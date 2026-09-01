@@ -35,6 +35,27 @@ pub const SNAPSHOT_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
 /// 不进入 10 秒级的心跳巡检（防大文档反复全量落盘）。
 pub const HEARTBEAT_MAX_PAGE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// P31：单页是否参与本轮心跳重写（代次去重 + 大小节流的合并判定，
+/// 纯函数便于测试）。
+///
+/// * 只覆盖**置脏**页——干净页的内容就在磁盘原件里，快照区无需副本；
+/// * 大小节流：估算字节（app 层传 rope 真实字节数）超过
+///   [`HEARTBEAT_MAX_PAGE_BYTES`] 的页不进心跳，只在退出时随全量
+///   提交落盘（§3 P29 第 5 条的 IO 保护）；
+/// * 代次去重：内容版本自上次心跳快照后没有推进（`last_snapshotted ==
+///   Some(current)`）的页跳过——这是「仅写有变化的页」的判定核心；
+///   从未参与过心跳的页（None）一律视为有变化。
+pub fn heartbeat_page_selected(
+    dirty: bool,
+    approx_bytes: u64,
+    last_snapshotted_version: Option<u64>,
+    current_version: u64,
+) -> bool {
+    dirty
+        && approx_bytes <= HEARTBEAT_MAX_PAGE_BYTES
+        && last_snapshotted_version != Some(current_version)
+}
+
 /// 单个标签页的会话元数据（内容在 `file` 指向的页快照里）。
 ///
 /// 字段口径与 app 层一致：光标行/列 0 基；滚动为像素值；
@@ -90,6 +111,7 @@ pub struct SessionManifest {
 ///
 /// `doc` 由调用方以 rope 结构共享克隆传入（O(1)），仅 `tab.dirty`
 /// 为真时会被读取并分块原子落盘（全程无全文 String）。
+#[derive(Debug, Clone)]
 pub struct SessionPage {
     pub tab: SessionTab,
     pub doc: Document,
@@ -138,7 +160,57 @@ pub fn write_session(
     active: usize,
     next_untitled: u64,
 ) -> Result<SessionManifest, CoreError> {
-    write_session_at(dir, fresh_generation(), pages, active, next_untitled)
+    write_session_at(dir, fresh_generation(), pages, active, next_untitled, WriteMode::Full)
+}
+
+/// P31 心跳增量提交的单页输入。
+///
+/// 三种形态（心跳模式下按序判定）：
+/// * `rewrite = true`：内容有变化 → 落新文件 `s{代次}-t{页序}.snap`；
+/// * `rewrite = false` 且 `tab.file` 已填：内容未变 → 沿用旧文件名不重写；
+/// * `rewrite = false` 且 `tab.file` 为 None：**超限节流页**——清单里保持
+///   置脏记录但不落内容快照。读侧把「置脏而无文件」解释为「无可用快照」
+///   （启动恢复按单页失败跳过并汇总提示），不得当作损坏或 panic。
+pub struct HeartbeatPage {
+    pub page: SessionPage,
+    /// 本轮是否需要重写该页的内容文件。
+    pub rewrite: bool,
+}
+
+/// P31 心跳增量提交：与 [`write_session`] 相同的 write-ahead 写序与失败
+/// 原子性，两处差异——
+///
+/// * 清单以 `clean_exit = false` 落盘：运行中的中间态，正是 P30 孤儿检测
+///   的判据（崩溃/杀进程后启动弹「未保存的工作区」恢复条）；
+/// * **逐页意图**由 [`HeartbeatPage::rewrite`] 表达：变化页重写、未变页
+///   复用旧文件、超限页只记账不落内容。复用的旧代名由 GC 与配额护栏
+///   按「清单引用」保护，不会被当作残留回收。
+pub fn write_heartbeat_session(
+    dir: &Path,
+    pages: &[HeartbeatPage],
+    active: usize,
+    next_untitled: u64,
+) -> Result<SessionManifest, CoreError> {
+    let flags: Vec<bool> = pages.iter().map(|p| p.rewrite).collect();
+    let plain: Vec<SessionPage> = pages.iter().map(|p| p.page.clone()).collect();
+    write_session_at(
+        dir,
+        fresh_generation(),
+        &plain,
+        active,
+        next_untitled,
+        WriteMode::Heartbeat(&flags),
+    )
+}
+
+/// 提交模式：普通全量（退出流） vs 心跳增量（运行中周期巡检）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WriteMode<'a> {
+    /// 置脏页一律重写新文件；清单 clean_exit=true。
+    Full,
+    /// 心跳增量：携带每页的 rewrite 标记（见 [`HeartbeatPage`]）；
+    /// 清单 clean_exit=false。
+    Heartbeat(&'a [bool]),
 }
 
 /// [`write_session`] 的可注入代次版本：测试用固定代次即可预判全部
@@ -149,6 +221,7 @@ pub(crate) fn write_session_at(
     pages: &[SessionPage],
     active: usize,
     next_untitled: u64,
+    mode: WriteMode<'_>,
 ) -> Result<SessionManifest, CoreError> {
     fs::create_dir_all(dir).map_err(|source| CoreError::Write {
         path: dir.to_path_buf(),
@@ -160,9 +233,23 @@ pub(crate) fn write_session_at(
     for (index, page) in pages.iter().enumerate() {
         let mut tab = page.tab.clone();
         if tab.dirty {
-            let name = page_file_name(generation, index);
-            save_document_atomic(&dir.join(&name), &page.doc)?;
-            tab.file = Some(name);
+            // 心跳模式按逐页意图分流；普通模式一律写新文件
+            let skip_rewrite = match mode {
+                WriteMode::Full => false,
+                WriteMode::Heartbeat(flags) => !flags.get(index).copied().unwrap_or(false),
+            };
+            if skip_rewrite {
+                // file 已填 = 内容未变，沿用旧文件；file 为 None = 超限
+                // 节流页，保持「置脏而无内容文件」的记账形态交给读侧容忍
+                if tab.file.is_some() {
+                    tabs.push(tab);
+                    continue;
+                }
+            } else {
+                let name = page_file_name(generation, index);
+                save_document_atomic(&dir.join(&name), &page.doc)?;
+                tab.file = Some(name);
+            }
         } else {
             tab.file = None;
         }
@@ -183,7 +270,7 @@ pub(crate) fn write_session_at(
         tabs,
         active: active.min(pages.len().saturating_sub(1)),
         next_untitled,
-        clean_exit: true,
+        clean_exit: matches!(mode, WriteMode::Full),
     };
     let serialized = toml::to_string_pretty(&manifest).map_err(|e| CoreError::Write {
         path: dir.join(MANIFEST_NAME),
@@ -196,16 +283,25 @@ pub(crate) fn write_session_at(
         },
     )?;
 
-    // 提交成功后回收非本代的残留页文件（上一代会话 / 中途失败孤儿）
-    gc_stale_pages(dir, generation);
+    // 提交成功后回收残留页文件（上一代 / 中途失败孤儿）；
+    // 本清单引用的文件（含心跳复用的旧代名）受保护不回收
+    let referenced: std::collections::HashSet<String> = manifest
+        .tabs
+        .iter()
+        .filter_map(|t| t.file.clone())
+        .collect();
+    gc_stale_pages(dir, generation, &referenced);
     // 配额护栏：超限时按最旧优先淘汰，永不触碰本会话引用的文件
     enforce_quota(dir, SNAPSHOT_QUOTA_BYTES);
     Ok(manifest)
 }
 
-/// 删除目录中不属于指定代次的页快照残留，返回删除的文件数。
-/// 非页快照命名的文件一律不动（目录可能被用户另作他用）。
-fn gc_stale_pages(dir: &Path, keep_generation: u64) -> usize {
+/// 删除目录中不属于指定代次、也不被当前清单引用的页快照残留，
+/// 返回删除的文件数。非页快照命名的文件一律不动（目录可能被用户另作他用）。
+///
+/// P31 起多带一个受保护名单：心跳复用的页文件带着旧代次前缀被新清单
+/// 引用，「代次不同」不能再作为回收依据——引用关系才是活会话的真判据。
+fn gc_stale_pages(dir: &Path, keep_generation: u64, protected: &std::collections::HashSet<String>) -> usize {
     let mut removed = 0;
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -216,7 +312,7 @@ fn gc_stale_pages(dir: &Path, keep_generation: u64) -> usize {
             continue;
         };
         match parse_page_generation(name) {
-            Some(gen) if gen == keep_generation => {}
+            Some(gen) if gen == keep_generation || protected.contains(name) => {}
             Some(_) => {
                 if fs::remove_file(&path).is_ok() {
                     removed += 1;
@@ -509,6 +605,7 @@ mod tests {
             }, "keep")],
             0,
             1,
+            WriteMode::Full,
         )
         .unwrap();
         let before = read_manifest(&dir).unwrap();
@@ -527,6 +624,7 @@ mod tests {
             ],
             0,
             1,
+            WriteMode::Full,
         );
         assert!(doomed.is_err(), "第 2 页写盘应失败");
 
@@ -547,6 +645,7 @@ mod tests {
             &[page(named_tab("C:/fresh.txt", true), "fresh")],
             0,
             1,
+            WriteMode::Full,
         )
         .unwrap();
         let names: Vec<String> = fs::read_dir(&dir)
@@ -591,6 +690,122 @@ mod tests {
 
         // 宽松配额：什么都不动
         assert_eq!(enforce_quota(&dir, SNAPSHOT_QUOTA_BYTES), 0);
+
+        clear_session(&dir);
+    }
+
+    // ---------- P31 周期快照心跳 ----------
+
+    #[test]
+    fn heartbeat_page_selection_dedupes_by_version_and_throttles_by_size() {
+        const CAP: u64 = HEARTBEAT_MAX_PAGE_BYTES;
+        // 置脏是前提
+        assert!(!heartbeat_page_selected(false, 100, None, 3), "干净页永不参与");
+        // 从未快照过（None）的置脏页必须参与——未命名页的首个兜底
+        assert!(heartbeat_page_selected(true, 100, None, 0));
+        // 代次去重：版本没推进就跳过；推进了才重写
+        assert!(!heartbeat_page_selected(true, 100, Some(3), 3));
+        assert!(heartbeat_page_selected(true, 100, Some(2), 3));
+
+        // 大小节流：恰好压线允许（>上限才出局），超一字节即跳过
+        assert!(heartbeat_page_selected(true, CAP, Some(1), 2), "恰好等于上限应允许");
+        assert!(!heartbeat_page_selected(true, CAP + 1, None, 9), "超限页只在退出时写");
+    }
+
+    #[test]
+    fn heartbeat_commit_reuses_unchanged_pages_and_flags_clean_exit_false() {
+        let dir = scratch_dir("heartbeat");
+
+        // 第一代（普通全量提交）：两页都置脏，各自拿到内容文件
+        let mut a = named_tab("C:/keep.txt", true);
+        a.cursor_col = 3;
+        let mut b = named_tab("C:/churn.txt", true);
+        b.dirty = true;
+        let first = write_session(&dir, &[page(a.clone(), "stable"), page(b, "v1")], 0, 1).unwrap();
+        let keep_file = first.tabs[0].file.clone().unwrap();
+        assert!(first.clean_exit, "退出流的全量提交必须带收尾标记");
+
+        // 心跳提交：页 A 内容未变 → 复用旧文件名（不重写）；
+        // 页 B 又编辑过 → 重写；页 C 超限节流（rewrite=false 且无旧文件）
+        // → 保持置脏记账但不落内容；清单必须是 clean_exit=false 的中间态
+        let mut a_reuse = a.clone();
+        a_reuse.file = Some(keep_file.clone()); // 调用方从页上的心跳账目预填
+        let mut c_throttled = named_tab("C:/huge.bin", true);
+        c_throttled.cursor_line = 9;
+        let second = write_heartbeat_session(
+            &dir,
+            &[
+                HeartbeatPage { page: page(a_reuse, "stable"), rewrite: false },
+                HeartbeatPage { page: page(named_tab("C:/churn.txt", true), "v2"), rewrite: true },
+                HeartbeatPage { page: page(c_throttled.clone(), "HUGE"), rewrite: false },
+            ],
+            0,
+            1,
+        )
+        .unwrap();
+        assert!(!second.clean_exit, "心跳写的中间清单必须置 clean_exit=false");
+        assert_eq!(
+            second.tabs[0].file.as_deref(),
+            Some(keep_file.as_str()),
+            "未变化页必须复用旧文件名"
+        );
+        assert_ne!(
+            second.tabs[1].file, first.tabs[1].file,
+            "变化页必须落新文件"
+        );
+        assert_eq!(second.tabs[2].file, None, "超限页不得落内容文件");
+        assert!(second.tabs[2].dirty && second.tabs[2].cursor_line == 9,
+            "超限页保持置脏记账与元数据");
+
+        // 复用的旧代名文件在 GC 后仍然健在且内容可读——「引用关系」
+        // 取代「代次相同」成为回收判据的直接后果
+        assert_eq!(
+            read_page(&dir, &second.tabs[0]).unwrap().to_text(),
+            "stable",
+            "复用文件不得被 GC 当残留回收"
+        );
+        assert_eq!(read_page(&dir, &second.tabs[1]).unwrap().to_text(), "v2");
+        assert!(
+            read_page(&dir, &second.tabs[2]).is_none(),
+            "超限页无内容快照可读（读侧按无可用快照处理）"
+        );
+
+        // 磁盘上恰好只剩新清单引用的两个文件：B 的旧文件已被回收，
+        // 超限页从未产生过文件
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .filter(|n| parse_page_generation(n).is_some())
+            .collect();
+        names.sort();
+        let mut expected: Vec<String> =
+            second.tabs.iter().filter_map(|t| t.file.clone()).collect();
+        expected.sort();
+        assert_eq!(names, expected, "GC 后应只剩活会话引用的页文件");
+
+        // 心跳之后照常退出：全量提交把 clean_exit 翻回 true，
+        // 且此刻起 A 页转干净 → 只剩 B、C 两个内容文件（含超限页——
+        // 「只在退出时写」的最终落点）
+        let third = write_session(
+            &dir,
+            &[
+                page(named_tab("C:/keep.txt", false), ""),
+                page(named_tab("C:/churn.txt", true), "v3"),
+                page(c_throttled, "HUGE-FINAL"),
+            ],
+            0,
+            1,
+        )
+        .unwrap();
+        assert!(third.clean_exit);
+        assert_eq!(third.tabs[0].file, None, "已保存页退出时无需内容文件");
+        assert_eq!(
+            read_page(&dir, &third.tabs[2]).unwrap().to_text(),
+            "HUGE-FINAL",
+            "超限页的内容由退出流全量提交兜底"
+        );
+        assert!(read_manifest(&dir).unwrap().clean_exit);
 
         clear_session(&dir);
     }

@@ -58,6 +58,11 @@ pub struct Settings {
     /// 关闭 = 启动恒空白页、退出不写会话清单（存量快照区在启动时清空）。
     #[serde(default = "default_true")]
     pub remember_session: bool,
+    /// 周期快照心跳间隔秒数（P31）：运行中每隔 N 秒巡检一次置脏页，
+    /// 把内容有变化的页增量写进快照区（崩溃至多丢一个间隔的输入）。
+    /// 加载时收敛到 `[MIN_SNAPSHOT_INTERVAL_SECS, MAX_SNAPSHOT_INTERVAL_SECS]`。
+    #[serde(default = "default_snapshot_interval_secs")]
+    pub snapshot_interval_secs: u32,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -74,6 +79,7 @@ impl Default for Settings {
             enable_snapshots: true,
             exit_mode: EXIT_MODE_SNAPSHOT.to_string(),
             remember_session: true,
+            snapshot_interval_secs: DEFAULT_SNAPSHOT_INTERVAL_SECS,
         }
     }
 }
@@ -83,6 +89,13 @@ pub const DEFAULT_AUTOSAVE_DELAY_SECS: u32 = 2;
 /// 防抖秒数允许范围（闭区间），越界值加载时被 clamp。
 pub const MIN_AUTOSAVE_DELAY_SECS: u32 = 1;
 pub const MAX_AUTOSAVE_DELAY_SECS: u32 = 60;
+
+/// 快照心跳间隔默认秒数（P31）：10 秒 ≈ 崩溃丢失窗口与 IO 频率的折中
+/// （§3 P31 第 1 条）。
+pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: u32 = 10;
+/// 心跳间隔允许范围（闭区间）：下界防写盘风暴，上界防丢失窗口过大。
+pub const MIN_SNAPSHOT_INTERVAL_SECS: u32 = 5;
+pub const MAX_SNAPSHOT_INTERVAL_SECS: u32 = 120;
 
 /// 关窗模式（P29）：快照直退——置脏页写快照后直接退出，零询问。
 pub const EXIT_MODE_SNAPSHOT: &str = "snapshot";
@@ -112,6 +125,11 @@ fn default_autosave_delay_secs() -> u32 {
 /// `#[serde(default)]` 用：P29 关窗模式缺字段时的默认值（快照直退）。
 fn default_exit_mode() -> String {
     EXIT_MODE_SNAPSHOT.to_string()
+}
+
+/// `#[serde(default)]` 用：P31 心跳间隔缺字段时的默认值。
+fn default_snapshot_interval_secs() -> u32 {
+    DEFAULT_SNAPSHOT_INTERVAL_SECS
 }
 
 impl Settings {
@@ -149,6 +167,10 @@ impl Settings {
         if self.exit_mode != EXIT_MODE_SNAPSHOT && self.exit_mode != EXIT_MODE_ASK {
             self.exit_mode = EXIT_MODE_SNAPSHOT.to_string();
         }
+        // P31：心跳间隔收敛到合法区间（过密=写盘风暴，过疏=丢失窗口过大）
+        self.snapshot_interval_secs = self
+            .snapshot_interval_secs
+            .clamp(MIN_SNAPSHOT_INTERVAL_SECS, MAX_SNAPSHOT_INTERVAL_SECS);
     }
 
     /// 当前是否为深色主题（仅规范值 `"dark"` 视为深色）。
@@ -556,6 +578,61 @@ mod tests {
         let path = dir.join("config.toml");
         s.save_to(&path).expect("保存应成功");
         assert_eq!(Settings::load_from(&path), s, "P30 字段必须参与 roundtrip");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P31 周期快照心跳设置 ----------
+
+    #[test]
+    fn snapshot_interval_defaults_and_legacy_config_compatible() {
+        let s = Settings::default();
+        assert_eq!(
+            s.snapshot_interval_secs, 10,
+            "心跳间隔默认 10s（崩溃丢失窗口与 IO 频率的折中）"
+        );
+
+        // 旧 config.toml 缺 P31 字段 → 同样得到默认值
+        let dir = scratch_dir("p31-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "theme = \"dark\"\n").unwrap();
+        assert_eq!(Settings::load_from(&path).snapshot_interval_secs, 10);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_interval_clamped_to_legal_range() {
+        let dir = scratch_dir("p31-clamp");
+        fs::create_dir_all(&dir).unwrap();
+
+        // 过密 → 收敛到下界（防写盘风暴）
+        let dense = dir.join("dense.toml");
+        fs::write(&dense, "snapshot_interval_secs = 0\n").unwrap();
+        assert_eq!(Settings::load_from(&dense).snapshot_interval_secs, MIN_SNAPSHOT_INTERVAL_SECS);
+
+        // 过疏 → 收敛到上界（防丢失窗口过大）
+        let sparse = dir.join("sparse.toml");
+        fs::write(&sparse, "snapshot_interval_secs = 99999\n").unwrap();
+        assert_eq!(Settings::load_from(&sparse).snapshot_interval_secs, MAX_SNAPSHOT_INTERVAL_SECS);
+
+        // 合法值原样保留
+        let legal = dir.join("legal.toml");
+        fs::write(&legal, "snapshot_interval_secs = 45\n").unwrap();
+        assert_eq!(Settings::load_from(&legal).snapshot_interval_secs, 45);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_interval_roundtrips_to_disk() {
+        let mut s = Settings::default();
+        s.snapshot_interval_secs = 45;
+
+        let dir = scratch_dir("p31-roundtrip");
+        let path = dir.join("config.toml");
+        s.save_to(&path).expect("保存应成功");
+        assert_eq!(Settings::load_from(&path), s, "P31 字段必须参与 roundtrip");
 
         fs::remove_dir_all(&dir).ok();
     }

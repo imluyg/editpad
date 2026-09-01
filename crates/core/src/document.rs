@@ -190,6 +190,13 @@ impl Document {
         self.rope.len_chars()
     }
 
+    /// 字节数（UTF-8 编码口径，rope 根节点缓存，O(1)）。
+    /// P31 心跳的大小节流按真实字节判——字符 ×3 的启发式会低估
+    /// 4 字节 emoji 文档，这里不给启发式留误差空间。
+    pub fn text_len_bytes(&self) -> usize {
+        self.rope.len_bytes()
+    }
+
     /// 行数（末尾有换行时，换行后的空行也算一行，与多数编辑器一致）。
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()

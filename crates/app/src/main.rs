@@ -111,6 +111,11 @@ enum Message {
     PreviewToggled,
     /// 光标闪烁心跳（打磨项）：翻转闪烁相位并触发重绘
     CaretTick,
+    /// 周期快照心跳节拍（P31）：巡检置脏页，把内容有变化的页增量写进
+    /// 快照区（自我续期链；至多一个提交在途）
+    SnapshotHeartbeatTick,
+    /// 周期快照心跳提交完成（P31）：按派发时刻的逐页计划回填账目
+    HeartbeatDone(HeartbeatOutcome),
     /// 格式化 JSON（Ctrl+Shift+F，仅当前语法为 JSON 时生效；P22 第二批）
     FormatJson,
     /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
@@ -731,6 +736,51 @@ async fn drive_autosave_once(
     Message::TabAutosaved(tab, version, result)
 }
 
+// ---------- 周期快照心跳（P31） ----------
+
+/// 一次心跳提交的输入：注入目录、全部页的逐页意图、派发时刻捕获的逐页计划。
+struct HeartbeatPayload {
+    dir: PathBuf,
+    pages: Vec<editpad_core::snapshot::HeartbeatPage>,
+    active: usize,
+    next_untitled: u64,
+    /// 需要重写内容的 (页下标, 派发时刻内容版本)——回报据此回填账目
+    plan: Vec<(usize, u64)>,
+}
+
+/// 一次心跳提交的回报：派发时刻的计划 + 写盘结果（成功时含新清单，
+/// 用于取各页实际文件名）。Clone 仅为测试同步驱动入口服务。
+#[derive(Debug, Clone)]
+struct HeartbeatOutcome {
+    plan: Vec<(usize, u64)>,
+    result: Result<editpad_core::snapshot::SessionManifest, String>,
+}
+
+/// 心跳提交的后台驱动：OS 线程执行 write-ahead 写序（P5/P18 同款桥接，
+/// 执行器仅阻塞等待结果）。线程意外终止也必须回报失败——账目作废后
+/// 下一拍全量重试，「内容不丢失」不允许静默断链。
+async fn drive_heartbeat(payload: HeartbeatPayload) -> Message {
+    let (tx, rx) =
+        std_mpsc::channel::<Result<editpad_core::snapshot::SessionManifest, String>>();
+    std::thread::spawn(move || {
+        let result = editpad_core::snapshot::write_heartbeat_session(
+            &payload.dir,
+            &payload.pages,
+            payload.active,
+            payload.next_untitled,
+        )
+        .map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    let result = rx
+        .recv()
+        .unwrap_or_else(|e| Err(format!("心跳线程意外终止:{e}")));
+    Message::HeartbeatDone(HeartbeatOutcome {
+        plan: payload.plan,
+        result,
+    })
+}
+
 /// 单个标签页的完整状态（P21）。
 ///
 /// [`EditorHandle`] 内聚文档/光标/选区/撤销/高亮/滚动；标签页另持
@@ -752,6 +802,11 @@ struct Tab {
     /// 全局单调不复用——杜绝两个同名未命名页的保存歧义；
     /// 另存为成功或加载真实文件后清除。
     untitled_num: Option<u64>,
+    /// P31 心跳账目：本页最后一次被心跳快照收录时的 (内容版本, 页文件名)。
+    /// None = 从未参与。版本与文件名成对维护，保证「版本没变 → 旧文件
+    /// 仍有效 → 沿用不重写」的复用判定不会错位；账目随页走（增删页/
+    /// 调序后仍与正确的内容文件配对）。
+    heartbeat_snap: Option<(u64, String)>,
 }
 
 impl Tab {
@@ -765,6 +820,7 @@ impl Tab {
             autosave_inflight: false,
             last_edit_at: None,
             untitled_num: None,
+            heartbeat_snap: None,
         }
     }
 
@@ -896,6 +952,17 @@ struct Editpad {
     /// 尚未落地的恢复加载页数（归零时出汇总状态）
     restore_pending: usize,
 
+    // ---------- 周期快照心跳（P31） ----------
+    /// 心跳提交任务在途标记（全局至多一个；页级账目在 Tab 上）
+    heartbeat_inflight: bool,
+    /// 「内存态比最近一次已提交清单更干净/结构已变」标记：保存清脏、
+    /// 关页、换文档等事件置位——下一拍即使无页被代次去重选中也要重写
+    /// 清单，防止崩溃恢复把用户已落盘/已关闭的内容按旧快照复活
+    /// （编辑置脏不置位：崩溃丢 ≤1 个间隔的输入正是心跳的设计语义）。
+    session_manifest_stale: bool,
+    /// 快照目录注入点（测试用）；None = 系统配置目录。
+    snapshot_dir_override: Option<PathBuf>,
+
     // ---------- 外观 ----------
     dark_mode: bool,
     /// Markdown 预览面板可见（P22 第三批；仅 Markdown 语法页渲染）
@@ -951,6 +1018,10 @@ impl Default for Editpad {
             restore_failed: 0,
             restore_dropped: 0,
             restore_pending: 0,
+            // P31：周期快照心跳状态
+            heartbeat_inflight: false,
+            session_manifest_stale: false,
+            snapshot_dir_override: None,
         }
     }
 }
@@ -1020,6 +1091,8 @@ impl Editpad {
             let last = self.tabs.len() - 1;
             self.assign_untitled_num(last);
         }
+        // P31：页集合结构已变——下一拍重写清单，防崩溃恢复复活已关的页
+        self.session_manifest_stale = true;
         // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名
         self.refresh_cur_handle();
         true
@@ -1064,10 +1137,24 @@ impl Editpad {
             },
             |_| Message::CaretTick,
         );
+        // P31 周期快照心跳链：同一自我续期模式——运行中每隔
+        // snapshot_interval_secs 巡检置脏页增量写快照（崩溃至多丢一个
+        // 间隔的输入）；随窗口关闭/进程退出自然销毁。
+        let heartbeat_chain = Task::perform(
+            async move {
+                std::thread::sleep(std::time::Duration::from_secs(u64::from(
+                    state.settings.snapshot_interval_secs,
+                )));
+            },
+            |_| Message::SnapshotHeartbeatTick,
+        );
         // P30：启动会话恢复——读清单重建标签；命名干净页经加载管线回填。
         // 开关判定在 boot_restore 内部（关闭 = 空白启动 + 存量清场）。
         let restore_task = state.boot_restore();
-        (state, Task::batch([caret_chain, restore_task]))
+        (
+            state,
+            Task::batch([caret_chain, heartbeat_chain, restore_task]),
+        )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1200,6 +1287,9 @@ impl Editpad {
                         tab.dirty = false;
                         // P25：真实文件已就位，未命名序号使命完成
                         tab.untitled_num = None;
+                        // P31：页内容整体换血（打开/恢复回填）——已提交清单
+                        // 对本页的描述过期，下一拍重写
+                        self.session_manifest_stale = true;
                         if let Some(path) = self.path_of_tab(target) {
                             self.record_recent(&path);
                         }
@@ -1271,6 +1361,11 @@ impl Editpad {
                 // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
                 self.tab_mut().dirty = self.tab().version != version;
                 self.busy = false;
+                if !self.tab().dirty {
+                    // P31：内存态比已提交清单「更干净」——下一拍重写清单，
+                    // 防崩溃恢复把已落盘内容按旧快照复活成置脏页
+                    self.session_manifest_stale = true;
+                }
                 if let Some(path) = self.tab().path.clone() {
                     self.record_recent(&path);
                 }
@@ -1316,6 +1411,9 @@ impl Editpad {
                             // 版本一致 = 快照之后没有新编辑：可以安全清脏
                             if tab.version == version {
                                 tab.dirty = false;
+                                // P31：auto-save 成功清脏 = 内存比清单干净，
+                                // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
+                                self.session_manifest_stale = true;
                             }
                         }
                         Err(error) => {
@@ -1643,6 +1741,57 @@ impl Editpad {
                     },
                     |_| Message::CaretTick,
                 )
+            }
+            Message::SnapshotHeartbeatTick => {
+                // P31 自我续期：无论本轮是否干活，下一拍恒排队（与光标
+                // 闪烁同一模式；进程退出即销毁，无残留计时器）。间隔取
+                // 加载时已归一的设置值，运行期视为不变。
+                let interval = std::time::Duration::from_secs(u64::from(
+                    self.settings.snapshot_interval_secs,
+                ));
+                let rearm = Task::perform(
+                    async move { std::thread::sleep(interval) },
+                    |_| Message::SnapshotHeartbeatTick,
+                );
+                // 快照底座任一开关关闭 / ask 模式 = 心跳整体停摆：
+                // 清单不写，退出流与启动恢复同样不依赖它（P29/P30 语义）
+                if !session_restore_allowed(
+                    self.settings.enable_snapshots,
+                    self.settings.remember_session,
+                ) || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
+                {
+                    return rearm;
+                }
+                // 至多一个提交在途：本轮巡检跳过（页级账目不受影响）
+                if self.heartbeat_inflight {
+                    return rearm;
+                }
+                // 目录解析走注入点（生产为 None → 系统配置目录）
+                let dir = self
+                    .snapshot_dir_override
+                    .clone()
+                    .or_else(editpad_core::snapshot::snapshot_dir);
+                let Some(dir) = dir else {
+                    return rearm;
+                };
+                match self.prepare_heartbeat_commit(&dir) {
+                    // 无变化且清单不过期：什么都不写（防无谓 IO）
+                    None => rearm,
+                    Some(payload) => {
+                        self.heartbeat_inflight = true;
+                        Task::batch([
+                            rearm,
+                            Task::perform(
+                                async move { drive_heartbeat(payload).await },
+                                |message| message,
+                            ),
+                        ])
+                    }
+                }
+            }
+            Message::HeartbeatDone(outcome) => {
+                self.heartbeat_apply(outcome);
+                Task::none()
             }
             Message::PreviewToggled => {
                 // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
@@ -2001,6 +2150,147 @@ impl Editpad {
         self.close_window()
     }
 
+    // ---------- 周期快照心跳（P31） ----------
+
+    /// Tab → 清单页元数据的统一映射。`file` 由调用方决定：
+    /// 退出流恒 None（全量重写）；心跳流对「版本未变的置脏页」预填
+    /// 旧文件名（core 侧据此复用不重写）。
+    fn session_tab_metadata(
+        t: &Tab,
+        file: Option<String>,
+    ) -> editpad_core::snapshot::SessionTab {
+        let ed = t.editor.borrow();
+        editpad_core::snapshot::SessionTab {
+            path: t.path.as_ref().map(|p| p.display().to_string()),
+            untitled_num: t.untitled_num,
+            dirty: t.dirty,
+            file,
+            cursor_line: ed.cursor.line,
+            cursor_col: ed.cursor.col,
+            scroll_top: ed.scroll_top,
+            scroll_left: ed.scroll_left,
+        }
+    }
+
+    /// 心跳选页：返回需要**重写内容**的 (下标, 派发时刻版本) 列表。
+    /// 判定核心在 core 的 [`editpad_core::snapshot::heartbeat_page_selected`]：
+    /// 置脏 + 未超大小上限（按 rope 真实字节数）+ 版本自上次快照有推进。
+    fn heartbeat_plan(&self) -> Vec<(usize, u64)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let last = t.heartbeat_snap.as_ref().map(|(v, _)| *v);
+                editpad_core::snapshot::heartbeat_page_selected(
+                    t.dirty,
+                    t.editor.borrow().doc.text_len_bytes() as u64,
+                    last,
+                    t.version,
+                )
+            })
+            .map(|(i, t)| (i, t.version))
+            .collect()
+    }
+
+    /// 组装全部页的心跳提交输入（逐页意图见 core [`HeartbeatPage`]）：
+    /// * 计划内的页 `rewrite=true` → 内容落新文件；
+    /// * 计划外但账目显示版本未变的置脏页：预填旧文件名 → 复用不重写；
+    /// * 计划外的其余置脏页（超限节流）：不预填 → 只记账不落内容；
+    /// * 干净页只记元数据。文档一律 rope 结构共享克隆（O(1)）。
+    fn build_heartbeat_pages(
+        &self,
+        plan: &[(usize, u64)],
+    ) -> Vec<editpad_core::snapshot::HeartbeatPage> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| {
+                let rewrite = plan.iter().any(|(i, _)| *i == idx);
+                let reuse = t
+                    .heartbeat_snap
+                    .as_ref()
+                    .filter(|(v, _)| !rewrite && *v == t.version)
+                    .map(|(_, f)| f.clone());
+                editpad_core::snapshot::HeartbeatPage {
+                    page: editpad_core::snapshot::SessionPage {
+                        tab: Self::session_tab_metadata(t, reuse),
+                        doc: t.editor.borrow().doc.clone(),
+                    },
+                    rewrite,
+                }
+            })
+            .collect()
+    }
+
+    /// 心跳提交准备：无变化且清单不过期时返回 None（本轮零 IO）。
+    fn prepare_heartbeat_commit(&self, dir: &Path) -> Option<HeartbeatPayload> {
+        let plan = self.heartbeat_plan();
+        if plan.is_empty() && !self.session_manifest_stale {
+            return None;
+        }
+        Some(HeartbeatPayload {
+            dir: dir.to_path_buf(),
+            pages: self.build_heartbeat_pages(&plan),
+            active: self.active_tab,
+            next_untitled: self.untitled_next,
+            plan,
+        })
+    }
+
+    /// 心跳回报落地（update 与测试同步入口共用的唯一出口）：
+    /// 成功 → 清过期标记，按派发时刻的计划逐页回填账目——
+    /// 版本仍一致且仍置脏才记（期间编辑过/转干净/已关闭的页自然跳过，
+    /// 其下一拍会重新入选或不再需要）；失败 → 全部账目作废（下一拍
+    /// 全量重试），状态栏留痕不无声吞掉（P18 同款取舍）。
+    fn heartbeat_apply(&mut self, outcome: HeartbeatOutcome) {
+        self.heartbeat_inflight = false;
+        match outcome.result {
+            Ok(manifest) => {
+                self.session_manifest_stale = false;
+                for (idx, version) in outcome.plan {
+                    let Some(tab) = self.tabs.get_mut(idx) else {
+                        continue; // 期间被关闭/下标漂移：放弃这条账目
+                    };
+                    if !(tab.dirty && tab.version == version) {
+                        continue;
+                    }
+                    if let Some(name) =
+                        manifest.tabs.get(idx).and_then(|t| t.file.clone())
+                    {
+                        tab.heartbeat_snap = Some((version, name));
+                    }
+                }
+            }
+            Err(error) => {
+                for tab in &mut self.tabs {
+                    tab.heartbeat_snap = None;
+                }
+                self.status = format!("快照心跳失败:{error}");
+            }
+        }
+    }
+
+    /// 同步执行一次完整心跳周期——生产路径走异步 [`Self::drive_heartbeat`]，
+    /// 本入口供测试端到端验证磁盘产物与账目回填（共用 prepare/apply 两半）。
+    #[cfg(test)]
+    fn run_heartbeat_cycle(&mut self, dir: &Path) -> Option<HeartbeatOutcome> {
+        let payload = self.prepare_heartbeat_commit(dir)?;
+        self.heartbeat_inflight = true;
+        let result = editpad_core::snapshot::write_heartbeat_session(
+            &payload.dir,
+            &payload.pages,
+            payload.active,
+            payload.next_untitled,
+        )
+        .map_err(|e| e.to_string());
+        let outcome = HeartbeatOutcome {
+            plan: payload.plan,
+            result,
+        };
+        self.heartbeat_apply(outcome.clone());
+        Some(outcome)
+    }
+
     // ---------- 关窗流（P29 快照直退） ----------
 
     /// 关窗请求处置：快照直退的前提 = 总开关开启 + 模式为快照 + 快照目录
@@ -2045,21 +2335,10 @@ impl Editpad {
         let pages: Vec<editpad_core::snapshot::SessionPage> = self
             .tabs
             .iter()
-            .map(|t| {
-                let ed = t.editor.borrow();
-                editpad_core::snapshot::SessionPage {
-                    tab: editpad_core::snapshot::SessionTab {
-                        path: t.path.as_ref().map(|p| p.display().to_string()),
-                        untitled_num: t.untitled_num,
-                        dirty: t.dirty,
-                        file: None,
-                        cursor_line: ed.cursor.line,
-                        cursor_col: ed.cursor.col,
-                        scroll_top: ed.scroll_top,
-                        scroll_left: ed.scroll_left,
-                    },
-                    doc: ed.doc.clone(),
-                }
+            .map(|t| editpad_core::snapshot::SessionPage {
+                // 退出流全量重写：file 恒 None，置脏页一律落新文件
+                tab: Self::session_tab_metadata(t, None),
+                doc: t.editor.borrow().doc.clone(),
             })
             .collect();
         match editpad_core::snapshot::write_session(
@@ -2235,6 +2514,11 @@ impl Editpad {
                 }
                 // ---- 干净命名页：占位 + 排队走既有加载管线 ----
                 (Some(path), None) => {
+                    if meta.dirty {
+                        // P31 超限节流页（置脏但心跳从未落其内容）：
+                        // 退回磁盘上次保存态，未存改动不可得——如实入汇总
+                        self.restore_failed += 1;
+                    }
                     queue.push(RestoreLoad {
                         path: PathBuf::from(path),
                         tab: tabs.len(),
@@ -4849,5 +5133,215 @@ mod tests {
         );
         assert!(app.active_load.is_none(), "被拒的打开不得登记任务");
         assert_eq!(app.tabs.len(), 1, "拒绝时不得占位新页");
+    }
+
+    // ---------- P31 周期快照心跳 ----------
+
+    /// 构造已加载命名文档、注入快照目录的心跳测试应用。
+    fn heartbeat_app(dir: &Path) -> Editpad {
+        let mut app = loaded_txt_app();
+        app.snapshot_dir_override = Some(dir.to_path_buf());
+        app
+    }
+
+    #[test]
+    fn heartbeat_writes_changed_dirty_page_and_marks_intermediate_manifest() {
+        let dir = scratch_dir("hb-e2e");
+        let mut app = heartbeat_app(&dir);
+
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.tab().dirty);
+
+        let outcome = app
+            .run_heartbeat_cycle(&dir)
+            .expect("有变化的置脏页应触发一次提交");
+        assert!(outcome.result.is_ok(), "提交应成功，实际 {:?}", outcome.result);
+
+        // 磁盘形态：clean_exit=false 的中间态清单 + 内容文件（未命名页
+        // 与命名页同规则收录——P18 的盲区由此获得兜底）
+        let manifest = editpad_core::snapshot::read_manifest(&dir).unwrap();
+        assert!(!manifest.clean_exit, "心跳写的必须是中间态清单");
+        assert!(manifest.tabs[0].dirty);
+        let doc = editpad_core::snapshot::read_page(&dir, &manifest.tabs[0]).unwrap();
+        assert_eq!(doc.to_text(), "xbase", "快照必须反映当前内容（光标在行首插入）");
+
+        // 账目回填：版本一致 → 记录 (版本, 文件名)
+        assert_eq!(
+            app.tabs[0].heartbeat_snap,
+            Some((app.tabs[0].version, manifest.tabs[0].file.clone().unwrap()))
+        );
+        assert!(!app.heartbeat_inflight, "回报落地后必须解除在途标记");
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn heartbeat_skips_commit_entirely_when_nothing_changed() {
+        let dir = scratch_dir("hb-dedupe");
+        let mut app = heartbeat_app(&dir);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+
+        let first = app.run_heartbeat_cycle(&dir).expect("首次应有提交");
+        let manifest_before = editpad_core::snapshot::read_manifest(&dir).unwrap();
+
+        // 无新编辑：代次去重命中 → 零 IO，磁盘原封不动
+        let second = app.run_heartbeat_cycle(&dir);
+        assert!(second.is_none(), "无变化且清单不过期时不得产生任何写盘");
+        assert_eq!(
+            editpad_core::snapshot::read_manifest(&dir),
+            Some(manifest_before),
+            "清单必须保持原样（含代次号）"
+        );
+        assert_eq!(
+            first.plan,
+            vec![(0usize, app.tabs[0].version)],
+            "计划只含变化页"
+        );
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn heartbeat_refreshes_manifest_after_autosave_cleans_tab() {
+        let dir = scratch_dir("hb-stale");
+        let mut app = heartbeat_app(&dir);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let _ = app.run_heartbeat_cycle(&dir).unwrap();
+        let dirty_manifest = editpad_core::snapshot::read_manifest(&dir).unwrap();
+        assert!(dirty_manifest.tabs[0].dirty);
+
+        // 模拟 auto-save 成功清脏：内存比已提交清单「更干净」→ 过期标记
+        let version = app.tabs[0].version;
+        dispatch(&mut app, Message::TabAutosaved(0, version, Ok(())));
+        assert!(!app.tab().dirty);
+        assert!(app.session_manifest_stale, "清脏后下一拍必须重写清单");
+
+        // 下一拍即使无页被选中也要提交：清单转为「干净页纯元数据」，
+        // 否则崩溃恢复会把已落盘内容按旧快照复活成置脏页
+        app.run_heartbeat_cycle(&dir).expect("过期清单应触发重写");
+        let refreshed = editpad_core::snapshot::read_manifest(&dir).unwrap();
+        assert!(!refreshed.tabs[0].dirty && refreshed.tabs[0].file.is_none());
+        assert!(!app.session_manifest_stale, "成功提交后过期标记归零");
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn heartbeat_skips_oversized_page_content_but_still_records_it_dirty() {
+        let dir = scratch_dir("hb-oversize");
+        let mut app = heartbeat_app(&dir);
+        // 17MB 文档 > HEARTBEAT_MAX_PAGE_BYTES(16MB)：不进心跳重写，
+        // 只在退出时随全量提交落盘（§3 P29 第 5 条的 IO 保护）
+        let big = editpad_core::Document::from_str(&"a".repeat(17_000_000));
+        {
+            let tab = &mut app.tabs[0];
+            tab.editor.borrow_mut().reset_document(big);
+            tab.dirty = true;
+            tab.version += 1;
+        }
+
+        // 首拍：Loaded 留下的清单过期标记驱动一次提交——超限页被记账
+        // （保持置脏）但绝不产生内容文件
+        let outcome = app
+            .run_heartbeat_cycle(&dir)
+            .expect("过期清单 + 置脏页应触发一次记账提交");
+        assert!(outcome.result.is_ok());
+        assert!(
+            outcome.plan.is_empty(),
+            "超限页不得进入重写计划，实际 {:?}",
+            outcome.plan
+        );
+        let manifest = editpad_core::snapshot::read_manifest(&dir).unwrap();
+        assert!(manifest.tabs[0].dirty, "超限页保持置脏记账");
+        assert_eq!(manifest.tabs[0].file, None, "超限页不得落内容文件");
+
+        let snap_files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".snap"))
+            .collect();
+        assert!(snap_files.is_empty(), "磁盘上不得出现任何内容快照");
+
+        // 次拍：过期标记已清、计划仍为空 → 零 IO（节流的常态形态）
+        assert!(app.run_heartbeat_cycle(&dir).is_none());
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn heartbeat_failure_clears_accounts_traces_status_and_keeps_dirty() {
+        let dir = scratch_dir("hb-fail");
+        // 注入目录指向一个普通文件 → create_dir_all 必败 → 提交必败
+        let blocker = dir.join("occupied-as-file");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+
+        let mut app = heartbeat_app(&blocker);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.tab().dirty);
+
+        let outcome = app
+            .run_heartbeat_cycle(&blocker)
+            .expect("有置脏页就应有提交尝试");
+        assert!(outcome.result.is_err(), "目录不可用时应失败");
+
+        assert!(app.tab().dirty, "失败必须保持置脏");
+        assert!(app.tabs[0].heartbeat_snap.is_none(), "失败账目作废");
+        assert!(!app.heartbeat_inflight, "失败也解除在途（允许下拍重试）");
+        assert!(
+            app.status.contains("快照心跳失败"),
+            "失败必须留痕不无声吞掉，实际 {:?}",
+            app.status
+        );
+
+        // 账目作废后下一拍会全量重试（此处仅验证状态复位，不再造真实目录）
+        let recovery_dir = scratch_dir("hb-fail-recovery");
+        let mut recovered = app.clone();
+        recovered.snapshot_dir_override = Some(recovery_dir.clone());
+        let retry = recovered.run_heartbeat_cycle(&recovery_dir);
+        assert!(retry.is_some_and(|o| o.result.is_ok()), "复位后重试应成功");
+
+        editpad_core::snapshot::clear_session(&dir);
+        editpad_core::snapshot::clear_session(&recovery_dir);
+    }
+
+    #[test]
+    fn heartbeat_result_with_stale_version_does_not_record_account() {
+        // 回报落地时的版本守卫：派发后页面又编辑过 → 迟到的快照不得入账
+        // （否则账目声称「版本 v 已快照」，实际盘上是更旧的内容）
+        let dir = scratch_dir("hb-stale-version");
+        let mut app = heartbeat_app(&dir);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let planned_version = app.tabs[0].version;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+
+        let outcome = HeartbeatOutcome {
+            plan: vec![(0, planned_version)],
+            result: Ok(editpad_core::snapshot::SessionManifest {
+                generation: 1,
+                tabs: vec![editpad_core::snapshot::SessionTab {
+                    path: None,
+                    untitled_num: None,
+                    dirty: true,
+                    file: Some("s1-t0.snap".to_owned()),
+                    cursor_line: 0,
+                    cursor_col: 0,
+                    scroll_top: 0.0,
+                    scroll_left: 0.0,
+                }],
+                active: 0,
+                next_untitled: 2,
+                clean_exit: false,
+            }),
+        };
+        app.heartbeat_apply(outcome);
+
+        assert!(
+            app.tabs[0].heartbeat_snap.is_none(),
+            "版本不符的迟到成果不得记账"
+        );
+        assert!(!app.session_manifest_stale, "成功路径仍应清过期标记");
+        assert!(!app.heartbeat_inflight);
+
+        editpad_core::snapshot::clear_session(&dir);
     }
 }

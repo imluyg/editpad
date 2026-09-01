@@ -28,6 +28,7 @@ pub use search::{
 };
 pub use settings::{Settings, EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
 pub use snapshot::{
-    clear_session, enforce_quota, read_manifest, read_page, snapshot_dir, write_session,
-    SessionManifest, SessionPage, SessionTab, HEARTBEAT_MAX_PAGE_BYTES, SNAPSHOT_QUOTA_BYTES,
+    clear_session, enforce_quota, heartbeat_page_selected, read_manifest, read_page,
+    snapshot_dir, write_heartbeat_session, write_session, HeartbeatPage, SessionManifest,
+    SessionPage, SessionTab, HEARTBEAT_MAX_PAGE_BYTES, SNAPSHOT_QUOTA_BYTES,
 };
