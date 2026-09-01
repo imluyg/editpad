@@ -81,6 +81,21 @@ enum Message {
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
     HighlightPaveNeeded,
+
+    // ---------- 多标签（P21） ----------
+    /// 新建空标签页（Ctrl+T）
+    NewTab,
+    /// 切到下一个标签页（Ctrl+Tab，循环）
+    SwitchTabNext,
+    /// 切换到第 `i` 个标签页（标签条点击）
+    SwitchTab(usize),
+    /// 请求关闭当前标签页：干净即关；置脏则先弹放弃确认条
+    CloseTabRequest,
+    /// 确认放弃第 `idx` 页的更改并关闭（P21 骨架版唯一出口；
+    /// 「保存后关闭」随完整版补齐）
+    ConfirmCloseTabDiscard(usize),
+    /// 取消标签页关闭确认
+    CancelCloseTab,
     /// 格式化 JSON（Ctrl+Shift+F，仅当前语法为 JSON 时生效；P22 第二批）
     FormatJson,
     /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
@@ -127,11 +142,13 @@ enum LoadEvent {
     Done(Result<editpad_core::LoadedDocument, String>),
 }
 
-/// 后台加载任务：订阅标识 + 目标路径。
+/// 后台加载任务：订阅标识 + 目标路径 + 目标标签页（P21 路由归属）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct LoadJob {
     id: u64,
     path: PathBuf,
+    /// 结果应写入的标签下标（期间切走标签不影响归页）
+    tab: usize,
 }
 
 /// 把一次加载任务构造成事件流（OS 线程做阻塞 IO，std mpsc 桥接到异步端）。
@@ -448,16 +465,59 @@ async fn drive_autosave_once(
     Message::Autosaved(version, result)
 }
 
-#[derive(Default)]
-struct Editpad {
-    // ---------- 文档状态 ----------
-    path: Option<PathBuf>,
-    /// 打开/另存为进行中暂存的路径，成功落盘后才转正
-    pending_path: Option<PathBuf>,
-    encoding_label: String,
-    /// 唯一数据源（M2 起）
+/// 单个标签页的完整状态（P21）。
+///
+/// [`EditorHandle`] 内聚文档/光标/选区/撤销/高亮/滚动；标签页另持
+/// 路径、置脏标记与编码标签。多标签下「干净页可驱逐」等内存硬约束
+/// 在骨架阶段暂不启用（每页本就只多一份 rope 结构）。
+#[derive(Debug, Clone)]
+struct Tab {
     editor: EditorHandle,
+    path: Option<PathBuf>,
     dirty: bool,
+    encoding_label: String,
+}
+
+impl Tab {
+    fn empty() -> Self {
+        Self {
+            editor: EditorHandle::default(),
+            path: None,
+            dirty: false,
+            encoding_label: String::new(),
+        }
+    }
+
+    /// 标签条上的显示名：未命名兜底 + 置脏前缀 ●。
+    fn display_name(&self) -> String {
+        let name = self
+            .path
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("未命名")
+            .to_owned();
+        if self.dirty {
+            format!("● {name}")
+        } else {
+            name
+        }
+    }
+}
+
+/// 应用状态（P21 骨架）：`tabs` 是标签页真值集合；
+/// busy/status/查找/跳转/确认条等交互态保持全局。
+#[derive(Debug, Clone)]
+struct Editpad {
+    // ---------- 多标签（P21 骨架） ----------
+    /// 标签页集合；恒非空（关闭最后一个会重置为新的空标签页）。
+    tabs: Vec<Tab>,
+    /// 当前激活的标签下标。
+    active_tab: usize,
+    /// 活动页编辑器句柄的**长期别名**：与 `tabs[active_tab].editor`
+    /// 指向同一 RefCell。单独存一份是因为 view()/apply_edit 等需要
+    /// 跨语句借用，临时克隆的句柄活不过当前函数。
+    cur_handle: EditorHandle,
     /// 对话框/IO 进行中，防止重复触发
     busy: bool,
     status: String,
@@ -518,11 +578,126 @@ struct Editpad {
     /// dirty 时暂存待打开的路径；Some 即打开确认条可见
     open_confirm: Option<PathBuf>,
 
+    // ---------- 标签页关闭确认（P21） ----------
+    /// Some(idx) = 第 idx 个标签页置脏，正在确认「放弃更改并关闭」
+    close_tab_confirm: Option<usize>,
+
     // ---------- 外观 ----------
     dark_mode: bool,
 }
 
+impl Default for Editpad {
+    fn default() -> Self {
+        let tabs = vec![Tab::empty()];
+        let cur_handle = tabs[0].editor.clone();
+        Self {
+            // P21：初始恒有一个空标签页（tabs 恒非空不变式）
+            tabs,
+            active_tab: 0,
+            cur_handle,
+            busy: false,
+            status: String::new(),
+            content_version: 0,
+            autosave_inflight: false,
+            last_edit_at: None,
+            settings: editpad_core::Settings::default(),
+            job_seq: 0,
+            active_load: None,
+            progress: None,
+            find_visible: false,
+            find_query: String::new(),
+            replace_query: String::new(),
+            case_sensitive: false,
+            matches: Vec::new(),
+            match_idx: None,
+            find_scan: None,
+            find_seq: 0,
+            find_cancel: Arc::default(),
+            hl_paving: None,
+            hl_pave_cancel: Arc::default(),
+            goto_visible: false,
+            goto_input: String::new(),
+            recents_visible: false,
+            confirm_visible: false,
+            pending_close: false,
+            main_window: None,
+            open_confirm: None,
+            close_tab_confirm: None,
+            dark_mode: false,
+        }
+    }
+}
+
 impl Editpad {
+    // ---------- 多标签访问器（P21） ----------
+
+    /// 当前激活标签页。
+    fn tab(&self) -> &Tab {
+        &self.tabs[self.active_tab]
+    }
+
+    /// 当前激活标签页（可变）。
+    fn tab_mut(&mut self) -> &mut Tab {
+        let i = self.active_tab;
+        &mut self.tabs[i]
+    }
+
+    /// 活动页句柄的长期引用（跨语句借用走 `cur_handle` 字段；
+    /// 单表达式内的临时借用也可用 [`Self::cur`]）。
+    fn cur(&self) -> EditorHandle {
+        self.cur_handle.clone()
+    }
+
+    /// 切换活动页并同步长期别名（所有 active_tab 变更必须经此或
+    /// [`Self::refresh_cur_handle`])。
+    fn set_active_tab(&mut self, idx: usize) {
+        self.active_tab = idx.min(self.tabs.len() - 1);
+        self.cur_handle = self.tabs[self.active_tab].editor.clone();
+    }
+
+    /// 与 tabs 对齐刷新别名（增删页后调用）。
+    fn refresh_cur_handle(&mut self) {
+        self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        self.cur_handle = self.tabs[self.active_tab].editor.clone();
+    }
+
+    /// 任一标签页有未保存改动（窗口关闭确认的聚合口径）。
+    fn any_dirty(&self) -> bool {
+        self.tabs.iter().any(|t| t.dirty)
+    }
+
+    /// 第 `idx` 页的路径（存在该页时）。
+    fn path_of_tab(&self, idx: usize) -> Option<PathBuf> {
+        self.tabs.get(idx).and_then(|t| t.path.clone())
+    }
+
+    /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页。
+    /// 返回是否真的移除了页面。
+    fn close_tab_now(&mut self, idx: usize) -> bool {
+        if idx >= self.tabs.len() {
+            return false;
+        }
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            self.tabs.push(Tab::empty());
+        }
+        // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名
+        self.refresh_cur_handle();
+        true
+    }
+
+    /// 打开文件应落入的标签下标：当前页「未命名且干净且为空」→
+    /// 就地打开；否则新开一页。
+    fn target_tab_for_open(&self) -> usize {
+        let t = self.tab();
+        let fresh = t.path.is_none() && !t.dirty && t.editor.borrow().doc.is_empty();
+        if fresh {
+            self.active_tab
+        } else {
+            self.tabs.len()
+        }
+    }
+
     fn new() -> (Self, Task<Message>) {
         let settings = editpad_core::Settings::load();
         let dark_mode = settings.is_dark();
@@ -533,7 +708,7 @@ impl Editpad {
             dark_mode,
             ..Self::default()
         };
-        state.editor.borrow_mut().set_font_size(font_size);
+        state.cur().borrow_mut().set_font_size(font_size);
         (state, Task::none())
     }
 
@@ -561,13 +736,13 @@ impl Editpad {
 
             // ---------- 剪贴板（P4） ----------
             Message::CopyRequested => {
-                let Some(text) = self.editor.borrow().selected_text() else {
+                let Some(text) = self.cur_handle.borrow().selected_text() else {
                     return Task::none();
                 };
                 iced::clipboard::write(text)
             }
             Message::CutRequested => {
-                let Some(text) = self.editor.borrow().selected_text() else {
+                let Some(text) = self.cur_handle.borrow().selected_text() else {
                     return Task::none();
                 };
                 // 先写剪贴板，再走统一编辑入口删除选区（Delete 在有选区时只删选区）。
@@ -626,42 +801,45 @@ impl Editpad {
             }
             Message::Loaded(job_id, result) => {
                 // 过期任务的迟到消息直接丢弃
-                if !self.active_load.as_ref().is_some_and(|j| j.id == job_id) {
+                let Some(job) = self.active_load.clone() else {
+                    return Task::none();
+                };
+                if job.id != job_id {
                     return Task::none();
                 }
                 self.active_load = None;
                 self.progress = None;
+                // P21：结果路由回发起加载的标签页——期间切走也不串页
+                let target = job.tab;
                 match result {
                     Ok((doc, sample, encoding)) => {
                         // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
                         // 内容嗅探（shebang/XML/JSON/YAML/约定文件名）
-                        let language = editpad_core::resolve_language(
-                            self.pending_path.as_deref(),
-                            &sample,
-                        );
+                        let language =
+                            editpad_core::resolve_language(Some(job.path.as_path()), &sample);
+                        let tab = &mut self.tabs[target];
                         {
-                            let mut ed = self.editor.borrow_mut();
+                            let mut ed = tab.editor.borrow_mut();
                             // P19：rope 直入，不再有 from_str 的二次全文拷贝
                             ed.reset_document(doc);
                             ed.set_language_by_name(language.as_deref());
                         }
-                        if let Some(path) = self.pending_path.take() {
+                        tab.path = Some(job.path.clone());
+                        tab.encoding_label = encoding;
+                        tab.dirty = false;
+                        if let Some(path) = self.path_of_tab(target) {
                             self.record_recent(&path);
-                            self.path = Some(path);
                         }
-                        self.encoding_label = encoding;
-                        self.dirty = false;
                         self.busy = false;
                         // 新文档已就位：旧文档的关闭确认语义过期
                         self.confirm_visible = false;
                         self.pending_close = false;
                         self.status.clear();
-                        if self.find_visible {
+                        if self.find_visible && target == self.active_tab {
                             return self.schedule_find_scan();
                         }
                     }
                     Err(error) => {
-                        self.pending_path = None;
                         self.busy = false;
                         self.status = format!("打开失败:{error}");
                     }
@@ -670,7 +848,7 @@ impl Editpad {
             }
 
             // ---------- 保存 ----------
-            Message::SaveRequested => match self.path.clone() {
+            Message::SaveRequested => match self.tab().path.clone() {
                 Some(_) => self.save(),
                 None => self.save_as_dialog(),
             },
@@ -682,26 +860,26 @@ impl Editpad {
                 Task::none()
             }
             Message::SaveTargetChosen(Some(path)) => {
-                self.path = Some(path);
+                self.tab_mut().path = Some(path);
                 // 对话框阶段结束再交给 save() 的 busy 守卫（原实现在此卡死 busy）
                 self.busy = false;
                 self.save()
             }
             Message::Saved(version, Ok(())) => {
                 // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
-                self.dirty = self.content_version != version;
+                self.tab_mut().dirty = self.content_version != version;
                 self.busy = false;
-                if let Some(path) = self.path.clone() {
+                if let Some(path) = self.tab().path.clone() {
                     self.record_recent(&path);
                 }
                 // P6 编码知情权：发生转码/BOM 丢失时明确告知，而不是静默落盘
-                if let Some(notice) = transcode_notice(&self.encoding_label) {
+                if let Some(notice) = transcode_notice(&self.tab().encoding_label) {
                     self.status = notice;
                 } else {
                     self.status.clear();
                 }
                 // 落盘后文件已是纯 UTF-8，标签同步归一（避免后续保存重复提示）
-                self.encoding_label = "UTF-8".to_owned();
+                self.tab_mut().encoding_label = "UTF-8".to_owned();
                 if self.pending_close {
                     // 落盘确认后才真正关窗
                     self.pending_close = false;
@@ -725,7 +903,7 @@ impl Editpad {
                         // 版本一致 = 快照之后没有新编辑：可以安全清脏；
                         // 不一致则保持置脏，由新一轮防抖任务覆盖最新内容
                         if self.content_version == version {
-                            self.dirty = false;
+                            self.tab_mut().dirty = false;
                         }
                     }
                     Err(error) => {
@@ -741,7 +919,8 @@ impl Editpad {
             Message::CloseRequested(id) => {
                 // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
                 self.main_window = Some(id);
-                if self.dirty {
+                // P21：任一标签页置脏即弹确认（聚合口径）
+                if self.any_dirty() {
                     self.confirm_visible = true;
                     Task::none()
                 } else {
@@ -751,14 +930,17 @@ impl Editpad {
             Message::ConfirmSaveAndClose => {
                 self.confirm_visible = false;
                 self.pending_close = true;
-                match self.path.clone() {
+                match self.tab().path.clone() {
                     Some(_) => self.save(),
                     // 未命名文档：先走另存为，落盘成功后自动关窗
                     None => self.save_as_dialog(),
                 }
             }
             Message::DiscardAndClose => {
-                self.dirty = false;
+                // P21：放弃关闭 = 全部标签页的未保存标记一并放弃
+                for tab in &mut self.tabs {
+                    tab.dirty = false;
+                }
                 self.confirm_visible = false;
                 self.close_window()
             }
@@ -774,10 +956,11 @@ impl Editpad {
                     return Task::none();
                 };
                 // 明确放弃：不再触发下一次确认；若关闭确认条还开着，其前提已消失
-                self.dirty = false;
+                self.tab_mut().dirty = false;
                 self.confirm_visible = false;
                 self.pending_close = false;
-                self.start_loading(path)
+                let tab = self.target_tab_for_open();
+                self.start_loading(path, tab)
             }
             Message::ConfirmOpenCancel => {
                 self.open_confirm = None;
@@ -820,7 +1003,7 @@ impl Editpad {
                 }
                 // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
                 let (new_contents, count) = {
-                    let editor = self.editor.borrow();
+                    let editor = self.cur_handle.borrow();
                     editpad_core::replace_all_document(
                         &editor.doc,
                         &self.find_query,
@@ -829,10 +1012,10 @@ impl Editpad {
                     )
                 };
                 if count > 0 {
-                    self.editor
+                    self.cur()
                         .borrow_mut()
                         .replace_whole_document(editpad_core::Document::from_str(&new_contents));
-                    self.dirty = true;
+                    self.tab_mut().dirty = true;
                     // P18：内容版本与防抖起点同步推进
                     self.content_version += 1;
                     self.last_edit_at = Some(std::time::Instant::now());
@@ -862,12 +1045,12 @@ impl Editpad {
             Message::FormatJson => {
                 const FORMAT_JSON_MAX_CHARS: usize = 4_000_000;
                 // 仅当前语法为 JSON 时生效（P22 第二批：按当前语法判断）
-                if self.editor.borrow().highlight_syntax_name().as_deref() != Some("JSON") {
+                if self.cur_handle.borrow().highlight_syntax_name().as_deref() != Some("JSON") {
                     self.status = "格式化 JSON 仅对 JSON 文件可用（Ctrl+Shift+F）".to_owned();
                     return Task::none();
                 }
                 let (text, chars) = {
-                    let ed = self.editor.borrow();
+                    let ed = self.cur_handle.borrow();
                     (ed.doc.to_text(), ed.doc.text_len())
                 };
                 if chars > FORMAT_JSON_MAX_CHARS {
@@ -879,10 +1062,10 @@ impl Editpad {
                 match editpad_core::format_json(&text) {
                     Ok(pretty) => {
                         // replace_whole_document 内部快照 → 可撤销；光标复位到文首
-                        self.editor
+                        self.cur()
                             .borrow_mut()
                             .replace_whole_document(editpad_core::Document::from_str(&pretty));
-                        self.dirty = true;
+                        self.tab_mut().dirty = true;
                         // P18：内容版本与防抖起点同步推进
                         self.content_version += 1;
                         self.last_edit_at = Some(std::time::Instant::now());
@@ -907,9 +1090,9 @@ impl Editpad {
                 // 双重代次检查：任务登记一致且高亮器未换代（换文件后
                 // 旧任务的迟到进度不得污染新会话的状态栏）
                 if self.hl_paving == Some(gen)
-                    && self.editor.borrow().highlight_generation() == Some(gen)
+                    && self.cur_handle.borrow().highlight_generation() == Some(gen)
                 {
-                    let total_strides = (self.editor.borrow().doc.line_count()
+                    let total_strides = (self.cur_handle.borrow().doc.line_count()
                         / editpad_core::highlight::STRIDE)
                         .max(1);
                     let pct = (strides_done as usize).min(total_strides) * 100 / total_strides;
@@ -923,7 +1106,7 @@ impl Editpad {
                     // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
                     // needs_paving 重新评估并续排（从存活检查点出发，代价小）
                     let installed = self
-                        .editor
+                        .cur_handle
                         .borrow_mut()
                         .install_highlighter_if_current(gen, paved);
                     let _ = installed;
@@ -948,7 +1131,7 @@ impl Editpad {
             }
             Message::GotoSubmit => match self.goto_input.trim().parse::<usize>() {
                 Ok(n) if n >= 1 => {
-                    self.editor.borrow_mut().jump_to_line(n);
+                    self.cur_handle.borrow_mut().jump_to_line(n);
                     self.goto_visible = false;
                     self.status.clear();
                     Task::none()
@@ -981,8 +1164,62 @@ impl Editpad {
                 self.confirm_visible = false;
                 self.pending_close = false;
                 self.open_confirm = None;
+                // P21：Esc 也取消标签页关闭确认
+                self.close_tab_confirm = None;
                 // P10：取消在途扫描 + 清结果（含序号失效）
                 self.cancel_find_scan();
+                Task::none()
+            }
+
+            // ---------- 多标签（P21） ----------
+            Message::NewTab => {
+                self.tabs.push(Tab::empty());
+                self.set_active_tab(self.tabs.len() - 1);
+                // 查找态全局：切页即作废旧命中，防串页
+                self.cancel_find_scan();
+                Task::none()
+            }
+            Message::SwitchTabNext => {
+                let next = (self.active_tab + 1) % self.tabs.len();
+                self.set_active_tab(next);
+                self.cancel_find_scan();
+                Task::none()
+            }
+            Message::SwitchTab(i) => {
+                if i < self.tabs.len() && i != self.active_tab {
+                    self.set_active_tab(i);
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::CloseTabRequest => {
+                let idx = self.active_tab;
+                if self.tabs[idx].dirty {
+                    // 置脏页先确认（骨架版仅提供「放弃更改」出口）
+                    self.close_tab_confirm = Some(idx);
+                } else if self.close_tab_now(idx) {
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::ConfirmCloseTabDiscard(idx) => {
+                self.close_tab_confirm = None;
+                if idx < self.tabs.len() {
+                    // 关最后一页时槽位会被复用：先清空内容与路径
+                    let tab = &mut self.tabs[idx];
+                    tab.dirty = false;
+                    tab.path = None;
+                    tab.editor
+                        .borrow_mut()
+                        .reset_document(editpad_core::Document::new());
+                }
+                if self.close_tab_now(idx) {
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::CancelCloseTab => {
+                self.close_tab_confirm = None;
                 Task::none()
             }
 
@@ -997,7 +1234,7 @@ impl Editpad {
                 let next = editor::normalize_font_size(self.display_font_size() + delta);
                 self.settings.font_size = next;
                 self.settings.save();
-                self.editor.borrow_mut().set_font_size(next);
+                self.cur_handle.borrow_mut().set_font_size(next);
                 Task::none()
             }
         }
@@ -1015,7 +1252,7 @@ impl Editpad {
         use EditOp as E;
         let mut hint: Option<&'static str> = None;
 
-        let mut editor = self.editor.borrow_mut();
+        let mut editor = self.cur_handle.borrow_mut();
         let changed = match op {
             E::Motion(motion, extend) => {
                 editor.apply_motion(motion, extend);
@@ -1055,7 +1292,7 @@ impl Editpad {
         drop(editor);
 
         if changed {
-            self.dirty = true;
+            self.tab_mut().dirty = true;
             // P18：内容版本 +1 并刷新防抖起点（自动保存的触发依据）
             self.content_version += 1;
             self.last_edit_at = Some(std::time::Instant::now());
@@ -1069,7 +1306,11 @@ impl Editpad {
     // ---------- 加载管线 ----------
 
     /// 启动一次后台加载：登记任务后由 [`Editpad::subscription`] 的流接管。
-    fn start_loading(&mut self, path: PathBuf) -> Task<Message> {
+    ///
+    /// P21：`tab` 指明结果应落入的标签页（可能等于 `tabs.len()`，
+    /// 表示「新开一页」——此处先占位创建，保证路由目标恒存在）；
+    /// 期间用户切走标签也不影响结果归页。
+    fn start_loading(&mut self, path: PathBuf, tab: usize) -> Task<Message> {
         if self.busy {
             return Task::none();
         }
@@ -1077,26 +1318,33 @@ impl Editpad {
         let job = LoadJob {
             id: self.job_seq,
             path: path.clone(),
+            tab,
         };
-        self.pending_path = Some(path);
+        if tab >= self.tabs.len() {
+            self.tabs.push(Tab::empty());
+        }
         self.active_load = Some(job);
         self.progress = Some((0, 0));
         self.busy = true;
+        // P21：加载落在新页时直接切过去（符合「打开即聚焦」直觉）
+        self.active_tab = tab;
         self.status.clear();
         Task::none()
     }
 
     /// 统一的换文档入口（打开对话框/拖拽/最近文件共用）：
-    /// dirty 时绝不静默丢弃修改（含撤销链），先弹打开确认条。
+    /// 当前页 dirty 时绝不静默丢弃修改（含撤销链），先弹打开确认条。
+    /// P21：落点 = [`Self::target_tab_for_open`]（空净当前页就地打开，否则新页）。
     fn request_open(&mut self, path: PathBuf) -> Task<Message> {
         if self.busy {
             return Task::none();
         }
-        if self.dirty {
+        if self.tab().dirty {
             self.open_confirm = Some(path);
             return Task::none();
         }
-        self.start_loading(path)
+        let tab = self.target_tab_for_open();
+        self.start_loading(path, tab)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -1148,14 +1396,14 @@ impl Editpad {
     }
 
     fn save(&mut self) -> Task<Message> {
-        if self.busy || self.path.is_none() {
+        if self.busy || self.tab().path.is_none() {
             return Task::none();
         }
         self.busy = true;
-        let path = self.path.clone().expect("上方已确认非空");
+        let path = self.tab().path.clone().expect("上方已确认非空");
         // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
-        let doc = self.editor.borrow().doc.clone();
+        let doc = self.cur_handle.borrow().doc.clone();
         // P18 版本守卫：记录本次落盘对应的内容版本
         let version = self.content_version;
         Task::perform(
@@ -1171,11 +1419,13 @@ impl Editpad {
     // ---------- 即时保存（P18） ----------
 
     /// 自动保存条件是否就绪（不含防抖时间判断）：
-    /// 已命名、有未存改动、无在途 IO、不与手动保存互斥、当前没有挂起任务。
+    /// 当前页已命名、有未存改动、无在途 IO、不与手动保存互斥、
+    /// 当前没有挂起任务。（骨架阶段仅覆盖活动标签页；后台页的
+    /// 自动保存随 P21 完整版补齐。）
     fn autosave_ready(&self) -> bool {
         self.settings.autosave_enabled
-            && self.dirty
-            && self.path.is_some()
+            && self.tab().dirty
+            && self.tab().path.is_some()
             && self.active_load.is_none()
             && !self.busy
             && !self.autosave_inflight
@@ -1191,10 +1441,10 @@ impl Editpad {
         if !self.autosave_ready() {
             return Task::none();
         }
-        let Some(path) = self.path.clone() else {
+        let Some(path) = self.tab().path.clone() else {
             return Task::none();
         };
-        let doc = self.editor.borrow().doc.clone();
+        let doc = self.cur_handle.borrow().doc.clone();
         let version = self.content_version;
         let delay = std::time::Duration::from_secs(
             u64::from(self.settings.autosave_delay_secs),
@@ -1250,7 +1500,7 @@ impl Editpad {
         self.find_seq += 1;
         let payload = FindScanPayload {
             seq: self.find_seq,
-            doc: self.editor.borrow().doc.clone(),
+            doc: self.cur_handle.borrow().doc.clone(),
             query: self.find_query.clone(),
             case_sensitive: self.case_sensitive,
             cancelled,
@@ -1282,18 +1532,18 @@ impl Editpad {
     /// * 期间发生过编辑（换代）→ 作废旧任务，从当前存活检查点重新出发；
     /// * UI 线程成本 = rope 结构共享克隆 + 高亮器检查点向量拷贝，零解析。
     fn schedule_highlight_pave(&mut self) -> Task<Message> {
-        let current_gen = self.editor.borrow().highlight_generation();
+        let current_gen = self.cur_handle.borrow().highlight_generation();
         if let (Some(active), Some(current)) = (self.hl_paving, current_gen) {
             if active == current {
                 return Task::none();
             }
         }
-        let Some((gen, highlighter)) = self.editor.borrow().highlight_pave_snapshot() else {
+        let Some((gen, highlighter)) = self.cur_handle.borrow().highlight_pave_snapshot() else {
             // 无高亮器（纯文本路径）：清掉可能残留的旧任务登记
             self.hl_paving = None;
             return Task::none();
         };
-        let doc = self.editor.borrow().doc.clone();
+        let doc = self.cur_handle.borrow().doc.clone();
         let total_lines = doc.line_count();
 
         // 作废上一代任务：批间取消标志 + 结果按代次过滤双保险
@@ -1330,7 +1580,7 @@ impl Editpad {
             return Task::none();
         }
 
-        let cursor = self.editor.borrow().cursor;
+        let cursor = self.cur_handle.borrow().cursor;
         let index = if forward {
             editpad_core::next_from(&self.matches, cursor.line, cursor.col)
         } else {
@@ -1342,7 +1592,7 @@ impl Editpad {
             (index, index.and_then(|i| self.matches.get(i).copied()))
         {
             let query_len = self.find_query.chars().count();
-            self.editor.borrow_mut().select_span(pos.line, pos.col, query_len);
+            self.cur_handle.borrow_mut().select_span(pos.line, pos.col, query_len);
             self.status = format!("第 {}/{} 处匹配", i + 1, self.matches.len());
         }
         Task::none()
@@ -1353,7 +1603,7 @@ impl Editpad {
             return Task::none();
         }
         let hit_selected = {
-            let editor = self.editor.borrow();
+            let editor = self.cur_handle.borrow();
             editor
                 .selected_text()
                 .is_some_and(|selected| {
@@ -1362,8 +1612,8 @@ impl Editpad {
         };
 
         if hit_selected {
-            self.editor.borrow_mut().replace_selection(&self.replace_query.clone());
-            self.dirty = true;
+            self.cur_handle.borrow_mut().replace_selection(&self.replace_query.clone());
+            self.tab_mut().dirty = true;
             // P10：替换后命中表已过期，排队后台重扫；「跳到下一个」等重扫完成
             // 后由用户再按（旧行为是同步重扫后立即跳，会卡大文档 UI）
             return self.schedule_find_scan();
@@ -1376,7 +1626,7 @@ impl Editpad {
 
     fn title(&self) -> String {
         let name = self.file_display_name().unwrap_or_else(|| "未命名".into());
-        if self.dirty {
+        if self.tab().dirty {
             format!("● {name} - Editpad")
         } else {
             format!("{name} - Editpad")
@@ -1388,7 +1638,8 @@ impl Editpad {
     }
 
     fn file_display_name(&self) -> Option<String> {
-        self.path
+        self.tab()
+            .path
             .as_deref()
             .and_then(Path::file_name)
             .and_then(std::ffi::OsStr::to_str)
@@ -1402,7 +1653,8 @@ impl Editpad {
                 .on_press_maybe((!self.busy).then_some(Message::OpenRequested)),
             button(text("保存"))
                 .padding([4, 12])
-                .on_press_maybe((!self.busy && self.dirty).then_some(Message::SaveRequested)),
+                .on_press_maybe((!self.busy && self.tab().dirty)
+                    .then_some(Message::SaveRequested)),
             button(text("另存为…"))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::SaveAsRequested)),
@@ -1437,16 +1689,34 @@ impl Editpad {
             ]
             .spacing(4)
             .align_y(Alignment::Center),
-            text(if self.dirty { "● 未保存" } else { "" }).color([0.85, 0.55, 0.1]),
+            text(if self.tab().dirty { "● 未保存" } else { "" }).color([0.85, 0.55, 0.1]),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([8, 10]);
 
         // M2 核心：自绘虚拟化编辑器，数据源是 ropey Document
-        let editor_view = self.editor.view();
+        let editor_view = self.cur_handle.view();
 
         let mut body = column![toolbar, rule::horizontal(1), editor_view];
+
+        // P21 标签条：恒显示（单页也给出「当前文件名」的可见反馈）。
+        // 点击切换；置脏页带 ● 前缀；活动页加 ▸ 指示。
+        {
+            let mut strip = row![].spacing(2).padding([4, 6]);
+            for (i, tab) in self.tabs.iter().enumerate() {
+                let marker = if i == self.active_tab { "▸ " } else { "  " };
+                strip = strip.push(
+                    button(text(format!(
+                        "{marker}{}",
+                        tab.display_name()
+                    )))
+                    .padding([2, 10])
+                    .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
+                );
+            }
+            body = body.push(rule::horizontal(1)).push(strip);
+        }
 
         if let Some((bytes_read, total_bytes)) = self.progress {
             body = body.push(
@@ -1593,13 +1863,34 @@ impl Editpad {
             );
         }
 
+        // P21 标签页关闭确认：骨架版仅提供「放弃更改并关闭」出口，
+        // 想保留改动请先 Ctrl+S（完整保存后关闭随 P21 完整版补齐）
+        if let Some(idx) = self.close_tab_confirm {
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text(format!(
+                        "第 {} 个标签页有未保存的更改",
+                        idx.saturating_add(1)
+                    )),
+                    button(text("放弃更改并关闭"))
+                        .padding([4, 12])
+                        .on_press(Message::ConfirmCloseTabDiscard(idx)),
+                    button(text("取消"))
+                        .padding([4, 12])
+                        .on_press(Message::CancelCloseTab),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
         // 未保存时打开新文件的确认条（样式沿用关闭确认条）
         if let Some(path) = &self.open_confirm {
             body = body.push(rule::horizontal(1)).push(
                 row![
                     text(format!("{} 有未保存的更改，放弃并打开？", path.display())),
-                    button(text("放弃更改并打开"))
-                        .padding([4, 12])
+                    button(text("放弃更改并打开"))                        .padding([4, 12])
                         .on_press(Message::ConfirmOpenDiscard),
                     button(text("取消"))
                         .padding([4, 12])
@@ -1618,21 +1909,22 @@ impl Editpad {
             );
         }
 
-        let cursor = self.editor.borrow().cursor;
+        let cursor = self.cur_handle.borrow().cursor;
         let status_bar = row![
             text(
-                self.path
+                self.tab()
+                    .path
                     .as_deref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "(未命名)".into())
             )
             .width(Fill),
-            text(if self.encoding_label.is_empty() {
+            text(if self.tab().encoding_label.is_empty() {
                 "—".to_owned()
             } else {
-                self.encoding_label.clone()
+                self.tab().encoding_label.clone()
             }),
-            text(format!("{} 行", self.editor.borrow().doc.line_count())),
+            text(format!("{} 行", self.cur_handle.borrow().doc.line_count())),
             text(format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1)),
         ]
         .spacing(24)
@@ -1678,6 +1970,9 @@ fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> 
                 "c" => Message::CopyRequested,
                 "x" => Message::CutRequested,
                 "v" => Message::PasteRequested,
+                // P21 标签页
+                "t" => Message::NewTab,
+                "w" => Message::CloseTabRequest,
                 _ => return None,
             };
             return Some(message);
@@ -1686,6 +1981,8 @@ fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> 
         return match &key {
             Key::Named(Named::Home) => edit(EditOp::Motion(Motion::DocStart, mods.shift())),
             Key::Named(Named::End) => edit(EditOp::Motion(Motion::DocEnd, mods.shift())),
+            // P21：Ctrl+Tab 循环切到下一个标签页
+            Key::Named(Named::Tab) => Some(Message::SwitchTabNext),
             _ => None,
         };
     }
@@ -1820,6 +2117,140 @@ mod tests {
         assert_eq!(lf.doc.to_text(), "x\ny\nz");
     }
 
+    // ---------- P21 多标签骨架 ----------
+
+    #[test]
+    fn new_tab_switch_and_pages_stay_independent() {
+        let mut app = Editpad::default();
+        assert_eq!(app.tabs.len(), 1);
+
+        // 初始页写内容 → 置脏
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("page0".into())));
+        assert!(app.tab().dirty);
+
+        // 连开两个新页：自动切换过去，且为空净未命名
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::NewTab);
+        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.active_tab, 2);
+        assert!(
+            app.cur_handle.borrow().doc.is_empty(),
+            "新页应为空文档"
+        );
+
+        // 第 3 页编辑后切走再切回：内容与置脏状态各自独立
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("page2".into())));
+        dispatch(&mut app, Message::SwitchTab(0));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "page0");
+        assert!(app.tab().dirty);
+        dispatch(&mut app, Message::SwitchTab(2));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "page2");
+
+        // Ctrl+Tab 循环
+        dispatch(&mut app, Message::SwitchTabNext);
+        assert_eq!(app.active_tab, 0, "从末页循环回首页");
+    }
+
+    #[test]
+    fn loaded_result_routes_to_origin_tab_after_switch() {
+        let mut app = Editpad::default();
+
+        // 打开 A：落入初始空净页
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
+        let seq_a = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq_a,
+                Ok((editpad_core::Document::from_str("content A"), String::new(), "UTF-8".to_owned())),
+            ),
+        );
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "content A");
+
+        // 当前页非空 → B 落新页 idx1 并切换过去；加载完成前用户切回页 0
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/b.txt")));
+        assert_eq!(app.active_tab, 1, "非空当前页应新开一页承接打开");
+        let seq_b = app.job_seq;
+        dispatch(&mut app, Message::SwitchTab(0));
+
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq_b,
+                Ok((editpad_core::Document::from_str("content B"), String::new(), "UTF-8".to_owned())),
+            ),
+        );
+
+        assert_eq!(app.active_tab, 0, "切走的用户不被加载结果拉回");
+        assert_eq!(app.tabs.len(), 2);
+        let origin_doc = app.tabs[1].editor.borrow().doc.to_text();
+        assert_eq!(origin_doc, "content B", "迟到结果必须归入发起页");
+    }
+
+    #[test]
+    fn close_tab_flow_respects_dirty_and_never_empties_tabs() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("dirty page".into())));
+
+        // 置脏页关闭 → 先确认不移除
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.close_tab_confirm, Some(0));
+        assert_eq!(app.tabs.len(), 1);
+
+        // 取消：页面原样保留
+        dispatch(&mut app, Message::CancelCloseTab);
+        assert_eq!(app.close_tab_confirm, None);
+        assert_eq!(app.tabs.len(), 1);
+
+        // 确认放弃：清空内容并移除；最后一页被新的空页替代
+        dispatch(&mut app, Message::CloseTabRequest);
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+        assert_eq!(app.tabs.len(), 1, "恒保有一个标签页");
+        assert!(!app.tab().dirty);
+        assert!(app.cur_handle.borrow().doc.is_empty());
+
+        // 干净页关闭即刻生效（两页 → 一页）
+        dispatch(&mut app, Message::NewTab);
+        assert_eq!(app.tabs.len(), 2);
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.tabs.len(), 1, "干净页直接关闭");
+        assert!(app.close_tab_confirm.is_none());
+    }
+
+    #[test]
+    fn window_close_confirms_when_any_background_tab_is_dirty() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("make dirty".into())));
+        dispatch(&mut app, Message::NewTab); // 切到干净的新页
+
+        // 活动页干净，但后台页置脏 → 关窗仍需确认（聚合口径）
+        let id = iced::window::Id::unique();
+        let _ = app.update(Message::CloseRequested(id));
+        assert!(
+            app.confirm_visible,
+            "任一页置脏都必须弹关窗确认"
+        );
+    }
+
+    #[test]
+    fn tab_keymap_new_next_close() {
+        use iced::keyboard::{self};
+        let ctrl = keyboard::Modifiers::CTRL;
+
+        assert!(matches!(
+            handle_key(keyboard::Key::Character("t".into()), ctrl),
+            Some(Message::NewTab)
+        ));
+        assert!(matches!(
+            handle_key(keyboard::Key::Character("w".into()), ctrl),
+            Some(Message::CloseTabRequest)
+        ));
+        assert!(matches!(
+            handle_key(keyboard::Key::Named(Named::Tab), ctrl),
+            Some(Message::SwitchTabNext)
+        ));
+    }
+
     // ---------- 健壮性边界用例批 ----------
 
     #[test]
@@ -1855,7 +2286,7 @@ mod tests {
         let mut app = Editpad::default();
         dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/big.log")));
         assert!(app.active_load.is_some());
-        assert!(!app.dirty);
+        assert!(!app.tab().dirty);
 
         let id = iced::window::Id::unique();
         let _ = app.update(Message::CloseRequested(id));
@@ -1888,7 +2319,7 @@ mod tests {
             Message::Loaded(seq, Ok((doc, sample.to_owned(), "UTF-8".to_owned()))),
         );
         assert_eq!(
-            app.editor.borrow().highlight_syntax_name().as_deref(),
+            app.cur_handle.borrow().highlight_syntax_name().as_deref(),
             Some("Editpad Log")
         );
 
@@ -1905,7 +2336,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            app2.editor.borrow().highlight_syntax_name().as_deref(),
+            app2.cur_handle.borrow().highlight_syntax_name().as_deref(),
             Some("Bourne Again Shell (bash)")
         );
     }
@@ -1933,14 +2364,14 @@ mod tests {
         let mut app = json_app("{\"b\":1,\"a\":[2,3]}");
         dispatch(&mut app, Message::FormatJson);
         let expected = "{\n  \"b\": 1,\n  \"a\": [\n    2,\n    3\n  ]\n}";
-        assert_eq!(app.editor.borrow().doc.to_text(), expected);
-        assert!(app.dirty, "格式化属于内容修改，必须置脏");
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), expected);
+        assert!(app.tab().dirty, "格式化属于内容修改，必须置脏");
         assert_eq!(app.status, "已格式化 JSON");
 
         // 可撤销：replace_whole_document 走快照链
         dispatch(&mut app, Message::Edit(EditOp::Undo));
         assert_eq!(
-            app.editor.borrow().doc.to_text(),
+            app.cur_handle.borrow().doc.to_text(),
             "{\"b\":1,\"a\":[2,3]}",
             "撤销应还原到格式化前"
         );
@@ -1952,7 +2383,7 @@ mod tests {
         let mut app = json_app(bad);
         dispatch(&mut app, Message::FormatJson);
         assert_eq!(
-            app.editor.borrow().doc.to_text(),
+            app.cur_handle.borrow().doc.to_text(),
             bad,
             "校验失败不得改动文档"
         );
@@ -1975,7 +2406,7 @@ mod tests {
         );
         dispatch(&mut app, Message::FormatJson);
         assert_eq!(
-            app.editor.borrow().doc.to_text(),
+            app.cur_handle.borrow().doc.to_text(),
             "{not:json,but:plain txt}",
             "非 JSON 文档不得被改动"
         );
@@ -2021,7 +2452,7 @@ mod tests {
 
         // 编辑置脏并派发防抖任务
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.dirty);
+        assert!(app.tab().dirty);
         assert!(app.autosave_inflight, "首次编辑应排队防抖任务");
         let scheduled_version = app.content_version;
 
@@ -2035,7 +2466,7 @@ mod tests {
             &mut app,
             Message::Autosaved(scheduled_version + 1, Ok(())),
         );
-        assert!(!app.dirty, "版本一致时落盘应清脏");
+        assert!(!app.tab().dirty, "版本一致时落盘应清脏");
         assert!(!app.autosave_inflight);
     }
 
@@ -2050,7 +2481,7 @@ mod tests {
         dispatch(&mut app, Message::Autosaved(stale, Ok(())));
 
         assert!(
-            app.dirty && !app.autosave_inflight,
+            app.tab().dirty && !app.autosave_inflight,
             "版本不符应保持置脏并解除挂起"
         );
     }
@@ -2068,7 +2499,7 @@ mod tests {
         );
 
         assert!(!app.autosave_inflight, "失败也要解除挂起");
-        assert!(app.dirty, "失败必须保持置脏");
+        assert!(app.tab().dirty, "失败必须保持置脏");
         assert!(
             app.status.contains("自动保存失败") && app.status.contains("disk full"),
             "失败必须留痕不能无声吞掉，实际 {:?}",
@@ -2085,7 +2516,7 @@ mod tests {
         // 未命名文档（path == None）：绝不自动落盘
         let mut untitled = Editpad::default();
         dispatch(&mut untitled, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(untitled.dirty);
+        assert!(untitled.tab().dirty);
         assert!(
             !untitled.autosave_inflight,
             "未命名文档不参与自动保存"
@@ -2095,7 +2526,7 @@ mod tests {
         let mut app = loaded_txt_app();
         app.settings.autosave_enabled = false;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.dirty);
+        assert!(app.tab().dirty);
         assert!(!app.autosave_inflight, "开关关闭时不排队");
 
         // busy（手动 IO 进行中）时也跳过
@@ -2405,7 +2836,7 @@ mod tests {
     #[test]
     fn replace_all_swaps_document_and_sets_dirty() {
         let mut app = Editpad::default();
-        app.editor
+        app.cur_handle
             .borrow_mut()
             .reset_document(editpad_core::Document::from_str("foo bar foo\nfoo"));
         app.find_visible = true;
@@ -2414,23 +2845,23 @@ mod tests {
 
         let _ = app.update(Message::ReplaceAll);
         assert_eq!(
-            app.editor.borrow().doc.to_text(),
+            app.cur_handle.borrow().doc.to_text(),
             "baz bar baz\nbaz",
             "全部替换应改写文档内容"
         );
-        assert!(app.dirty, "全部替换后必须置脏");
+        assert!(app.tab().dirty, "全部替换后必须置脏");
         assert_eq!(app.status, "已替换 3 处");
 
         // 无命中时不改文档也不置脏
         let mut app2 = Editpad::default();
-        app2.editor
+        app2.cur_handle
             .borrow_mut()
             .reset_document(editpad_core::Document::from_str("untouched"));
         app2.find_query = "zzz".into();
         app2.replace_query = "x".into();
         let _ = app2.update(Message::ReplaceAll);
-        assert_eq!(app2.editor.borrow().doc.to_text(), "untouched");
-        assert!(!app2.dirty);
+        assert_eq!(app2.cur_handle.borrow().doc.to_text(), "untouched");
+        assert!(!app2.tab().dirty);
         assert_eq!(app2.status, "已替换 0 处");
     }
 
@@ -2438,7 +2869,7 @@ mod tests {
     fn replace_all_is_blocked_while_scan_in_flight() {
         // P10 守卫在 P11 新路径上仍然生效：扫描在途时的全文快照可能过期
         let mut app = Editpad::default();
-        app.editor
+        app.cur_handle
             .borrow_mut()
             .reset_document(editpad_core::Document::from_str("keep me"));
         app.find_query = "me".into();
@@ -2446,11 +2877,11 @@ mod tests {
         app.find_scan = Some(11);
         let _ = app.update(Message::ReplaceAll);
         assert_eq!(
-            app.editor.borrow().doc.to_text(),
+            app.cur_handle.borrow().doc.to_text(),
             "keep me",
             "后台扫描在途时不得执行全部替换"
         );
-        assert!(!app.dirty);
+        assert!(!app.tab().dirty);
     }
 
     // ---------- P12 高亮后台分批补建 ----------
@@ -2465,12 +2896,12 @@ mod tests {
         let app = Editpad::default();
         let text = "fn f(x: f64) -> f64 { x /* 注释 */ }\n".repeat(lines);
         {
-            let mut ed = app.editor.borrow_mut();
+            let mut ed = app.cur_handle.borrow_mut();
             ed.reset_document(editpad_core::Document::from_str(&text));
             ed.set_language(Some("rs"));
         }
         let gen = app
-            .editor
+            .cur_handle
             .borrow()
             .highlight_generation()
             .expect("已启用高亮");
@@ -2479,17 +2910,17 @@ mod tests {
 
     fn pave_payload(app: &Editpad, batch: usize) -> (HlPavePayload, u64) {
         let (gen, highlighter) = app
-            .editor
+            .cur_handle
             .borrow()
             .highlight_pave_snapshot()
             .expect("已启用高亮");
-        let doc = app.editor.borrow().doc.clone();
+        let doc = app.cur_handle.borrow().doc.clone();
         (
             HlPavePayload {
                 gen,
                 doc,
                 highlighter,
-                total_lines: app.editor.borrow().doc.line_count(),
+                total_lines: app.cur_handle.borrow().doc.line_count(),
                 cancelled: Arc::new(AtomicBool::new(false)),
                 batch_strides: batch,
             },
@@ -2549,7 +2980,7 @@ mod tests {
         ), "铺建完成后状态应归位，实际 {:?}", app.status);
         assert_eq!(app.hl_paving, None, "完成后必须解除在途登记");
         assert_eq!(
-            app.editor.borrow().highlight_checkpoints_len(),
+            app.cur_handle.borrow().highlight_checkpoints_len(),
             Some(1 + 3),
             "初始检查点 + 3 个后台档位"
         );
@@ -2564,11 +2995,11 @@ mod tests {
         // 编辑换代：真实编辑触发 invalidate_from → 换代
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         assert_ne!(
-            app.editor.borrow().highlight_generation(),
+            app.cur_handle.borrow().highlight_generation(),
             Some(gen0),
             "编辑必须换代"
         );
-        let len_now = app.editor.borrow().highlight_checkpoints_len();
+        let len_now = app.cur_handle.borrow().highlight_checkpoints_len();
 
         // 迟到的旧代成果（内容无关紧要，代次闸门负责拒收）
         let (stale_payload, _) = pave_payload(&app, 32);
@@ -2578,7 +3009,7 @@ mod tests {
 
         assert_eq!(app.hl_paving, None, "过期任务的登记必须解除");
         assert_eq!(
-            app.editor.borrow().highlight_checkpoints_len(),
+            app.cur_handle.borrow().highlight_checkpoints_len(),
             len_now,
             "换代后的迟到成果不得覆盖当前高亮器"
         );
@@ -2682,7 +3113,7 @@ mod tests {
 
         // 纯文本文档（无高亮器）：请求直接清空登记不派发
         let mut plain = Editpad::default();
-        plain.editor
+        plain.cur_handle
             .borrow_mut()
             .reset_document(editpad_core::Document::from_str("plain text only\n"));
         dispatch(&mut plain, Message::HighlightPaveNeeded);

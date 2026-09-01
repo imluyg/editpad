@@ -1178,6 +1178,13 @@ impl HScrollbar {
 #[derive(Clone, Default)]
 pub struct EditorHandle(Rc<RefCell<EditorCore>>);
 
+impl std::fmt::Debug for EditorHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 内部是 RefCell<EditorCore>（含大量 GUI 态），只输出标识
+        f.pad("EditorHandle")
+    }
+}
+
 impl EditorHandle {
     pub fn borrow(&self) -> std::cell::Ref<'_, EditorCore> {
         self.0.borrow()
