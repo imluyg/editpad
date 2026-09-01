@@ -8,6 +8,7 @@ pub mod error;
 pub mod highlight;
 pub mod json;
 pub mod loader;
+pub mod markdown;
 pub(crate) mod syntaxes;
 pub mod saver;
 pub mod search;

@@ -15,8 +15,9 @@ use std::sync::{Arc, mpsc as std_mpsc};
 
 use iced::futures::SinkExt;
 use iced::keyboard::{self, key::Named};
-use iced::widget::{button, checkbox, column, container, progress_bar, row, rule, text, text_input};
-use iced::{stream, window, Alignment, Element, Fill, Subscription, Task, Theme};
+use iced::widget::{button, checkbox, column, container, progress_bar, row, rule, scrollable,
+    text, text_input};
+use iced::{stream, window, Alignment, Element, Fill, Font, Subscription, Task, Theme};
 
 use editor::{EditorHandle, EditOp, Motion};
 
@@ -101,6 +102,8 @@ enum Message {
     CancelCloseTab,
     /// 保存第 `idx` 页并在成功后关闭（P21 完整版；未命名页不支持）
     CloseTabSave(usize),
+    /// 切换 Markdown 预览面板（仅当前语法为 Markdown 时生效；P22 第三批）
+    PreviewToggled,
     /// 格式化 JSON（Ctrl+Shift+F，仅当前语法为 JSON 时生效；P22 第二批）
     FormatJson,
     /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
@@ -446,7 +449,130 @@ fn transcode_notice(original_encoding: &str) -> Option<String> {
     }
 }
 
-// ---------- 即时保存（P18，按页独立） ----------
+// ---------- Markdown 预览面板（P22 第三批） ----------
+
+/// 把解析出的块级元素排成只读预览列（滚动容器包裹）。
+fn markdown_preview_element(source: &str) -> Element<'static, Message> {
+    use iced::font::Weight;
+
+    let blocks = editpad_core::markdown::parse_markdown(source);
+    let mut col = column![].spacing(10).padding(14);
+    for block in blocks {
+        match block {
+            editpad_core::markdown::MdBlock::Heading { level, spans } => {
+                let px = match level {
+                    1 => 26.0,
+                    2 => 23.0,
+                    3 => 20.0,
+                    4 => 18.0,
+                    5 => 17.0,
+                    _ => 16.0,
+                };
+                col = col.push(md_spans_row(spans, px, true));
+            }
+            editpad_core::markdown::MdBlock::Paragraph { spans } => {
+                col = col.push(md_spans_row(spans, 15.0, false));
+            }
+            editpad_core::markdown::MdBlock::ListItem { spans } => {
+                let mut line = row![text("• ").size(15)];
+                for span in spans {
+                    let font = md_font(span.is_bold(), span.is_italic());
+                    let mut t = text(span.text.clone()).size(15).font(font);
+                    if span.is_code() {
+                        t = t.color([0.12, 0.36, 0.6]);
+                    }
+                    line = line.push(t);
+                }
+                col = col.push(line);
+            }
+            editpad_core::markdown::MdBlock::Quote { spans } => {
+                let mut line = row![text("▌ ").color([0.55, 0.55, 0.6])];
+                for span in spans {
+                    let font = md_font(span.is_bold(), span.is_italic());
+                    let t = text(span.text.clone())
+                        .size(15)
+                        .font(font)
+                        .color([0.45, 0.45, 0.5]);
+                    line = line.push(t);
+                }
+                col = col.push(line);
+            }
+            editpad_core::markdown::MdBlock::CodeBlock { lines } => {
+                for line in lines {
+                    col = col.push(
+                        text(format!("▏ {line}"))
+                            .size(14)
+                            .font(Font {
+                                weight: Weight::Normal,
+                                ..Font::MONOSPACE
+                            })
+                            .color([0.25, 0.35, 0.45]),
+                    );
+                }
+            }
+            editpad_core::markdown::MdBlock::Rule => {
+                col = col.push(rule::horizontal(2));
+            }
+        }
+    }
+    scrollable(container(col).width(Fill)).height(Fill).into()
+}
+
+/// 按行内样式构造文本片段行。
+fn md_spans_row(
+    spans: Vec<editpad_core::markdown::MdSpan>,
+    px: f32,
+    bold: bool,
+) -> iced::widget::Row<'static, Message> {
+    use iced::font::{Style as FontStyle, Weight};
+
+    let mut row = row![].spacing(0);
+    if spans.is_empty() {
+        row = row.push(text(""));
+        return row.into();
+    }
+    for span in spans {
+        let weight = if bold || span.is_bold() {
+            Weight::Bold
+        } else {
+            Weight::Normal
+        };
+        let style = if span.is_italic() {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        };
+        let font = Font {
+            weight,
+            style,
+            ..Font::MONOSPACE
+        };
+        let mut t = text(span.text.clone()).size(px).font(font);
+        if span.is_code() {
+            t = t.color([0.12, 0.36, 0.6]);
+        }
+        row = row.push(t);
+    }
+    row
+}
+
+fn md_font(bold: bool, italic: bool) -> Font {
+    Font {
+        weight: if bold {
+            iced::font::Weight::Bold
+        } else {
+            iced::font::Weight::Normal
+        },
+        style: if italic {
+            iced::font::Style::Italic
+        } else {
+            iced::font::Style::Normal
+        },
+        ..Font::MONOSPACE
+    }
+}
+
+// ---------- 多开内存护栏（P21，§3 P19 总则第 2 条） ----------
 
 /// 多开内存护栏上限（字节）：全部页内容 + 待载文件的保守估算。
 /// 约 2.56 亿字符 ≈ 数个 50MB 级大文档同时驻留的量级。
@@ -612,6 +738,8 @@ struct Editpad {
 
     // ---------- 外观 ----------
     dark_mode: bool,
+    /// Markdown 预览面板可见（P22 第三批；仅 Markdown 语法页渲染）
+    preview_visible: bool,
 }
 
 impl Default for Editpad {
@@ -650,6 +778,7 @@ impl Default for Editpad {
             close_tab_confirm: None,
             pending_close_tab: None,
             dark_mode: false,
+            preview_visible: false,
         }
     }
 }
@@ -1247,6 +1376,17 @@ impl Editpad {
                 self.close_tab_confirm = None;
                 Task::none()
             }
+            Message::PreviewToggled => {
+                // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
+                if self.cur_handle.borrow().highlight_syntax_name().as_deref()
+                    == Some("Markdown")
+                {
+                    self.preview_visible = !self.preview_visible;
+                } else {
+                    self.status = "预览仅支持 Markdown 文件".to_owned();
+                }
+                Task::none()
+            }
             Message::CloseTabSave(idx) => {
                 // 「保存并关闭」：已命名的置脏页先落盘，
                 // TabSaved 成功且清脏后再真正移除页面
@@ -1744,6 +1884,14 @@ impl Editpad {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        // P22 第三批：当前页是否为 Markdown（决定预览按钮可用性）
+        let is_markdown = self
+            .cur_handle
+            .borrow()
+            .highlight_syntax_name()
+            .as_deref()
+            == Some("Markdown");
+
         let toolbar = row![
             button(text("打开…"))
                 .padding([4, 12])
@@ -1755,6 +1903,14 @@ impl Editpad {
             button(text("另存为…"))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::SaveAsRequested)),
+            // P22 第三批：Markdown 预览开关（仅 Markdown 语法页可用）
+            button(text(if self.preview_visible {
+                "关闭预览"
+            } else {
+                "MD 预览"
+            }))
+            .padding([4, 12])
+            .on_press_maybe(is_markdown.then_some(Message::PreviewToggled)),
             button(text("查找/替换"))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::FindToggled)),
@@ -1792,13 +1948,9 @@ impl Editpad {
         .align_y(Alignment::Center)
         .padding([8, 10]);
 
-        // M2 核心：自绘虚拟化编辑器，数据源是 ropey Document
-        let editor_view = self.cur_handle.view();
-
-        let mut body = column![toolbar, rule::horizontal(1), editor_view];
-
         // P21 标签条：恒显示（单页也给出「当前文件名」的可见反馈）。
         // 点击切换；置脏页带 ● 前缀；活动页加 ▸ 指示。
+        let mut body = column![toolbar, rule::horizontal(1)];
         {
             let mut strip = row![].spacing(2).padding([4, 6]);
             for (i, tab) in self.tabs.iter().enumerate() {
@@ -1812,7 +1964,15 @@ impl Editpad {
                     .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
                 );
             }
-            body = body.push(rule::horizontal(1)).push(strip);
+            body = body.push(strip);
+        }
+
+        // 中间主区域：Markdown 预览面板 或 自绘虚拟化编辑器
+        if self.preview_visible && is_markdown {
+            let text = self.cur_handle.borrow().doc.to_text();
+            body = body.push(markdown_preview_element(&text));
+        } else {
+            body = body.push(self.cur_handle.view());
         }
 
         if let Some((bytes_read, total_bytes)) = self.progress {
@@ -2334,6 +2494,38 @@ mod tests {
             app.confirm_visible,
             "任一页置脏都必须弹关窗确认"
         );
+    }
+
+    // ---------- P22 第三批：Markdown 预览 ----------
+
+    #[test]
+    fn preview_toggle_only_flips_for_markdown_documents() {
+        // .md 扩展名经别名层得到 Markdown 语法 → 开关生效
+        let mut md = Editpad::default();
+        dispatch(&mut md, Message::FileDropped(PathBuf::from("C:/doc/readme.md")));
+        let seq = md.job_seq;
+        dispatch(
+            &mut md,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("# 标题\n正文"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert!(!md.preview_visible);
+        dispatch(&mut md, Message::PreviewToggled);
+        assert!(md.preview_visible);
+        dispatch(&mut md, Message::PreviewToggled);
+        assert!(!md.preview_visible);
+
+        // 非 Markdown 页：不翻转并提示
+        let mut app = json_app("{}");
+        dispatch(&mut app, Message::PreviewToggled);
+        assert!(!app.preview_visible);
+        assert!(app.status.contains("仅支持 Markdown"), "{:?}", app.status);
     }
 
     #[test]

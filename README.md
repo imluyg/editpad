@@ -62,13 +62,41 @@ cargo run --release
 | M2b | syntect 逐行懒高亮、IME 预编辑内联、CJK 列映射 | ✅ 完成 |
 | M3 | 关闭确认、拖拽打开、深色主题+字号设置、dirty 替换保护、打开/另存为死锁修复 | ✅ 完成 |
 
+| M3 | 关闭确认、拖拽打开、深色主题+字号设置、dirty 替换保护、打开/另存为死锁修复 | ✅ 完成 |
+| M4 | 多标签页（Ctrl+T/W/Tab）、即时保存、JSON 校验格式化、Log/TOML 着色+无扩展名嗅探+MD 预览 | ✅ 完成 |
+
 **遗留项**（非阻塞）：软换行（涉及导航模型重构）、单实例互斥、安装包分发脚本、
 平滑滚动/光标闪烁、A± 连点防抖、大字号下行号槽宽系数微调。
+
+## 快捷键
+
+| 组合 | 功能 |
+|------|------|
+| Ctrl+O / Ctrl+S / Ctrl+A | 打开 / 保存 / 全选 |
+| Ctrl+F 或 Ctrl+H / Ctrl+G | 查找替换栏 / 跳转到行 |
+| Ctrl+Z / Ctrl+Y | 撤销 / 重做 |
+| Ctrl+C / Ctrl+X / Ctrl+V | 复制 / 剪切 / 粘贴 |
+| Ctrl+T / Ctrl+W / Ctrl+Tab | 新建标签页 / 关闭当前页 / 循环切换标签页 |
+| Ctrl+Shift+F | 格式化 JSON（仅 JSON 文件） |
+| Ctrl+Home / Ctrl+End | 跳到文档首 / 尾 |
+| Shift+滚轮 | 横向滚动（触控板横向分量同样支持） |
 
 测试策略：core 层纯逻辑全部单测覆盖；随机编辑序列（插入/删除/全部替换，
 混排三种行尾、CJK 与 emoji）与 String 参照实现逐步对拍
 （`core/tests/edit_sequence_fuzz.rs`，固定种子可复现）；50MB 性能内存
 用脚本生成的日志文件做回归基准。
+
+## 格式适配（M4）
+
+- 常见代码语言按扩展名自动着色（syntect 内建 + 自维护别名表：
+  `log`/`md`/`markdown`/`toml`/`ini`/`cfg`/`conf`/`mk`/`yml` 等）；
+- 内嵌迷你语法：**Log**（ERROR/WARN/INFO/DEBUG 级别分色 + 时间戳）、
+  **TOML**（节名/键/字符串/注释），随单文件分发；
+- 无扩展名文件按内容嗅探：shebang、`<?xml`、JSON/YAML 启发，
+  以及 `Dockerfile`/`Makefile` 约定文件名；
+- Markdown 文件提供 `MD 预览` 面板（标题/列表/引用/代码块/分隔线/
+  粗体斜体行内样式，只读渲染）；
+- JSON 文件支持 `Ctrl+Shift+F` 一键校验并格式化（错误定位到行列）。
 
 ## License
 
