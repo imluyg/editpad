@@ -1027,9 +1027,11 @@ impl Editpad {
         }
         self.busy = true;
         let path = self.path.clone().expect("上方已确认非空");
-        let contents = self.editor.borrow().doc.to_text();
+        // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
+        // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
+        let doc = self.editor.borrow().doc.clone();
         Task::perform(
-            async move { editpad_core::save_atomic(&path, &contents) },
+            async move { editpad_core::save_document_atomic(&path, &doc) },
             |result| Message::Saved(result.map_err(|e| e.to_string())),
         )
     }
@@ -1637,6 +1639,60 @@ mod tests {
         let mut lf = editor::EditorCore::default();
         lf.insert_str(&"x\r\ny\rz");
         assert_eq!(lf.doc.to_text(), "x\ny\nz");
+    }
+
+    // ---------- 健壮性边界用例批 ----------
+
+    #[test]
+    fn duplicate_open_while_loading_is_guards_and_reload_after_done() {
+        // 加载进行中再次拖入同一文件：busy 守卫必须拒绝重入（防双任务竞态）
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
+        assert!(app.active_load.is_some(), "首次拖入应登记加载任务");
+        let seq_first = app.job_seq;
+
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
+        assert_eq!(app.job_seq, seq_first, "加载中不得排队第二个任务");
+
+        // 加载完成后允许重复打开同一文件（每次新 job，无路径去重）
+        let doc = editpad_core::Document::from_str("reloaded\n");
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq_first,
+                Ok((doc, "UTF-8".to_owned())),
+            ),
+        );
+        assert!(app.active_load.is_none(), "完成后任务应解除");
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
+        assert_eq!(
+            app.job_seq,
+            seq_first + 1,
+            "完成后的重复打开必须作为新任务重新加载"
+        );
+    }
+
+    #[test]
+    fn close_during_load_exits_without_confirm_bar_or_stuck_state() {
+        // 加载中关窗：dirty 必为 false（打开确认已清），应走直接关窗路径，
+        // 不弹未保存确认条、不残留 pending 状态
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/big.log")));
+        assert!(app.active_load.is_some());
+        assert!(!app.dirty);
+
+        let id = iced::window::Id::unique();
+        let _ = app.update(Message::CloseRequested(id));
+        assert_eq!(app.main_window, Some(id), "窗口 id 应被捕获供 close 使用");
+        assert!(
+            !app.confirm_visible && !app.pending_close,
+            "加载中关窗不得触发确认条"
+        );
+        // 关窗后迟到的加载完成消息照常按 job 过滤消化，不 panic
+        let doc = editpad_core::Document::from_str("late arrival");
+        let seq = app.job_seq;
+        dispatch(&mut app, Message::Loaded(seq, Ok((doc, "UTF-8".to_owned()))));
+        assert!(app.active_load.is_none());
     }
 
     #[test]
