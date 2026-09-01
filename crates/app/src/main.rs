@@ -1,3 +1,7 @@
+// P24：发布版隐藏随 GUI 一起弹出的控制台黑窗（Windows 子系统属性）；
+// 调试构建保留控制台，便于直接 cargo run 看日志输出。
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
 //! Editpad —— 极简记事本。
 //!
 //! M2 里程碑：自绘虚拟化编辑器接管渲染，ropey Document 成为唯一数据源。
@@ -657,6 +661,10 @@ struct Tab {
     autosave_inflight: bool,
     /// 本页最后一次内容改动的时刻（防抖窗口计时起点）
     last_edit_at: Option<std::time::Instant>,
+    /// 未命名页的递增序号（P25）：显示为「未命名N」，
+    /// 全局单调不复用——杜绝两个同名未命名页的保存歧义；
+    /// 另存为成功或加载真实文件后清除。
+    untitled_num: Option<u64>,
 }
 
 impl Tab {
@@ -669,22 +677,34 @@ impl Tab {
             version: 0,
             autosave_inflight: false,
             last_edit_at: None,
+            untitled_num: None,
         }
     }
 
-    /// 标签条上的显示名：未命名兜底 + 置脏前缀 ●。
-    fn display_name(&self) -> String {
-        let name = self
+    /// 不含置脏标记的基础显示名：真实文件名优先，
+    /// 未命名页显示「未命名N」（N 为全局单调序号）。
+    fn base_name(&self) -> String {
+        if let Some(name) = self
             .path
             .as_deref()
             .and_then(Path::file_name)
             .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("未命名")
-            .to_owned();
+        {
+            return name.to_owned();
+        }
+        match self.untitled_num {
+            Some(n) => format!("未命名{n}"),
+            None => "未命名".to_owned(),
+        }
+    }
+
+    /// 标签条上的显示名：基础名 + 置脏前缀 ●。
+    fn display_name(&self) -> String {
+        let base = self.base_name();
         if self.dirty {
-            format!("● {name}")
+            format!("● {base}")
         } else {
-            name
+            base
         }
     }
 
@@ -767,6 +787,9 @@ struct Editpad {
     // ---------- 标签页关闭确认（P21） ----------
     /// Some(idx) = 第 idx 个标签页置脏，正在确认「放弃更改并关闭」
     close_tab_confirm: Option<usize>,
+    // ---------- 未命名页编号（P25） ----------
+    /// 下一个未命名页序号（全局单调，不复用已关闭页的号码）
+    untitled_next: u64,
 
     // ---------- 外观 ----------
     dark_mode: bool,
@@ -776,7 +799,10 @@ struct Editpad {
 
 impl Default for Editpad {
     fn default() -> Self {
-        let tabs = vec![Tab::empty()];
+        // P25：初始页即「未命名1」，下一个新页为「未命名2」
+        let mut first = Tab::empty();
+        first.untitled_num = Some(1);
+        let tabs = vec![first];
         let cur_handle = tabs[0].editor.clone();
         Self {
             // P21：初始恒有一个空标签页（tabs 恒非空不变式）
@@ -811,6 +837,8 @@ impl Default for Editpad {
             pending_close_tab: None,
             dark_mode: false,
             preview_visible: false,
+            // P25：初始页即「未命名1」，下一个新页为「未命名2」
+            untitled_next: 2,
         }
     }
 }
@@ -833,6 +861,16 @@ impl Editpad {
     /// 单表达式内的临时借用也可用 [`Self::cur`]）。
     fn cur(&self) -> EditorHandle {
         self.cur_handle.clone()
+    }
+
+    /// 为第 `idx` 页分配下一个未命名序号（P25）：全局单调、不复用
+    /// 已关闭页的号码——杜绝两个同名未命名页。
+    fn assign_untitled_num(&mut self, idx: usize) {
+        let n = self.untitled_next;
+        self.untitled_next += 1;
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.untitled_num = Some(n);
+        }
     }
 
     /// 切换活动页并同步长期别名（所有 active_tab 变更必须经此或
@@ -858,8 +896,8 @@ impl Editpad {
         self.tabs.get(idx).and_then(|t| t.path.clone())
     }
 
-    /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页。
-    /// 返回是否真的移除了页面。
+    /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页
+    /// （新页分配下一个未命名序号）。返回是否真的移除了页面。
     fn close_tab_now(&mut self, idx: usize) -> bool {
         if idx >= self.tabs.len() {
             return false;
@@ -867,6 +905,8 @@ impl Editpad {
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
             self.tabs.push(Tab::empty());
+            let last = self.tabs.len() - 1;
+            self.assign_untitled_num(last);
         }
         // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名
         self.refresh_cur_handle();
@@ -1023,6 +1063,8 @@ impl Editpad {
                         tab.path = Some(job.path.clone());
                         tab.encoding_label = encoding;
                         tab.dirty = false;
+                        // P25：真实文件已就位，未命名序号使命完成
+                        tab.untitled_num = None;
                         if let Some(path) = self.path_of_tab(target) {
                             self.record_recent(&path);
                         }
@@ -1056,7 +1098,10 @@ impl Editpad {
                 Task::none()
             }
             Message::SaveTargetChosen(Some(path)) => {
-                self.tab_mut().path = Some(path);
+                let tab = self.tab_mut();
+                tab.path = Some(path);
+                // P25：另存为转正后未命名序号使命完成
+                tab.untitled_num = None;
                 // 对话框阶段结束再交给 save() 的 busy 守卫（原实现在此卡死 busy）
                 self.busy = false;
                 self.save()
@@ -1370,7 +1415,9 @@ impl Editpad {
             // ---------- 多标签（P21） ----------
             Message::NewTab => {
                 self.tabs.push(Tab::empty());
-                self.set_active_tab(self.tabs.len() - 1);
+                let last = self.tabs.len() - 1;
+                self.assign_untitled_num(last);
+                self.set_active_tab(last);
                 // 查找态全局：切页即作废旧命中，防串页
                 self.cancel_find_scan();
                 Task::none()
@@ -1922,7 +1969,7 @@ impl Editpad {
     // ---------- 展示辅助 ----------
 
     fn title(&self) -> String {
-        let name = self.file_display_name().unwrap_or_else(|| "未命名".into());
+        let name = self.tab().base_name();
         if self.tab().dirty {
             format!("● {name} - Editpad")
         } else {
@@ -1931,7 +1978,14 @@ impl Editpad {
     }
 
     fn suggested_name(&self) -> String {
-        self.file_display_name().unwrap_or_else(|| "未命名.txt".into())
+        match self.file_display_name() {
+            Some(name) => name,
+            // P25：未命名页的另存为建议名带序号并补扩展名
+            None => match self.tab().untitled_num {
+                Some(n) => format!("未命名{n}.txt"),
+                None => "未命名.txt".into(),
+            },
+        }
     }
 
     fn file_display_name(&self) -> Option<String> {
@@ -2240,7 +2294,7 @@ impl Editpad {
                     .path
                     .as_deref()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(未命名)".into())
+                    .unwrap_or_else(|| format!("({})", self.tab().base_name()))
             )
             .width(Fill),
             text(if self.tab().encoding_label.is_empty() {
@@ -2584,6 +2638,76 @@ mod tests {
         dispatch(&mut app, Message::PreviewToggled);
         assert!(!app.preview_visible);
         assert!(app.status.contains("仅支持 Markdown"), "{:?}", app.status);
+    }
+
+    // ---------- P24/P25 手测反馈修复 ----------
+
+    #[test]
+    fn untitled_tabs_get_unique_sequential_names() {
+        let mut app = Editpad::default();
+        // 初始页即「未命名1」
+        assert_eq!(app.tab().base_name(), "未命名1");
+        assert_eq!(app.title(), "未命名1 - Editpad");
+
+        // 连开两页：未命名2、未命名3，全局唯一
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::NewTab);
+        let names: Vec<String> =
+            app.tabs.iter().map(|t| t.base_name()).collect();
+        assert_eq!(names, vec!["未命名1", "未命名2", "未命名3"]);
+
+        // 置脏前缀进标签名但不进 title 的基础名判断之外重复
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.tab().display_name().starts_with("● 未命名"));
+    }
+
+    #[test]
+    fn closed_untitled_numbers_are_never_reused_and_saving_clears_them() {
+        let mut app = Editpad::default();
+
+        // 关闭「未命名2」（干净直接关）后新建：号码不复用，拿「未命名3」
+        dispatch(&mut app, Message::NewTab);
+        assert_eq!(app.tabs[1].base_name(), "未命名2");
+        app.set_active_tab(1);
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.tabs.len(), 1);
+
+        dispatch(&mut app, Message::NewTab);
+        assert_eq!(
+            app.tabs[1].base_name(),
+            "未命名3",
+            "单调分配杜绝重名"
+        );
+
+        // 另存为转正后序号清除，标签显示真实文件名
+        dispatch(
+            &mut app,
+            Message::SaveTargetChosen(Some(PathBuf::from("C:/x/real.txt"))),
+        );
+        assert_eq!(
+            app.tabs[1].path.as_deref(),
+            Some(Path::new("C:/x/real.txt"))
+        );
+        assert_eq!(app.tabs[1].untitled_num, None);
+        assert_eq!(app.tabs[1].base_name(), "real.txt");
+
+        // 加载真实文件同样清除序号（Loaded 路径）
+        let mut app2 = Editpad::default();
+        dispatch(&mut app2, Message::FileDropped(PathBuf::from("C:/r/a.md")));
+        let seq = app2.job_seq;
+        dispatch(
+            &mut app2,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("x"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app2.tabs[0].untitled_num, None);
+        assert_eq!(app2.tabs[0].base_name(), "a.md");
     }
 
     #[test]
