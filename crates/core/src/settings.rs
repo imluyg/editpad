@@ -4,6 +4,7 @@
 //! `%APPDATA%\editpad\config.toml`）。读写都是尽力而为：
 //! 配置损坏或目录不可写时静默回退默认值，绝不影响编辑器本体。
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,21 @@ use serde::{Deserialize, Serialize};
 
 /// 最近文件列表上限。
 pub const MAX_RECENT_FILES: usize = 10;
+
+/// 单个最近文件的光标/滚动记忆（P32）。
+///
+/// 与 [`Settings::recent_files`] **平行**存储（键 = 路径字符串）而非内嵌
+/// 进条目：旧 config.toml 的 `recent_files = [".."]` 纯字符串数组因此
+/// 零迁移兼容；缺字段落 0（serde default）。滚动值非有限时归一为 0。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RecentView {
+    #[serde(default)]
+    pub line: usize,
+    #[serde(default)]
+    pub col: usize,
+    #[serde(default)]
+    pub scroll_top: f32,
+}
 
 /// 主题的唯二合法取值；其他值在加载时归一为 [`THEME_LIGHT`]。
 pub const THEME_LIGHT: &str = "light";
@@ -25,6 +41,12 @@ const DEFAULT_FONT_SIZE: f32 = 16.0;
 pub struct Settings {
     #[serde(default)]
     pub recent_files: Vec<String>,
+    /// 最近文件的光标/滚动记忆（P32）：键 = 路径字符串，与
+    /// [`Self::recent_files`] 对齐。修剪规则：键不在最近列表中即删除
+    /// （加载归一与 push_recent 后都会对齐），「记住最近文件」关闭时整体清空
+    /// ——路径本身是隐私数据（P20 同款口径），不能换个字段继续留痕。
+    #[serde(default)]
+    pub recent_views: HashMap<String, RecentView>,
     /// 界面主题：只允许 `"light"` 或 `"dark"`，非法输入在加载时归一。
     // 注意：不能用裸 #[serde(default)]——那会落到 String::default()（空串），
     // 必须指向规范默认值，保证旧 config.toml 缺字段时直接得到合法偏好。
@@ -71,6 +93,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             recent_files: Vec::new(),
+            recent_views: HashMap::new(),
             theme: THEME_LIGHT.to_string(),
             font_size: DEFAULT_FONT_SIZE,
             remember_recent_files: true,
@@ -156,9 +179,21 @@ impl Settings {
         };
         // P20：关闭「记住最近文件」时，存量列表一并清空——
         // 只关开关不清数据等于没关（config.toml 里仍躺着完整路径）。
+        // P32：光标记忆的键同样是完整路径，必须一起清。
         if !self.remember_recent_files && !self.recent_files.is_empty() {
             self.recent_files.clear();
         }
+        if !self.remember_recent_files && !self.recent_views.is_empty() {
+            self.recent_views.clear();
+        }
+        // P32：滚动值消毒（非有限 → 0，防单个坏值；P29 清单同款先例）
+        for view in self.recent_views.values_mut() {
+            if !view.scroll_top.is_finite() {
+                view.scroll_top = 0.0;
+            }
+        }
+        // P32：修剪孤儿——键不在最近列表里的记忆删除（防跨年无界增长）
+        self.prune_recent_views();
         // P18：防抖秒数收敛到合法区间（0 秒会变成每秒写盘风暴）
         self.autosave_delay_secs = self
             .autosave_delay_secs
@@ -222,12 +257,51 @@ impl Settings {
         self.recent_files.retain(|p| p != &entry);
         self.recent_files.insert(0, entry);
         self.recent_files.truncate(MAX_RECENT_FILES);
+        // P32：被挤出上限的条目，其光标记忆一并修剪（列表与记忆恒对齐）
+        self.prune_recent_views();
+    }
+
+    /// 查询某路径的光标/滚动记忆（P32）；无记录返回 None。
+    pub fn recent_view(&self, path: &Path) -> Option<RecentView> {
+        let key = path.display().to_string();
+        self.recent_views.get(&key).copied()
+    }
+
+    /// 记录/更新某路径的光标/滚动记忆（P32）。仅在「记住最近文件」开启
+    /// 且该路径已在最近列表中时生效（未列表化的路径不单独记账）；
+    /// 滚动值非有限时归一为 0。返回是否产生了实际变化（调用方据此决定
+    /// 是否落盘）。
+    pub fn set_recent_view(&mut self, path: &Path, view: RecentView) -> bool {
+        if !self.remember_recent_files {
+            return false;
+        }
+        let key = path.display().to_string();
+        if !self.recent_files.iter().any(|p| p == &key) {
+            return false;
+        }
+        let mut view = view;
+        if !view.scroll_top.is_finite() {
+            view.scroll_top = 0.0;
+        }
+        if self.recent_views.get(&key) == Some(&view) {
+            return false; // 无变化不落盘
+        }
+        self.recent_views.insert(key, view);
+        true
+    }
+
+    /// 修剪孤儿光标记忆：键不在最近文件列表中的条目删除（P32）。
+    fn prune_recent_views(&mut self) {
+        self.recent_views
+            .retain(|key, _| self.recent_files.iter().any(|p| p == key));
     }
 
     /// 清空最近文件列表（P20「清空记录」按钮）。
     /// 只改内存；调用方随后 `save()` 才会从 config.toml 抹掉痕迹。
+    /// P32：光标记忆的键同样是路径，一并清空。
     pub fn clear_recent_files(&mut self) {
         self.recent_files.clear();
+        self.recent_views.clear();
     }
 }
 
@@ -633,6 +707,148 @@ mod tests {
         let path = dir.join("config.toml");
         s.save_to(&path).expect("保存应成功");
         assert_eq!(Settings::load_from(&path), s, "P31 字段必须参与 roundtrip");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P32 最近文件光标/滚动记忆 ----------
+
+    #[test]
+    fn recent_view_roundtrips_with_legacy_string_list() {
+        // 旧 config.toml（recent_files 纯字符串数组）加载后光标记忆为空；
+        // 新写入的记忆与列表一起 roundtrip，且旧字段格式不被破坏
+        let dir = scratch_dir("p32-roundtrip");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // 第一步：旧格式文件照常解析，记忆为空
+        fs::write(&path, "recent_files = [\"C:/old.txt\"]").unwrap();
+        let legacy = Settings::load_from(&path);
+        assert_eq!(legacy.recent_files, vec!["C:/old.txt".to_string()]);
+        assert!(legacy.recent_views.is_empty(), "旧配置不应凭空长出记忆");
+
+        // 第二步：补记忆 → 落盘 → 重载逐字还原
+        let mut s = legacy;
+        s.set_recent_view(
+            Path::new("C:/old.txt"),
+            RecentView { line: 42, col: 7, scroll_top: 128.5 },
+        );
+        s.save_to(&path).expect("保存应成功");
+        let loaded = Settings::load_from(&path);
+        assert_eq!(
+            loaded.recent_view(Path::new("C:/old.txt")),
+            Some(RecentView { line: 42, col: 7, scroll_top: 128.5 }),
+            "光标记忆必须参与 roundtrip"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_recent_view_rejects_unlisted_paths_and_disabled_flag() {
+        let mut s = Settings::default();
+        s.push_recent(Path::new("C:/listed.txt"));
+
+        // 未在最近列表中的路径：不记账（避免记忆无界增长）
+        assert!(!s.set_recent_view(
+            Path::new("C:/never-opened.txt"),
+            RecentView { line: 1, col: 0, scroll_top: 0.0 },
+        ));
+        assert!(s.recent_views.is_empty());
+
+        // 关闭「记住最近文件」：整体 no-op（路径是隐私数据，P20 口径）
+        s.remember_recent_files = false;
+        assert!(!s.set_recent_view(
+            Path::new("C:/listed.txt"),
+            RecentView { line: 1, col: 0, scroll_top: 0.0 },
+        ));
+    }
+
+    #[test]
+    fn recent_view_updates_in_place_and_reports_changes() {
+        let mut s = Settings::default();
+        s.push_recent(Path::new("C:/doc.txt"));
+        let v1 = RecentView { line: 3, col: 0, scroll_top: 10.0 };
+
+        assert!(s.set_recent_view(Path::new("C:/doc.txt"), v1), "首次记录应报告变化");
+        // 相同值再写：无变化（调用方据此跳过落盘）
+        assert!(!s.set_recent_view(Path::new("C:/doc.txt"), v1));
+        // 值变化：再次报告
+        let v2 = RecentView { line: 9, col: 2, scroll_top: 20.0 };
+        assert!(s.set_recent_view(Path::new("C:/doc.txt"), v2));
+        assert_eq!(s.recent_view(Path::new("C:/doc.txt")), Some(v2));
+
+        // 非有限滚动值消毒为 0
+        let bad = RecentView { line: 1, col: 0, scroll_top: f32::NAN };
+        assert!(s.set_recent_view(Path::new("C:/doc.txt"), bad));
+        assert_eq!(
+            s.recent_view(Path::new("C:/doc.txt")).unwrap().scroll_top,
+            0.0,
+            "NaN 滚动必须归一为 0"
+        );
+    }
+
+    #[test]
+    fn pruning_keeps_recent_views_aligned_with_the_list() {
+        let mut s = Settings::default();
+        for i in 0..MAX_RECENT_FILES as u32 {
+            s.push_recent(Path::new(&format!("C:/f/{i}.txt")));
+            s.set_recent_view(
+                Path::new(&format!("C:/f/{i}.txt")),
+                RecentView { line: i as usize, col: 0, scroll_top: 0.0 },
+            );
+        }
+        assert_eq!(s.recent_views.len(), MAX_RECENT_FILES);
+
+        // 再开一个新文件：f/0 被挤出上限 → 它的光标记忆必须随之消失
+        s.push_recent(Path::new("C:/f/new.txt"));
+        assert!(
+            !s.recent_views.contains_key("C:/f/0.txt"),
+            "被挤出的条目不得残留孤儿记忆"
+        );
+        // 剩余记忆 = f1..f9 共 9 条（new 刚打开尚无光标记录）
+        assert_eq!(s.recent_views.len(), MAX_RECENT_FILES - 1);
+        assert!(s.recent_view(Path::new("C:/f/new.txt")).is_none(), "新文件尚无记忆");
+
+        // 清空记录按钮：列表与记忆一起清（键即路径，不能留痕）
+        s.clear_recent_files();
+        assert!(s.recent_views.is_empty());
+
+        // 加载归一同款修剪：手改 config 塞进孤儿键 → 加载时被清掉
+        let dir = scratch_dir("p32-prune");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "recent_files = [\"C:/real.txt\"]\n\
+             [recent_views.\"C:/ghost.txt\"]\nline = 5\ncol = 0\nscroll_top = 0.0\n",
+        )
+        .unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(
+            !loaded.recent_views.contains_key("C:/ghost.txt"),
+            "孤儿记忆必须在加载归一时修剪"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn disabling_remember_recent_files_purges_views_on_load() {
+        // P20 开关关闭时，光标记忆里的路径同样是隐私痕迹——一并清空
+        let dir = scratch_dir("p32-purge");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "remember_recent_files = false\nrecent_files = [\"C:/a.txt\"]\n\
+             [recent_views.\"C:/a.txt\"]\nline = 2\ncol = 1\nscroll_top = 4.0\n",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert!(loaded.recent_files.is_empty());
+        assert!(loaded.recent_views.is_empty(), "关闭开关后记忆必须随加载清空");
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -26,7 +26,7 @@ pub use search::{
     find_all, find_all_document, next_from, prev_from, replace_all, replace_all_document,
     ascii_case_eq, MatchPos,
 };
-pub use settings::{Settings, EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
+pub use settings::{Settings, RecentView, EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
 pub use snapshot::{
     clear_session, enforce_quota, heartbeat_page_selected, read_manifest, read_page,
     snapshot_dir, write_heartbeat_session, write_session, HeartbeatPage, SessionManifest,

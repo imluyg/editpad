@@ -1176,6 +1176,8 @@ impl Editpad {
         if idx >= self.tabs.len() {
             return false;
         }
+        // P32：移除前把该页光标/滚动回写最近文件记忆
+        self.remember_tab_views(&[idx]);
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
             self.tabs.push(Tab::empty());
@@ -1194,6 +1196,8 @@ impl Editpad {
     /// （tabs 恒非空不变式，同 [`Self::close_tab_now`]）。
     /// 返回实际移除的页数。越界/重复下标安全跳过。
     fn close_tabs_now(&mut self, indices: &[usize]) -> usize {
+        // P32：移除前按原下标批量回写光标/滚动记忆
+        self.remember_tab_views(indices);
         let mut idxs = indices.to_vec();
         idxs.sort_unstable();
         idxs.dedup();
@@ -1420,6 +1424,13 @@ impl Editpad {
                             // 上次退出时的位置（无副作用定位入口）
                             if let Some((line, col, scroll_top, scroll_left)) = pending_view {
                                 ed.restore_view(line, col, scroll_top, scroll_left);
+                            }
+                            // P32：普通打开命中最近文件记忆 → 光标/滚动就位。
+                            // 恢复任务以会话清单视图为准（上方已应用），不覆盖。
+                            if !is_restore {
+                                if let Some(view) = self.settings.recent_view(&job.path) {
+                                    ed.restore_view(view.line, view.col, view.scroll_top, 0.0);
+                                }
                             }
                         }
                         tab.path = Some(job.path.clone());
@@ -2270,8 +2281,12 @@ impl Editpad {
             self.tabs.push(Tab::empty());
         }
         self.register_load_job(path, tab);
-        // P21：加载落在新页时直接切过去（符合「打开即聚焦」直觉）
-        self.active_tab = tab;
+        // P21：加载落在新页时直接切过去（符合「打开即聚焦」直觉）。
+        // ⚠️ 必须经 set_active_tab 同步 cur_handle 长期别名——直接赋值
+        // active_tab 会造成「下标指向新页、别名仍指旧页」的失步：
+        // 输入与渲染都走别名，表现为打开文件后敲字打进上一个文档
+        // （P32 本轮发现并修复；既有测试均在断言前显式切换而未暴露）。
+        self.set_active_tab(tab);
         self.status.clear();
         Task::none()
     }
@@ -2423,6 +2438,28 @@ impl Editpad {
     fn record_recent(&mut self, path: &Path) {
         self.settings.push_recent(path);
         self.persist_settings();
+    }
+
+    /// P32：把指定页的当前光标/滚动写进最近文件记忆（未命名页无路径跳过），
+    /// 任一页有实际变化才落盘一次 config.toml。
+    fn remember_tab_views(&mut self, indices: &[usize]) {
+        let mut changed = false;
+        for &idx in indices {
+            let Some(path) = self.path_of_tab(idx) else {
+                continue;
+            };
+            let ed = self.tabs[idx].editor.borrow();
+            let view = editpad_core::RecentView {
+                line: ed.cursor.line,
+                col: ed.cursor.col,
+                scroll_top: ed.scroll_top,
+            };
+            drop(ed);
+            changed |= self.settings.set_recent_view(&path, view);
+        }
+        if changed {
+            self.persist_settings();
+        }
     }
 
     /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到
@@ -2617,6 +2654,10 @@ impl Editpad {
     fn handle_close_request(&mut self, id: window::Id, snapshot_dir: Option<PathBuf>) -> Task<Message> {
         // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
         self.main_window = Some(id);
+        // P32：关窗前把全部命名页的光标/滚动回写最近文件记忆
+        // （快照直退与旧确认条两条路径都要覆盖；未命名页自然跳过）
+        let all: Vec<usize> = (0..self.tabs.len()).collect();
+        self.remember_tab_views(&all);
         // P30：remember_session 关闭 = 退出不写会话清单，回退旧确认条
         if !session_restore_allowed(
             self.settings.enable_snapshots,
@@ -4357,6 +4398,195 @@ mod tests {
         // 越界/重复下标安全
         assert_eq!(bare.close_tabs_now(&[5]), 0);
         assert_eq!(bare.close_tabs_now(&[0, 0]), 1);
+    }
+
+    // ---------- P32 最近文件光标/滚动记忆 ----------
+
+    #[test]
+    fn reopened_recent_file_restores_cursor_and_scroll() {
+        let mut app = Editpad::default();
+        // 文档要足够大（默认视口 ~400px 高可容纳全部行时，
+        // restore_view 的行程钳制会把小滚动值顶到 max+1——P30 设计语义）
+        let mut text = String::new();
+        for i in 1..=60 {
+            text.push_str(&format!("line{i}\n"));
+        }
+        let doc = || editpad_core::Document::from_str(&text);
+
+        // 首开 C:/a.txt：进最近列表（尚无记忆）
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
+        let seq1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(seq1, Ok((doc(), String::new(), "UTF-8".to_owned()))),
+        );
+        assert!(app.settings.recent_view(Path::new("C:/a.txt")).is_none());
+
+        // 种入上次退出时的位置（模拟历史记忆）
+        assert!(app.settings.set_recent_view(
+            Path::new("C:/a.txt"),
+            editpad_core::RecentView { line: 2, col: 1, scroll_top: 5.0 },
+        ));
+
+        // 重开同一文件（当前页已命名非空 → 落新页并聚焦）→ 光标滚动就位
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
+        let seq2 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(seq2, Ok((doc(), String::new(), "UTF-8".to_owned()))),
+        );
+        let ed = app.cur_handle.borrow();
+        assert_eq!(
+            ed.cursor,
+            editor::CursorPos { line: 2, col: 1 },
+            "光标应回到记忆位置"
+        );
+        assert_eq!(ed.scroll_top, 5.0, "垂直滚动应回到记忆位置");
+    }
+
+    #[test]
+    fn closing_named_tab_writes_back_cursor_memory_to_disk() {
+        let dir = scratch_dir("p32-writeback");
+        let mut app = Editpad::default();
+        // 注入配置路径：验证回写真的落盘，且绝不碰真实 %APPDATA%
+        app.settings_path_override = Some(dir.join("config.toml"));
+
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/b.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("r0\nr1\nr2\nr3"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 光标挪到第 3 行（jump_to_line 1 基 → 0 基 line=2），页面干净可直接关
+        app.cur_handle.borrow_mut().jump_to_line(3);
+        assert!(!app.tab().dirty);
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert_eq!(app.tabs.len(), 1, "干净命名页应被关闭");
+
+        let recorded = app.settings.recent_view(Path::new("C:/b.txt"));
+        assert_eq!(
+            recorded.map(|v| v.line),
+            Some(2),
+            "关页必须把光标行（0 基）写回记忆"
+        );
+        // 注入路径端到端：重载 config.toml 记忆仍在
+        let persisted = editpad_core::Settings::load_from(&dir.join("config.toml"));
+        assert_eq!(persisted.recent_view(Path::new("C:/b.txt")).map(|v| v.line), Some(2));
+
+        fs_remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn window_close_writes_back_all_named_tabs_views() {
+        let mut app = Editpad::default();
+        let dir = scratch_dir("p32-windowclose");
+        app.settings_path_override = Some(dir.join("config.toml"));
+
+        // 两页各开一个文件，光标停在不同行
+        for (name, jump) in [("C:/w1.txt", 1usize), ("C:/w2.txt", 3usize)] {
+            dispatch(&mut app, Message::FileDropped(PathBuf::from(name)));
+            let seq = app.job_seq;
+            dispatch(
+                &mut app,
+                Message::Loaded(
+                    seq,
+                    Ok((
+                        editpad_core::Document::from_str("a\nb\nc\nd\ne"),
+                        String::new(),
+                        "UTF-8".to_owned(),
+                    )),
+                ),
+            );
+            if jump > 1 {
+                app.cur_handle.borrow_mut().jump_to_line(jump);
+            }
+        }
+        assert_eq!(app.tabs.len(), 2);
+
+        // 关窗请求（快照直退默认路径；目录传 None 走降级不影响断言）：
+        // 入口处必须先把两页的光标都记账
+        let id = iced::window::Id::unique();
+        let _ = app.handle_close_request(id, None);
+
+        assert_eq!(
+            app.settings.recent_view(Path::new("C:/w1.txt")).map(|v| v.line),
+            Some(0),
+            "未跳转的页记文首"
+        );
+        assert_eq!(
+            app.settings.recent_view(Path::new("C:/w2.txt")).map(|v| v.line),
+            Some(2),
+            "跳转过光标的页按 0 基记账"
+        );
+
+        fs_remove_dir_all(&dir);
+    }
+
+    /// std::fs::remove_dir_all 的薄封装（测试尾部清理）。
+    fn fs_remove_dir_all(dir: &Path) {
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ---------- P35 打开落新页的别名失步（P32 本轮发现） ----------
+
+    #[test]
+    fn opening_into_new_tab_keeps_editor_alias_in_sync() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
+        let seq_a = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq_a,
+                Ok((
+                    editpad_core::Document::from_str("content A"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 打开 B：当前页已命名 → 落新页 idx1 并「聚焦」（active_tab 切过去）
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/b.txt")));
+        let seq_b = app.job_seq;
+        assert_eq!(app.active_tab, 1, "打开即聚焦新页");
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq_b,
+                Ok((
+                    editpad_core::Document::from_str("content B"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 加载完成后直接输入（无任何显式切换）：必须落在聚焦的新页。
+        // 失步缺陷下 cur_handle 仍指页 0——敲字打进上一个文档。
+        // （打开文件后光标在文首 0:0，插入落在开头是既有正确语义；
+        //  本测试钉住的是「落进哪一页」，不是行内位置。）
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("+X".into())));
+        assert_eq!(
+            app.tabs[1].editor.borrow().doc.to_text(),
+            "+Xcontent B",
+            "输入必须落在聚焦的新页"
+        );
+        assert_eq!(
+            app.tabs[0].editor.borrow().doc.to_text(),
+            "content A",
+            "旧页不得被误改"
+        );
+        // 渲染源与活动页一致
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "+Xcontent B");
     }
 
     #[test]
