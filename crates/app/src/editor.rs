@@ -49,14 +49,23 @@ const GUTTER_FONT_SCALE: f32 = 13.0 / 16.0;
 /// （方案 c：零体积治本，不捆绑字体文件）。
 pub const BODY_FONT: Font = Font::MONOSPACE;
 
-/// UI 控件字号 = 正文字号 × 该系数（[`GUTTER_FONT_SCALE`] 先例）。
+/// UI 控件字号的固定基准（px）。**P36 用户裁决：UI 不随正文字号缩放**——
+/// A-/A+ 与 Ctrl+滚轮只调节文件内容，UI 控件保持固定尺寸。
+/// 取 16px = iced 默认文本尺寸（`Settings::default_text_size`），
+/// 与未缩放时的既有观感持平。
+pub const UI_FONT_BASE_PX: f32 = 16.0;
+
+/// UI 字号相对基准的微调系数（[`GUTTER_FONT_SCALE`] 先例；1.0 = 持平）。
+pub const UI_FONT_SCALE: f32 = 1.0;
+
+/// UI 控件统一字号（全项目唯一换算点）：`UI_FONT_BASE_PX × UI_FONT_SCALE`。
 ///
 /// 勘误留痕：iced 0.14 默认文本尺寸实测为 **16px**
 /// （`iced_core::settings::Settings::default_text_size`），与默认正文字号相同
 /// ——第 25 轮「UI 14px vs 正文 16px」的记录有误，两层割裂实际只在字形族。
-/// 取 1.0 保持既有观感不变；本常量的意义是把「UI 随 Ctrl+滚轮缩放」的口径
-/// 显式化，日后想分级只改这一个数字。
-pub const UI_FONT_SCALE: f32 = 1.0;
+pub fn ui_font_px() -> f32 {
+    UI_FONT_BASE_PX * UI_FONT_SCALE
+}
 
 /// CJK 等宽候选优先级表（P33 方案 c 钉字）：启动期从左到右扫描，
 /// 第一个系统已安装的族名被设为 fontdb `Family::Monospace` 的解析目标。
@@ -2067,9 +2076,11 @@ mod tests {
 
     #[test]
     fn ui_typography_constants_contract() {
-        // 字号口径：默认字号 × UI_FONT_SCALE 与 iced 0.14 默认文本尺寸(16px)
-        // 持平——统一口径不得改变默认观感（第 25 轮「UI 14px」记录已勘误）
-        assert!((FONT_SIZE_DEFAULT * UI_FONT_SCALE - 16.0).abs() < f32::EPSILON);
+        // P36 口径：UI 字号固定、不随正文字号缩放——A-/A+ 与 Ctrl+滚轮
+        // 只调节文件内容；固定基准与 iced 默认文本尺寸(16px)持平
+        // （第 25 轮「UI 14px」记录已勘误）
+        assert_eq!(UI_FONT_BASE_PX, 16.0);
+        assert!((ui_font_px() - UI_FONT_BASE_PX * UI_FONT_SCALE).abs() < f32::EPSILON);
         // 字形族口径：UI 与正文共用同一换装点（P34 落地时只需改 BODY_FONT）
         assert_eq!(BODY_FONT, Font::MONOSPACE);
     }

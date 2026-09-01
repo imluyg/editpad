@@ -545,8 +545,9 @@ fn transcode_notice(original_encoding: &str) -> Option<String> {
 
 /// 把解析出的块级元素排成只读预览列（滚动容器包裹）。
 ///
-/// `font_size` = 当前正文字号：预览排版整体随 Ctrl+滚轮缩放（P33 口径），
-/// 各级基准值与旧硬编码一致（正文默认 16px 时逐项像素相等）。
+/// `font_size` = 当前正文字号：预览排版随 Ctrl+滚轮缩放（P36 口径：
+/// 预览属文件内容渲染故跟随；工具栏等 UI 控件不跟随），各级基准值与
+/// 旧硬编码一致（正文默认 16px 时逐项像素相等）。
 fn markdown_preview_element(source: &str, font_size: f32) -> Element<'static, Message> {
     use iced::font::Weight;
 
@@ -3260,8 +3261,8 @@ impl Editpad {
     fn tab_context_panel(&self, idx: usize) -> Element<'_, Message> {
         let tab = &self.tabs[idx];
         let interactive = !self.busy;
-        // P33：UI 字号/字形族统一口径（与正文同族、随 Ctrl+滚轮缩放）
-        let uipx = self.display_font_size() * editor::UI_FONT_SCALE;
+        // P33/P36：UI 与正文同族（BODY_FONT），字号固定不随正文缩放
+        let uipx = editor::ui_font_px();
         let uifont = editor::BODY_FONT;
 
         let mut panel = column![
@@ -3348,8 +3349,8 @@ impl Editpad {
     /// （主题/字号/即时保存/隐私/会话）+ 只读热键速查表。改动即写回。
     fn settings_panel(&self) -> Element<'_, Message> {
         let s = &self.settings;
-        // P33：UI 字号/字形族统一口径（与正文同族、随 Ctrl+滚轮缩放）
-        let uipx = self.display_font_size() * editor::UI_FONT_SCALE;
+        // P33/P36：UI 与正文同族（BODY_FONT），字号固定不随正文缩放
+        let uipx = editor::ui_font_px();
         let uifont = editor::BODY_FONT;
 
         // 热键速查表（只读）：数据源 = HOTKEYS，与 README「快捷键」段同源
@@ -3513,8 +3514,9 @@ impl Editpad {
             .highlight_syntax_name()
             .as_deref()
             == Some("Markdown");
-        // P33：UI 字号/字形族统一口径——全部控件与正文同族、随 Ctrl+滚轮缩放
-        let uipx = self.display_font_size() * editor::UI_FONT_SCALE;
+        // P33/P36：UI 全部控件与正文同族（BODY_FONT），但字号固定不随
+        // 正文缩放——A-/A+ 与 Ctrl+滚轮只调节文件内容
+        let uipx = editor::ui_font_px();
         let uifont = editor::BODY_FONT;
 
         let toolbar = row![
