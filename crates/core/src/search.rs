@@ -14,6 +14,8 @@ pub struct MatchPos {
     pub col: usize,
 }
 
+use crate::document::Document;
+
 /// 单字符相等判断：`case_sensitive=false` 时仅对 ASCII 折叠大小写。
 ///
 /// P15 起作为全项目唯一的大小写折叠实现——app 层「选中文本是否等于查询」
@@ -37,25 +39,66 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
         return out;
     }
     let q: Vec<char> = query.chars().collect();
-
     for (line_idx, line) in text.split('\n').enumerate() {
-        let lc: Vec<char> = line.chars().collect();
-        if lc.len() < q.len() {
-            continue;
-        }
-        'window: for start in 0..=(lc.len() - q.len()) {
-            for (offset, &qc) in q.iter().enumerate() {
-                if !char_eq(qc, lc[start + offset], case_sensitive) {
-                    continue 'window;
-                }
-            }
-            out.push(MatchPos {
-                line: line_idx,
-                col: start,
-            });
-        }
+        scan_line(line, &q, case_sensitive, line_idx, &mut out);
     }
     out
+}
+
+/// 在 [`Document`]（rope）上直接查找，语义与 [`find_all`] 完全一致（P10）。
+///
+/// 与 `find_all(&doc.to_text(), ..)` 相比省掉整份全文 String：
+/// 按存储块零拷贝迭代、手工按 `\n` 分段，峰值内存只多一个「当前行」缓冲
+/// （复用分配，长度 = 最长行）。列语义逐字符对齐 `split('\n')`——
+/// 行尾 `\r` 保留在行内（与 find_all 一致），孤立 `\r` 不当行界。
+pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> Vec<MatchPos> {
+    let mut out = Vec::new();
+    if query.is_empty() {
+        return out;
+    }
+    let q: Vec<char> = query.chars().collect();
+
+    let mut line = String::new();
+    let mut line_idx = 0usize;
+    for chunk in doc.chunks() {
+        let mut rest = chunk;
+        // 块边界可能落在任意位置：'\n' 前的残段累积进当前行缓冲，
+        // 遇到完整 '\n' 才结算一行——保证与 split('\n') 逐字节等价
+        while let Some(pos) = rest.find('\n') {
+            line.push_str(&rest[..pos]);
+            scan_line(&line, &q, case_sensitive, line_idx, &mut out);
+            line.clear();
+            line_idx += 1;
+            rest = &rest[pos + 1..];
+        }
+        line.push_str(rest);
+    }
+    scan_line(&line, &q, case_sensitive, line_idx, &mut out);
+    out
+}
+
+/// 单行窗口扫描：在 `line` 的字符序列上滑动长度 `q.len()` 的窗口逐一比较。
+fn scan_line(line: &str, q: &[char], case_sensitive: bool, line_idx: usize, out: &mut Vec<MatchPos>) {
+    let lc: Vec<char> = line.chars().collect();
+    if lc.len() < q.len() {
+        return;
+    }
+    let first = q[0];
+    'window: for start in 0..=(lc.len() - q.len()) {
+        // 首字符快速过滤：绝大多数位置在此被跳过，省掉内层循环开销
+        if !char_eq(first, lc[start], case_sensitive) {
+            continue;
+        }
+        for (offset, &qc) in q.iter().enumerate().skip(1) {
+            if !char_eq(qc, lc[start + offset], case_sensitive) {
+                continue 'window;
+            }
+        }
+        out.push(MatchPos {
+            line: line_idx,
+            col: start,
+        });
+    }
 }
 
 /// 光标 (line, col) 处（含该位置命中）之后的第一个匹配下标；
@@ -195,5 +238,74 @@ mod tests {
         let (out, n) = replace_all("abc", "", "x", true);
         assert_eq!(out, "abc");
         assert_eq!(n, 0);
+    }
+
+    // ---------- P10：rope 直查与 find_all 逐字节对拍 ----------
+
+    /// 确定性伪随机串（小字母表 + 换行 + CRLF + 多字节字符），
+    /// 保证两条路径在跨块边界、行尾形态各异的输入上完全一致。
+    fn pseudo_random_text(seed: u64, len: usize) -> String {
+        const ALPHABET: [char; 8] = ['a', 'b', 'c', '\n', '\r', '中', '🚀', 'x'];
+        let mut state = seed | 1;
+        let mut out = String::with_capacity(len * 4);
+        for _ in 0..len {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            out.push(ALPHABET[(state >> 33) as usize % ALPHABET.len()]);
+        }
+        out
+    }
+
+    #[test]
+    fn find_all_document_matches_find_all_exactly() {
+        let fixtures = [
+            "",                                  // 空文档
+            "single line no newline",            // 单行无换行
+            "foo\nbar foo\n",                    // 常规多行（尾换行）
+            "a\r\nb\r\nc",                       // CRLF：\r 留在行内，列语义同 split('\n')
+            "x\r\ny\nz\rw",                      // 混合 + 孤立 \r（不作行界）
+            "中文中文\n🚀🚀中\n",                 // 多字节字符列号
+            "\tindent\ttab\t\n",                 // Tab 原样计数
+            "aaaa aa\naa",                       // 重叠命中窗口
+        ];
+        for text in fixtures {
+            let doc = Document::from_str(text);
+            for query in ["a", "aa", "foo", "中", "🚀x", "\r", "\r\n", "zz"] {
+                for cs in [true, false] {
+                    assert_eq!(
+                        find_all_document(&doc, query, cs),
+                        find_all(text, query, cs),
+                        "不一致: text={text:?} query={query:?} cs={cs}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn find_all_document_matches_find_all_on_random_texts() {
+        for seed in [1u64, 0xDEAD_BEEF, 12345] {
+            let text = pseudo_random_text(seed, 20_000);
+            let doc = Document::from_str(&text);
+            for query in ["a", "ab", "c\n", "中", "xx", "a\r"] {
+                assert_eq!(
+                    find_all_document(&doc, query, false),
+                    find_all(&text, query, false),
+                    "seed={seed} query={query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn find_all_document_handles_long_lines_and_empty_query() {
+        // 超长单行（> ropey 默认块大小若干倍），覆盖块边界残段累积逻辑
+        let long = format!("{}needle{}\n", "x".repeat(100_000), "y".repeat(50_000));
+        let doc = Document::from_str(&long);
+        assert_eq!(
+            find_all_document(&doc, "needle", true),
+            vec![MatchPos { line: 0, col: 100_000 }]
+        );
+        // 空查询约定：返回空表
+        assert!(find_all_document(&doc, "", true).is_empty());
     }
 }

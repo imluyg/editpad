@@ -130,6 +130,12 @@ impl Document {
         self.rope.to_string()
     }
 
+    /// 按底层存储块零拷贝迭代正文。流式查找（P10）与将来的分块保存
+    /// （P19）都以此为基础设施——不产生全文 String，内存峰值与文档大小无关。
+    pub fn chunks(&self) -> impl Iterator<Item = &str> {
+        self.rope.chunks()
+    }
+
     /// 取第 `line` 行（0 起）的文本——将来虚拟化渲染按行取数的雏形：
     /// 只碰可见行，成本与全文大小无关。
     pub fn line_str(&self, line_idx: usize) -> String {

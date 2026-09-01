@@ -9,7 +9,8 @@
 mod editor;
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc as std_mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc as std_mpsc};
 
 use iced::futures::SinkExt;
 use iced::keyboard::{self, key::Named};
@@ -66,6 +67,8 @@ enum Message {
     ReplaceQueryChanged(String),
     ReplaceCurrent,
     ReplaceAll,
+    /// 后台查找扫描完成：(任务序号, 命中表)。序号过期的结果直接丢弃（P10）
+    FindScanDone(u64, Vec<editpad_core::MatchPos>),
 
     GotoToggled,
     GotoInputChanged(String),
@@ -208,6 +211,62 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+// ---------- 后台查找扫描（P10） ----------
+
+/// 查找防抖窗口：窗口内的新输入会作废旧任务（置位其取消标志）并另排新任务。
+const FIND_DEBOUNCE_MS: u64 = 200;
+
+/// 一次后台查找扫描的输入快照。`doc` 是 rope 的结构共享克隆（O(1)，
+/// 不拷贝正文）；`cancelled` 指向应用状态里的当前代取消标志——
+/// 新输入会把上一代的标志置位，睡醒后的旧任务检查到即放弃扫描。
+#[derive(Clone)]
+struct FindScanPayload {
+    seq: u64,
+    doc: editpad_core::Document,
+    query: String,
+    case_sensitive: bool,
+    /// 本代任务的取消标志（新任务排队时把上一代置位）
+    cancelled: Arc<AtomicBool>,
+    /// 防抖窗口毫秒数（生产走 [`FIND_DEBOUNCE_MS`]；测试注入小值）
+    debounce_ms: u64,
+}
+
+/// 查找任务的事件驱动（扫描函数与防抖时长均可注入以便测试，同 [`drive_load`] 做法）。
+///
+/// 保证语义：无论扫描成功、被取消还是 **panic**，都恰好回一条 `FindScanDone`
+/// ——否则查找栏会永久停在「查找中…」。过期结果由 update 按 seq 二次过滤。
+async fn drive_find_scan<F>(
+    payload: FindScanPayload,
+    scan: F,
+) -> Message
+where
+    F: FnOnce(&editpad_core::Document, &str, bool) -> Vec<editpad_core::MatchPos>
+        + Send
+        + 'static,
+{
+    let (notify_tx, notify_rx) = std_mpsc::channel::<Vec<editpad_core::MatchPos>>();
+    std::thread::spawn(move || {
+        // 防抖：真正的取消由 cancelled 标志完成——新输入排队时置位上一代，
+        // 这里睡满窗口后检查，被作废的任务直接退出、不浪费一次全文扫描
+        std::thread::sleep(std::time::Duration::from_millis(payload.debounce_ms));
+        let matches = if payload.cancelled.load(Ordering::Relaxed) {
+            Vec::new()
+        } else {
+            // P5 同款兜底：扫描崩溃也要回消息（空表），不能让 UI 永久等待
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scan(&payload.doc, &payload.query, payload.case_sensitive)
+            }))
+            .unwrap_or_default()
+        };
+        let _ = notify_tx.send(matches);
+    });
+
+    // 阻塞 recv 与 drive_load 的取舍相同：OS 线程结果桥接到异步端，
+    // iced 线程池可承受短暂阻塞
+    let matches = notify_rx.recv().unwrap_or_default();
+    Message::FindScanDone(payload.seq, matches)
+}
+
 /// 与 core::search 一致的大小写语义：实现已下沉到 core（P15 去重），
 /// 这里只保留「区分大小写走整串比较」的快速路径。
 fn strings_equal(a: &str, b: &str, case_sensitive: bool) -> bool {
@@ -264,6 +323,11 @@ struct Editpad {
     case_sensitive: bool,
     matches: Vec<editpad_core::MatchPos>,
     match_idx: Option<usize>,
+    /// 在途后台扫描的序号；None 表示没有。迟到的旧结果按它丢弃（P10）
+    find_scan: Option<u64>,
+    find_seq: u64,
+    /// 当前代扫描的取消标志；新任务排队时把旧标志置位（P10 防抖取消）
+    find_cancel: Arc<AtomicBool>,
 
     // ---------- 跳转 ----------
     goto_visible: bool,
@@ -308,7 +372,8 @@ impl Editpad {
             // ---------- 编辑器 ----------
             Message::Edit(op) => {
                 if self.apply_edit(op) && self.find_visible {
-                    self.refresh_matches();
+                    // P10：编辑后不再同步重扫（每键全文扫描会卡 UI），排队后台防抖扫描
+                    return self.schedule_find_scan();
                 }
                 Task::none()
             }
@@ -412,7 +477,7 @@ impl Editpad {
                         self.pending_close = false;
                         self.status.clear();
                         if self.find_visible {
-                            self.refresh_matches();
+                            return self.schedule_find_scan();
                         }
                     }
                     Err(error) => {
@@ -523,24 +588,24 @@ impl Editpad {
                 self.find_visible = !self.find_visible;
                 if self.find_visible {
                     self.goto_visible = false;
-                    self.refresh_matches();
+                    return self.schedule_find_scan();
                 } else {
-                    self.matches.clear();
-                    self.match_idx = None;
+                    // 关栏即取消在途扫描并清结果（旧实现只清结果）
+                    self.cancel_find_scan();
                 }
                 Task::none()
             }
             Message::FindQueryChanged(query) => {
                 self.find_query = query;
-                self.refresh_matches();
-                Task::none()
+                // P10：查询变化只排队后台扫描（防抖），UI 线程零全文拷贝；
+                // 查询为空时内部转为取消 + 清结果
+                self.schedule_find_scan()
             }
             Message::FindNext => self.step_match(true),
             Message::FindPrev => self.step_match(false),
             Message::CaseToggled(value) => {
                 self.case_sensitive = value;
-                self.refresh_matches();
-                Task::none()
+                self.schedule_find_scan()
             }
             Message::ReplaceQueryChanged(query) => {
                 self.replace_query = query;
@@ -548,7 +613,8 @@ impl Editpad {
             }
             Message::ReplaceCurrent => self.replace_current(),
             Message::ReplaceAll => {
-                if self.busy || self.find_query.is_empty() {
+                if self.busy || self.find_query.is_empty() || self.find_scanning() {
+                    // 扫描在途时禁止全部替换：此刻的全文快照可能是过期的
                     return Task::none();
                 }
                 let contents = self.editor.borrow().doc.to_text();
@@ -564,8 +630,19 @@ impl Editpad {
                         .replace_whole_document(editpad_core::Document::from_str(&new_contents));
                     self.dirty = true;
                 }
-                self.refresh_matches();
+                // P10：替换后的重扫走后台防抖，不再同步刷
+                let task = self.schedule_find_scan();
                 self.status = format!("已替换 {count} 处");
+                return task;
+            }
+            Message::FindScanDone(seq, found) => {
+                // 过期结果丢弃：只认当前排队中的那次扫描（P10 的 job 序号过滤，
+                // 与 Loaded 按 job_id 过滤同构）
+                if self.find_scan == Some(seq) {
+                    self.find_scan = None;
+                    self.matches = found;
+                    self.match_idx = None;
+                }
                 Task::none()
             }
 
@@ -609,8 +686,8 @@ impl Editpad {
                 self.confirm_visible = false;
                 self.pending_close = false;
                 self.open_confirm = None;
-                self.matches.clear();
-                self.match_idx = None;
+                // P10：取消在途扫描 + 清结果（含序号失效）
+                self.cancel_find_scan();
                 Task::none()
             }
 
@@ -729,6 +806,7 @@ impl Editpad {
             Some(job) => Subscription::run_with(job.clone(), build_load_stream),
             None => Subscription::none(),
         };
+        // P10 的查找扫描走 Task::perform（见 schedule_find_scan），不经订阅
         // 0.14 没有 keyboard::on_key_press 了，用 listen_with 手动过滤按键；
         // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）
         let events =
@@ -811,22 +889,59 @@ impl Editpad {
 
     // ---------- 查找 / 替换内部逻辑 ----------
 
-    fn refresh_matches(&mut self) {
-        self.matches = if self.find_query.is_empty() {
-            Vec::new()
-        } else {
-            let contents = self.editor.borrow().doc.to_text();
-            editpad_core::find_all(&contents, &self.find_query, self.case_sensitive)
+    /// 排队一次后台查找扫描（P10）。查询为空或查找栏已关闭时转为取消。
+    /// UI 线程只做廉价操作：文档快照是 rope 结构共享克隆，全文扫描
+    /// 在防抖 200ms 后的后台线程进行，结果按序号回填。
+    fn schedule_find_scan(&mut self) -> Task<Message> {
+        if !self.find_visible || self.find_query.is_empty() {
+            self.cancel_find_scan();
+            return Task::none();
+        }
+        // 作废上一代任务（若它还睡在防抖窗口里，醒来即退出）
+        self.find_cancel.store(true, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.find_cancel = cancelled.clone();
+        self.find_seq += 1;
+        let payload = FindScanPayload {
+            seq: self.find_seq,
+            doc: self.editor.borrow().doc.clone(),
+            query: self.find_query.clone(),
+            case_sensitive: self.case_sensitive,
+            cancelled,
+            debounce_ms: FIND_DEBOUNCE_MS,
         };
+        self.find_scan = Some(self.find_seq);
+        Task::perform(drive_find_scan(payload, |doc, q, cs| {
+            editpad_core::find_all_document(doc, q, cs)
+        }), |message| message)
+    }
+
+    /// 取消在途扫描并清空结果（关查找栏/Esc/清空查询共用）。
+    /// 序号递增 + 取消标志置位双保险，保证在途任务的结果回来后必被丢弃。
+    fn cancel_find_scan(&mut self) {
+        self.find_cancel.store(true, Ordering::Relaxed);
+        self.find_seq += 1;
+        self.find_scan = None;
+        self.matches.clear();
         self.match_idx = None;
+    }
+
+    fn find_scanning(&self) -> bool {
+        self.find_scan.is_some()
     }
 
     fn step_match(&mut self, forward: bool) -> Task<Message> {
         if self.busy || self.find_query.is_empty() {
             return Task::none();
         }
+        // 扫描在途：不基于过期命中表跳转
+        if self.find_scanning() {
+            self.status = "查找中…".to_owned();
+            return Task::none();
+        }
         if self.matches.is_empty() {
-            self.refresh_matches();
+            // 懒触发：开栏即按 Enter 而扫描还没排队过时，先补一次扫描
+            return self.schedule_find_scan();
         }
         if self.matches.is_empty() {
             self.status = "无匹配".to_owned();
@@ -867,8 +982,11 @@ impl Editpad {
         if hit_selected {
             self.editor.borrow_mut().replace_selection(&self.replace_query.clone());
             self.dirty = true;
-            self.refresh_matches();
+            // P10：替换后命中表已过期，排队后台重扫；「跳到下一个」等重扫完成
+            // 后由用户再按（旧行为是同步重扫后立即跳，会卡大文档 UI）
+            return self.schedule_find_scan();
         }
+        // 没有可替换的选区：行为不变——跳到下一个匹配
         self.step_match(true)
     }
 
@@ -987,7 +1105,11 @@ impl Editpad {
 
         if self.find_visible {
             let total = self.matches.len();
-            let position_label = if total == 0 {
+            // P10：扫描在途时明确显示状态，按钮基于过期结果禁用
+            let scanning = self.find_scanning();
+            let position_label = if scanning {
+                "查找中…".to_owned()
+            } else if total == 0 {
                 "无匹配".to_owned()
             } else {
                 match self.match_idx {
@@ -995,7 +1117,7 @@ impl Editpad {
                     None => format!("{total} 处"),
                 }
             };
-            let has_matches = !self.matches.is_empty();
+            let has_matches = !scanning && !self.matches.is_empty();
 
             body = body.push(rule::horizontal(1)).push(
                 row![
@@ -1025,7 +1147,10 @@ impl Editpad {
                         .width(200),
                     button(text("替换当前"))
                         .on_press_maybe(has_matches.then_some(Message::ReplaceCurrent)),
-                    button(text("全部替换")).on_press(Message::ReplaceAll),
+                    // 扫描在途时禁用：此刻的全文快照可能是过期的
+                    button(text("全部替换")).on_press_maybe(
+                        (!scanning).then_some(Message::ReplaceAll),
+                    ),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -1395,5 +1520,177 @@ mod tests {
         assert!(failures[0].contains("模拟加载线程崩溃"), "错误需含 panic 信息: {}", failures[0]);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P10 后台查找扫描 ----------
+
+    #[test]
+    fn find_scan_stream_emits_exactly_one_done_with_matches() {
+        let payload = FindScanPayload {
+            seq: 42,
+            doc: editpad_core::Document::from_str("foo\nbar foo\n"),
+            query: "foo".to_owned(),
+            case_sensitive: true,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            debounce_ms: 10,
+        };
+        // 恰好一条完成消息（函数直接返回它）
+        let message = block_on(drive_find_scan(payload, |doc, q, cs| {
+            editpad_core::find_all_document(doc, q, cs)
+        }));
+        match &message {
+            Message::FindScanDone(seq, hits) => {
+                assert_eq!(*seq, 42);
+                assert_eq!(
+                    hits,
+                    &vec![
+                        editpad_core::MatchPos { line: 0, col: 0 },
+                        editpad_core::MatchPos { line: 1, col: 4 },
+                    ]
+                );
+            }
+            other => panic!("应为 FindScanDone，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_scan_cancelled_task_skips_scanning_and_replies_empty() {
+        // 新输入排队时会把上一代的取消标志置位；被作废的任务醒来即退出，
+        // 不浪费一次全文扫描，但仍回一条空结果消息保持「恰好一条」语义
+        let flag = Arc::new(AtomicBool::new(false));
+        flag.store(true, Ordering::Relaxed);
+        let payload = FindScanPayload {
+            seq: 3,
+            doc: editpad_core::Document::from_str("target target"),
+            query: "target".to_owned(),
+            case_sensitive: true,
+            cancelled: flag,
+            debounce_ms: 10,
+        };
+        let message = block_on(drive_find_scan(payload, |doc, q, cs| {
+            editpad_core::find_all_document(doc, q, cs)
+        }));
+        match message {
+            Message::FindScanDone(seq, hits) => {
+                assert_eq!(seq, 3);
+                assert!(hits.is_empty(), "被取消的任务不得产出命中");
+            }
+            other => panic!("应为 FindScanDone，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_scan_survives_panic_and_still_replies() {
+        // 扫描函数崩溃也必须回消息（空表），否则查找栏永久停在「查找中…」
+        let payload = FindScanPayload {
+            seq: 7,
+            doc: editpad_core::Document::new(),
+            query: "x".to_owned(),
+            case_sensitive: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            debounce_ms: 10,
+        };
+        let message = block_on(drive_find_scan(
+            payload,
+            |_doc, _q, _cs| -> Vec<editpad_core::MatchPos> { panic!("模拟扫描崩溃") },
+        ));
+        match &message {
+            Message::FindScanDone(seq, hits) => {
+                assert_eq!(*seq, 7);
+                assert!(hits.is_empty(), "panic 兜底应回空命中表");
+            }
+            other => panic!("应为 FindScanDone，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_scan_results_are_filtered_by_sequence_number() {
+        let mut app = Editpad::default();
+        // 两份可区分的命中表：过期投递不得覆盖已采纳/待采纳的状态
+        let hit_a = || vec![editpad_core::MatchPos { line: 0, col: 0 }];
+        let hit_b = || vec![editpad_core::MatchPos { line: 1, col: 4 }];
+        /// 测试内派发：显式丢弃 Task（update 的返回值仅运行时消费）
+        fn dispatch(app: &mut Editpad, message: Message) {
+            let _ = app.update(message);
+        }
+
+        app.find_visible = true;
+
+        // 排队 → 采纳当前序号的结果
+        dispatch(&mut app, Message::FindQueryChanged("a".into()));
+        assert_eq!(app.find_scan, Some(1), "查询变化应排队一次后台扫描");
+        dispatch(&mut app, Message::FindScanDone(1, hit_a()));
+        assert_eq!(app.matches, hit_a());
+        assert_eq!(app.find_scan, None, "结果采纳后在途标记应清除");
+        assert_eq!(app.match_idx, None, "新结果后跳转游标复位");
+
+        // 已消费的序号再回来（重复投递）不得二次生效
+        dispatch(&mut app, Message::FindScanDone(1, hit_b()));
+        assert_eq!(app.matches, hit_a());
+
+        // 新输入换新序号；重扫期间保留旧命中（防闪烁），但旧序号的迟到结果不许覆盖
+        dispatch(&mut app, Message::FindQueryChanged("ab".into()));
+        assert_eq!(app.find_scan, Some(2));
+        dispatch(&mut app, Message::FindScanDone(1, hit_b()));
+        assert_eq!(app.matches, hit_a(), "过期结果必须被丢弃、不得覆盖");
+        dispatch(&mut app, Message::FindScanDone(2, hit_b()));
+        assert_eq!(app.matches, hit_b());
+        assert_eq!(app.find_scan, None);
+
+        // 大小写切换同样触发重扫
+        dispatch(&mut app, Message::CaseToggled(true));
+        assert_eq!(app.find_scan, Some(3));
+
+        // 文档编辑（查找栏开着时）触发重扫
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert_eq!(app.find_scan, Some(4));
+
+        // 关闭查找栏 = 取消：清结果且在途结果作废
+        dispatch(&mut app, Message::FindToggled);
+        assert_eq!(app.find_scan, None);
+        assert!(app.matches.is_empty());
+        dispatch(&mut app, Message::FindScanDone(4, hit_a()));
+        assert!(app.matches.is_empty(), "取消后的迟到结果必须被丢弃");
+
+        // Esc 关栏同样取消（注意：上一步关栏的取消已把序号推到 5，本次排队为 6）
+        app.find_visible = true;
+        dispatch(&mut app, Message::FindQueryChanged("abc".into()));
+        assert_eq!(app.find_scan, Some(6));
+        dispatch(&mut app, Message::BarsDismissed);
+        assert_eq!(app.find_scan, None);
+        dispatch(&mut app, Message::FindScanDone(6, hit_a()));
+        assert!(app.matches.is_empty());
+
+        // 清空查询 = 取消而非空表扫描（BarsDismissed 取消后序号为 7，本次排队 8）
+        app.find_visible = true;
+        dispatch(&mut app, Message::FindQueryChanged("q".into()));
+        assert_eq!(app.find_scan, Some(8));
+        dispatch(&mut app, Message::FindScanDone(8, hit_a()));
+        assert_eq!(app.matches, hit_a());
+        dispatch(&mut app, Message::FindQueryChanged(String::new()));
+        assert_eq!(app.find_scan, None);
+        assert!(app.matches.is_empty());
+        dispatch(&mut app, Message::FindScanDone(8, hit_a()));
+        assert!(app.matches.is_empty(), "清空查询取消后，同号迟到结果也必须被丢弃");
+    }
+
+    #[test]
+    fn find_next_while_scanning_reports_progress_not_stale_jump() {
+        let mut app = Editpad::default();
+        app.find_visible = true;
+        app.find_query = "zzz".into();
+
+        // 有结果在途：不基于过期命中表跳转
+        app.find_scan = Some(9);
+        app.matches = vec![editpad_core::MatchPos { line: 0, col: 0 }];
+        let _ = app.update(Message::FindNext);
+        assert_eq!(app.status, "查找中…", "扫描在途时 Enter 应提示进度");
+
+        // 无结果且无在途扫描：懒补排一次扫描而不是误报「无匹配」
+        let mut fresh = Editpad::default();
+        fresh.find_visible = true;
+        fresh.find_query = "zzz".into();
+        let _ = fresh.update(Message::FindNext);
+        assert!(fresh.find_scan.is_some(), "Enter 应懒触发一次后台扫描");
     }
 }

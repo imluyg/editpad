@@ -16,5 +16,5 @@ pub use error::CoreError;
 pub use highlight::{LazyHighlighter, StyledRun};
 pub use loader::{load_file, load_file_streaming, decode, LoadProgress, LoadedText};
 pub use saver::save_atomic;
-pub use search::{find_all, next_from, prev_from, replace_all, ascii_case_eq, MatchPos};
+pub use search::{find_all, find_all_document, next_from, prev_from, replace_all, ascii_case_eq, MatchPos};
 pub use settings::Settings;
