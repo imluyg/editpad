@@ -85,6 +85,12 @@ pub struct Settings {
     /// 加载时收敛到 `[MIN_SNAPSHOT_INTERVAL_SECS, MAX_SNAPSHOT_INTERVAL_SECS]`。
     #[serde(default = "default_snapshot_interval_secs")]
     pub snapshot_interval_secs: u32,
+    /// 正文字体族名（P34）。None = 默认等宽（现状行为，旧配置缺字段兼容）；
+    /// Some(名字) = 用系统里该族渲染正文与 UI。加载时归一：空串/纯空白/
+    /// 超长/含控制字符的值收敛为 None；「名字未安装」的回退在 app 层做
+    /// （core 不掌握系统字体清单），且只影响本次生效，不抹掉用户配置。
+    #[serde(default)]
+    pub font_family: Option<String>,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -103,6 +109,7 @@ impl Default for Settings {
             exit_mode: EXIT_MODE_SNAPSHOT.to_string(),
             remember_session: true,
             snapshot_interval_secs: DEFAULT_SNAPSHOT_INTERVAL_SECS,
+            font_family: None,
         }
     }
 }
@@ -124,6 +131,9 @@ pub const MAX_SNAPSHOT_INTERVAL_SECS: u32 = 120;
 pub const EXIT_MODE_SNAPSHOT: &str = "snapshot";
 /// 关窗模式（P29）：旧行为——置脏即弹「未保存确认条」逐次询问。
 pub const EXIT_MODE_ASK: &str = "ask";
+
+/// 字体族名的长度上限（P34）。真实族名远短于此；超长值视为配置损坏。
+pub const MAX_FONT_FAMILY_LEN: usize = 128;
 
 /// `#[serde(default)]` 用：缺字段时的主题默认值。
 fn default_theme() -> String {
@@ -206,6 +216,26 @@ impl Settings {
         self.snapshot_interval_secs = self
             .snapshot_interval_secs
             .clamp(MIN_SNAPSHOT_INTERVAL_SECS, MAX_SNAPSHOT_INTERVAL_SECS);
+        // P34：字体族名收敛——空串/纯空白/超长/含控制字符一律回退默认。
+        // 只裁剪明显损坏的值；「系统里没装这个字体」由 app 层回退（core
+        // 不掌握系统字体清单），且不抹掉配置本身。
+        if let Some(name) = &self.font_family {
+            let broken = name.trim().is_empty()
+                || name.len() > MAX_FONT_FAMILY_LEN
+                || name.chars().any(char::is_control);
+            if broken {
+                self.font_family = None;
+            } else if name != name.trim() {
+                self.font_family = Some(name.trim().to_owned());
+            }
+        }
+    }
+
+    /// 切换正文字体族（P34）：None = 回退默认等宽。Some 值经与加载归一
+    /// 同一套规则收敛（空白裁剪），调用方无需预处理。
+    pub fn set_font_family(&mut self, family: Option<String>) {
+        self.font_family = family;
+        self.normalize();
     }
 
     /// 当前是否为深色主题（仅规范值 `"dark"` 视为深色）。
@@ -849,6 +879,80 @@ mod tests {
         let loaded = Settings::load_from(&path);
         assert!(loaded.recent_files.is_empty());
         assert!(loaded.recent_views.is_empty(), "关闭开关后记忆必须随加载清空");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P34 字体选择设置 ----------
+
+    #[test]
+    fn font_family_defaults_to_none_and_legacy_config_compatible() {
+        let s = Settings::default();
+        assert_eq!(s.font_family, None, "默认必须回退现状等宽行为");
+
+        // 旧 config.toml 缺 P34 字段 → None（serde default），零迁移升级
+        let dir = scratch_dir("p34-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "theme = \"dark\"\nfont_size = 18\n").unwrap();
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.font_family, None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn font_family_broken_values_normalized_on_load() {
+        let dir = scratch_dir("p34-normalize");
+        fs::create_dir_all(&dir).unwrap();
+
+        // 空串 / 纯空白 / 超长 / 控制字符：一律收敛为 None
+        for (tag, raw) in [
+            ("empty", "font_family = \"\"\n"),
+            ("blank", "font_family = \"   \\t \"\n"),
+            ("long", &format!("font_family = \"{}\"\n", "F".repeat(MAX_FONT_FAMILY_LEN + 1))),
+            ("control", "font_family = \"Con\\ntrol\"\n"),
+        ] {
+            let path = dir.join(format!("{tag}.toml"));
+            fs::write(&path, raw).unwrap();
+            assert_eq!(
+                Settings::load_from(&path).font_family,
+                None,
+                "{tag} 值必须在加载时收敛为默认"
+            );
+        }
+
+        // 首尾空白裁剪后保留；合法值原样保留
+        let padded = dir.join("padded.toml");
+        fs::write(&padded, "font_family = \"  NSimSun  \"\n").unwrap();
+        assert_eq!(
+            Settings::load_from(&padded).font_family,
+            Some("NSimSun".to_owned())
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn font_family_roundtrips_and_setter_normalizes() {
+        let mut s = Settings::default();
+        s.set_font_family(Some("Sarasa Mono SC".to_owned()));
+        assert_eq!(s.font_family.as_deref(), Some("Sarasa Mono SC"));
+
+        let dir = scratch_dir("p34-roundtrip");
+        let path = dir.join("config.toml");
+        s.save_to(&path).expect("保存应成功");
+        assert_eq!(
+            Settings::load_from(&path).font_family,
+            Some("Sarasa Mono SC".to_owned()),
+            "P34 字段必须参与 roundtrip"
+        );
+
+        // 切换入口复用同一套归一规则：坏值进不来
+        s.set_font_family(Some("   ".to_owned()));
+        assert_eq!(s.font_family, None);
+        // 回退默认等宽
+        s.set_font_family(None);
+        assert_eq!(s.font_family, None);
 
         fs::remove_dir_all(&dir).ok();
     }

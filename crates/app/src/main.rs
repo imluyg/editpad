@@ -204,6 +204,14 @@ enum Message {
     SettingsExitModeToggled,
     /// 周期快照心跳间隔秒数增减（±5，clamp 后写回；P31）
     SettingsIntervalDelta(i32),
+
+    // ---------- 字体选择（P34） ----------
+    /// 设置弹窗选中一个系统字体族（名字来自启动期枚举清单），写回设置
+    SettingsFontSelected(String),
+    /// 回退默认等宽字体（settings.font_family = None）
+    SettingsFontReset,
+    /// 设置弹窗的字体过滤输入框变化（仅影响列表展示，不落盘）
+    FontFilterChanged(String),
 }
 
 /// 后台加载线程 → 订阅流的事件。
@@ -548,11 +556,16 @@ fn transcode_notice(original_encoding: &str) -> Option<String> {
 /// `font_size` = 当前正文字号：预览排版随 Ctrl+滚轮缩放（P36 口径：
 /// 预览属文件内容渲染故跟随；工具栏等 UI 控件不跟随），各级基准值与
 /// 旧硬编码一致（正文默认 16px 时逐项像素相等）。
-fn markdown_preview_element(source: &str, font_size: f32) -> Element<'static, Message> {
+/// `base` = 正文字形族（P34：预览属内容渲染，随设置切换）。
+fn markdown_preview_element(
+    source: &str,
+    font_size: f32,
+    base: Font,
+) -> Element<'static, Message> {
     use iced::font::Weight;
 
     // 预览各级字号相对正文默认 16px 的既有比例
-    let scaled = |base: f32| base * (font_size / 16.0);
+    let scaled = |px: f32| px * (font_size / 16.0);
 
     let blocks = editpad_core::markdown::parse_markdown(source);
     let mut col = column![].spacing(10).padding(14);
@@ -567,15 +580,16 @@ fn markdown_preview_element(source: &str, font_size: f32) -> Element<'static, Me
                     5 => scaled(17.0),
                     _ => scaled(16.0),
                 };
-                col = col.push(md_spans_row(spans, px, true));
+                col = col.push(md_spans_row(spans, px, true, base));
             }
             editpad_core::markdown::MdBlock::Paragraph { spans } => {
-                col = col.push(md_spans_row(spans, scaled(15.0), false));
+                col = col.push(md_spans_row(spans, scaled(15.0), false, base));
             }
             editpad_core::markdown::MdBlock::ListItem { spans } => {
-                let mut line = row![text("• ").size(scaled(15.0)).font(editor::BODY_FONT)];
+                let mut line =
+                    row![text("• ").size(scaled(15.0)).font(base)];
                 for span in spans {
-                    let font = md_font(span.is_bold(), span.is_italic());
+                    let font = md_font(base, span.is_bold(), span.is_italic());
                     let mut t =
                         text(span.text.clone()).size(scaled(15.0)).font(font);
                     if span.is_code() {
@@ -589,11 +603,11 @@ fn markdown_preview_element(source: &str, font_size: f32) -> Element<'static, Me
                 let mut line = row![
                     text("▌ ")
                         .size(scaled(15.0))
-                        .font(editor::BODY_FONT)
+                        .font(base)
                         .color([0.55, 0.55, 0.6])
                 ];
                 for span in spans {
-                    let font = md_font(span.is_bold(), span.is_italic());
+                    let font = md_font(base, span.is_bold(), span.is_italic());
                     let t = text(span.text.clone())
                         .size(scaled(15.0))
                         .font(font)
@@ -609,7 +623,7 @@ fn markdown_preview_element(source: &str, font_size: f32) -> Element<'static, Me
                             .size(scaled(14.0))
                             .font(Font {
                                 weight: Weight::Normal,
-                                ..editor::BODY_FONT
+                                ..base
                             })
                             .color([0.25, 0.35, 0.45]),
                     );
@@ -628,6 +642,7 @@ fn md_spans_row(
     spans: Vec<editpad_core::markdown::MdSpan>,
     px: f32,
     bold: bool,
+    base: Font,
 ) -> iced::widget::Row<'static, Message> {
     use iced::font::{Style as FontStyle, Weight};
 
@@ -650,7 +665,7 @@ fn md_spans_row(
         let font = Font {
             weight,
             style,
-            ..editor::BODY_FONT
+            ..base
         };
         let mut t = text(span.text.clone()).size(px).font(font);
         if span.is_code() {
@@ -661,7 +676,7 @@ fn md_spans_row(
     row
 }
 
-fn md_font(bold: bool, italic: bool) -> Font {
+fn md_font(base: Font, bold: bool, italic: bool) -> Font {
     Font {
         weight: if bold {
             iced::font::Weight::Bold
@@ -673,7 +688,7 @@ fn md_font(bold: bool, italic: bool) -> Font {
         } else {
             iced::font::Style::Normal
         },
-        ..editor::BODY_FONT
+        ..base
     }
 }
 
@@ -711,6 +726,76 @@ fn apply_default_cjk_mono_pin() {
     if let Some(family) = editor::pick_cjk_mono_family(&families) {
         font_system.raw().db_mut().set_monospace_family(family);
     }
+}
+
+// ---------- 字体选择（P34） ----------
+
+/// 设置弹窗字体列表单帧最多渲染的行数；超出提示继续过滤。
+/// Windows 全量族名可达数百条——无上限的 widget 树会让弹窗每帧变重，
+/// v1 用「过滤词 + 上限」控制规模（滚动列表本身有高度限制）。
+const FONT_PICKER_MAX_ROWS: usize = 200;
+
+/// 枚举系统已装字体的全部族名（精确去重、不区分大小写排序）。
+///
+/// 数据源与 P33 钉字同路：iced 全局 font_system 的 fontdb——Windows 上
+/// 已自动装载 `C:\Windows\Fonts` 等系统目录，无需手写目录扫描（§3 P34
+/// 的「手写扫描」路线就此作废，连文件名→族名的换算都省了）。
+/// 本地化别名（如「新宋体」与 NSimSun）都会出现在清单里，均为 fontdb
+/// 认可的合法名字。失败（锁中毒等）返回空表：弹窗降级为提示文案。
+/// 注：包装器的 `raw()` 签名是 `&mut self`，读清单也只能拿写锁（P33 同款，
+/// 启动期一次性的短暂临界区）。
+fn enumerate_available_families() -> Vec<String> {
+    let Ok(mut font_system) = iced::advanced::graphics::text::font_system().write() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = font_system
+        .raw()
+        .db()
+        .faces()
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
+/// 配置字体名 → 实际生效的系统族名（纯函数便于测试）。
+///
+/// * 配置为空 → None（用默认等宽）；
+/// * 精确命中清单 → Some(该条目)；
+/// * 宽松命中（去空白 + 小写相等，复用 [`editor::normalize_family`]）→
+///   Some(规范条目)——手改 config.toml 的大小写/空白变体被自动矫正；
+/// * 未命中 → None：**只回退本次渲染，不抹掉配置**（用户重装字体后
+///   自动恢复；启动时给一次状态栏提示）。
+fn effective_font_family(configured: Option<&str>, available: &[String]) -> Option<String> {
+    let name = configured?;
+    if available.iter().any(|f| f == name) {
+        return Some(name.to_owned());
+    }
+    let want = editor::normalize_family(name);
+    available
+        .iter()
+        .find(|f| editor::normalize_family(f) == want)
+        .cloned()
+}
+
+/// 启动期解析（纯函数便于测试）：返回 (生效族名, 是否提示「未安装」)。
+fn resolve_startup_font(
+    configured: Option<&str>,
+    available: &[String],
+) -> (Option<String>, bool) {
+    let effective = effective_font_family(configured, available);
+    let missing = configured.is_some() && effective.is_none();
+    (effective, missing)
+}
+
+/// 把族名 `'static` 化：iced 0.14 的 `Family::Name(&'static str)` 不收
+/// String，运行期选定的族名只能泄漏进进程生存期。
+/// 内存入账（预算总则第 1 条）：每次**切换到不同字体**泄漏一个族名
+/// 字符串（几十字节）；字体选择是设置级低频操作，进程内总量可忽略。
+/// 启动期至多一次、选择消息每次至多一次，无循环放大路径。
+fn leak_font_family(name: String) -> &'static str {
+    Box::leak(name.into_boxed_str())
 }
 
 // ---------- 多开内存护栏（P21，§3 P19 总则第 2 条） ----------
@@ -1012,6 +1097,18 @@ struct Editpad {
     /// 设置弹窗是否可见（P27）：工具栏「设置」按钮开、Esc/关闭按钮关。
     settings_visible: bool,
 
+    // ---------- 字体选择（P34） ----------
+    /// 启动期从 fontdb 枚举的系统字体族名清单（去重、不区分大小写排序）。
+    /// 设置弹窗的选择列表数据源；空 = 枚举失败（弹窗显示提示并隐藏列表）。
+    available_fonts: Vec<String>,
+    /// 实际生效的字体族名（经 [`effective_font_family`] 对系统清单解析后的
+    /// 规范名，已 `'static` 化——见 [`leak_font_family`]）。None = 默认等宽。
+    /// 配置值与生效值的分离让「卸载了所选字体」只回退本次渲染，不抹掉
+    /// 用户配置（重装后自动恢复）。
+    active_font_family: Option<&'static str>,
+    /// 设置弹窗字体列表的过滤词（纯 UI 态，不落盘）。
+    font_filter: String,
+
     // ---------- 后台加载 ----------
     job_seq: u64,
     /// 进行中的加载任务；None 表示没有
@@ -1122,6 +1219,9 @@ impl Default for Editpad {
             settings: editpad_core::Settings::default(),
             settings_path_override: None,
             settings_visible: false,
+            available_fonts: Vec::new(),
+            active_font_family: None,
+            font_filter: String::new(),
             job_seq: 0,
             active_load: None,
             progress: None,
@@ -1309,6 +1409,12 @@ impl Editpad {
         // 逐字回退不会重排
         apply_default_cjk_mono_pin();
         let settings = editpad_core::Settings::load();
+        // P34：枚举系统字体清单（P33 钉字之后，同一 fontdb 全局），并解析
+        // 配置的字体——未安装时只回退本次渲染并提示一次，**不抹掉配置**
+        // （重装字体后自动恢复用户意图）。
+        let available_fonts = enumerate_available_families();
+        let (active_font_family, configured_font_missing) =
+            resolve_startup_font(settings.font_family.as_deref(), &available_fonts);
         // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
         // （对齐 P20「记住最近文件」先例）
         if !settings.enable_snapshots {
@@ -1322,9 +1428,16 @@ impl Editpad {
         let mut state = Self {
             settings,
             dark_mode,
+            available_fonts,
+            active_font_family: active_font_family.map(leak_font_family),
             ..Self::default()
         };
         state.cur().borrow_mut().set_font_size(font_size);
+        if configured_font_missing {
+            if let Some(name) = state.settings.font_family.as_deref() {
+                state.status = format!("配置的字体「{name}」未安装，本次启动回退默认等宽");
+            }
+        }
         // P18 打磨：启动光标闪烁心跳链（自我续期，占用一个睡眠节拍）
         let caret_chain = Task::perform(
             async {
@@ -2241,6 +2354,30 @@ impl Editpad {
                 self.persist_settings();
                 Task::none()
             }
+
+            // ---------- 字体选择（P34） ----------
+            Message::SettingsFontSelected(name) => {
+                // 名字来自启动期枚举清单，必然可解析；仍走统一解析保持
+                // 「设置值 ↔ 生效值」同源（清单为空的异常环境会回退默认）
+                self.settings.set_font_family(Some(name));
+                self.active_font_family = effective_font_family(
+                    self.settings.font_family.as_deref(),
+                    &self.available_fonts,
+                )
+                .map(leak_font_family);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsFontReset => {
+                self.settings.set_font_family(None);
+                self.active_font_family = None;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::FontFilterChanged(filter) => {
+                self.font_filter = filter;
+                Task::none()
+            }
         }
     }
 
@@ -2537,6 +2674,20 @@ impl Editpad {
     /// 设置里归一后的当前字号（显示与按钮可用性判断都用它）。
     fn display_font_size(&self) -> f32 {
         editor::normalize_font_size(self.settings.font_size)
+    }
+
+    /// 正文与 UI 的统一字形族（P34 换装点）：生效族名 Some → 以
+    /// `Family::Name` 引用（系统字体已在 fontdb 里，无需装载字节），
+    /// None / 未配置 → 默认等宽（P33 的 CJK 钉字仍生效）。
+    /// iced 排版缓存按 Font 值做键——运行期换族即换键，无陈旧缓存问题。
+    fn body_font(&self) -> Font {
+        match self.active_font_family {
+            Some(name) => Font {
+                family: iced::font::Family::Name(name),
+                ..editor::BODY_FONT
+            },
+            None => editor::BODY_FONT,
+        }
     }
 
     /// 「放弃更改并关闭」：P21 聚合放弃 + P29 连快照一起丢
@@ -3261,9 +3412,9 @@ impl Editpad {
     fn tab_context_panel(&self, idx: usize) -> Element<'_, Message> {
         let tab = &self.tabs[idx];
         let interactive = !self.busy;
-        // P33/P36：UI 与正文同族（BODY_FONT），字号固定不随正文缩放
+        // P33/P36：UI 与正文同族，字号固定不随正文缩放；P34：族随设置
         let uipx = editor::ui_font_px();
-        let uifont = editor::BODY_FONT;
+        let uifont = self.body_font();
 
         let mut panel = column![
             row![
@@ -3349,9 +3500,9 @@ impl Editpad {
     /// （主题/字号/即时保存/隐私/会话）+ 只读热键速查表。改动即写回。
     fn settings_panel(&self) -> Element<'_, Message> {
         let s = &self.settings;
-        // P33/P36：UI 与正文同族（BODY_FONT），字号固定不随正文缩放
+        // P33/P36：UI 与正文同族，字号固定不随正文缩放；P34：族随设置
         let uipx = editor::ui_font_px();
-        let uifont = editor::BODY_FONT;
+        let uifont = self.body_font();
 
         // 热键速查表（只读）：数据源 = HOTKEYS，与 README「快捷键」段同源
         let mut hotkey_col = column![text("热键（速查）").size(uipx).font(uifont)].spacing(2);
@@ -3411,6 +3562,86 @@ impl Editpad {
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
+
+                // ---- 正文字体（P34） ----
+                text("正文字体").size(uipx).font(uifont),
+                row![
+                    text(match (&s.font_family, &self.active_font_family) {
+                        (Some(cfg), Some(eff)) if cfg.as_str() == *eff => {
+                            format!("当前：{eff}")
+                        }
+                        (Some(cfg), _) => {
+                            format!("当前：默认等宽（配置的「{cfg}」未安装）")
+                        }
+                        (None, _) => "当前：默认（等宽）".to_owned(),
+                    })
+                    .size(uipx)
+                    .font(uifont),
+                    button(text("回退默认").size(uipx).font(uifont))
+                        .padding([2, 8])
+                        .on_press_maybe(
+                            s.font_family.is_some().then_some(Message::SettingsFontReset)
+                        ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                text("建议选含中文字形的等宽字体；非等宽字体的列对齐会漂移")
+                    .size(uipx * 0.85)
+                    .font(uifont)
+                    .color([0.5, 0.5, 0.5]),
+                // 过滤框 + 候选列表（数据源 = 启动期 fontdb 枚举，名字即选即用）
+                text_input("输入关键字过滤字体", &self.font_filter)
+                    .size(uipx)
+                    .font(uifont)
+                    .on_input(Message::FontFilterChanged)
+                    .width(Fill),
+                {
+                    let needle = editor::normalize_family(&self.font_filter);
+                    let matches: Vec<&String> = self
+                        .available_fonts
+                        .iter()
+                        .filter(|f| {
+                            needle.is_empty()
+                                || editor::normalize_family(f).contains(&needle)
+                        })
+                        .collect();
+                    let total = matches.len();
+                    // 显式标注：两个分支的 widget 类型不同，靠 Into 目标统一
+                    let picker: Element<'_, Message> =
+                        if self.available_fonts.is_empty() {
+                            text("无法枚举系统字体（保持默认等宽）")
+                                .size(uipx)
+                                .font(uifont)
+                                .color([0.7, 0.4, 0.1])
+                                .into()
+                        } else {
+                            let mut list = column![].spacing(2);
+                            for name in matches.iter().take(FONT_PICKER_MAX_ROWS) {
+                                list = list.push(
+                                    button(container(
+                                        text(name.as_str()).size(uipx).font(uifont),
+                                    )
+                                    .width(Fill))
+                                    .width(Fill)
+                                    .on_press(Message::SettingsFontSelected(
+                                        (*name).clone(),
+                                    )),
+                                );
+                            }
+                            if total > FONT_PICKER_MAX_ROWS {
+                                list = list.push(
+                                    text(format!(
+                                        "…共 {total} 个命中，请继续输入关键字缩小范围"
+                                    ))
+                                    .size(uipx * 0.85)
+                                    .font(uifont)
+                                    .color([0.5, 0.5, 0.5]),
+                                );
+                            }
+                            scrollable(list).height(180).into()
+                        };
+                    picker
+                },
 
                 // ---- 即时保存（P18） ----
                 text("即时保存").size(uipx).font(uifont),
@@ -3514,10 +3745,10 @@ impl Editpad {
             .highlight_syntax_name()
             .as_deref()
             == Some("Markdown");
-        // P33/P36：UI 全部控件与正文同族（BODY_FONT），但字号固定不随
-        // 正文缩放——A-/A+ 与 Ctrl+滚轮只调节文件内容
+        // P33/P36：UI 全部控件与正文同族，字号固定不随正文缩放——
+        // A-/A+ 与 Ctrl+滚轮只调节文件内容；P34：族随设置切换
         let uipx = editor::ui_font_px();
-        let uifont = editor::BODY_FONT;
+        let uifont = self.body_font();
 
         let toolbar = row![
             button(text("打开…").size(uipx).font(uifont))
@@ -3624,11 +3855,18 @@ impl Editpad {
         }
 
         // 中间主区域：Markdown 预览面板 或 自绘虚拟化编辑器
+        // P34：两路都按设置的字形族渲染（预览属内容渲染随族切换；
+        // 画布经 view_with_font 每帧传参，无跨帧同步状态）
+        let content_font = self.body_font();
         if self.preview_visible && is_markdown {
             let text = self.cur_handle.borrow().doc.to_text();
-            body = body.push(markdown_preview_element(&text, self.display_font_size()));
+            body = body.push(markdown_preview_element(
+                &text,
+                self.display_font_size(),
+                content_font,
+            ));
         } else {
-            body = body.push(self.cur_handle.view());
+            body = body.push(self.cur_handle.view(content_font));
         }
 
         if let Some((bytes_read, total_bytes)) = self.progress {
@@ -6759,5 +6997,134 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P34 字体选择 ----------
+
+    #[test]
+    fn effective_font_family_resolution_contract() {
+        let available = vec![
+            "Microsoft YaHei UI".to_owned(),
+            "NSimSun".to_owned(),
+            "Sarasa Mono SC".to_owned(),
+        ];
+
+        // 未配置 → 默认等宽（None）
+        assert_eq!(effective_font_family(None, &available), None);
+
+        // 精确命中 → 原样生效
+        assert_eq!(
+            effective_font_family(Some("NSimSun"), &available),
+            Some("NSimSun".to_owned())
+        );
+
+        // 大小写/空白变体 → 宽松命中并矫正为清单规范名
+        assert_eq!(
+            effective_font_family(Some("nsimsun"), &available),
+            Some("NSimSun".to_owned())
+        );
+        assert_eq!(
+            effective_font_family(Some(" SarasaMono sc "), &available),
+            Some("Sarasa Mono SC".to_owned())
+        );
+
+        // 未安装 → 回退默认，不臆造名字
+        assert_eq!(effective_font_family(Some("不存在的字体"), &available), None);
+        // 空清单（枚举失败的降级环境）→ 一律默认
+        assert_eq!(effective_font_family(Some("NSimSun"), &[]), None);
+    }
+
+    #[test]
+    fn resolve_startup_font_prompts_only_for_configured_but_missing() {
+        let available = vec!["NSimSun".to_owned()];
+
+        // 未配置：无提示
+        assert_eq!(resolve_startup_font(None, &available), (None, false));
+        // 配置且可用（含变体矫正）：生效但不提示
+        assert_eq!(
+            resolve_startup_font(Some("nsimsun"), &available),
+            (Some("NSimSun".to_owned()), false)
+        );
+        // 配置了未安装的字体：回退 + 提示一次
+        assert_eq!(resolve_startup_font(Some("Foo"), &available), (None, true));
+        // 空清单降级环境：配置了就提示
+        assert_eq!(resolve_startup_font(Some("Foo"), &[]), (None, true));
+    }
+
+    #[test]
+    fn font_selection_updates_active_font_and_persists_to_injected_path() {
+        let dir = scratch_dir("p34-app");
+        let config = dir.join("config.toml");
+        let mut app = Editpad::default();
+        app.settings_path_override = Some(config.clone());
+        app.available_fonts =
+            vec!["Arial".to_owned(), "Sarasa Mono SC".to_owned()];
+
+        // 未选择时 = 默认等宽（P33 钉字语义不变）
+        assert_eq!(app.body_font(), editor::BODY_FONT);
+
+        // 选择系统字体：设置与生效族名同步更新并落盘
+        dispatch(&mut app, Message::SettingsFontSelected("Arial".to_owned()));
+        assert_eq!(app.settings.font_family.as_deref(), Some("Arial"));
+        assert_eq!(app.active_font_family.as_deref(), Some("Arial"));
+        assert_eq!(
+            app.body_font().family,
+            iced::font::Family::Name("Arial"),
+            "正文与 UI 的换装点必须切到所选族"
+        );
+        assert_eq!(
+            editpad_core::Settings::load_from(&config)
+                .font_family
+                .as_deref(),
+            Some("Arial"),
+            "选择必须即时写回注入路径的 config.toml"
+        );
+
+        // 回退默认：设置清空、渲染回到 BODY_FONT、落盘为空
+        dispatch(&mut app, Message::SettingsFontReset);
+        assert_eq!(app.settings.font_family, None);
+        assert_eq!(app.active_font_family, None);
+        assert_eq!(app.body_font(), editor::BODY_FONT);
+        assert_eq!(
+            editpad_core::Settings::load_from(&config).font_family,
+            None,
+            "回退默认后 config.toml 不应再留字体名"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn font_selection_via_loose_match_canonicalizes_name() {
+        // 手改 config 的变体名经统一解析收敛到规范名（与启动期同一条路径）
+        let mut app = Editpad::default();
+        app.available_fonts = vec!["Noto Sans Mono CJK SC".to_owned()];
+        dispatch(
+            &mut app,
+            Message::SettingsFontSelected("noto sans mono cjk sc".to_owned()),
+        );
+        assert_eq!(
+            app.active_font_family.as_deref(),
+            Some("Noto Sans Mono CJK SC"),
+            "生效值必须是清单里的规范族名"
+        );
+        assert_eq!(
+            app.settings.font_family.as_deref(),
+            Some("noto sans mono cjk sc"),
+            "core 层只做损坏值裁剪，不负责大小写矫正"
+        );
+    }
+
+    #[test]
+    fn font_filter_is_pure_ui_state_and_never_touches_settings() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FontFilterChanged("mono".to_owned()));
+        assert_eq!(app.font_filter, "mono");
+        assert_eq!(app.settings.font_family, None, "过滤词不落盘不改配置");
+
+        // Esc 关浮动栏不应清掉弹窗内输入态（重开时保留上次过滤词属可接受行为，
+        // 这里钉住的是「过滤不影响设置」这一核心契约）
+        dispatch(&mut app, Message::BarsDismissed);
+        assert_eq!(app.settings.font_family, None);
     }
 }

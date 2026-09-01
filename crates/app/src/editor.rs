@@ -87,7 +87,8 @@ pub const CJK_MONO_CANDIDATES: [&str; 6] = [
 
 /// 族名归一：去空白 + 小写。候选表条目都是 ASCII 形态族名，
 /// 与 fontdb 枚举出的本地化族名做同样宽松的比较即可覆盖大小写/空格变体。
-fn normalize_family(name: &str) -> String {
+/// P34 起公开：app 层的「配置字体 ↔ 系统清单」宽松匹配复用同一实现。
+pub fn normalize_family(name: &str) -> String {
     name.chars()
         .filter(|c| !c.is_whitespace())
         .flat_map(char::to_lowercase)
@@ -1357,8 +1358,13 @@ impl EditorHandle {
     }
 
     /// 构造可加入视图树的自绘控件。
-    pub fn view(&self) -> Element<'_, super::Message> {
-        Element::new(EditorView { core: self.clone() })
+    ///
+    /// P34：字形族由调用方按设置传入——控件每帧重建，天然跟随运行期
+    /// 切换，无需在 EditorCore 里维护同步状态（「下标 + 长期别名」教训
+    /// 的反面教材：能靠每帧传参的状态就不要落库）。
+    /// 默认语义 = [`BODY_FONT`]（P33 的 CJK 钉字仍生效）。
+    pub fn view(&self, font: Font) -> Element<'_, super::Message> {
+        Element::new(EditorView { core: self.clone(), font })
     }
 }
 
@@ -1366,6 +1372,8 @@ impl EditorHandle {
 
 struct EditorView {
     core: EditorHandle,
+    /// 本帧正文/行号栏使用的字形族（P34；默认 = [`BODY_FONT`]）。
+    font: Font,
 }
 
 /// 浅色主题的固定配色（保持 v1 观感）；深色主题在 draw 时由 palette 派生。
@@ -1448,6 +1456,8 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
     ) {
         let bounds = layout.bounds();
         let core = self.core.borrow();
+        // P34：本帧字形族来自构造入参（默认 = BODY_FONT）
+        let body_font = self.font;
         let palette = theme.palette();
         let colors = EditorColors::resolve(theme);
         let lh = core.line_height();
@@ -1523,7 +1533,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     bounds: Size::new(gutter_w - GUTTER_MIN, lh),
                     size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                     line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                    font: BODY_FONT,
+                    font: body_font,
                     align_x: core_text::Alignment::Right,
                     align_y: alignment::Vertical::Top,
                     shaping: core_text::Shaping::Basic,
@@ -1547,7 +1557,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         bounds: Size::new((bounds.width - gutter_w).max(0.0), lh),
                         size: Pixels(core.font_size()),
                         line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                        font: BODY_FONT,
+                        font: body_font,
                         align_x: core_text::Alignment::Default,
                         align_y: alignment::Vertical::Top,
                         shaping: core_text::Shaping::Advanced,
@@ -1579,7 +1589,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                             ),
                             size: Pixels(core.font_size()),
                             line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                            font: BODY_FONT,
+                            font: body_font,
                             align_x: core_text::Alignment::Default,
                             align_y: alignment::Vertical::Top,
                             shaping: core_text::Shaping::Advanced,
@@ -1621,7 +1631,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         bounds: Size::new(width + 60.0, lh),
                         size: Pixels(core.font_size()),
                         line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                        font: BODY_FONT,
+                        font: body_font,
                         align_x: core_text::Alignment::Default,
                         align_y: alignment::Vertical::Top,
                         shaping: core_text::Shaping::Advanced,
