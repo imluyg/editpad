@@ -231,6 +231,14 @@ impl Document {
         self.rope.len_chars() == 0
     }
 
+    /// 与另一文档做内容相等比较（P38 撤销回基线判定用）：长度不等直接
+    /// 短路；等长时按底层存储块逐字节比对（ropey 的块级 ==，memcmp 量级），
+    /// 全程无全文 String 分配。行尾元数据一并参与——编辑层虽不会原地
+    /// 改写它，但「同文不同尾」的两个文档不应视为同一状态。
+    pub fn content_eq(&self, other: &Document) -> bool {
+        self.eol == other.eol && self.rope == other.rope
+    }
+
     // ---------- 行列 <-> 字符偏移换算（自绘编辑器的定位基础） ----------
 
     /// 第 `line_idx` 行首字符的全文字符偏移。
@@ -322,8 +330,32 @@ mod tests {
         let _ = snapshot;
     }
 
-    // ---------- P9 主导行尾 ----------
+    // ---------- P38 内容相等比较 ----------
 
+    #[test]
+    fn content_eq_compares_text_and_eol_metadata() {
+        // 同源克隆：内容与行尾元数据全同
+        let doc = Document::from_str("hello\r\nworld");
+        assert!(doc.content_eq(&doc.clone()));
+
+        // 长度不同的快速短路
+        assert!(!doc.content_eq(&Document::from_str("hello\r\nworl")));
+        // 等长但内容不同（块级逐字节比对路径）
+        assert!(!doc.content_eq(&Document::from_str("hello\r\nworlD")));
+
+        // 同文不同主导行尾元数据：不算同一状态
+        assert!(!Document::from_str("a\nb").content_eq(&Document::from_str("a\r\nb")));
+
+        // 跨块构建（流式加载的 from_parts 路径）与一次性构建结果一致：
+        // 块边界不同也不影响比较正确性
+        let mut builder = ropey::RopeBuilder::new();
+        builder.append("分块");
+        builder.append("构建的长文本");
+        let streamed = Document::from_parts(builder.finish(), LineEnding::Lf);
+        assert!(streamed.content_eq(&Document::from_str("分块构建的长文本")));
+    }
+
+    // ---------- P9 主导行尾 ----------
     #[test]
     fn line_ending_detection_picks_dominant_style() {
         use LineEnding::{CrLf, Cr, Lf};

@@ -237,6 +237,10 @@ pub struct EditorCore {
     /// 任何光标活动会重置为可见并刷新活动时刻，静止超时后按相位隐现。
     blink_on: bool,
     last_activity: Option<std::time::Instant>,
+    /// P38 落盘基线：最近一次已知「磁盘内容」的文档快照（rope 结构
+    /// 共享克隆，O(1)）。撤销/重做后据此判断内容是否回到了已保存状态，
+    /// 让 dirty 如实反映「与磁盘的差异」而不是「自保存后动过没有」。
+    saved_baseline: Option<Document>,
 }
 
 /// 光标闪烁半周期。
@@ -268,6 +272,8 @@ impl Default for EditorCore {
             focused: true,
             blink_on: true,
             last_activity: None,
+            // P38：未命名页的基线 = 初始空内容——撤销回空白即可安全关页
+            saved_baseline: Some(Document::new()),
         }
     }
 }
@@ -389,6 +395,8 @@ impl EditorCore {
 
     /// 用新文档整体替换（加载文件时用），清空历史。
     pub fn reset_document(&mut self, doc: Document) {
+        // P38：新文档即新的落盘基线（加载完成 = 磁盘内容已就位）
+        self.saved_baseline = Some(doc.clone());
         self.doc = doc;
         self.cursor = CursorPos::default();
         self.anchor = None;
@@ -526,6 +534,33 @@ impl EditorCore {
     /// 保证组内只有真正连续的单字符输入。
     fn break_typing(&mut self) {
         self.typing_run = None;
+    }
+
+    // ---------- 落盘基线（P38：dirty 如实反映与磁盘的差异） ----------
+
+    /// 登记落盘基线 = **当前内容**。仅在「当前内容确已写入磁盘」的时刻
+    /// 调用（保存/自动保存成功且版本守卫通过）；版本不符时不得调用——
+    /// 那时磁盘上是旧快照，基线保持不动才能维持 dirty 的正确性。
+    /// rope 克隆是结构共享，O(1)。
+    pub fn mark_saved(&mut self) {
+        self.saved_baseline = Some(self.doc.clone());
+    }
+
+    /// 当前内容是否与最近一次落盘基线一致。撤销/重做后由应用层查询，
+    /// 决定 dirty 是否可以回清。无基线时保守返回 false。
+    pub fn is_at_saved_content(&self) -> bool {
+        self.saved_baseline
+            .as_ref()
+            .is_some_and(|base| base.content_eq(&self.doc))
+    }
+
+    /// 撤销落盘基线（置 None）。用于 P30 会话恢复：恢复出来的置脏页内容
+    /// 来自快照而非磁盘，若把快照当基线，「编辑→撤销回快照态」会错误
+    /// 清脏——命名页下次启动从磁盘旧内容重载、未命名页直接空白，未存
+    /// 改动将静默丢失。清掉后 `is_at_saved_content` 保守返回 false，该页
+    /// 在真正落盘一次之前撤销永不回清，宁可不便利也不能丢内容。
+    pub fn clear_saved_baseline(&mut self) {
+        self.saved_baseline = None;
     }
 
     fn snapshot(&mut self) {
@@ -2344,6 +2379,68 @@ mod tests {
             "淘汰后最早退到第 89 组快照，而非空文档"
         );
         assert!(!c.undo(), "栈已耗尽");
+    }
+
+    // ---------- P38 落盘基线：dirty 如实反映与磁盘的差异 ----------
+
+    #[test]
+    fn saved_baseline_tracks_save_and_revert_cycle() {
+        let mut c = core_with("");
+        // 初始基线 = 空文档（Default 即登记）
+        assert!(c.is_at_saved_content(), "初始空内容应在基线上");
+
+        c.insert_str("hello");
+        assert!(!c.is_at_saved_content());
+        // 模拟落盘成功：当前内容成为新基线
+        c.mark_saved();
+        assert!(c.is_at_saved_content());
+
+        // 基线之后继续编辑 → 偏离；撤销回基线 → 回到与磁盘一致
+        c.insert_str("!");
+        assert!(!c.is_at_saved_content());
+        assert!(c.undo());
+        assert!(c.is_at_saved_content(), "撤销回基线应判定与磁盘一致");
+        assert!(c.redo());
+        assert!(!c.is_at_saved_content(), "重做离开基线");
+    }
+
+    #[test]
+    fn reset_document_installs_new_baseline() {
+        let mut c = core_with("");
+        c.insert_str("stale");
+        c.mark_saved();
+        // 换文档（加载/放弃重置）：基线必须跟着换，不能沿用旧文档
+        c.reset_document(editpad_core::Document::from_str("fresh\r\ndoc"));
+        assert!(c.is_at_saved_content());
+        c.insert_str("x");
+        assert!(!c.is_at_saved_content());
+        assert!(c.undo());
+        assert!(c.is_at_saved_content());
+        // 旧基线不得复活：撤销后内容是新文档原文，不是 "stale"
+        assert_eq!(c.doc.to_text(), "fresh\r\ndoc");
+    }
+
+    #[test]
+    fn cleared_baseline_is_conservative_until_marked_saved_again() {
+        let mut c = core_with("");
+        c.insert_str("快照恢复出的草稿");
+        // P30 恢复路径：快照内容 ≠ 磁盘内容，基线必须清空
+        c.clear_saved_baseline();
+        assert!(!c.is_at_saved_content(), "无基线时必须保守判定为偏离");
+
+        // 清空基线后撤销/重做往返：一律保守置脏，绝不误判「已与磁盘一致」
+        c.insert_str("!");
+        assert!(c.undo());
+        assert!(!c.is_at_saved_content());
+        assert!(c.redo());
+        assert!(!c.is_at_saved_content());
+
+        // 真正落盘一次后基线重建，回清能力恢复
+        c.mark_saved();
+        assert!(c.is_at_saved_content());
+        c.insert_str("x");
+        assert!(c.undo());
+        assert!(c.is_at_saved_content());
     }
 
     #[test]

@@ -1679,6 +1679,10 @@ impl Editpad {
                 self.tab_mut().dirty = self.tab().version != version;
                 self.busy = false;
                 if !self.tab().dirty {
+                    // P38：落盘成功且期间无新编辑——当前内容即磁盘内容，
+                    // 刷新撤销回基线的判定基准（版本不符时不得动基线：
+                    // 那时磁盘上是旧快照）
+                    self.cur_handle.borrow_mut().mark_saved();
                     // P31：内存态比已提交清单「更干净」——下一拍重写清单，
                     // 防崩溃恢复把已落盘内容按旧快照复活成置脏页
                     self.session_manifest_stale = true;
@@ -1728,6 +1732,8 @@ impl Editpad {
                             // 版本一致 = 快照之后没有新编辑：可以安全清脏
                             if tab.version == version {
                                 tab.dirty = false;
+                                // P38：当前内容即磁盘内容，刷新落盘基线
+                                tab.editor.borrow_mut().mark_saved();
                                 // P31：auto-save 成功清脏 = 内存比清单干净，
                                 // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
                                 self.session_manifest_stale = true;
@@ -2168,6 +2174,10 @@ impl Editpad {
                         let clean = self.tabs[idx].version == version;
                         if clean {
                             self.tabs[idx].dirty = false;
+                            // P38：落盘成功且版本守卫通过——内容即磁盘内容。
+                            // 本页通常随即被移除，此处是 close_tab_now 失败
+                            // 等幸存路径的基线兜底
+                            self.tabs[idx].editor.borrow_mut().mark_saved();
                             if self.pending_close_tab == Some(idx)
                                 && self.close_tab_now(idx)
                             {
@@ -2392,6 +2402,9 @@ impl Editpad {
 
         use EditOp as E;
         let mut hint: Option<&'static str> = None;
+        // P38：撤销/重做后内容是否恰好回到落盘基线（打字/删除路径不查询，
+        // 维持保守置脏，避免大文档每键全量比对）
+        let mut back_to_saved = false;
 
         let mut editor = self.cur_handle.borrow_mut();
         let changed = match op {
@@ -2407,6 +2420,8 @@ impl Editpad {
                 let changed = editor.undo();
                 if !changed {
                     hint = Some("没有更多撤销历史");
+                } else {
+                    back_to_saved = editor.is_at_saved_content();
                 }
                 changed
             }
@@ -2414,6 +2429,8 @@ impl Editpad {
                 let changed = editor.redo();
                 if !changed {
                     hint = Some("已在最新状态");
+                } else {
+                    back_to_saved = editor.is_at_saved_content();
                 }
                 changed
             }
@@ -2433,9 +2450,20 @@ impl Editpad {
         drop(editor);
 
         if changed {
-            self.tab_mut().dirty = true;
-            // P18：内容版本 +1 并刷新防抖起点（自动保存的触发依据）
-            self.tab_mut().note_mutation();
+            {
+                let tab = self.tab_mut();
+                // P38：撤销/重做按「内容是否回到最近落盘版本」重算置脏——
+                // 退净到基线即与磁盘一致，● 消失、关窗不再无谓拦截；
+                // 其余编辑路径 back_to_saved 恒 false，行为不变
+                tab.dirty = !back_to_saved;
+                // P18：内容版本 +1 并刷新防抖起点（自动保存的触发依据）
+                tab.note_mutation();
+            }
+            if back_to_saved {
+                // P31：内存态变得比已提交清单更干净（清单还记着置脏页），
+                // 下一拍心跳重写清单，防崩溃恢复把已回清的内容按旧快照复活
+                self.session_manifest_stale = true;
+            }
             self.status.clear();
         } else if let Some(hint) = hint {
             self.status = hint.to_owned();
@@ -3007,6 +3035,10 @@ impl Editpad {
                                 {
                                     let mut ed = tab.editor.borrow_mut();
                                     ed.reset_document(doc);
+                                    // P38：快照内容不是磁盘内容，不得当落盘
+                                    // 基线——否则撤销回快照态会错误清脏，
+                                    // 未存改动在零询问退出后静默丢失
+                                    ed.clear_saved_baseline();
                                     ed.restore_view(
                                         meta.cursor_line,
                                         meta.cursor_col,
@@ -3037,6 +3069,9 @@ impl Editpad {
                             {
                                 let mut ed = tab.editor.borrow_mut();
                                 ed.reset_document(doc);
+                                // P38：同未命名页——快照 ≠ 磁盘，基线保守置空，
+                                // 撤销回快照态不得清脏（磁盘还是旧内容）
+                                ed.clear_saved_baseline();
                                 ed.restore_view(
                                     meta.cursor_line,
                                     meta.cursor_col,
@@ -5471,6 +5506,86 @@ mod tests {
         editpad_core::snapshot::clear_session(&dir);
     }
 
+    #[test]
+    fn restored_dirty_pages_stay_dirty_when_undo_revisits_snapshot_state() {
+        // P38 × P30 交互回归：恢复出来的置脏页不得把快照内容当落盘基线，
+        // 否则「编辑 → 撤销回快照态」会错误清脏 → 零询问退出后下次启动
+        // 命名页从磁盘旧内容重载、未命名页直接空白——未存改动静默丢失。
+        let dir = snapshot_scratch_dir("p38-restore-baseline");
+        let untitled = editpad_core::snapshot::SessionTab {
+            path: None,
+            untitled_num: Some(3),
+            dirty: true,
+            file: None,
+            cursor_line: 0,
+            cursor_col: 2,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+        };
+        let named = editpad_core::snapshot::SessionTab {
+            path: Some("C:/w/report.txt".to_owned()),
+            untitled_num: None,
+            dirty: true,
+            file: None,
+            cursor_line: 0,
+            cursor_col: 0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+        };
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[
+                editpad_core::snapshot::SessionPage {
+                    tab: untitled,
+                    doc: editpad_core::Document::from_str("草稿"),
+                },
+                editpad_core::snapshot::SessionPage {
+                    tab: named,
+                    doc: editpad_core::Document::from_str("磁盘上没有的修改"),
+                },
+            ],
+            0,
+            4,
+        )
+        .unwrap();
+
+        let mut app = Editpad::default();
+        let _ = app.restore_from_manifest(&dir, &manifest);
+        assert_eq!(app.tabs.len(), 2);
+        assert!(app.tabs[0].dirty && app.tabs[1].dirty);
+
+        // 未命名页：编辑一步再撤销回快照态——必须保持置脏（无基线保守）
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+        assert!(app.tabs[0].dirty);
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert!(
+            app.tabs[0].dirty,
+            "撤销回快照态不清脏：内容从未落盘（P30 恢复页基线已清空）"
+        );
+        assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "草稿");
+
+        // 置脏命名页同理：磁盘还是旧内容，快照态不算「已保存」
+        dispatch(&mut app, Message::SwitchTab(1));
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("?".into())));
+        assert!(app.tabs[1].dirty);
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert!(app.tabs[1].dirty, "命名恢复页撤销回快照态同样保持置脏");
+        assert_eq!(
+            app.tabs[1].editor.borrow().doc.to_text(),
+            "磁盘上没有的修改"
+        );
+
+        // 真正落盘一次后基线重建，撤销回清能力恢复正常语义
+        let v = app.tabs[1].version;
+        dispatch(&mut app, Message::TabAutosaved(1, v, Ok(())));
+        assert!(!app.tabs[1].dirty);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert!(!app.tabs[1].dirty, "落盘之后撤销回基线应正常回清");
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
     /// 在指定目录种一个「异常退出中间态」会话（clean_exit=false，
     /// 即 P31 心跳写的清单形态）：手工落一份可解析 TOML + 真实页文件。
     fn plant_orphan_session(dir: &Path) {
@@ -5943,6 +6058,62 @@ mod tests {
         busy_app.busy = true;
         dispatch(&mut busy_app, Message::Edit(EditOp::InsertText("x".into())));
         assert!(!busy_app.tabs[0].autosave_inflight, "busy 时不得排队自动保存");
+    }
+
+    // ---------- P38 撤销回基线清脏 ----------
+
+    #[test]
+    fn undo_back_to_saved_content_clears_dirty_and_redo_restores() {
+        let mut app = loaded_txt_app();
+        assert!(!app.tab().dirty);
+
+        // 基线之后编辑置脏 → 自动保存成功落盘 → 当前内容成为磁盘内容
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+        assert!(app.tab().dirty);
+        let v = app.tab().version;
+        dispatch(&mut app, Message::TabAutosaved(0, v, Ok(())));
+        assert!(!app.tab().dirty);
+
+        // 再编辑后撤销：内容恰好回到磁盘版本 → dirty 如实回清。
+        // 注意先移动光标打断 P37 打字组——否则「?」并入上一组，
+        // 一次撤销会直接退回基线之前（那时保持置脏才是正确行为）
+        dispatch(
+            &mut app,
+            Message::Edit(EditOp::Motion(Motion::Right, false)),
+        );
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("?".into())));
+        assert!(app.tab().dirty);
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert!(
+            !app.tab().dirty,
+            "撤销回已保存内容必须回清 dirty（旧实现保持置脏）"
+        );
+        assert!(!app.any_dirty(), "单页应用：聚合口径同样干净");
+
+        // 重做离开基线 → 重新置脏；再撤又回清
+        dispatch(&mut app, Message::Edit(EditOp::Redo));
+        assert!(app.tab().dirty, "重做到未保存状态必须重新置脏");
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert!(!app.tab().dirty);
+    }
+
+    #[test]
+    fn untitled_page_undo_to_blank_clears_dirty() {
+        let mut app = Editpad::default();
+        // 未命名页的基线 = 初始空白：打字置脏，退净即安全可关
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("草稿".into())));
+        assert!(app.any_dirty());
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert!(!app.any_dirty(), "撤销回空白的未命名页不应再拦截关窗");
+        assert_eq!(app.tabs.len(), 1);
+
+        // 部分撤销仍视为有未保存内容：两步输入只退一步
+        let mut app2 = Editpad::default();
+        dispatch(&mut app2, Message::Edit(EditOp::InsertText("a".into())));
+        dispatch(&mut app2, Message::Edit(EditOp::InsertText("\n".into()))); // 换行独立成组
+        dispatch(&mut app2, Message::Edit(EditOp::Undo));
+        assert_eq!(app2.cur_handle.borrow().doc.to_text(), "a");
+        assert!(app2.any_dirty(), "\"a\" 从未落盘，必须保持置脏");
     }
 
     #[test]
