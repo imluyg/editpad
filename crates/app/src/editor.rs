@@ -744,20 +744,34 @@ impl EditorCore {
     /// （旧实现会在 UI 线程一次性冻结数十秒），而是返回无色渲染，
     /// 同时经 [`Self::needs_paving`] 由应用层安排后台分批补建；
     /// 铺建推进到该行后自然恢复配色。
+    ///
+    /// P61 渐进上色：精确预算不足时改走**可视区近似上色**（anchor =
+    /// 可视首行的全新语法状态，独立缓存、不污染精确路径）——大跳转后
+    /// 视口立即有近似配色，后台精确铺建到达后自然替换。可视区之外的
+    /// 行保持无色（反正画不出来）。
     fn highlight_runs(&self, line_idx: usize, target_text: &str) -> Vec<StyledRun> {
         let Some(hl) = &self.highlight else {
             return Vec::new();
         };
         let doc = &self.doc;
-        hl.borrow_mut()
-            .styled_line_limited(
-                line_idx,
-                target_text,
-                doc.line_count(),
-                LazyHighlighter::MAX_INLINE_STRIDES,
-                &mut |i| doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned(),
-            )
-            .unwrap_or_default()
+        let total = doc.line_count();
+        if let Some(runs) = hl.borrow_mut().styled_line_limited(
+            line_idx,
+            target_text,
+            total,
+            LazyHighlighter::MAX_INLINE_STRIDES,
+            &mut |i| doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned(),
+        ) {
+            return runs;
+        }
+        let anchor = self.visible_range().0;
+        hl.borrow_mut().styled_line_approx(
+            line_idx,
+            anchor,
+            target_text,
+            total,
+            &mut |i| doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned(),
+        )
     }
 
     // ---------- 高亮后台分批补建（P12 协作面） ----------

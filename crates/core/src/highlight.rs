@@ -85,6 +85,11 @@ pub struct LazyHighlighter {    syntax_name: String,
     checkpoints: Vec<State>,
     /// 行后状态缓存：key = 已解析完的行号。
     line_cache: HashMap<usize, State>,
+    /// P61 渐进上色：可视区**近似**行后状态缓存（key = 行号）。
+    /// 与精确 `line_cache` 严格隔离——近似状态绝不被精确路径消费，
+    /// 精确铺建到达后调用方自然改用精确结果，近似条目沦为死键
+    /// （容量超限整体清空）。任何失效（编辑）整体清空。
+    approx_line_cache: HashMap<usize, State>,
     /// 补建时被垫付空行的起始行号（P23）：文档当时在此结束，档位内
     /// 之后的部分是垫付的。任何失效发生时，含垫付的检查点一并截掉，
     /// 杜绝「跳到文末 → 文档增长 → 从脏检查点续算」的错色。
@@ -141,6 +146,7 @@ impl LazyHighlighter {
                 HighlightState::new(&highlighter, ScopeStack::new()),
             )],
             line_cache: HashMap::new(),
+            approx_line_cache: HashMap::new(),
             phantom_from: None,
             generation: next_generation(),
         }
@@ -183,6 +189,9 @@ impl LazyHighlighter {
     pub fn invalidate_from(&mut self, line_idx: usize) {
         // P12：编辑即换代——在途的后台补建结果回来后对不上号，整体丢弃
         self.generation = next_generation();
+        // P61：近似状态全部作废（基于旧文档内容，且与精确路径隔离的
+        // 独立缓存——整体清空最简单，可视区会在后续帧重新近似）
+        self.approx_line_cache.clear();
         let mut keep = line_idx / STRIDE + 1;
         if let Some(p) = self.phantom_from {
             // 检查点 k 覆盖 [k*STRIDE, (k+1)*STRIDE)；含垫付行的档位全部不要
@@ -319,6 +328,101 @@ impl LazyHighlighter {
             return None;
         }
         Some(self.styled_line(line_idx, target_text, total_lines, text_of))
+    }
+
+    /// P61 渐进上色：可视区**近似**上色——从 `anchor` 行的全新语法状态
+    /// 出发推进到 `line_idx`（沿途行状态进 `approx_line_cache`，连续滚动
+    /// 时逐行 O(1) 延续），解析目标行并缓存终态。
+    ///
+    /// 与精确路径的关系：**不建检查点、不读写 `line_cache`**——近似状态
+    /// 存独立缓存，绝不会污染精确路径（[`Self::styled_line`] 的
+    /// sequential_hit 只看 line_cache）。取舍：多行构造（跨行注释/
+    /// 字符串）跨 `anchor` 的前几行可能错色；后台精确铺建到达该行后，
+    /// 调用方优先取精确结果自然替换。
+    ///
+    /// * `anchor`：近似状态起点（调用方传可视区首行）；`line_idx <
+    ///   anchor` 时按 `line_idx == anchor` 处理（全新状态直解目标行）。
+    /// * 成本：连续滚动每新行一次 parse_line（≈75µs 量级）；跳转后首帧
+    ///   最多一个视口的行推进（几十行 × 75µs，远小于 UI 冻结阈值）。
+    pub fn styled_line_approx(
+        &mut self,
+        line_idx: usize,
+        anchor: usize,
+        target_text: &str,
+        total_lines: usize,
+        text_of: &mut dyn FnMut(usize) -> String,
+    ) -> Vec<StyledRun> {
+        let ss = syntax_set();
+        let highlighter = Highlighter::new(theme());
+        let syntax = syntax_set()
+            .find_syntax_by_name(&self.syntax_name)
+            .expect("语法名来自构造期，必然存在");
+
+        // 起点：上一行的近似终态（连续滚动逐行延续）；否则从 anchor 的
+        // 全新语法状态推进 anchor..line_idx（行文本按需索取）
+        let (mut parse, mut highlight) = if line_idx > 0 {
+            match self.approx_line_cache.get(&(line_idx - 1)) {
+                Some(state) => state.clone(),
+                None => {
+                    let mut state = (
+                        ParseState::new(&syntax),
+                        HighlightState::new(&highlighter, ScopeStack::new()),
+                    );
+                    let from = anchor.min(line_idx);
+                    for i in from..line_idx {
+                        if i >= total_lines {
+                            break;
+                        }
+                        advance(&mut state.0, &mut state.1, &text_of(i), ss, &highlighter);
+                    }
+                    state
+                }
+            }
+        } else {
+            (
+                ParseState::new(&syntax),
+                HighlightState::new(&highlighter, ScopeStack::new()),
+            )
+        };
+
+        // 解析目标行：与精确路径同一产出管线
+        let ops = parse.parse_line(target_text, ss).unwrap_or_default();
+        let regions =
+            HighlightIterator::new(&mut highlight, &ops[..], target_text, &highlighter);
+
+        let mut runs: Vec<StyledRun> = Vec::new();
+        let mut char_pos = 0usize;
+        for (style, segment) in regions {
+            let start_col = char_pos;
+            char_pos += segment.chars().count();
+            if end_reached(start_col, char_pos) {
+                continue;
+            }
+            let color = [
+                style.foreground.r as f32 / 255.0,
+                style.foreground.g as f32 / 255.0,
+                style.foreground.b as f32 / 255.0,
+                style.foreground.a as f32 / 255.0,
+            ];
+            match runs.last_mut() {
+                Some(last) if last.color == color && last.end_col == start_col => {
+                    last.end_col = char_pos;
+                }
+                _ => runs.push(StyledRun {
+                    start_col,
+                    end_col: char_pos,
+                    color,
+                }),
+            }
+        }
+
+        // 终态入近似缓存（下一行延续）；容量超限整体清空（同 line_cache）
+        if self.approx_line_cache.len() >= LINE_CACHE_CAP {
+            self.approx_line_cache.clear();
+        }
+        self.approx_line_cache.insert(line_idx, (parse, highlight));
+
+        runs
     }
 
     /// 从当前检查点继续向后补建，一次最多 `max_strides` 个档位（P12）。
@@ -820,5 +924,125 @@ mod tests {
         // 有扩展名但完全未知 → 嗅探仍有机会（约定文件名场景之外的内容嗅探）
         let p = Path::new("artifact.xyzzy");
         assert_eq!(resolve_language(Some(p), "plain"), None);
+    }
+
+    // ---------- P61 渐进上色（可视区近似上色） ----------
+
+    #[test]
+    fn styled_line_approx_colors_without_touching_checkpoints() {
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let total = 2000usize; // 远超内联预算（跳到文中未铺建区的等价物）
+        let text_of = &mut |i: usize| format!("let v{i} = {i};");
+        assert!(
+            hl.strides_missing(1500) > LazyHighlighter::MAX_INLINE_STRIDES,
+            "前置：目标行必须超出内联预算"
+        );
+        let before = hl.checkpoints_len();
+
+        // 近似上色：可视区（anchor = 首个可见行）内的行
+        let runs = hl.styled_line_approx(
+            1500,
+            1490,
+            &format!("let v1500 = 1500;"),
+            total,
+            text_of,
+        );
+        assert!(!runs.is_empty(), "近似上色必须产出着色片段");
+        assert_eq!(
+            hl.checkpoints_len(),
+            before,
+            "近似路径不得创建检查点（与精确铺建严格隔离）"
+        );
+
+        // 连续下一行：经近似缓存逐行延续，仍产出片段
+        let runs2 = hl.styled_line_approx(
+            1501,
+            1490,
+            &format!("let v1501 = 1501;"),
+            total,
+            text_of,
+        );
+        assert!(!runs2.is_empty());
+    }
+
+    #[test]
+    fn approx_does_not_poison_exact_path() {
+        // 关键契约：近似状态存独立缓存，绝不污染精确路径——
+        // 先近似、后精确的结果必须与「从未近似」的对照高亮器完全一致
+        let doc: Vec<String> = (0..600)
+            .map(|i| format!("let v{i} = {i}; // 注释 {i}"))
+            .collect();
+        let total = doc.len();
+        let text_of = &mut |i: usize| doc[i].clone();
+
+        let mut approxed = LazyHighlighter::new("rs").expect("rust 语法存在");
+        for line in [300usize, 301, 302] {
+            approxed.styled_line_approx(line, 300, &doc[line], total, text_of);
+        }
+
+        // 精确路径：预算内的行（100）+ 跨近似区的行（310，精确补建会
+        // 途经近似过的 300..=302——必须走检查点状态而非近似缓存）
+        let runs_100 = approxed.styled_line(100, &doc[100], total, text_of);
+        let runs_310 = approxed.styled_line(310, &doc[310], total, text_of);
+
+        let mut control = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let ctrl_100 = control.styled_line(100, &doc[100], total, text_of);
+        let ctrl_310 = control.styled_line(310, &doc[310], total, text_of);
+
+        assert_eq!(runs_100, ctrl_100, "预算内精确结果不受近似影响");
+        assert_eq!(runs_310, ctrl_310, "跨近似区的精确结果不得被污染");
+    }
+
+    #[test]
+    fn approx_state_continues_across_rows() {
+        // 跨行块注释：第二行的近似上色应延续第一行的注释态
+        // （若无状态延续，第二行按全新状态解析会得到普通代码色）
+        let doc_lines = vec![
+            "let a = 1;".to_owned(),
+            "/* 跨行注释开始".to_owned(),
+            "仍然是注释".to_owned(),
+            "let b = 2;".to_owned(),
+        ];
+        let total = doc_lines.len();
+        let text_of = &mut |i: usize| doc_lines[i].clone();
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let r1 = hl.styled_line_approx(1, 1, &doc_lines[1], total, text_of);
+        let r2 = hl.styled_line_approx(2, 1, &doc_lines[2], total, text_of);
+        assert!(!r1.is_empty() && !r2.is_empty());
+        assert_eq!(
+            r1.first().unwrap().color,
+            r2.first().unwrap().color,
+            "跨行注释态必须经近似缓存延续"
+        );
+    }
+
+    #[test]
+    fn invalidate_clears_approx_and_exact_still_correct() {
+        let doc: Vec<String> = (0..300)
+            .map(|i| format!("// c{i}\n"))
+            .chain(std::iter::once("let tail = 0;".to_owned()))
+            .collect();
+        let total = doc.len();
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        hl.styled_line_approx(250, 250, &doc[250], total, &mut |i| doc[i].clone());
+
+        // 编辑：第 10 行起失效 → 近似缓存整体清空
+        hl.invalidate_from(10);
+
+        // 失效后近似重新可用，且精确路径与「从未近似」的对照完全一致
+        let mut edited = |i: usize| {
+            if i == 300 {
+                "let tail = 1;".to_owned()
+            } else {
+                doc[i].clone()
+            }
+        };
+        let runs = hl.styled_line_approx(250, 250, &edited(250), total, &mut edited);
+        assert!(!runs.is_empty());
+
+        let mut control = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let expected = control.styled_line(250, &edited(250), total, &mut edited);
+        let actual = hl.styled_line(250, &edited(250), total, &mut edited);
+        assert_eq!(actual, expected, "失效后精确路径不受近似影响");
     }
 }
