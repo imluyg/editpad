@@ -127,6 +127,10 @@ cargo run --release
   （启动时清空存量会话）；
 - `exit_mode = "ask"`——恢复旧的「每次询问确认条」行为。
 
+以上开关连同主题/字号/即时保存（自动落盘开关与防抖秒数）都收编在
+工具栏「设置」弹窗里，改动即时写回 `config.toml`，无需手改文件；
+弹窗尾部附只读热键速查表（busy 加载/保存期间不可打开，Esc 关闭）。
+
 ## License
 
 Licensed under `Apache-2.0`（见 `LICENSE-APACHE`），
