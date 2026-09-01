@@ -46,29 +46,32 @@
         // 不得落入 Ctrl 快捷键分支被吞，必须按普通文本插入
         let at = keyboard::Key::Character("@".into());
         assert!(matches!(
-            handle_key(at, altgr),
+            handle_key_defaults(at, altgr),
             Some(Message::Edit(EditOp::InsertText(t))) if t == "@"
         ));
 
         let q = keyboard::Key::Character("q".into());
         assert!(matches!(
-            handle_key(q, altgr),
+            handle_key_defaults(q, altgr),
             Some(Message::Edit(EditOp::InsertText(t))) if t == "q"
         ));
 
         // 纯 Ctrl 的快捷键行为不受影响
         let ctrl = keyboard::Modifiers::CTRL;
         let o = keyboard::Key::Character("O".into());
-        assert!(matches!(handle_key(o, ctrl), Some(Message::OpenRequested)));
+        assert!(matches!(
+            handle_key_defaults(o, ctrl),
+            Some(Message::OpenRequested)
+        ));
 
         // Ctrl+未绑定字母仍返回 None（不插入；注意 x 已是 P4 剪切键）
         let q = keyboard::Key::Character("q".into());
-        assert!(handle_key(q, ctrl).is_none());
+        assert!(handle_key_defaults(q, ctrl).is_none());
 
         // Shift+字符（无 Ctrl）照常插入
         let bang = keyboard::Key::Character("!".into());
         assert!(matches!(
-            handle_key(bang, keyboard::Modifiers::SHIFT),
+            handle_key_defaults(bang, keyboard::Modifiers::SHIFT),
             Some(Message::Edit(EditOp::InsertText(t))) if t == "!"
         ));
         let _ = Named::Tab; // 保持 import 使用
@@ -89,7 +92,7 @@
             ("C", "copy"), // 大写（Shift 同按）也走同一快捷键
         ] {
             let key = keyboard::Key::Character(letter.into());
-            let message = handle_key(key, ctrl).expect("应产生消息");
+            let message = handle_key_defaults(key, ctrl).expect("应产生消息");
             let ok = match (&message, expected) {
                 (Message::CopyRequested, "copy")
                 | (Message::CutRequested, "cut")
@@ -890,15 +893,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         let ctrl = keyboard::Modifiers::CTRL;
 
         assert!(matches!(
-            handle_key(keyboard::Key::Character("t".into()), ctrl),
+            handle_key_defaults(keyboard::Key::Character("t".into()), ctrl),
             Some(Message::NewTab)
         ));
         assert!(matches!(
-            handle_key(keyboard::Key::Character("w".into()), ctrl),
+            handle_key_defaults(keyboard::Key::Character("w".into()), ctrl),
             Some(Message::CloseTabRequest)
         ));
         assert!(matches!(
-            handle_key(keyboard::Key::Named(Named::Tab), ctrl),
+            handle_key_defaults(keyboard::Key::Named(Named::Tab), ctrl),
             Some(Message::SwitchTabNext)
         ));
     }
@@ -1769,12 +1772,12 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         use iced::keyboard::{self};
         let shift_ctrl = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
         assert!(matches!(
-            handle_key(keyboard::Key::Character("F".into()), shift_ctrl),
+            handle_key_defaults(keyboard::Key::Character("F".into()), shift_ctrl),
             Some(Message::FormatJson)
         ));
         // 普通 Ctrl+F 不受影响
         assert!(matches!(
-            handle_key(keyboard::Key::Character("f".into()), keyboard::Modifiers::CTRL),
+            handle_key_defaults(keyboard::Key::Character("f".into()), keyboard::Modifiers::CTRL),
             Some(Message::FindToggled)
         ));
     }
@@ -1951,7 +1954,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // P14：Tab 不再被吞——插入真实制表符（显示层展开，见 editor.rs）
         use iced::keyboard::{self, key::Named};
         let message =
-            handle_key(keyboard::Key::Named(Named::Tab), keyboard::Modifiers::empty())
+            handle_key_defaults(keyboard::Key::Named(Named::Tab), keyboard::Modifiers::empty())
                 .expect("Tab 应产生编辑消息");
         assert!(matches!(
             message,
@@ -2851,63 +2854,104 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         editpad_core::snapshot::clear_session(&dir);
     }
 
-    // ---------- P27 设置按钮 + 设置弹窗 + 热键速查表 ----------
+    // ---------- P27 设置按钮 + 设置弹窗 + P62 热键系统 ----------
 
-    #[test]
-    fn hotkey_table_is_well_formed() {
-        assert!(!HOTKEYS.is_empty(), "热键速查表不得为空");
-        for (combo, desc) in HOTKEYS {
-            assert!(!combo.trim().is_empty(), "组合键列不得为空");
-            assert!(!desc.trim().is_empty(), "功能说明不得为空：{combo}");
+    /// 测试便捷：默认（无重映射）热键分发。
+    fn handle_key_defaults(
+        key: keyboard::Key,
+        mods: keyboard::Modifiers,
+    ) -> Option<Message> {
+        handle_key(key, mods, &std::collections::HashMap::new())
+    }
+
+    /// 把规范组合串解析回 (修饰键, 按键)——热键表与分发一致性的驱动器。
+    fn parse_combo_for_test(combo: &str) -> (keyboard::Modifiers, keyboard::Key) {
+        use iced::keyboard::{self, key::Named};
+        let mut mods = keyboard::Modifiers::empty();
+        let mut tokens = combo.split('+').map(str::trim).rev();
+        let key_name = tokens
+            .next()
+            .unwrap_or_else(|| panic!("空组合键 {combo:?}"));
+        for tok in tokens {
+            mods |= match tok {
+                "Ctrl" => keyboard::Modifiers::CTRL,
+                "Shift" => keyboard::Modifiers::SHIFT,
+                other => panic!("未知修饰键 {other:?}"),
+            };
         }
-        // 条目唯一：重复条目意味着展示数据已经漂移
-        let mut combos: Vec<_> = HOTKEYS.iter().map(|(c, _)| *c).collect();
-        let total = combos.len();
-        combos.sort_unstable();
-        combos.dedup();
-        assert_eq!(combos.len(), total, "热键表存在重复条目");
+        let key = match key_name {
+            "Tab" => keyboard::Key::Named(Named::Tab),
+            "Home" => keyboard::Key::Named(Named::Home),
+            "End" => keyboard::Key::Named(Named::End),
+            single if single.chars().count() == 1 => {
+                keyboard::Key::Character(single.to_ascii_lowercase().into())
+            }
+            other => panic!("测试解析器未支持的键名 {other:?}"),
+        };
+        (mods, key)
     }
 
     #[test]
-    fn hotkey_table_entries_all_dispatch_through_handle_key() {
-        use iced::keyboard::{self, key::Named};
-        // 速查表的每个组合键都必须在 handle_key 里有真实分支——
-        // 表格与分发器任何一侧改动漏同步，本测试当场暴露（防漂移的兑现）
-        for (combo, _) in HOTKEYS {
-            if combo.contains("滚轮") {
-                continue; // 鼠标事件不经 handle_key 分发，无法在此验证
-            }
-            // 单元格可能聚合多个组合（「Ctrl+F / Ctrl+H」），逐个验证；
-            // 单个组合形如 Ctrl+Shift+F——按 + 切分，末段=键名，其余=修饰键
-            for part in combo.split('/') {
-                let part = part.trim();
-                let mut mods = keyboard::Modifiers::empty();
-                let mut tokens = part.split('+').map(str::trim).rev();
-                let key_name = tokens.next().unwrap_or_else(|| panic!("空组合键 {part:?}"));
-                for tok in tokens {
-                    mods |= match tok {
-                        "Ctrl" => keyboard::Modifiers::CTRL,
-                        "Shift" => keyboard::Modifiers::SHIFT,
-                        "Alt" => keyboard::Modifiers::ALT,
-                        other => panic!("速查表出现未知修饰键 {other:?}"),
-                    };
-                }
-                let key = match key_name {
-                    "Tab" => keyboard::Key::Named(Named::Tab),
-                    "Home" => keyboard::Key::Named(Named::Home),
-                    "End" => keyboard::Key::Named(Named::End),
-                    single if single.chars().count() == 1 => {
-                        keyboard::Key::Character(single.to_ascii_lowercase().into())
-                    }
-                    other => panic!("速查表出现未支持的键名 {other:?}"),
-                };
-                let dispatched = handle_key(key, mods);
-                assert!(
-                    dispatched.is_some(),
-                    "速查表条目 {part:?} 在 handle_key 中无对应分支——快捷键与展示数据已漂移"
-                );
-            }
+    fn hotkey_actions_are_well_formed() {
+        assert!(!HOTKEY_ACTIONS.is_empty(), "热键动作注册表不得为空");
+        // id 唯一且非空（持久化主键）
+        let mut ids: Vec<_> = HOTKEY_ACTIONS.iter().map(|a| a.id).collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "动作 id 存在重复");
+        // 默认组合全部可归一（格式合法）且互不冲突
+        let mut combos: Vec<_> = HOTKEY_ACTIONS
+            .iter()
+            .map(|a| editpad_core::normalize_combo(a.default_combo).expect("默认组合必须合法"))
+            .collect();
+        let combo_total = combos.len();
+        combos.sort_unstable();
+        combos.dedup();
+        assert_eq!(combos.len(), combo_total, "默认组合存在冲突");
+        for a in HOTKEY_ACTIONS {
+            assert!(!a.desc.trim().is_empty(), "动作 {} 说明不得为空", a.id);
         }
+    }
+
+    #[test]
+    fn hotkey_actions_all_dispatch_through_handle_key() {
+        // 注册表的每个默认组合都必须经 handle_key（默认表）产生消息——
+        // 注册表与分发器任何一侧改动漏同步，本测试当场暴露（防漂移）
+        for action in HOTKEY_ACTIONS {
+            let (mods, key) = parse_combo_for_test(action.default_combo);
+            let dispatched = handle_key_defaults(key, mods);
+            assert!(
+                dispatched.is_some(),
+                "动作 {}（{}）在 handle_key 中无对应分支",
+                action.id,
+                action.default_combo
+            );
+        }
+    }
+
+    #[test]
+    fn handle_key_remap_overrides_and_frees_default() {
+        // 把「保存」重映射到 Ctrl+Shift+S：新组合生效、旧组合让出
+        let mut remap = std::collections::HashMap::new();
+        remap.insert("save".to_owned(), "Ctrl+Shift+S".to_owned());
+
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+S");
+        assert!(matches!(
+            handle_key(key, mods, &remap),
+            Some(Message::SaveRequested)
+        ));
+        let (mods, key) = parse_combo_for_test("Ctrl+S");
+        assert!(
+            handle_key(key, mods, &remap).is_none(),
+            "被挪走的默认组合必须让出（用户显式放弃）"
+        );
+        // 未重映射的动作不受影响
+        let (mods, key) = parse_combo_for_test("Ctrl+O");
+        assert!(matches!(
+            handle_key(key, mods, &remap),
+            Some(Message::OpenRequested)
+        ));
     }
 
     #[test]
@@ -3094,10 +3138,11 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(settings_search_hit("   ", "任意", "任意"));
 
         // 大小写不敏感：desc 里的 JSON 命中 "json" 查询（热键行描述）
-        let (_, json_desc) = HOTKEYS
+        let (_, json_desc) = HOTKEY_ACTIONS
             .iter()
-            .find(|(_, d)| d.contains("JSON"))
-            .expect("热键表必有 JSON 格式化条目");
+            .find(|a| a.desc.contains("JSON"))
+            .map(|a| (a.id, a.desc))
+            .expect("热键动作必有 JSON 格式化条目");
         assert!(settings_search_hit("json", "Ctrl+Shift+F", json_desc));
 
         // 中文子串：标题命中（会话快照）与描述命中（关窗行为含「快照直退」）
@@ -3113,7 +3158,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         let rows: Vec<SettingsRow> = settings_rows().collect();
 
         // 行元数据完整：键/标题/描述非空，键全清单唯一（控件匹配的依据）
-        let mut keys: Vec<&str> = rows.iter().map(|r| r.key).collect();
+        let mut keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
         let total = keys.len();
         keys.sort_unstable();
         keys.dedup();
@@ -3123,28 +3168,37 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             assert!(!r.desc.trim().is_empty(), "行 {} 描述不得为空", r.key);
         }
 
-        // 每个分类页至少一行；热键行与 HOTKEYS 表一一对应（防两套数据漂移）
+        // 静态目录覆盖非热键分类页（P62 起热键页为动态行，由 rows_for 构建）
         for page in SettingsPage::ALL {
+            if page == SettingsPage::Hotkeys {
+                continue;
+            }
             assert!(
                 rows.iter().any(|r| r.page == page),
                 "分类 {} 在行清单中没有条目",
                 page.title()
             );
         }
-        let hotkey_rows: Vec<&SettingsRow> =
-            rows.iter().filter(|r| r.page == SettingsPage::Hotkeys).collect();
-        assert_eq!(hotkey_rows.len(), HOTKEYS.len());
-        for ((combo, desc), r) in HOTKEYS.iter().zip(hotkey_rows) {
-            assert_eq!(r.key, *combo, "热键行键必须与 HOTKEYS 组合键一致");
-            assert_eq!(r.desc, *desc, "热键行描述必须与 HOTKEYS 一致");
+        assert!(
+            !rows.iter().any(|r| r.page == SettingsPage::Hotkeys),
+            "热键行已改为动态构建，静态目录不得再包含"
+        );
+
+        // 动态热键行：每个注册动作一行，标题 = 说明、描述 = 生效组合
+        let app = Editpad::default();
+        let hotkey_rows = app.rows_for(SettingsPage::Hotkeys);
+        assert_eq!(hotkey_rows.len(), HOTKEY_ACTIONS.len());
+        for (action, r) in HOTKEY_ACTIONS.iter().zip(&hotkey_rows) {
+            assert_eq!(r.key, action.id, "热键行键必须与动作 id 一致");
+            assert_eq!(r.title, action.desc);
+            assert_eq!(r.desc, action.default_combo, "未重映射时描述 = 默认组合");
         }
 
-        // 控件覆盖：功能行必有控件；热键/关于为纯展示行（设计如此）
-        let app = Editpad::default();
+        // 控件覆盖：功能行必有控件；热键行有「修改」控件、关于为纯展示行
         for r in &rows {
-            let control = app.settings_row_control(r.key);
+            let control = app.settings_row_control(&r.key);
             match r.page {
-                SettingsPage::Hotkeys | SettingsPage::About => {
+                SettingsPage::About => {
                     assert!(control.is_none(), "展示行 {} 不应有控件", r.key);
                 }
                 _ => {
@@ -3152,11 +3206,124 @@ fn ctx_menu_card_h_adapts_to_viewport() {
                 }
             }
         }
+        for r in &hotkey_rows {
+            assert!(
+                app.settings_row_control(&r.key).is_some(),
+                "热键行 {} 缺「修改」控件",
+                r.key
+            );
+        }
 
         // 字体挑选块挂载点：FONT_ROW_KEY 行存在于字体页（键与标题同源）
         assert!(rows.iter().any(|r| {
             r.page == SettingsPage::Font && r.key == FONT_ROW_KEY && r.title == FONT_ROW_KEY
         }));
+    }
+
+    #[test]
+    fn hotkey_capture_flow_persists_rejects_conflict_and_resets() {
+        let dir = scratch_dir("p62-capture");
+        let config = dir.join("config.toml");
+        let mut app = Editpad::default();
+        app.settings_path_override = Some(config.clone());
+
+        // 进入捕获 → 提交无冲突组合 → 写映射 + 持久化 + 退出捕获
+        dispatch(&mut app, Message::HotkeyCaptureStarted("save"));
+        assert_eq!(app.hotkey_capture, Some("save"));
+        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+S".into()));
+        assert!(app.hotkey_capture.is_none());
+        assert_eq!(
+            app.settings.hotkeys.get("save").map(String::as_str),
+            Some("Ctrl+Shift+S")
+        );
+        assert_eq!(
+            editpad_core::Settings::load_from(&config)
+                .hotkeys
+                .get("save")
+                .map(String::as_str),
+            Some("Ctrl+Shift+S"),
+            "重映射必须即时落盘"
+        );
+
+        // 重映射后分发走新组合（save → Ctrl+Shift+S；分发读活重映射表）
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+S");
+        assert!(matches!(
+            handle_key(key, mods, &app.settings.hotkeys),
+            Some(Message::SaveRequested)
+        ));
+        let (mods, key) = parse_combo_for_test("Ctrl+S");
+        assert!(
+            handle_key(key, mods, &app.settings.hotkeys).is_none(),
+            "旧组合已让出"
+        );
+
+        // 冲突：把「打开」绑到已被 save 占用的组合 → 拒绝并保持捕获态
+        dispatch(&mut app, Message::HotkeyCaptureStarted("open"));
+        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+S".into()));
+        assert_eq!(app.hotkey_capture, Some("open"), "冲突保持捕获态");
+        assert!(app.status.contains("占用"));
+        assert!(
+            app.settings.hotkeys.get("open").is_none(),
+            "被拒动作不得写入映射"
+        );
+        dispatch(&mut app, Message::HotkeyCaptureCancel);
+        assert!(app.hotkey_capture.is_none());
+
+        // 全部恢复默认：清空映射 + 持久化（旧组合回归默认、新组合失效）
+        dispatch(&mut app, Message::HotkeysResetAll);
+        assert!(app.settings.hotkeys.is_empty());
+        assert!(
+            editpad_core::Settings::load_from(&config)
+                .hotkeys
+                .is_empty()
+        );
+        let (mods, key) = parse_combo_for_test("Ctrl+S");
+        assert!(matches!(
+            handle_key_defaults(key, mods),
+            Some(Message::SaveRequested)
+        ), "恢复默认后 Ctrl+S 回归保存");
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+S");
+        assert!(
+            handle_key_defaults(key, mods).is_none(),
+            "恢复默认后 Ctrl+Shift+S 不再触发保存"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hotkey_capture_rejects_non_hotkey_keys_and_esc_cancels() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::HotkeyCaptureStarted("save"));
+
+        // 无 Ctrl 的按键不可作热键：忽略（保持捕获态）
+        dispatch(
+            &mut app,
+            Message::KeyPressed(
+                keyboard::Key::Character("a".into()),
+                keyboard::Modifiers::empty(),
+            ),
+        );
+        assert_eq!(app.hotkey_capture, Some("save"));
+
+        // Esc 取消
+        dispatch(
+            &mut app,
+            Message::KeyPressed(
+                keyboard::Key::Named(keyboard::key::Named::Escape),
+                keyboard::Modifiers::empty(),
+            ),
+        );
+        assert!(app.hotkey_capture.is_none());
+
+        // 非法组合串（core 归一兜底）：捕获态提交非法串 → 不写入
+        dispatch(&mut app, Message::HotkeyCaptureStarted("save"));
+        dispatch(&mut app, Message::HotkeyCaptureKey("alt+f4".into()));
+        assert!(
+            !app.settings.hotkeys.contains_key("save"),
+            "非法组合不得写入映射"
+        );
+        dispatch(&mut app, Message::HotkeyCaptureCancel);
     }
 
     #[test]

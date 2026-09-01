@@ -71,10 +71,13 @@ cargo run --release
 
 ## 快捷键
 
-| 组合 | 功能 |
+以下为默认组合，均可在 **设置 → 快捷键** 页重映射（点击「修改」按下新
+组合键，Esc 取消；冲突会被拒绝；「全部恢复默认」一键还原）。
+
+| 默认组合 | 功能 |
 |------|------|
 | Ctrl+O / Ctrl+S / Ctrl+A | 打开 / 保存 / 全选 |
-| Ctrl+F 或 Ctrl+H / Ctrl+G | 查找替换栏 / 跳转到行 |
+| Ctrl+F / Ctrl+G | 查找替换栏 / 跳转到行 |
 | Ctrl+Z / Ctrl+Y | 撤销 / 重做 |
 | Ctrl+C / Ctrl+X / Ctrl+V | 复制 / 剪切 / 粘贴 |
 | Ctrl+T / Ctrl+W / Ctrl+Tab | 新建标签页 / 关闭当前页 / 循环切换标签页 |

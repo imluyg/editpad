@@ -95,6 +95,11 @@ pub struct Settings {
     /// 非法/缺省在加载时归一为默认页。纯界面偏好，不参与行为语义。
     #[serde(default = "default_settings_page")]
     pub settings_page: String,
+    /// P62 热键重映射：动作 id → 组合键串（如 `"Ctrl+Shift+S"`）。
+    /// 空 = 全部默认。加载时逐条经 [`normalize_combo`] 归一，非法组合
+    /// 条目删除；动作 id 的合法性由 app 层过滤（core 不掌握动作清单）。
+    #[serde(default)]
+    pub hotkeys: HashMap<String, String>,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -115,6 +120,7 @@ impl Default for Settings {
             snapshot_interval_secs: DEFAULT_SNAPSHOT_INTERVAL_SECS,
             font_family: None,
             settings_page: SETTINGS_PAGE_APPEARANCE.to_string(),
+            hotkeys: HashMap::new(),
         }
     }
 }
@@ -173,6 +179,71 @@ pub fn normalize_settings_page(value: &str) -> &'static str {
 /// `#[serde(default)]` 用：P51 分类页缺字段时的默认值。
 fn default_settings_page() -> String {
     SETTINGS_PAGE_APPEARANCE.to_string()
+}
+
+// ---------- P62 组合键串归一 ----------
+
+/// 可作热键的命名键（大小写不敏感匹配，规范形如列首大写形式）。
+const COMBO_NAMED_KEYS: [&str; 23] = [
+    "Home", "End", "PageUp", "PageDown", "Tab", "Insert", "Delete", "Up", "Down", "Left", "Right",
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+];
+
+/// 组合键串归一（纯函数可单测）：`ctrl+shift+f` → `Ctrl+Shift+F`。
+///
+/// 契约：必须含 Ctrl（热键语义）；不得含 Alt（AltGr 保护——AltGr 在
+/// Windows 上报为 Ctrl+Alt，放行会挤占欧洲键盘字符输入）；键名 = 单个
+/// 字母/数字或 [`COMBO_NAMED_KEYS`] 白名单（大小写不敏感）；修饰键顺序
+/// 规范化为 `Ctrl [+Shift] +键名`。不合法返回 None。
+pub fn normalize_combo(value: &str) -> Option<String> {
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut key: Option<String> = None;
+    for token in value.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        match token.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => {
+                if ctrl || key.is_some() {
+                    return None;
+                }
+                ctrl = true;
+            }
+            "shift" => {
+                if shift || key.is_some() {
+                    return None;
+                }
+                shift = true;
+            }
+            "alt" | "meta" | "super" | "win" | "cmd" => return None, // AltGr 保护
+            token => {
+                if key.is_some() {
+                    return None; // 多个键名
+                }
+                if token.len() == 1 {
+                    let ch = token.chars().next()?;
+                    if !ch.is_ascii_alphanumeric() {
+                        return None;
+                    }
+                    key = Some(ch.to_ascii_uppercase().to_string());
+                } else {
+                    let hit = COMBO_NAMED_KEYS
+                        .iter()
+                        .find(|k| k.eq_ignore_ascii_case(token))?;
+                    key = Some((*hit).to_string());
+                }
+            }
+        }
+    }
+    if !ctrl {
+        return None;
+    }
+    let key = key?;
+    let mut out = String::from("Ctrl");
+    if shift {
+        out.push_str("+Shift");
+    }
+    out.push('+');
+    out.push_str(&key);
+    Some(out)
 }
 
 /// `#[serde(default)]` 用：缺字段时的主题默认值。
@@ -271,6 +342,17 @@ impl Settings {
         }
         // P51：分类页键归一——手改/损坏值收敛为默认页
         self.settings_page = normalize_settings_page(&self.settings_page).to_string();
+        // P62：热键重映射逐条归一——非法组合条目删除（动作 id 的合法性
+        // 由 app 层过滤，core 不掌握动作清单）
+        self.hotkeys.retain(|_, combo| {
+            match normalize_combo(combo) {
+                Some(canonical) => {
+                    *combo = canonical;
+                    true
+                }
+                None => false,
+            }
+        });
     }
 
     /// 切换正文字体族（P34）：None = 回退默认等宽。Some 值经与加载归一
@@ -1041,6 +1123,60 @@ mod tests {
             SETTINGS_PAGE_HOTKEYS,
             "P51 字段必须参与 roundtrip"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P62 热键重映射 ----------
+
+    #[test]
+    fn normalize_combo_contract() {
+        // 规范化：大小写/修饰键顺序收敛为「Ctrl [+Shift] +键名」
+        assert_eq!(normalize_combo("ctrl+s"), Some("Ctrl+S".to_owned()));
+        assert_eq!(normalize_combo("CTRL + shift + f"), Some("Ctrl+Shift+F".to_owned()));
+        assert_eq!(normalize_combo("Ctrl+Home"), Some("Ctrl+Home".to_owned()));
+        assert_eq!(normalize_combo("ctrl+8"), Some("Ctrl+8".to_owned()));
+        // 必须含 Ctrl
+        assert_eq!(normalize_combo("shift+s"), None);
+        assert_eq!(normalize_combo("s"), None);
+        // Alt 一律拒绝（AltGr 保护）
+        assert_eq!(normalize_combo("ctrl+alt+q"), None);
+        assert_eq!(normalize_combo("alt+f4"), None);
+        // 键名白名单
+        assert_eq!(normalize_combo("ctrl+foo"), None);
+        assert_eq!(normalize_combo("ctrl+1+2"), None);
+        assert_eq!(normalize_combo("ctrl++"), None);
+        // 命名键大小写不敏感
+        assert_eq!(normalize_combo("ctrl+home"), Some("Ctrl+Home".to_owned()));
+        assert_eq!(normalize_combo("ctrl+F12"), Some("Ctrl+F12".to_owned()));
+    }
+
+    #[test]
+    fn hotkeys_map_normalized_roundtrip_and_legacy() {
+        // 默认 = 空表（全默认组合）
+        assert!(Settings::default().hotkeys.is_empty());
+
+        let dir = scratch_dir("p62-hotkeys");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // 合法条目规范化保留；非法条目删除；旧 config 无字段 → 空
+        let mut s = Settings::default();
+        s.hotkeys.insert("save".to_owned(), "ctrl+shift+s".to_owned());
+        s.hotkeys.insert("bogus".to_owned(), "ctrl+foo".to_owned());
+        s.save_to(&path).expect("保存应成功");
+        let loaded = Settings::load_from(&path);
+        assert_eq!(
+            loaded.hotkeys.get("save").map(String::as_str),
+            Some("Ctrl+Shift+S"),
+            "合法重映射必须规范化保留并 roundtrip"
+        );
+        assert!(!loaded.hotkeys.contains_key("bogus"), "非法组合必须删除");
+
+        // 旧 config（无 P62 字段）→ 空表，零迁移
+        let legacy = dir.join("legacy.toml");
+        fs::write(&legacy, "theme = \"dark\"\n").unwrap();
+        assert!(Settings::load_from(&legacy).hotkeys.is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

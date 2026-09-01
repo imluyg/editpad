@@ -75,97 +75,107 @@ pub(crate) const FONT_ROW_KEY: &str = "正文字体";
 
 /// 设置行的统一视图：静态元数据（SETTINGS_ROWS）+ 热键行动态展开，
 /// 渲染与搜索共用同一清单（防「展示一套、过滤另一套」的数据漂移）。
-#[derive(Debug, Clone, Copy)]
+/// P62：字段改 String——热键行的描述是当前生效组合（随重映射变化，
+/// 非 'static）。
+#[derive(Debug, Clone)]
 pub(crate) struct SettingsRow {
     pub(crate) page: SettingsPage,
-    /// 控件匹配键（= title；热键行 = 组合键，全清单唯一）
-    pub(crate) key: &'static str,
-    pub(crate) title: &'static str,
-    pub(crate) desc: &'static str,
+    /// 控件匹配键（= title；热键行 = 动作 id，全清单唯一）
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) desc: String,
 }
 
 /// 设置行静态元数据（P47）：标题 / 描述文案与所属页。热键行不在此列
-/// （渲染时由 HOTKEYS 展开），关于页信息在此登记。
-pub(crate) const SETTINGS_ROWS: &[SettingsRow] = &[
-    SettingsRow {
+/// （P62 起热键页为动态行，由 view::rows_for 构建），关于页信息在此登记。
+pub(crate) struct StaticRow {
+    page: SettingsPage,
+    key: &'static str,
+    title: &'static str,
+    desc: &'static str,
+}
+
+/// 设置行静态元数据（P47）：标题 / 描述文案与所属页。
+pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
+    StaticRow {
         page: SettingsPage::Appearance,
         key: "主题",
         title: "主题",
         desc: "切换深色 / 浅色主题，立即生效并记住。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Appearance,
         key: "字号",
         title: "字号",
         desc: "正文文字大小；编辑器内 Ctrl+滚轮 缩放，或在此步进调节。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Font,
         key: FONT_ROW_KEY,
         title: FONT_ROW_KEY,
         desc: "界面与正文共用的字体族；建议选含中文字形的等宽字体，非等宽字体的列对齐会漂移。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Save,
         key: "即时保存",
         title: "即时保存",
         desc: "停手后自动落盘，不必手动 Ctrl+S。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Save,
         key: "防抖秒数",
         title: "防抖秒数",
         desc: "停手多少秒后执行自动保存。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Session,
         key: "记住最近打开的文件",
         title: "记住最近打开的文件",
         desc: "在「最近打开」保留历史；关闭开关会一并清空存量记录。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Session,
         key: "会话快照",
         title: "会话快照",
         desc: "关窗时自动保存未存内容，异常退出后可恢复。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Session,
         key: "启动时恢复上次界面",
         title: "启动时恢复上次界面",
         desc: "启动时还原上次的标签页与内容。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Session,
         key: "关窗行为",
         title: "关窗行为",
         desc: "「快照直退」不打断；「每次询问」先确认未保存内容。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::Session,
         key: "快照心跳间隔（秒）",
         title: "快照心跳间隔（秒）",
         desc: "后台周期保存快照的间隔。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::About,
         key: "名称",
         title: "名称",
         desc: "Editpad —— 极简记事本。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::About,
         key: "版本",
         title: "版本",
         desc: env!("CARGO_PKG_VERSION"),
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::About,
         key: "渲染后端",
         title: "渲染后端",
         desc: "tiny-skia 软渲染（P41 内存取舍：进程内存约为 GPU 路径的 1/12）。",
     },
-    SettingsRow {
+    StaticRow {
         page: SettingsPage::About,
         key: "开源协议",
         title: "开源协议",
@@ -173,17 +183,16 @@ pub(crate) const SETTINGS_ROWS: &[SettingsRow] = &[
     },
 ];
 
-/// 全部设置行的统一清单：SETTINGS_ROWS + HOTKEYS 展开的热键行。
-/// 顺序 = 分类内自上而下的展示顺序；搜索过滤与行渲染都从这里出发。
+/// 静态设置行清单（P62 起**不含热键行**——热键页为动态行，由
+/// view::rows_for 按动作注册表与当前重映射构建）。顺序 = 分类内
+/// 自上而下的展示顺序；搜索过滤与行渲染都从这里出发。
 pub(crate) fn settings_rows() -> impl Iterator<Item = SettingsRow> {
-    SETTINGS_ROWS.iter().copied().chain(HOTKEYS.iter().map(
-        |(combo, desc)| SettingsRow {
-            page: SettingsPage::Hotkeys,
-            key: combo,
-            title: combo,
-            desc,
-        },
-    ))
+    SETTINGS_ROWS.iter().map(|r| SettingsRow {
+        page: r.page,
+        key: r.key.to_owned(),
+        title: r.title.to_owned(),
+        desc: r.desc.to_owned(),
+    })
 }
 
 /// 搜索命中判定（P47）：空白词 = 不过滤（全部命中）；否则对标题或描述

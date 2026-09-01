@@ -971,17 +971,39 @@ impl Editpad {
                 )
                 .padding(Padding { top: 4.0, right: 4.0, bottom: 8.0, left: 4.0 }),
             );
-            for r in settings_rows().filter(|r| r.page == current_page) {
+            // P62：热键页头部带「全部恢复默认」与说明
+            if current_page == SettingsPage::Hotkeys {
+                list = list.push(
+                    container(
+                        row![
+                            button(text("全部恢复默认").size(uipx).font(uifont))
+                                .padding([3, 12])
+                                .style(chrome_button_style)
+                                .on_press_maybe(
+                                    (!self.busy).then_some(Message::HotkeysResetAll)
+                                ),
+                            text("修改后立即生效并写入 config.toml")
+                                .size(uipx * 0.85)
+                                .font(uifont)
+                                .color(sc.desc),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                .padding(Padding { top: 0.0, right: 4.0, bottom: 6.0, left: 4.0 }),
+                );
+            }
+            for r in self.rows_for(current_page) {
                 list = list.push(self.settings_row_widget(r));
             }
         } else {
             // 搜索：按分类顺序分组展示命中行
             let mut total_hits = 0;
             for page in SettingsPage::ALL {
-                let hits: Vec<SettingsRow> = settings_rows()
-                    .filter(|r| {
-                        r.page == page && settings_search_hit(query, r.title, r.desc)
-                    })
+                let hits: Vec<SettingsRow> = self
+                    .rows_for(page)
+                    .into_iter()
+                    .filter(|r| settings_search_hit(query, &r.title, &r.desc))
                     .collect();
                 if hits.is_empty() {
                     continue;
@@ -1022,6 +1044,25 @@ impl Editpad {
             .into()
     }
 
+    /// 某分类页的全部设置行（P62）：热键页为**动态行**——标题 = 动作
+    /// 说明、描述 = 当前生效组合（随重映射变化），其余页走静态目录。
+    pub(crate) fn rows_for(&self, page: SettingsPage) -> Vec<SettingsRow> {
+        if page == SettingsPage::Hotkeys {
+            return HOTKEY_ACTIONS
+                .iter()
+                .map(|a| SettingsRow {
+                    page,
+                    key: a.id.to_owned(),
+                    title: a.desc.to_owned(),
+                    desc: effective_combo(a.id, &self.settings.hotkeys)
+                        .unwrap_or(a.default_combo)
+                        .to_owned(),
+                })
+                .collect();
+        }
+        settings_rows().filter(|r| r.page == page).collect()
+    }
+
     /// 单个设置行（P47）：左「标题 + 灰色描述」、右对齐控件，行下 1px
     /// 分隔线（行式布局）。「正文字体」行下方附带字体挑选块。
     fn settings_row_widget(&self, r: SettingsRow) -> Element<'_, Message> {
@@ -1037,7 +1078,7 @@ impl Editpad {
         .width(Fill);
 
         let mut body = row![left].spacing(12).align_y(Alignment::Center);
-        if let Some(control) = self.settings_row_control(r.key) {
+        if let Some(control) = self.settings_row_control(&r.key) {
             body = body.push(control);
         }
 
@@ -1051,12 +1092,42 @@ impl Editpad {
         cell.into()
     }
 
-    /// 按行键构建右侧控件（P47）；返回 None = 纯展示行（热键速查/关于）。
+    /// 按行键构建右侧控件（P47）；返回 None = 纯展示行（关于页）。
     /// 控件消息与 P27 完全一致，写回语义不变。
     pub(crate) fn settings_row_control(&self, key: &str) -> Option<Element<'_, Message>> {
         let s = &self.settings;
         let uipx = editor::ui_font_px();
         let uifont = self.body_font();
+
+        // P62 热键行（key = 动作 id）：修改按钮 / 捕获中提示
+        if HOTKEY_ACTIONS.iter().any(|a| a.id == key) {
+            if self.hotkey_capture.as_deref() == Some(key) {
+                let sc = settings_colors(&self.theme());
+                return Some(
+                    text("按下新组合键…（Esc 取消）")
+                        .size(uipx)
+                        .font(uifont)
+                        .color(sc.accent)
+                        .into(),
+                );
+            }
+            return Some(
+                button(text("修改").size(uipx).font(uifont))
+                    .padding([3, 12])
+                    .style(chrome_button_style)
+                    .on_press_maybe(
+                        (!self.busy)
+                            .then(|| {
+                                HOTKEY_ACTIONS
+                                    .iter()
+                                    .find(|a| a.id == key)
+                                    .map(|a| Message::HotkeyCaptureStarted(a.id))
+                            })
+                            .flatten(),
+                    )
+                    .into(),
+            );
+        }
 
         let control: Element<'_, Message> = match key {
             // ---- 外观 ----

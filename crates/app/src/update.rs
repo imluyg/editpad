@@ -170,7 +170,10 @@ impl Editpad {
         // 进程内一次）——必须发生在首帧排版之前，否则排版缓存里已固化的
         // 逐字回退不会重排
         apply_default_cjk_mono_pin();
-        let settings = editpad_core::Settings::load();
+        let mut settings = editpad_core::Settings::load();
+        // P62：热键重映射表消毒——动作 id 不在注册表中的条目删除
+        // （core 只做组合串格式归一，动作清单是 app 层知识）
+        sanitize_hotkeys(&mut settings);
         // P34：枚举系统字体清单（P33 钉字之后，同一 fontdb 全局），并解析
         // 配置的字体——未安装时只回退本次渲染并提示一次，**不抹掉配置**
         // （重装字体后自动恢复用户意图）。
@@ -532,6 +535,52 @@ impl Editpad {
             // ---------- 外部修改检测（P50） ----------
             Message::WindowFocused => {
                 self.check_external_changes();
+                Task::none()
+            }
+
+            // ---------- 按键分发与热键捕获（P62） ----------
+            Message::KeyPressed(key, modifiers) => {
+                // 热键捕获态拦截：Esc 直接取消（简单状态清除，无需消息
+                // 往返）；可作热键的按键经 HotkeyCaptureKey 走校验提交
+                if self.hotkey_capture.is_some() {
+                    if let keyboard::Key::Named(Named::Escape) = &key {
+                        self.hotkey_capture = None;
+                        self.status.clear();
+                        return Task::none();
+                    }
+                    if let Some(combo) = combo_string(modifiers, &key) {
+                        return Task::done(Message::HotkeyCaptureKey(combo));
+                    }
+                    return Task::none();
+                }
+                match handle_key(key, modifiers, &self.settings.hotkeys) {
+                    Some(message) => Task::done(message),
+                    None => Task::none(),
+                }
+            }
+            Message::HotkeyCaptureStarted(id) => {
+                self.hotkey_capture = Some(id);
+                self.status = format!(
+                    "为「{}」按下新组合键（Esc 取消）",
+                    HOTKEY_ACTIONS
+                        .iter()
+                        .find(|a| a.id == id)
+                        .map(|a| a.desc)
+                        .unwrap_or("")
+                );
+                Task::none()
+            }
+            Message::HotkeyCaptureKey(combo) => self.commit_hotkey_capture(combo),
+            Message::HotkeyCaptureCancel => {
+                self.hotkey_capture = None;
+                self.status.clear();
+                Task::none()
+            }
+            Message::HotkeysResetAll => {
+                self.settings.hotkeys.clear();
+                self.persist_settings();
+                self.hotkey_capture = None;
+                self.status = "已恢复默认热键".to_owned();
                 Task::none()
             }
             Message::ConfirmExternalReload(idx) => {
@@ -1425,6 +1474,49 @@ impl Editpad {
     ///   P52 起队列聚合多页，条上显示总数，可逐个处理或全部忽略。
     /// * 一次聚焦至多发起一个重载（防批量加载风暴）；聚焦即全量重算
     ///   队列——已忽略的页（重记戳）自然不再命中。
+    /// P62：热键捕获提交——组合串先过 core 归一（防御直接消息调用），
+    /// 冲突检测（其他动作已占用该组合则报错并保持捕获态）→ 写重映射表
+    /// → 持久化 → 退出捕获态。
+    fn commit_hotkey_capture(&mut self, combo: String) -> Task<Message> {
+        let Some(id) = self.hotkey_capture else {
+            return Task::none();
+        };
+        if editpad_core::normalize_combo(&combo).is_none() {
+            self.status = format!("「{combo}」不是有效的热键组合");
+            return Task::none();
+        }
+        if let Some(other) = HOTKEY_ACTIONS.iter().find(|a| {
+            a.id != id
+                && self
+                    .hotkey_capture_conflicts_with(a.id, &combo)
+        }) {
+            self.status =
+                format!("「{combo}」已被「{}」占用，换一个组合再试（Esc 取消）", other.desc);
+            return Task::none();
+        }
+        self.settings.hotkeys.insert(id.to_owned(), combo.clone());
+        self.persist_settings();
+        self.hotkey_capture = None;
+        self.status = format!("「{}」已绑定 {combo}", {
+            HOTKEY_ACTIONS
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| a.desc)
+                .unwrap_or(id)
+        });
+        Task::none()
+    }
+
+    /// 该动作的当前生效组合是否与 `combo` 相同（冲突判定用）。
+    fn hotkey_capture_conflicts_with(&self, id: &str, combo: &str) -> bool {
+        self.settings
+            .hotkeys
+            .get(id)
+            .map(String::as_str)
+            .or_else(|| default_combo_of(id))
+            == Some(combo)
+    }
+
     fn check_external_changes(&mut self) {
         if self.busy || self.active_load.is_some() {
             return;
@@ -1523,7 +1615,9 @@ impl Editpad {
         };
         // P10 的查找扫描走 Task::perform（见 schedule_find_scan），不经订阅
         // 0.14 没有 keyboard::on_key_press 了，用 listen_with 手动过滤按键；
-        // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）
+        // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）。
+        // P62：按键转发为 KeyPressed 消息、分发挪到 update——重映射表与
+        // 热键捕获态必须读活状态，订阅闭包捕获会陈旧。
         let events =
             iced::event::listen_with(|event, status, _window| match (event, status) {
                 (
@@ -1531,7 +1625,7 @@ impl Editpad {
                         key, modifiers, ..
                     }),
                     iced::event::Status::Ignored,
-                ) => handle_key(key, modifiers),
+                ) => Some(Message::KeyPressed(key, modifiers)),
                 (
                     iced::Event::Window(window::Event::FileDropped(path)),
                     _,

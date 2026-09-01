@@ -26,9 +26,9 @@ pub use search::{
     find_all, find_all_document, next_from, prev_from, replace_all, replace_all_document,
     ascii_case_eq, MatchPos,
 };
-pub use settings::{Settings, RecentView, normalize_settings_page, EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT,
-    SETTINGS_PAGES, SETTINGS_PAGE_APPEARANCE, SETTINGS_PAGE_FONT, SETTINGS_PAGE_SAVE,
-    SETTINGS_PAGE_SESSION, SETTINGS_PAGE_HOTKEYS, SETTINGS_PAGE_ABOUT};
+pub use settings::{Settings, RecentView, normalize_combo, normalize_settings_page, EXIT_MODE_ASK,
+    EXIT_MODE_SNAPSHOT, SETTINGS_PAGES, SETTINGS_PAGE_APPEARANCE, SETTINGS_PAGE_FONT,
+    SETTINGS_PAGE_SAVE, SETTINGS_PAGE_SESSION, SETTINGS_PAGE_HOTKEYS, SETTINGS_PAGE_ABOUT};
 pub use snapshot::{
     clear_session, enforce_quota, heartbeat_page_selected, read_manifest, read_page,
     snapshot_dir, write_heartbeat_session, write_session, HeartbeatPage, SessionManifest,

@@ -233,6 +233,20 @@ enum Message {
     /// 侧栏搜索框变化：内容区跨分类过滤命中行（纯 UI 态，不落盘）
     SettingsSearchChanged(String),
 
+    // ---------- 热键可重映射（P62） ----------
+    /// 设置热键页「修改」：进入捕获态，下一个可作热键的按键成为新组合
+    HotkeyCaptureStarted(&'static str),
+    /// 捕获态收到一个规范组合串：校验冲突后写映射并持久化
+    HotkeyCaptureKey(String),
+    /// 捕获态取消（Esc 在 update 内直接清除；此变体供测试/将来 UI × 按钮用）
+    #[cfg_attr(not(test), expect(dead_code))]
+    HotkeyCaptureCancel,
+    /// 热键页「全部恢复默认」：清空重映射表（全默认组合）并持久化
+    HotkeysResetAll,
+    /// 订阅转发的原始按键（P62：分发挪到 update——重映射表与捕获态
+    /// 必须读活状态，订阅闭包捕获会陈旧）
+    KeyPressed(keyboard::Key, keyboard::Modifiers),
+
     // ---------- 外部修改检测（P50） ----------
     /// 窗口重新获得焦点：巡检各命名页的 (mtime, size) 戳，外部已改的
     /// 干净活动页静默重载，其余弹提示条由用户裁决
@@ -1143,6 +1157,8 @@ struct Editpad {
     renaming_tab: Option<usize>,
     /// P55：就地重命名的输入内容（预填当前文件名，纯 UI 态）。
     rename_input: String,
+    /// P62：热键捕获态——Some(动作 id) = 设置热键页正在等待新组合键。
+    hotkey_capture: Option<&'static str>,
 
     // ---------- 字体选择（P34） ----------
     /// 启动期从 fontdb 枚举的系统字体族名清单（去重、不区分大小写排序）。
@@ -1278,6 +1294,7 @@ impl Default for Editpad {
             external_change: None,
             renaming_tab: None,
             rename_input: String::new(),
+            hotkey_capture: None,
             available_fonts: Vec::new(),
             active_font_family: None,
             font_filter: String::new(),
@@ -1393,35 +1410,231 @@ fn popup_card_style(theme: &Theme) -> container::Style {
     }
 }
 
-/// 全局快捷键速查表（P27 v1 只读速查）。
+// ---------- 热键系统（P62 可重映射） ----------
+
+/// 热键动作：持久化主键 `id` + 默认组合 + 说明。
 ///
-/// 这是快捷键的**唯一展示数据源**：设置弹窗的热键表与 README「快捷键」
-/// 段都从这里派生（`(组合键, 功能)`）。新增/修改快捷键时必须同步
-/// [`handle_key`] 与 README，避免三处漂移——改动后跑
-/// `hotkey_table_is_well_formed` 与 `hotkey_table_matches_handle_key`
-/// 两个测试即可当场暴露漏改。
-const HOTKEYS: &[(&str, &str)] = &[
-    ("Ctrl+O", "打开文件"),
-    ("Ctrl+S", "保存"),
-    ("Ctrl+A", "全选"),
-    ("Ctrl+F / Ctrl+H", "查找/替换栏"),
-    ("Ctrl+G", "跳转到行"),
-    ("Ctrl+Z", "撤销"),
-    ("Ctrl+Y", "重做"),
-    ("Ctrl+C", "复制选区"),
-    ("Ctrl+X", "剪切选区"),
-    ("Ctrl+V", "粘贴"),
-    ("Ctrl+T", "新建标签页"),
-    ("Ctrl+W", "关闭当前标签页"),
-    ("Ctrl+Tab", "循环切换标签页"),
-    ("Ctrl+Shift+F", "格式化 JSON（仅 JSON 文件）"),
-    ("Ctrl+Home", "跳到文档首"),
-    ("Ctrl+End", "跳到文档尾"),
-    ("Shift+滚轮", "横向滚动"),
-    ("Ctrl+滚轮", "缩放正文字号（设置里也可步进调节）"),
+/// `id` 是 config.toml `hotkeys` 映射的键——**改 id = 破坏用户配置**，
+/// 禁止；改默认组合只影响未重映射的用户。新增动作 = 追加一行 +
+/// [`dispatch_action`] 加一个分支（测试清单自动覆盖）。
+struct HotkeyAction {
+    id: &'static str,
+    default_combo: &'static str,
+    desc: &'static str,
+}
+
+/// 键盘热键动作注册表（展示顺序 = 设置热键页顺序）。
+/// Shift+滚轮 / Ctrl+滚轮为鼠标动作，不可重映射，仅 README 展示。
+const HOTKEY_ACTIONS: &[HotkeyAction] = &[
+    HotkeyAction { id: "open", default_combo: "Ctrl+O", desc: "打开文件" },
+    HotkeyAction { id: "save", default_combo: "Ctrl+S", desc: "保存" },
+    HotkeyAction { id: "select_all", default_combo: "Ctrl+A", desc: "全选" },
+    HotkeyAction { id: "find", default_combo: "Ctrl+F", desc: "查找/替换栏" },
+    HotkeyAction { id: "goto", default_combo: "Ctrl+G", desc: "跳转到行" },
+    HotkeyAction { id: "undo", default_combo: "Ctrl+Z", desc: "撤销" },
+    HotkeyAction { id: "redo", default_combo: "Ctrl+Y", desc: "重做" },
+    HotkeyAction { id: "copy", default_combo: "Ctrl+C", desc: "复制选区" },
+    HotkeyAction { id: "cut", default_combo: "Ctrl+X", desc: "剪切选区" },
+    HotkeyAction { id: "paste", default_combo: "Ctrl+V", desc: "粘贴" },
+    HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
+    HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
+    HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
+    HotkeyAction { id: "format_json", default_combo: "Ctrl+Shift+F", desc: "格式化 JSON（仅 JSON 文件）" },
+    HotkeyAction { id: "doc_start", default_combo: "Ctrl+Home", desc: "跳到文档首" },
+    HotkeyAction { id: "doc_end", default_combo: "Ctrl+End", desc: "跳到文档尾" },
 ];
 
-// ---------- 外部修改检测（P50） ----------
+/// 动作 id 的默认组合（未重映射时的组合键串）。
+fn default_combo_of(id: &str) -> Option<&'static str> {
+    HOTKEY_ACTIONS
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.default_combo)
+}
+
+/// 动作 id 的当前生效组合：用户重映射优先，否则默认。
+fn effective_combo<'a>(
+    id: &str,
+    remap: &'a HashMap<String, String>,
+) -> Option<&'a str> {
+    remap
+        .get(id)
+        .map(String::as_str)
+        .or_else(|| default_combo_of(id))
+}
+
+/// 过滤用户重映射表：动作 id 不在注册表中的条目删除（启动加载时调用）。
+fn sanitize_hotkeys(settings: &mut editpad_core::Settings) {
+    settings
+        .hotkeys
+        .retain(|id, _| HOTKEY_ACTIONS.iter().any(|a| a.id == *id));
+}
+
+/// 按键 → 规范组合串（P62）：`Ctrl [+Shift] +键名`。
+///
+/// 契约：必须含 Ctrl 且不得含 Alt（AltGr 保护，P8 同口径——AltGr 在
+/// Windows 上报为 Ctrl+Alt）；键名 = 单个字母/数字（大写化）或白名单
+/// 命名键；不满足返回 None（该按键不参与热键系统，交回普通编辑路径）。
+fn combo_string(mods: keyboard::Modifiers, key: &keyboard::Key) -> Option<String> {
+    use keyboard::Key;
+    if !mods.control() || mods.alt() {
+        return None;
+    }
+    let key_name = match key {
+        Key::Character(chars) => {
+            let mut it = chars.chars();
+            match (it.next(), it.next()) {
+                (Some(ch), None) if ch.is_ascii_alphanumeric() => {
+                    ch.to_ascii_uppercase().to_string()
+                }
+                _ => return None,
+            }
+        }
+        Key::Named(named) => {
+            let name = match named {
+                Named::Home => "Home",
+                Named::End => "End",
+                Named::PageUp => "PageUp",
+                Named::PageDown => "PageDown",
+                Named::Tab => "Tab",
+                Named::Insert => "Insert",
+                Named::Delete => "Delete",
+                Named::ArrowUp => "Up",
+                Named::ArrowDown => "Down",
+                Named::ArrowLeft => "Left",
+                Named::ArrowRight => "Right",
+                Named::F1 => "F1",
+                Named::F2 => "F2",
+                Named::F3 => "F3",
+                Named::F4 => "F4",
+                Named::F5 => "F5",
+                Named::F6 => "F6",
+                Named::F7 => "F7",
+                Named::F8 => "F8",
+                Named::F9 => "F9",
+                Named::F10 => "F10",
+                Named::F11 => "F11",
+                Named::F12 => "F12",
+                _ => return None,
+            };
+            name.to_string()
+        }
+        _ => return None,
+    };
+    let mut combo = String::from("Ctrl");
+    if mods.shift() {
+        combo.push_str("+Shift");
+    }
+    combo.push('+');
+    combo.push_str(&key_name);
+    Some(combo)
+}
+
+/// 生效动作查询：精确组合 → 用户重映射优先，其次**未重映射**动作的默认
+/// 组合（已重映射的动作让出默认键位——用户显式挪走即视为放弃旧键位）。
+fn effective_action(
+    combo: &str,
+    remap: &HashMap<String, String>,
+) -> Option<&'static str> {
+    for action in HOTKEY_ACTIONS {
+        if remap.get(action.id).map(String::as_str) == Some(combo) {
+            return Some(action.id);
+        }
+    }
+    for action in HOTKEY_ACTIONS {
+        if !remap.contains_key(action.id) && action.default_combo == combo {
+            return Some(action.id);
+        }
+    }
+    None
+}
+
+/// 去掉组合串中的 Shift 修饰（文档导航的选区变体：Ctrl+Shift+Home 与
+/// Ctrl+Home 同指 doc_start，Shift 经由 dispatch 透传给 Motion）。
+fn shiftless(combo: &str) -> String {
+    combo.replace("Shift+", "")
+}
+
+/// 动作 id → 消息。`mods` 供文档导航动作透传 Shift（选区语义）。
+fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
+    let edit = |op| Some(Message::Edit(op));
+    match id {
+        "open" => Some(Message::OpenRequested),
+        "save" => Some(Message::SaveRequested),
+        "select_all" => Some(Message::Edit(EditOp::SelectAll)),
+        "find" => Some(Message::FindToggled),
+        "goto" => Some(Message::GotoToggled),
+        "undo" => Some(Message::Edit(EditOp::Undo)),
+        "redo" => Some(Message::Edit(EditOp::Redo)),
+        "copy" => Some(Message::CopyRequested),
+        "cut" => Some(Message::CutRequested),
+        "paste" => Some(Message::PasteRequested),
+        "new_tab" => Some(Message::NewTab),
+        "close_tab" => Some(Message::CloseTabRequest),
+        "next_tab" => Some(Message::SwitchTabNext),
+        "format_json" => Some(Message::FormatJson),
+        "doc_start" => edit(EditOp::Motion(Motion::DocStart, mods.shift())),
+        "doc_end" => edit(EditOp::Motion(Motion::DocEnd, mods.shift())),
+        _ => None,
+    }
+}
+
+/// 全局按键分发（P62 可重映射）。
+///
+/// 顺序：① Ctrl 组合（无 Alt，P8 AltGr 保护）→ 规范组合串 → 生效动作表
+/// （用户重映射优先，其次默认）→ 分发；Ctrl+Shift+Home/End 经 shiftless
+/// 回退命中 doc_start/doc_end 并透传 Shift（选区语义）。② 其余按键
+/// （字符输入/光标移动/回车退格/Esc）走既有编辑路径。
+fn handle_key(
+    key: keyboard::Key,
+    mods: keyboard::Modifiers,
+    remap: &HashMap<String, String>,
+) -> Option<Message> {
+    use keyboard::Key;
+    let edit = |op| Some(Message::Edit(op));
+
+    if mods.control() && !mods.alt() {
+        if let Some(combo) = combo_string(mods, &key) {
+            let id = effective_action(&combo, remap).or_else(|| {
+                let stripped = shiftless(&combo);
+                if stripped == combo {
+                    return None;
+                }
+                // 仅文档导航接受 Shift 变体回退（其余动作 Shift 组合是
+                // 独立动作，如 Ctrl+Shift+F ≠ Ctrl+F）
+                effective_action(&stripped, remap)
+                    .filter(|id| matches!(*id, "doc_start" | "doc_end"))
+            });
+            if let Some(id) = id {
+                return dispatch_action(id, mods);
+            }
+        }
+        return None;
+    }
+
+    match &key {
+        Key::Character(chars) => edit(EditOp::InsertText(chars.to_string())),
+        Key::Named(Named::Backspace) => edit(EditOp::Backspace),
+        Key::Named(Named::Delete) => edit(EditOp::Delete),
+        // P9：统一插 \n，由 insert_str 归一为文档主导行尾（CRLF 文档得 \r\n）
+        Key::Named(Named::Enter) => edit(EditOp::InsertText("\n".into())),
+        // P14：Tab 插入真实制表符；显示层由 editor::char_cols 展开到制表位，
+        // 文档字节保持原样（保存往返不失真）
+        Key::Named(Named::Tab) => edit(EditOp::InsertText("\t".into())),
+        Key::Named(Named::Escape) => Some(Message::BarsDismissed),
+
+        Key::Named(Named::ArrowLeft) => edit(EditOp::Motion(Motion::Left, mods.shift())),
+        Key::Named(Named::ArrowRight) => edit(EditOp::Motion(Motion::Right, mods.shift())),
+        Key::Named(Named::ArrowUp) => edit(EditOp::Motion(Motion::Up, mods.shift())),
+        Key::Named(Named::ArrowDown) => edit(EditOp::Motion(Motion::Down, mods.shift())),
+        Key::Named(Named::Home) => edit(EditOp::Motion(Motion::Home, mods.shift())),
+        Key::Named(Named::End) => edit(EditOp::Motion(Motion::End, mods.shift())),
+        Key::Named(Named::PageUp) => edit(EditOp::Motion(Motion::PageUp, mods.shift())),
+        Key::Named(Named::PageDown) => edit(EditOp::Motion(Motion::PageDown, mods.shift())),
+
+        _ => None,
+    }
+}
 
 /// P55：重命名目标路径推导（纯函数可单测）——同目录下改名；空名/含
 /// 路径分隔符/Windows 非法文件名字符 → None（调用方提示并保持输入态）。
@@ -1461,81 +1674,6 @@ fn file_changed_externally(
         (None, _) => false,
     }
 }
-
-/// 全局按键分发：Ctrl 组合快捷键优先，其次编辑键与光标移动。
-fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> {
-    use keyboard::Key;
-
-    let edit = |op| Some(Message::Edit(op));
-
-    // Ctrl 组合（Windows/Linux 语义）。
-    // P8：AltGr 在 Windows 上报为 Ctrl+Alt，欧洲键盘的 AltGr 字符
-    // （德语 @=AltGr+Q 等）若进此分支匹配不到就被静默吞掉；
-    // 因此仅「纯 Ctrl」才当快捷键，带 Alt 的一律按普通字符处理。
-    if mods.control() && !mods.alt() {
-        // P22 第二批：Ctrl+Shift+F = 格式化 JSON。必须先于普通字母映射
-        // 分流，否则 Shift 产生的 'F' 会被小写化成 f 撞上「查找」。
-        if mods.shift() {
-            if let Key::Character(letter) = &key {
-                if letter.to_ascii_lowercase() == "f" {
-                    return Some(Message::FormatJson);
-                }
-            }
-        }
-        if let Key::Character(letter) = &key {
-            let message = match letter.to_ascii_lowercase().as_str() {
-                "o" => Message::OpenRequested,
-                "s" => Message::SaveRequested,
-                "f" | "h" => Message::FindToggled,
-                "g" => Message::GotoToggled,
-                "z" => Message::Edit(EditOp::Undo),
-                "y" => Message::Edit(EditOp::Redo),
-                "a" => Message::Edit(EditOp::SelectAll),
-                // P4 剪贴板三件套
-                "c" => Message::CopyRequested,
-                "x" => Message::CutRequested,
-                "v" => Message::PasteRequested,
-                // P21 标签页
-                "t" => Message::NewTab,
-                "w" => Message::CloseTabRequest,
-                _ => return None,
-            };
-            return Some(message);
-        }
-        // Ctrl+Home/End：文档首尾
-        return match &key {
-            Key::Named(Named::Home) => edit(EditOp::Motion(Motion::DocStart, mods.shift())),
-            Key::Named(Named::End) => edit(EditOp::Motion(Motion::DocEnd, mods.shift())),
-            // P21：Ctrl+Tab 循环切到下一个标签页
-            Key::Named(Named::Tab) => Some(Message::SwitchTabNext),
-            _ => None,
-        };
-    }
-
-    match &key {
-        Key::Character(chars) => edit(EditOp::InsertText(chars.to_string())),
-        Key::Named(Named::Backspace) => edit(EditOp::Backspace),
-        Key::Named(Named::Delete) => edit(EditOp::Delete),
-        // P9：统一插 \n，由 insert_str 归一为文档主导行尾（CRLF 文档得 \r\n）
-        Key::Named(Named::Enter) => edit(EditOp::InsertText("\n".into())),
-        // P14：Tab 插入真实制表符；显示层由 editor::char_cols 展开到制表位，
-        // 文档字节保持原样（保存往返不失真）
-        Key::Named(Named::Tab) => edit(EditOp::InsertText("\t".into())),
-        Key::Named(Named::Escape) => Some(Message::BarsDismissed),
-
-        Key::Named(Named::ArrowLeft) => edit(EditOp::Motion(Motion::Left, mods.shift())),
-        Key::Named(Named::ArrowRight) => edit(EditOp::Motion(Motion::Right, mods.shift())),
-        Key::Named(Named::ArrowUp) => edit(EditOp::Motion(Motion::Up, mods.shift())),
-        Key::Named(Named::ArrowDown) => edit(EditOp::Motion(Motion::Down, mods.shift())),
-        Key::Named(Named::Home) => edit(EditOp::Motion(Motion::Home, mods.shift())),
-        Key::Named(Named::End) => edit(EditOp::Motion(Motion::End, mods.shift())),
-        Key::Named(Named::PageUp) => edit(EditOp::Motion(Motion::PageUp, mods.shift())),
-        Key::Named(Named::PageDown) => edit(EditOp::Motion(Motion::PageDown, mods.shift())),
-
-        _ => None,
-    }
-}
-
 
 // ---------- 模块声明（P60 自 main.rs 拆分：纯移动零行为变更） ----------
 // update.rs = 消息处理/保存/加载/订阅；view.rs = 视图/面板/浮层；
