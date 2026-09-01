@@ -55,8 +55,11 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
         scan_multiline_str(text, &q, case_sensitive, &mut out);
         return out;
     }
+    // 行字符缓冲跨行复用：50MB 级文档约 50 万行，逐行新建 Vec<char>
+    // 会产生等量小堆分配（第 39 轮实测占查找耗时可观份额）
+    let mut lc: Vec<char> = Vec::new();
     for (line_idx, line) in text.split('\n').enumerate() {
-        scan_line(line, &q, case_sensitive, line_idx, &mut out);
+        scan_line(line, &q, case_sensitive, line_idx, &mut lc, &mut out);
     }
     out
 }
@@ -83,26 +86,38 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
 
     let mut line = String::new();
     let mut line_idx = 0usize;
+    let mut lc: Vec<char> = Vec::new(); // 同 find_all：跨行复用字符缓冲
     for chunk in doc.chunks() {
         let mut rest = chunk;
         // 块边界可能落在任意位置：'\n' 前的残段累积进当前行缓冲，
         // 遇到完整 '\n' 才结算一行——保证与 split('\n') 逐字节等价
         while let Some(pos) = rest.find('\n') {
             line.push_str(&rest[..pos]);
-            scan_line(&line, &q, case_sensitive, line_idx, &mut out);
+            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
             line.clear();
             line_idx += 1;
             rest = &rest[pos + 1..];
         }
         line.push_str(rest);
     }
-    scan_line(&line, &q, case_sensitive, line_idx, &mut out);
+    scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
     out
 }
 
 /// 单行窗口扫描：在 `line` 的字符序列上滑动长度 `q.len()` 的窗口逐一比较。
-fn scan_line(line: &str, q: &[char], case_sensitive: bool, line_idx: usize, out: &mut Vec<MatchPos>) {
-    let lc: Vec<char> = line.chars().collect();
+///
+/// `lc` 为跨行复用的字符缓冲（clear+extend 重用分配；第 39 轮优化），
+/// 语义与每行新建 `Vec<char>` 完全一致。
+fn scan_line(
+    line: &str,
+    q: &[char],
+    case_sensitive: bool,
+    line_idx: usize,
+    lc: &mut Vec<char>,
+    out: &mut Vec<MatchPos>,
+) {
+    lc.clear();
+    lc.extend(line.chars());
     if lc.len() < q.len() {
         return;
     }
@@ -643,6 +658,24 @@ mod tests {
         );
         // 空查询约定：返回空表
         assert!(find_all_document(&doc, "", true).is_empty());
+    }
+
+    #[test]
+    fn find_all_reuses_line_char_buffer_across_lines() {
+        // 回归第 39 轮缓冲复用优化：跨行长短交替 + 空行 + 多字节行，
+        // 若复用缓冲残留上一行状态（clear 缺失/顺序错乱）会当场断言失败；
+        // 两条路径共享同一 scan_line，钉住精确语义即可双向覆盖
+        let text = "the quick brown fox jumps over the lazy dog\n短行 the\n\nthe end 🚀\nno match here\nthe";
+        let want = vec![
+            MatchPos { line: 0, col: 0, len_chars: 3 },
+            MatchPos { line: 0, col: 31, len_chars: 3 },
+            MatchPos { line: 1, col: 3, len_chars: 3 },
+            MatchPos { line: 3, col: 0, len_chars: 3 },
+            MatchPos { line: 5, col: 0, len_chars: 3 },
+        ];
+        assert_eq!(find_all(text, "the", true), want);
+        let doc = Document::from_str(text);
+        assert_eq!(find_all_document(&doc, "the", true), want);
     }
 
     // ---------- P26：跨行查询 ----------
