@@ -2022,7 +2022,12 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 renderer.fill_text(
                     core_text::Text {
                         content: text,
-                        bounds: Size::new((bounds.width - gutter_w).max(0.0), lh),
+                        // P46 根因修复：bounds 宽度必须覆盖整行——iced 段落按
+                        // bounds 宽度 shaping，传视口宽会导致「视口外的字符
+                        // 没有生成字形」：水平滚动后看不到、行尾吞字、
+                        // 拖动出大段空缺（shaping 只到视口宽）。INFINITY =
+                        // 整行全量 shaping，绘制侧按视口裁剪，成本可忽略。
+                        bounds: Size::new(f32::INFINITY, lh),
                         size: Pixels(core.font_size()),
                         line_height: core_text::LineHeight::Absolute(Pixels(lh)),
                         font: body_font,
@@ -2050,10 +2055,10 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     renderer.fill_text(
                         core_text::Text {
                             content: segment,
-                            bounds: Size::new(
-                                (bounds.width - gutter_w).max(0.0),
-                                lh,
-                            ),
+                            // P46 根因修复：同整行分支——分片 bounds 宽度按
+                            // 视口 shaping 会把片段右侧（滚动后可见部分）
+                            // 的字形截掉；INFINITY 全量 shape，按视口裁剪。
+                            bounds: Size::new(f32::INFINITY, lh),
                             size: Pixels(core.font_size()),
                             line_height: core_text::LineHeight::Absolute(Pixels(lh)),
                             font: body_font,
