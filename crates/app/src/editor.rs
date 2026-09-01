@@ -18,7 +18,7 @@ use iced::advanced::{
     input_method,
     layout::{self, Layout},
     renderer::{self, Renderer as _},
-    text::{self as core_text, Renderer as _},
+    text::{self as core_text, Paragraph as _, Renderer as _},
     widget::Tree,
     Clipboard, Shell, Widget,
 };
@@ -29,7 +29,8 @@ use editpad_core::{Document, LazyHighlighter, StyledRun};
 // ---------- 视觉常量 ----------
 //
 // 行高/列宽不再写死：由 `font_size` 驱动
-// （line_height = 字号×1.375，char_width = 字号×0.5625），随设置实时变化。
+// （line_height = 字号×1.375；char_width 优先用 P42 的运行时实测值，
+// 未实测时回退 字号×0.5625 固定假设），随设置实时变化。
 
 const GUTTER_MIN: f32 = 12.0;
 /// 默认字号（与 core 设置层的规范默认一致）。
@@ -241,6 +242,13 @@ pub struct EditorCore {
     /// 共享克隆，O(1)）。撤销/重做后据此判断内容是否回到了已保存状态，
     /// 让 dirty 如实反映「与磁盘的差异」而不是「自保存后动过没有」。
     saved_baseline: Option<Document>,
+    /// P42 实测列宽（真实字形 advance，像素/列）：控件层用排版段落实测
+    /// 后注入。None = 未实测或测值无效，[`Self::char_width`] 回退固定假设。
+    measured_char_w: Option<f32>,
+    /// P42 度量键：最近一次实测尝试的 (字体, 字号)。与上字段配对去重——
+    /// 键相同即「已按当前字体/字号测过（无论成败）」，避免每帧重测；
+    /// 字体切换（P34）/字号变更（set_font_size 折算后仍会重测校准）时换键。
+    metric_key: Option<(Font, f32)>,
 }
 
 /// 光标闪烁半周期。
@@ -274,6 +282,9 @@ impl Default for EditorCore {
             last_activity: None,
             // P38：未命名页的基线 = 初始空内容——撤销回空白即可安全关页
             saved_baseline: Some(Document::new()),
+            // P42：默认未实测，走 0.5625 固定假设（既有契约不变）
+            measured_char_w: None,
+            metric_key: None,
         }
     }
 }
@@ -368,6 +379,61 @@ fn measure_insertion(text: &str) -> (usize, usize) {
     (lines, tail_cols)
 }
 
+// ---------- 列宽实测（P42） ----------
+//
+// 列模型的「1 列多宽」必须与真实字形 advance 一致，光标/点击/选区才贴合
+// 文字。固定假设（字号×0.5625）按 Consolas 估算，换字体即漂移（NSimSun
+// 0.5em → 每字符 +1px）；治本 = 控件层用排版段落实测，见
+// [`EditorView::ensure_measured_char_width`]。
+
+/// 实测采样字符数（'0' 的重复次数；样本越大舍入误差越小，成本可忽略）。
+const MEASURE_SAMPLE_CHARS: usize = 16;
+
+/// P42：实测列宽有效性校验。等宽字体的 ASCII advance 应落在字号的
+/// [0.3, 0.9] 倍（Consolas≈0.55、NSimSun/更纱=0.5、MS Gothic≈0.5）；
+/// 超出区间视为测量异常（字体未就绪/排版未生效等），保持固定假设。
+fn validate_measured_char_width(w: f32, font_size: f32) -> Option<f32> {
+    if !w.is_finite() || w <= 0.0 || font_size <= 0.0 {
+        return None;
+    }
+    let ratio = w / font_size;
+    if (0.3..=0.9).contains(&ratio) {
+        Some(w)
+    } else {
+        None
+    }
+}
+
+/// P42：用排版段落实测等宽列宽（像素/字符）。
+///
+/// 段落构造即完成 shaping（cosmic-text 走全局 font_system——P33 钉字/
+/// P34 选字自动生效），无需 renderer 实例；参数与正文绘制完全同款
+/// （Shaping::Advanced + Wrapping::None，见 draw 的 fill_text 调用），
+/// 保证量出来的就是画出来的。任何异常返回 None（保持固定假设）。
+fn measure_char_width(font: Font, size: f32) -> Option<f32> {
+    if !(size.is_finite() && size > 0.0) {
+        return None;
+    }
+    let paragraph = <iced::Renderer as core_text::Renderer>::Paragraph::with_text(
+        core_text::Text {
+            content: "0".repeat(MEASURE_SAMPLE_CHARS).as_str(),
+            bounds: Size::new(f32::INFINITY, f32::INFINITY),
+            size: Pixels(size),
+            line_height: core_text::LineHeight::Absolute(Pixels(size * 1.375)),
+            font,
+            align_x: core_text::Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: core_text::Shaping::Advanced,
+            wrapping: core_text::Wrapping::None,
+        },
+    );
+    let total = paragraph.min_bounds().width;
+    if !(total.is_finite() && total > 0.0) {
+        return None;
+    }
+    Some(total / MEASURE_SAMPLE_CHARS as f32)
+}
+
 impl EditorCore {
     // ---------- 字号与几何度量 ----------
 
@@ -381,15 +447,48 @@ impl EditorCore {
         self.font_size * 1.375
     }
 
-    /// 单列字符宽（像素，等宽假设）= 字号 × 0.5625。
+    /// 单列字符宽（像素）。
+    ///
+    /// P42：优先用 [`Self::measured_char_w`]——控件层按真实字形 advance
+    /// 实测的等宽列宽；未实测（或测值无效）回退固定假设 `字号 × 0.5625`。
+    /// 假设值按 Consolas（≈0.55em）估的：P33 钉 NSimSun（0.5em）后每字符
+    /// 累计 +1px 漂移，光标压字/离字（P42）皆源于此，实测后归零。
     pub fn char_width(&self) -> f32 {
-        self.font_size * 0.5625
+        self.measured_char_w
+            .unwrap_or_else(|| self.font_size * 0.5625)
+    }
+
+    /// P42：注入实测列宽（控件层量得真实字形 advance 后调用）。
+    /// 校验失败（非有限/非正/超出字号的合理倍率区间）返回 false 并保持现状。
+    pub fn set_measured_char_width(&mut self, width: f32) -> bool {
+        match validate_measured_char_width(width, self.font_size) {
+            Some(w) => {
+                self.measured_char_w = Some(w);
+                true
+            }
+            None => false,
+        }
     }
 
     /// 设置字号：clamp 到合法区间后让滚动/可见性按新度量重新收敛
     /// （字号变大时可见行变少，光标必须仍落在视口内）。
+    /// P42：实测列宽按字号比例折算（同一字体的 advance 与字号线性），
+    /// 折算后仍落合法区间；控件层下一帧按新度量键重测校准。
     pub fn set_font_size(&mut self, size: f32) {
+        let old = self.font_size;
         self.font_size = normalize_font_size(size);
+        if old > 0.0 && self.font_size != old {
+            if let Some(w) = self.measured_char_w {
+                let scaled = w * self.font_size / old;
+                // 比例折算不改变 w/字号 倍率，校验恒应通过；万一浮点
+                // 边界翻车就丢弃实测回退假设，下一帧重测兜底
+                if validate_measured_char_width(scaled, self.font_size).is_some() {
+                    self.measured_char_w = Some(scaled);
+                } else {
+                    self.measured_char_w = None;
+                }
+            }
+        }
         self.ensure_visible();
     }
 
@@ -1470,6 +1569,30 @@ struct EditorView {
     font: Font,
 }
 
+impl EditorView {
+    /// P42：确保列宽与真实字形一致——首帧（或字体/字号变更后）用排版
+    /// 段落实测 advance 并注入 EditorCore。按 (字体, 字号) 键去重：
+    /// 同键不重测（无论成败，失败保持固定假设，不每帧空转）；
+    /// P34 切字 / A±改字号（set_font_size 只做比例折算）换键重测校准。
+    ///
+    /// 调用点 = 控件 `layout`（每帧最先执行，早于任何 update 事件与
+    /// draw），保证键盘/鼠标事件到达时 char_width 已是实测值。
+    fn ensure_measured_char_width(&self) {
+        let key = (self.font, self.core.borrow().font_size());
+        {
+            let core = self.core.borrow();
+            if core.metric_key == Some(key) {
+                return;
+            }
+        }
+        // 先记键再量：即使本帧量度失败也不再重试（换字体/字号才换键）
+        self.core.borrow_mut().metric_key = Some(key);
+        if let Some(w) = measure_char_width(self.font, key.1) {
+            self.core.borrow_mut().set_measured_char_width(w);
+        }
+    }
+}
+
 /// 浅色主题的固定配色（保持 v1 观感）；深色主题在 draw 时由 palette 派生。
 const SELECTION_COLOR: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.25);
 const CARET_COLOR: Color = Color::from_rgb8(0x11, 0x11, 0x11);
@@ -1535,6 +1658,8 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
+        // P42：每帧最先校准列宽（实测 advance 注入，键相同即跳过）
+        self.ensure_measured_char_width();
         layout::Node::new(limits.resolve(Length::Fill, Length::Fill, Size::INFINITE))
     }
 
@@ -2465,6 +2590,100 @@ mod tests {
         // 超出该行尾的点击被夹紧到行尾
         let hit = c.hit_test(gutter + 100.0 * c.char_width(), 0.0);
         assert_eq!(hit, CursorPos { line: 0, col: 6 });
+    }
+
+    // ---------- P42 列宽实测 ----------
+
+    #[test]
+    fn measured_char_width_overrides_and_rejects_invalid() {
+        let mut c = core_with("hello");
+        // 未实测：固定假设路径（既有契约）
+        assert_eq!(c.char_width(), 9.0);
+
+        // 合法实测值接管
+        assert!(c.set_measured_char_width(8.0));
+        assert_eq!(c.char_width(), 8.0);
+
+        // 非法值全部拒绝且保持现状：非有限 / 非正 / 超出字号 [0.3,0.9] 倍
+        for bad in [0.0, -8.0, f32::NAN, f32::INFINITY, 20.0, 3.0] {
+            assert!(!c.set_measured_char_width(bad), "应拒绝 {bad}");
+            assert_eq!(c.char_width(), 8.0);
+        }
+        // 倍率区间两端可接受（16px → [4.8, 14.4]）
+        assert!(c.set_measured_char_width(4.8));
+        assert!(c.set_measured_char_width(14.4));
+    }
+
+    #[test]
+    fn measured_char_width_drives_caret_and_hit_test() {
+        let mut c = core_with("hello world");
+        c.set_viewport_height(200.0);
+        c.set_measured_char_width(8.0);
+        let gutter = c.gutter_width();
+
+        // 点击第 5 列中点之后 → col 5；光标 x = gutter + 5×8（贴合字形，
+        // 旧假设 9px 时会漂到 gutter+45，压进后面的字符）
+        let hit = c.hit_test(gutter + 5.0 * 8.0 + 1.0, 0.0);
+        assert_eq!(hit, CursorPos { line: 0, col: 5 });
+        c.cursor = hit;
+        let caret_x = c.caret_rect_relative().x;
+        assert!((caret_x - (gutter + 40.0)).abs() < 1e-3);
+
+        // CJK 双宽列同样按实测列宽换算：点击第 2 列（第 1 个汉字占 0..16px）
+        let mut zh = core_with("中文");
+        zh.set_measured_char_width(8.0);
+        let gutter = zh.gutter_width();
+        let hit = zh.hit_test(gutter + 2.5 * 8.0, 0.0);
+        assert_eq!(hit, CursorPos { line: 0, col: 1 });
+        zh.cursor = hit;
+        assert!((zh.caret_rect_relative().x - (gutter + 16.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn set_font_size_rescales_measured_width() {
+        let mut c = core_with("hello");
+        assert!(c.set_measured_char_width(8.0));
+        // 同一字体 advance 与字号线性：16px 实测 8.0 → 20px 应为 10.0
+        c.set_font_size(20.0);
+        assert_eq!(c.char_width(), 10.0);
+        c.set_font_size(16.0);
+        assert_eq!(c.char_width(), 8.0);
+    }
+
+    #[test]
+    fn ensure_measured_char_width_measures_and_dedups() {
+        // 控件层全链路：layout 首帧实测注入（走全局 font_system，
+        // P33 钉字生效）；本机等宽字体 advance 必然落在合法区间
+        let view = EditorView {
+            core: EditorHandle(Rc::new(RefCell::new(core_with("")))),
+            font: BODY_FONT,
+        };
+        view.ensure_measured_char_width();
+        let core = view.core.borrow();
+        assert_eq!(core.metric_key, Some((BODY_FONT, 16.0)));
+        let w = core
+            .measured_char_w
+            .expect("系统字体可用时实测不应失败");
+        assert!(
+            (0.3..=0.9).contains(&(w / core.font_size())),
+            "实测列宽 {w} 超出合理倍率"
+        );
+        drop(core);
+
+        // 同键二次调用去重（值稳定不抖动）
+        view.ensure_measured_char_width();
+        let core = view.core.borrow();
+        assert_eq!(core.metric_key, Some((BODY_FONT, 16.0)));
+        assert_eq!(core.measured_char_w, Some(w));
+
+        // 换字号 → 换键重测：倍率保持（advance ∝ 字号）
+        drop(core);
+        view.core.borrow_mut().set_font_size(20.0);
+        view.ensure_measured_char_width();
+        let core = view.core.borrow();
+        assert_eq!(core.metric_key, Some((BODY_FONT, 20.0)));
+        let w20 = core.measured_char_w.expect("换字号重测不应失败");
+        assert!((w20 / 20.0 - w / 16.0).abs() < 0.05, "倍率应守恒 {w20}");
     }
 
     #[test]
