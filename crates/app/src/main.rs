@@ -337,6 +337,36 @@ fn strings_equal(a: &str, b: &str, case_sensitive: bool) -> bool {
     }
 }
 
+/// 查找/替换输入的转义解析（P22 补充能力）：
+/// `\n` `\r` `\t` `\\` 分别解析为换行、回车、制表符、反斜杠；
+/// 其他未知转义保持原样（`\q` 仍是 `\q`），不做半截猜测。
+///
+/// 这让用户可以搜索/替换换行与制表符等不可见字符——
+/// 也是未来多行查询的输入入口。
+fn unescape_query(q: &str) -> String {
+    let mut out = String::with_capacity(q.len());
+    let mut chars = q.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            // 未知转义或孤立反斜杠：按字面保留
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 // ---------- 高亮后台分批补建（P12） ----------
 
 /// 每个后台批次铺建的检查点档位数。一档 = STRIDE 行 ≈ 10ms 量级，
@@ -1169,12 +1199,13 @@ impl Editpad {
                     return Task::none();
                 }
                 // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
+                // P22 补充：查询与替换文本先做转义解析（\n \r \t \\）
                 let (new_contents, count) = {
                     let editor = self.cur_handle.borrow();
                     editpad_core::replace_all_document(
                         &editor.doc,
-                        &self.find_query,
-                        &self.replace_query,
+                        &unescape_query(&self.find_query),
+                        &unescape_query(&self.replace_query),
                         self.case_sensitive,
                     )
                 };
@@ -1749,8 +1780,7 @@ impl Editpad {
     /// 排队一次后台查找扫描（P10）。查询为空或查找栏已关闭时转为取消。
     /// UI 线程只做廉价操作：文档快照是 rope 结构共享克隆，全文扫描
     /// 在防抖 200ms 后的后台线程进行，结果按序号回填。
-    fn schedule_find_scan(&mut self) -> Task<Message> {
-        if !self.find_visible || self.find_query.is_empty() {
+    fn schedule_find_scan(&mut self) -> Task<Message> {        if !self.find_visible || self.find_query.is_empty() {
             self.cancel_find_scan();
             return Task::none();
         }
@@ -1762,7 +1792,8 @@ impl Editpad {
         let payload = FindScanPayload {
             seq: self.find_seq,
             doc: self.cur_handle.borrow().doc.clone(),
-            query: self.find_query.clone(),
+            // P22 补充：查询做转义解析（\n \r \t \\）后再扫描
+            query: unescape_query(&self.find_query),
             case_sensitive: self.case_sensitive,
             cancelled,
             debounce_ms: FIND_DEBOUNCE_MS,
@@ -1852,7 +1883,8 @@ impl Editpad {
         if let (Some(i), Some(pos)) =
             (index, index.and_then(|i| self.matches.get(i).copied()))
         {
-            let query_len = self.find_query.chars().count();
+            // P22 补充：长度按转义解析后的查询计（含 \n 等不可见字符）
+            let query_len = unescape_query(&self.find_query).chars().count();
             self.cur_handle.borrow_mut().select_span(pos.line, pos.col, query_len);
             self.status = format!("第 {}/{} 处匹配", i + 1, self.matches.len());
         }
@@ -1863,17 +1895,21 @@ impl Editpad {
         if self.busy || self.find_query.is_empty() {
             return Task::none();
         }
+        let effective_query = unescape_query(&self.find_query);
+        let effective_replacement = unescape_query(&self.replace_query);
         let hit_selected = {
             let editor = self.cur_handle.borrow();
             editor
                 .selected_text()
                 .is_some_and(|selected| {
-                    strings_equal(&selected, &self.find_query, self.case_sensitive)
+                    strings_equal(&selected, &effective_query, self.case_sensitive)
                 })
         };
 
         if hit_selected {
-            self.cur_handle.borrow_mut().replace_selection(&self.replace_query.clone());
+            self.cur_handle
+                .borrow_mut()
+                .replace_selection(&effective_replacement);
             self.tab_mut().dirty = true;
             // P10：替换后命中表已过期，排队后台重扫；「跳到下一个」等重扫完成
             // 后由用户再按（旧行为是同步重扫后立即跳，会卡大文档 UI）
@@ -2520,8 +2556,6 @@ mod tests {
         );
     }
 
-    // ---------- P22 第三批：Markdown 预览 ----------
-
     #[test]
     fn preview_toggle_only_flips_for_markdown_documents() {
         // .md 扩展名经别名层得到 Markdown 语法 → 开关生效
@@ -2659,6 +2693,56 @@ mod tests {
             app2.cur_handle.borrow().highlight_syntax_name().as_deref(),
             Some("Bourne Again Shell (bash)")
         );
+    }
+
+    // ---------- 查找/替换转义解析（\n \r \t \\） ----------
+
+    #[test]
+    fn unescape_resolves_known_escapes_and_keeps_unknown_literal() {
+        assert_eq!(unescape_query("\\n"), "\n");
+        assert_eq!(unescape_query("a\\tb"), "a\tb");
+        assert_eq!(unescape_query("\\r"), "\r");
+        assert_eq!(unescape_query("a\\\\b"), "a\\b");
+        // 未知转义保持原样两个字符；孤立反斜杠保持字面
+        assert_eq!(unescape_query("\\q"), "\\q");
+        assert_eq!(unescape_query("trailing\\"), "trailing\\");
+        // 无转义内容不受影响
+        assert_eq!(unescape_query("plain 中文 🚀"), "plain 中文 🚀");
+    }
+
+    #[test]
+    fn find_and_replace_support_escaped_tab_and_newline() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/t/a.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("a\tb"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 查找 \t 并替换为换行：输入框里的字面反斜杠序列被解析成真实控制字符
+        app.find_visible = true;
+        dispatch(&mut app, Message::FindQueryChanged("\\t".into()));
+        dispatch(&mut app, Message::ReplaceQueryChanged("\\n".into()));
+        let raw_query_kept = app.find_query.clone();
+        assert_eq!(raw_query_kept, "\\t", "输入框保留用户原始输入");
+        // 模拟在途扫描已完成（测试中任务被丢弃，不会自动清除）
+        app.find_scan = None;
+
+        dispatch(&mut app, Message::ReplaceAll);
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "a\nb",
+            "替换文本中的 \\n 转义应成为真实换行"
+        );
+        assert!(app.tab().dirty);
     }
 
     // ---------- P22 第二批：格式化 JSON ----------
