@@ -20,9 +20,10 @@ use std::sync::{Arc, mpsc as std_mpsc};
 
 use iced::futures::SinkExt;
 use iced::keyboard::{self, key::Named};
-use iced::widget::{button, checkbox, column, container, mouse_area, progress_bar, row, rule,
-    scrollable, text, text_input};
-use iced::{stream, window, Alignment, Element, Fill, Font, Subscription, Task, Theme};
+use iced::widget::{button, checkbox, column, container, mouse_area, opaque, progress_bar, row, rule,
+    scrollable, text, text_input, Stack};
+use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
+    Font, Padding, Point, Shadow, Subscription, Task, Theme, Vector};
 
 use editor::{EditorHandle, EditOp, Motion};
 
@@ -110,10 +111,17 @@ enum Message {
 
     // ---------- 标签右键菜单（P28） ----------
     /// 在第 `idx` 个标签页上打开右键菜单（标签按钮外包 mouse_area 捕获右键；
-    /// 左键仍由内部 button 消费，切换不受影响）
+    /// 左键仍由内部 button 消费，切换不受影响）。P39 起菜单为浮层，
+    /// 打开时以最近指针位置为锚点。
     TabContextMenu(usize),
-    /// 收起右键菜单（选中单项 / Esc / 切换标签时）
+    /// 收起右键菜单（选中单项 / Esc / 点菜单外 / 切换标签时）
     TabContextMenuClosed,
+    // ---------- 浮层弹窗定位（P39/P40） ----------
+    /// 指针在标签条区域内移动（右键菜单锚点的数据源；仅标签条挂了
+    /// on_move，消息量与悬停频率同量级，可忽略）
+    CursorMoved(Point),
+    /// 窗口逻辑尺寸变化（浮层贴边钳制的依据；启动时 winit 也会发一次）
+    ViewportResized(f32, f32),
     /// 固定/取消固定第 `idx` 页：固定页豁免单页与批量关闭
     TogglePinTab(usize),
     /// 菜单「保存」：切到第 `idx` 页并复用既有活动页保存流
@@ -1160,6 +1168,13 @@ struct Editpad {
     // ---------- 标签右键菜单（P28） ----------
     /// Some(idx) = 正在展示第 idx 个标签页的右键菜单
     tab_context_menu: Option<usize>,
+    // ---------- 浮层弹窗定位（P39/P40） ----------
+    /// 右键菜单锚点（窗口系坐标）：打开菜单那一刻的指针位置
+    menu_anchor: (f32, f32),
+    /// 指针在标签条区域内的最新位置（锚点数据源；标签条 mouse_area 跟踪）
+    cursor_pos: (f32, f32),
+    /// 窗口逻辑尺寸（Resized 事件；(0,0) = 未知，贴边钳制跳过）
+    viewport_size: (f32, f32),
     /// Some(targets) = 批量关闭（关闭其他/右侧）目标列表，任一置脏时
     /// 先弹一次聚合确认；确认后统一放弃并移除。固定页不在列表内。
     batch_close_confirm: Option<Vec<usize>>,
@@ -1245,6 +1260,11 @@ impl Default for Editpad {
             open_confirm: None,
             close_tab_confirm: None,
             tab_context_menu: None,
+            // P39/P40：浮层定位初值——锚点给一个可见的保守位置，
+            // 尺寸未知 (0,0) = 贴边钳制跳过（启动后首个 Resized 事件校准）
+            menu_anchor: (24.0, 56.0),
+            cursor_pos: (0.0, 0.0),
+            viewport_size: (0.0, 0.0),
             batch_close_confirm: None,
             pending_close_tab: None,
             dark_mode: false,
@@ -1268,6 +1288,14 @@ impl Default for Editpad {
 
 impl Editpad {
     // ---------- 多标签访问器（P21） ----------
+
+    /// 进入 busy（对话框/IO 互斥）。P39 浮层化后的新约束：同时收起
+    /// 右键菜单浮层——它的透明背板会挡住整窗点击，busy 期间不能留它挡道
+    /// （旧内嵌面板无此问题，故此前各 busy 置位点都无需理会菜单态）。
+    fn enter_busy(&mut self) {
+        self.busy = true;
+        self.tab_context_menu = None;
+    }
 
     /// 当前激活标签页。
     fn tab(&self) -> &Tab {
@@ -1523,7 +1551,7 @@ impl Editpad {
                 if self.busy {
                     return Task::none();
                 }
-                self.busy = true;
+                self.enter_busy();
                 self.status.clear();
                 Task::perform(
                     async {
@@ -2149,7 +2177,7 @@ impl Editpad {
                     self.status = "未命名标签页请先另存为再关闭".to_owned();
                     return Task::none();
                 }
-                self.busy = true;
+                self.enter_busy();
                 let path = self.tabs[idx].path.clone().expect("上方已确认非空");
                 let doc = self.tabs[idx].editor.borrow().doc.clone();
                 let version = self.tabs[idx].version;
@@ -2196,12 +2224,23 @@ impl Editpad {
                 Task::none()
             }
 
-            // ---------- 标签右键菜单（P28） ----------
+            // ---------- 标签右键菜单（P28；P39 起为浮层） ----------
             Message::TabContextMenu(i) => {
                 // busy（对话框/IO 中）不开菜单；越界下标（页刚被关掉）忽略
                 if !self.busy && i < self.tabs.len() {
+                    // P39：浮层锚点 = 打开那一刻的指针位置（标签条 mouse_area 跟踪）
+                    self.menu_anchor = self.cursor_pos;
                     self.tab_context_menu = Some(i);
                 }
+                Task::none()
+            }
+            // ---------- 浮层弹窗定位（P39/P40） ----------
+            Message::CursorMoved(p) => {
+                self.cursor_pos = (p.x, p.y);
+                Task::none()
+            }
+            Message::ViewportResized(w, h) => {
+                self.viewport_size = (w, h);
                 Task::none()
             }
             Message::TabContextMenuClosed => {
@@ -2517,7 +2556,7 @@ impl Editpad {
         let id = self.job_seq;
         self.active_load = Some(LoadJob { id, path, tab });
         self.progress = Some((0, 0));
-        self.busy = true;
+        self.enter_busy();
         id
     }
 
@@ -2556,6 +2595,11 @@ impl Editpad {
                     iced::Event::Window(window::Event::FileDropped(path)),
                     _,
                 ) => Some(Message::FileDropped(path)),
+                // P39/P40：窗口逻辑尺寸（浮层贴边钳制依据；iced_winit 已
+                // 换算成逻辑坐标，与 mouse_area 光标坐标同空间）
+                (iced::Event::Window(window::Event::Resized(size)), _) => {
+                    Some(Message::ViewportResized(size.width, size.height))
+                }
                 _ => None,
             });
         // 窗口关闭请求：exit_on_close_request(false) 后以订阅事件流转
@@ -2571,7 +2615,7 @@ impl Editpad {
         if self.busy {
             return Task::none();
         }
-        self.busy = true;
+        self.enter_busy();
         let suggested = self.suggested_name();
         Task::perform(
             async move {
@@ -2588,7 +2632,7 @@ impl Editpad {
         if self.busy || self.tab().path.is_none() {
             return Task::none();
         }
-        self.busy = true;
+        self.enter_busy();
         let path = self.tab().path.clone().expect("上方已确认非空");
         // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
@@ -3859,6 +3903,8 @@ impl Editpad {
         // P28：按钮外包 mouse_area 捕获右键弹菜单——MouseArea 先把事件
         // 交给子组件，左键被 button 捕获后自身跳过，故切换不受影响；
         // 右键无人捕获，落到 on_right_press。
+        // P39：整条标签条再包一层 mouse_area 跟踪指针位置（浮层菜单
+        // 锚点数据源；只在标签条悬停时产生消息，量级可忽略）。
         let mut body = column![toolbar, rule::horizontal(1)];
         {
             let mut strip = row![].spacing(2).padding([4, 6]);
@@ -3879,14 +3925,9 @@ impl Editpad {
                     .on_right_press(Message::TabContextMenu(i)),
                 );
             }
-            body = body.push(strip);
-        }
-
-        // P28 右键菜单面板（下标失效 = 页刚被关掉，不渲染）
-        if let Some(idx) = self.tab_context_menu {
-            if idx < self.tabs.len() {
-                body = body.push(rule::horizontal(1)).push(self.tab_context_panel(idx));
-            }
+            body = body.push(
+                mouse_area(strip).on_move(Message::CursorMoved),
+            );
         }
 
         // 中间主区域：Markdown 预览面板 或 自绘虚拟化编辑器
@@ -4044,10 +4085,8 @@ impl Editpad {
             );
         }
 
-        // P27 设置弹窗：置于其余面板之后（覆盖式语义，关闭入口见标题行 ×）
-        if self.settings_visible {
-            body = body.push(rule::horizontal(1)).push(self.settings_panel());
-        }
+        // P27 设置弹窗：P40 起为居中浮层模态（见 view 尾部 Stack 组装），
+        // 不再内嵌推进 body 列。
 
         // 未保存关闭确认条：置于状态区域上方
         if self.confirm_visible {
@@ -4218,7 +4257,124 @@ impl Editpad {
 
         body = body.push(rule::horizontal(1)).push(status_bar);
 
-        container(body).width(Fill).height(Fill).into()
+        // P39/P40：浮层经 Stack 叠加——首层（正文）定尺寸，顶层浮在
+        // 其上、不占布局空间（iced_widget-0.14.2 Stack 语义），正文可用
+        // 面积不再被菜单/设置弹窗挤占。opaque 背板捕获层内点击，
+        // 防止点菜单外的落穿透到正文。
+        let base: Element<'_, Message> = container(body).width(Fill).height(Fill).into();
+        let mut layered = Stack::new().push(base);
+        if let Some(idx) = self.tab_context_menu {
+            if idx < self.tabs.len() {
+                layered = layered.push(self.context_menu_overlay(idx));
+            }
+        }
+        if self.settings_visible {
+            layered = layered.push(self.settings_overlay());
+        }
+        layered.into()
+    }
+
+    // ---------- 浮层弹窗（P39/P40） ----------
+
+    /// P39：标签右键菜单浮层——整窗透明背板（点击即收起）+ 锚在指针
+    /// 位置、贴边钳制后的菜单卡片。opaque 双层防穿透：背板捕获菜单外
+    /// 点击不落到正文，卡片捕获卡片内空白处点击不触发背板关闭。
+    fn context_menu_overlay(&self, idx: usize) -> Element<'_, Message> {
+        let (ax, ay) = clamp_menu_anchor(
+            self.menu_anchor,
+            self.viewport_size,
+            CTX_MENU_W,
+            CTX_MENU_H,
+        );
+        let card = opaque(
+            container(self.tab_context_panel(idx))
+                .padding(4)
+                .style(popup_card_style),
+        );
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
+        )
+        .on_press(Message::TabContextMenuClosed)
+        .on_right_press(Message::TabContextMenuClosed)
+        .into()
+    }
+
+    /// P40：设置弹窗浮层——整窗背板（点击关闭）+ 居中卡片，卡片内部
+    /// 滚动（内容高约 700px+，小窗口不溢出）。opaque 卡片让点击卡片
+    /// 空白处（padding/标题行旁）不误触背板关闭。
+    fn settings_overlay(&self) -> Element<'_, Message> {
+        // 卡片内容高度上限 = 窗口高 − 边距；窗口尺寸未知时给保守值
+        let vh = self.viewport_size.1;
+        let list_h = if vh > 120.0 { vh - 80.0 } else { 600.0 };
+        let card = opaque(
+            container(scrollable(self.settings_panel()).width(Fill).height(list_h))
+                .width(500)
+                .padding(4)
+                .style(popup_card_style),
+        );
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(Alignment::Center)
+                .padding(16),
+        )
+        .on_press(Message::SettingsToggled)
+        .into()
+    }
+}
+
+// ---------- 浮层弹窗几何与样式（P39/P40） ----------
+
+/// 右键菜单卡片的估宽（px）：最宽项「关闭其他标签页(N)」≈ 8 汉字 ×16px
+/// + 内边距。仅用于贴边钳制，与实际 Shrink 宽度的少量偏差可接受。
+const CTX_MENU_W: f32 = 200.0;
+/// 右键菜单卡片的估高（px）：标题行 + 6 个菜单项 + 分隔线 + 内边距。
+const CTX_MENU_H: f32 = 280.0;
+
+/// P39：浮层锚点贴边钳制——菜单整体保持在窗口内（右缘翻左/下缘翻上
+/// 的效果 = 把锚点往回拉）。窗口尺寸未知（宽或高为 0）时该轴不钳制；
+/// 结果恒非负。纯函数可单测。
+fn clamp_menu_anchor(
+    pos: (f32, f32),
+    viewport: (f32, f32),
+    menu_w: f32,
+    menu_h: f32,
+) -> (f32, f32) {
+    let (mut x, mut y) = pos;
+    let (vw, vh) = viewport;
+    if vw > 0.0 && menu_w.is_finite() && menu_w > 0.0 {
+        x = x.min((vw - menu_w).max(0.0));
+    }
+    if vh > 0.0 && menu_h.is_finite() && menu_h > 0.0 {
+        y = y.min((vh - menu_h).max(0.0));
+    }
+    (x.max(0.0), y.max(0.0))
+}
+
+/// P39/P40：浮层卡片样式——主题背景 + 1px 描边 + 投影，深浅主题通用
+/// （从 palette 派生，与编辑器 EditorColors::resolve 同一口径）。
+fn popup_card_style(theme: &Theme) -> container::Style {
+    let palette = theme.palette();
+    container::Style {
+        background: Some(Background::Color(palette.background)),
+        border: Border {
+            color: Color { a: 0.35, ..palette.text },
+            width: 1.0,
+            radius: Radius::from(6.0),
+        },
+        shadow: Shadow {
+            color: Color { a: 0.25, ..Color::BLACK },
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..container::Style::default()
     }
 }
 
@@ -4616,6 +4772,78 @@ mod tests {
             batch_close_targets(&tabs, BatchCloseScope::RightOf(9)),
             Vec::<usize>::new()
         );
+    }
+
+    // ---------- P39/P40 浮层弹窗 ----------
+
+    #[test]
+    fn clamp_menu_anchor_keeps_overlay_inside_window() {
+        // 常规位置不钳制
+        assert_eq!(
+            clamp_menu_anchor((100.0, 100.0), (800.0, 600.0), 200.0, 280.0),
+            (100.0, 100.0)
+        );
+        // 右缘：x 拉回 窗宽−菜单宽（等效于主流编辑器的向左翻开）
+        assert_eq!(
+            clamp_menu_anchor((750.0, 100.0), (800.0, 600.0), 200.0, 280.0),
+            (600.0, 100.0)
+        );
+        // 下缘：y 拉回 窗高−菜单高
+        assert_eq!(
+            clamp_menu_anchor((100.0, 500.0), (800.0, 600.0), 200.0, 280.0),
+            (100.0, 320.0)
+        );
+        // 窗口尺寸未知 (0,0) → 不钳制（启动后首个 Resized 事件校准）
+        assert_eq!(
+            clamp_menu_anchor((750.0, 500.0), (0.0, 0.0), 200.0, 280.0),
+            (750.0, 500.0)
+        );
+        // 小窗整体夹 0；负坐标夹 0
+        assert_eq!(
+            clamp_menu_anchor((50.0, 40.0), (100.0, 80.0), 200.0, 280.0),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            clamp_menu_anchor((-5.0, -5.0), (800.0, 600.0), 200.0, 280.0),
+            (0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn context_menu_anchor_recorded_from_cursor_and_viewport_tracked() {
+        let mut app = app_with_tabs(1);
+        // 窗口逻辑尺寸经 Resized 事件入账（浮层贴边钳制依据）
+        dispatch(&mut app, Message::ViewportResized(1024.0, 768.0));
+        assert_eq!(app.viewport_size, (1024.0, 768.0));
+
+        // 指针位置先于右键到达 → 菜单锚点 = 打开那一刻的指针位置
+        dispatch(&mut app, Message::CursorMoved(iced::Point::new(300.0, 200.0)));
+        dispatch(&mut app, Message::TabContextMenu(0));
+        assert_eq!(app.tab_context_menu, Some(0));
+        assert_eq!(app.menu_anchor, (300.0, 200.0));
+
+        // 进入 busy（对话框/IO 互斥）必须收起已开的浮层：背板挡整窗不能留
+        app.enter_busy();
+        assert_eq!(app.tab_context_menu, None);
+
+        // busy 期间右键拒开新菜单，锚点也不被改写（下次打开取届时位置）
+        dispatch(&mut app, Message::CursorMoved(iced::Point::new(10.0, 10.0)));
+        dispatch(&mut app, Message::TabContextMenu(0));
+        assert_eq!(app.tab_context_menu, None);
+        assert_eq!(app.menu_anchor, (300.0, 200.0));
+    }
+
+    #[test]
+    fn view_builds_with_floating_overlays_open() {
+        // 无头冒烟：菜单浮层、设置浮层、两者叠加时视图树均可构造
+        // （Stack + opaque + 背板 mouse_area 的组合在构造期不 panic）
+        let mut app = app_with_tabs(2);
+        dispatch(&mut app, Message::ViewportResized(1024.0, 768.0));
+        dispatch(&mut app, Message::CursorMoved(iced::Point::new(40.0, 40.0)));
+        dispatch(&mut app, Message::TabContextMenu(0));
+        let _ = app.view();
+        dispatch(&mut app, Message::SettingsToggled);
+        let _ = app.view();
     }
 
     #[test]
