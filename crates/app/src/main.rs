@@ -226,6 +226,15 @@ enum Message {
     SettingsPageSelected(SettingsPage),
     /// 侧栏搜索框变化：内容区跨分类过滤命中行（纯 UI 态，不落盘）
     SettingsSearchChanged(String),
+
+    // ---------- 外部修改检测（P50） ----------
+    /// 窗口重新获得焦点：巡检各命名页的 (mtime, size) 戳，外部已改的
+    /// 干净活动页静默重载，其余弹提示条由用户裁决
+    WindowFocused,
+    /// 提示条「重新加载」：放弃该页未保存内容并从磁盘重读
+    ConfirmExternalReload(usize),
+    /// 提示条「忽略」：以当前磁盘状态重记时间戳，直到下次再变不再提示
+    IgnoreExternalChange(usize),
 }
 
 /// 后台加载线程 → 订阅流的事件。
@@ -1030,6 +1039,9 @@ struct Tab {
     /// 标签条以 📌 标识。v1 取舍：不自动前置排序（保持用户手动排列的
     /// 稳定顺序）；不入会话快照清单（会话内临时状态）。
     pinned: bool,
+    /// P50 外部修改检测戳：载入/保存成功时刻的 (mtime, size)。
+    /// None = 从未记录（未命名页/会话恢复占位页未落地的），不参与判定。
+    file_stamp: Option<(std::time::SystemTime, u64)>,
 }
 
 impl Tab {
@@ -1045,6 +1057,7 @@ impl Tab {
             untitled_num: None,
             heartbeat_snap: None,
             pinned: false,
+            file_stamp: None,
         }
     }
 
@@ -1114,6 +1127,9 @@ struct Editpad {
     settings_page: SettingsPage,
     /// 设置弹窗侧栏搜索词（P47；纯 UI 态不落盘，关弹窗/点导航即清）。
     settings_search: String,
+    /// P50：外部修改提示条指向的页下标；Some = 提示条可见。
+    /// Esc（BarsDismissed）/重载/忽略即清。
+    external_change: Option<usize>,
 
     // ---------- 字体选择（P34） ----------
     /// 启动期从 fontdb 枚举的系统字体族名清单（去重、不区分大小写排序）。
@@ -1246,6 +1262,7 @@ impl Default for Editpad {
             settings_visible: false,
             settings_page: SettingsPage::default(),
             settings_search: String::new(),
+            external_change: None,
             available_fonts: Vec::new(),
             active_font_family: None,
             font_filter: String::new(),
@@ -1661,6 +1678,8 @@ impl Editpad {
                         tab.path = Some(job.path.clone());
                         tab.encoding_label = encoding;
                         tab.dirty = false;
+                        // P50：载入成功即记外部修改比对戳
+                        tab.file_stamp = file_stamp(&job.path);
                         // P25：真实文件已就位，未命名序号使命完成
                         tab.untitled_num = None;
                         // P31：页内容整体换血（打开/恢复回填）——已提交清单
@@ -1757,6 +1776,10 @@ impl Editpad {
                 }
                 // 落盘后文件已是纯 UTF-8，标签同步归一（避免后续保存重复提示）
                 self.tab_mut().encoding_label = "UTF-8".to_owned();
+                // P50：落盘成功即刷新外部修改比对戳（磁盘内容 = 刚写的内容）
+                if let Some(path) = self.tab().path.clone() {
+                    self.tab_mut().file_stamp = file_stamp(&path);
+                }
                 if self.pending_close {
                     // 落盘确认后才真正关窗。P29：保存的是活动页，
                     // 其余置脏页走快照直退（不再二次弹窗），快照失败才降级
@@ -1793,6 +1816,9 @@ impl Editpad {
                                 tab.dirty = false;
                                 // P38：当前内容即磁盘内容，刷新落盘基线
                                 tab.editor.borrow_mut().mark_saved();
+                                // P50：自动保存落盘成功，同步刷新比对戳
+                                tab.file_stamp =
+                                    tab.path.as_deref().and_then(file_stamp);
                                 // P31：auto-save 成功清脏 = 内存比清单干净，
                                 // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
                                 self.session_manifest_stale = true;
@@ -1811,6 +1837,27 @@ impl Editpad {
             // ---------- 关闭确认 ----------
             Message::CloseRequested(id) => {
                 self.handle_close_request(id, editpad_core::snapshot::snapshot_dir())
+            }
+
+            // ---------- 外部修改检测（P50） ----------
+            Message::WindowFocused => {
+                self.check_external_changes();
+                Task::none()
+            }
+            Message::ConfirmExternalReload(idx) => {
+                self.external_change = None;
+                match self.tabs.get(idx).and_then(|t| t.path.clone()) {
+                    Some(path) => self.start_loading(path, idx),
+                    None => Task::none(),
+                }
+            }
+            Message::IgnoreExternalChange(idx) => {
+                // 以当前磁盘状态重记戳：此后直到文件再次变化都不再提示
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
+                }
+                self.external_change = None;
+                Task::none()
             }
             Message::ConfirmSaveAndClose => {
                 self.confirm_visible = false;
@@ -2058,6 +2105,8 @@ impl Editpad {
                 // P28：Esc 同时收起右键菜单与批量关闭确认
                 self.tab_context_menu = None;
                 self.batch_close_confirm = None;
+                // P50：Esc 一并收起外部修改提示条
+                self.external_change = None;
                 // P10：取消在途扫描 + 清结果（含序号失效）
                 self.cancel_find_scan();
                 Task::none()
@@ -2622,6 +2671,46 @@ impl Editpad {
         self.start_loading(path, tab)
     }
 
+    /// P50：窗口聚焦时的外部修改巡检。
+    ///
+    /// * busy / 加载中跳过（在途任务的结果马上会刷新戳，此时比对无意义）；
+    /// * 干净的**活动页**被外部修改 → 静默重载（无未保存工作可丢，内容
+    ///   以磁盘为准；走既有加载管线，Loaded 归页时重记戳）；
+    /// * 其余被改页（置脏页 / 后台页）→ 弹一次提示条由用户裁决
+    ///   （置脏页绝不能静默重载——那等于丢弃用户未保存的工作）。
+    /// * 一次聚焦至多发起一个动作：重载发起即返回，提示条只取第一个
+    ///   命中页；未裁决的页等下次聚焦再报。
+    fn check_external_changes(&mut self) {
+        if self.busy || self.active_load.is_some() {
+            return;
+        }
+        let mut prompt = None;
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let Some(path) = tab.path.as_deref() else {
+                continue;
+            };
+            let Some(recorded) = tab.file_stamp else {
+                continue; // 从未记录（会话恢复占位等），无从比对
+            };
+            if !file_changed_externally(Some(recorded), file_stamp(path)) {
+                continue;
+            }
+            if idx == self.active_tab && !tab.dirty {
+                let path = tab.path.clone().expect("上方已判 Some");
+                // 加载流由 subscription 依据 active_load 重建接管，返回的
+                // Task 恒为 none——显式弃置（加载管线语义见 start_loading）
+                let _ = self.start_loading(path, idx);
+                return;
+            }
+            if prompt.is_none() {
+                prompt = Some(idx);
+            }
+        }
+        if self.external_change.is_none() {
+            self.external_change = prompt;
+        }
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         let load = match &self.active_load {
             Some(job) => Subscription::run_with(job.clone(), build_load_stream),
@@ -2642,6 +2731,11 @@ impl Editpad {
                     iced::Event::Window(window::Event::FileDropped(path)),
                     _,
                 ) => Some(Message::FileDropped(path)),
+                // P50：窗口重新聚焦 = 外部修改巡检时机（编辑器无常驻轮询，
+                // 焦点回归是最自然的检查点——用户刚从外部工具切回来）
+                (iced::Event::Window(window::Event::Focused), _) => {
+                    Some(Message::WindowFocused)
+                }
                 // P39/P40：窗口逻辑尺寸（浮层贴边钳制依据；iced_winit 已
                 // 换算成逻辑坐标，与 mouse_area 光标坐标同空间）
                 (iced::Event::Window(window::Event::Resized(size)), _) => {
@@ -4358,6 +4452,34 @@ impl Editpad {
             );
         }
 
+        // P50 外部修改提示条：指向页已被外部改动且不能静默重载
+        // （置脏页/后台页）。下标失效（页已关）时不渲染，等下次聚焦重算。
+        if let Some(idx) = self.external_change {
+            if let Some(tab) = self.tabs.get(idx) {
+                if tab.path.is_some() {
+                    body = body.push(rule::horizontal(1)).push(
+                        row![
+                            text(format!(
+                                "「{}」已被外部修改，是否重新加载？",
+                                tab.display_name()
+                            ))
+                            .size(uipx)
+                            .font(uifont),
+                            button(text("重新加载").size(uipx).font(uifont))
+                                .padding([4, 12])
+                                .on_press(Message::ConfirmExternalReload(idx)),
+                            button(text("忽略").size(uipx).font(uifont))
+                                .padding([4, 12])
+                                .on_press(Message::IgnoreExternalChange(idx)),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .padding([6, 10]),
+                    );
+                }
+            }
+        }
+
         // P30 崩溃恢复一次性提示条：上次未正常收尾（崩溃/P31 心跳中间态）。
         // 「恢复」按快照全量重建；「丢弃」连快照一起丢。数据原封留在磁盘，
         // 不裁决就一直挂着——与「未保存确认条」同级的强提醒语义。
@@ -4591,6 +4713,31 @@ const HOTKEYS: &[(&str, &str)] = &[
     ("Shift+滚轮", "横向滚动"),
     ("Ctrl+滚轮", "缩放正文字号（设置里也可步进调节）"),
 ];
+
+// ---------- 外部修改检测（P50） ----------
+
+/// 取外部修改比对戳 (mtime, size)：元数据或 mtime 不可得（文件已被删/
+/// 平台不支持）时返回 None（调用方按「无从比对」处理）。
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    Some((mtime, meta.len()))
+}
+
+/// 外部修改判定（纯函数可单测）：记录与当前都已知且 (mtime, size) 任一
+/// 分量变化即视为外部修改（size 兜底 FAT 系 2s 粒度的 mtime 盲区）；
+/// 记录缺失 = 从未记录，不判定；当前缺失 = 文件已被外部删除，同样算
+/// 修改（提示用户；此时重载会得到明确的打开失败提示）。
+fn file_changed_externally(
+    recorded: Option<(std::time::SystemTime, u64)>,
+    current: Option<(std::time::SystemTime, u64)>,
+) -> bool {
+    match (recorded, current) {
+        (Some((rm, rs)), Some((cm, cs))) => rm != cm || rs != cs,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
 
 // ---------- 设置弹窗分类导航（P47，侧栏分类风格） ----------
 
@@ -8331,6 +8478,148 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 占位页（干净未命名）也入清单——下次启动恢复为空页，无数据丢失
         assert!(editpad_core::read_manifest(&dir).is_some());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P50 外部修改检测 ----------
+
+    #[test]
+    fn file_changed_externally_contract() {
+        let t1 = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(100);
+        let t2 = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(200);
+
+        // 记录缺失（未落地页）= 不判定
+        assert!(!file_changed_externally(None, Some((t1, 10))));
+        // 完全一致 = 未修改
+        assert!(!file_changed_externally(Some((t1, 10)), Some((t1, 10))));
+        // mtime 变 / size 变（FAT 系 2s 粒度盲区的兜底）/ 双变 = 修改
+        assert!(file_changed_externally(Some((t1, 10)), Some((t2, 10))));
+        assert!(file_changed_externally(Some((t1, 10)), Some((t1, 11))));
+        assert!(file_changed_externally(Some((t1, 10)), Some((t2, 11))));
+        // 当前缺失 = 文件被外部删除 = 视为修改（提示用户，重载得明确报错）
+        assert!(file_changed_externally(Some((t1, 10)), None));
+    }
+
+    #[test]
+    fn window_focus_reloads_clean_active_tab_silently() {
+        let dir = scratch_dir("p50-focus");
+        let path = dir.join("watched.txt");
+        std::fs::write(&path, "v1").unwrap();
+
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(path.clone()));
+        let seq1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq1,
+                Ok((
+                    editpad_core::Document::from_str("v1"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert!(app.tabs[0].file_stamp.is_some(), "载入成功即记比对戳");
+
+        // 无外部变化：聚焦不动作
+        dispatch(&mut app, Message::WindowFocused);
+        assert!(app.active_load.is_none());
+        assert!(app.external_change.is_none());
+
+        // 外部修改（内容+大小都变）：聚焦 → 干净活动页静默重载
+        std::fs::write(&path, "v2-changed").unwrap();
+        dispatch(&mut app, Message::WindowFocused);
+        assert!(app.active_load.is_some(), "干净活动页应静默重载");
+        let seq2 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq2,
+                Ok((
+                    editpad_core::Document::from_str("v2-changed"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "v2-changed");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn window_focus_prompts_for_dirty_tab_and_respects_decision() {
+        let dir = scratch_dir("p50-dirty");
+        let path = dir.join("dirty.txt");
+        std::fs::write(&path, "disk").unwrap();
+
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(path.clone()));
+        let seq1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq1,
+                Ok((
+                    editpad_core::Document::from_str("disk"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 用户编辑置脏；期间文件被外部改
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("local edit".into())));
+        std::fs::write(&path, "disk changed").unwrap();
+
+        // 聚焦：置脏页绝不静默重载，弹提示条
+        dispatch(&mut app, Message::WindowFocused);
+        assert_eq!(app.external_change, Some(0));
+        let _ = app.view(); // 提示条视图可构造
+
+        // 忽略 → 以磁盘现状重记戳，再次聚焦不再提示
+        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        assert!(app.external_change.is_none());
+        dispatch(&mut app, Message::WindowFocused);
+        assert!(app.external_change.is_none(), "忽略后同状态不再提示");
+
+        // 文件再次变化 → 又提示；这次选重载 → 放弃本地编辑取磁盘内容
+        std::fs::write(&path, "disk v3").unwrap();
+        dispatch(&mut app, Message::WindowFocused);
+        assert_eq!(app.external_change, Some(0));
+        dispatch(&mut app, Message::ConfirmExternalReload(0));
+        let seq2 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq2,
+                Ok((
+                    editpad_core::Document::from_str("disk v3"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "disk v3");
+        assert!(!app.tabs[0].dirty, "重载完成后回净");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn focus_check_skips_busy_and_unnamed_tabs() {
+        let mut app = Editpad::default();
+        // 未命名页（无路径无戳）：聚焦不动作不 panic
+        dispatch(&mut app, Message::WindowFocused);
+        assert!(app.external_change.is_none());
+
+        // busy 中聚焦：跳过巡检（在途任务的完成回调会刷新戳）
+        app.busy = true;
+        dispatch(&mut app, Message::WindowFocused);
+        assert!(app.external_change.is_none() && app.active_load.is_none());
+        app.busy = false;
     }
 
     #[test]
