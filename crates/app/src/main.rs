@@ -23,7 +23,7 @@ use iced::keyboard::{self, key::Named};
 use iced::widget::{button, checkbox, column, container, mouse_area, opaque, progress_bar, row, rule,
     scrollable, text, text_input, Stack};
 use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
-    Font, Padding, Point, Shadow, Subscription, Task, Theme};
+    Font, Padding, Point, Shadow, Shrink, Subscription, Task, Theme};
 
 use editor::{EditorHandle, EditOp, Motion};
 
@@ -4313,7 +4313,9 @@ impl Editpad {
             card_h,
         );
         let card = opaque(
-            container(scrollable(self.tab_context_panel(idx)).height(card_h))
+            // P46：宽度必须 Shrink——scrollable 默认宽度是 Fill，
+            // 会把菜单卡片横向撑满整窗（功能文字左侧、右侧一大片空白）
+            container(scrollable(self.tab_context_panel(idx)).height(card_h).width(Shrink))
                 .padding(4)
                 .style(popup_card_style),
         );

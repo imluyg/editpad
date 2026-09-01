@@ -3364,6 +3364,57 @@ mod tests {
         assert_eq!(c.content_width_px(), c.max_line_cols as f32 * c.char_width(), "无注入回退列模型");
     }
 
+    /// P46 诊断：滚动条出现阈值必须与「当前文档最宽行的真实像素宽」一致——
+    /// 实测列宽注入后，90 ASCII 字符（720px）在 800px 视口内**不**出现滚动条；
+    /// 未实测（9px 假设）或文档确有超宽行时出现。此测试钉住判定口径，
+    /// 防止任何一侧高估导致「文字还没占满右边滚动条就出现」。
+    #[test]
+    fn hscrollbar_threshold_matches_real_content_width() {
+        // 90 ASCII 字符 × 实测 8px = 720px < 视口 800px → 不出现
+        let mut c = core_with(&"x".repeat(90));
+        c.set_viewport_width(800.0);
+        c.set_measured_char_width(8.0);
+        c.recompute_max_line_cols();
+        assert_eq!(c.max_line_cols, 90);
+        assert_eq!(c.content_width_px(), 720.0, "实测 8px 下行程=真实宽");
+        let view = c.text_viewport_w();
+        assert_eq!(
+            HScrollbar::measure(c.content_width_px(), view, 800.0, 0.0).needed,
+            false,
+            "720px 内容在 800px 视口内不得出现滚动条"
+        );
+        // 同文档注入真实行宽（此处与列模型一致），口径不变
+        c.set_row_layout(0, {
+            let mut xs = Vec::with_capacity(91);
+            for i in 0..=90 {
+                xs.push(i as f32 * 8.0);
+            }
+            xs
+        });
+        assert_eq!(c.content_width_px(), 720.0);
+        assert_eq!(
+            HScrollbar::measure(c.content_width_px(), view, 800.0, 0.0).needed,
+            false
+        );
+        // 超宽行（200 字符 = 1600px > 800）→ 出现
+        c.insert_str(&"x".repeat(110)); // 90+110=200 字符
+        assert_eq!(c.max_line_cols, 200);
+        c.set_measured_char_width(8.0);
+        let needed = HScrollbar::measure(c.content_width_px(), view, 800.0, 0.0).needed;
+        assert!(needed, "1600px 内容在 800px 视口内必须出现滚动条");
+        // 未实测（回退 9px 假设）：90→810px > 800 → 确实会出现（P42 未生效时的
+        // 高估留痕——这正是「文字没占满滚动条就出现」的机制面之一）
+        let mut c2 = core_with(&"x".repeat(90));
+        c2.set_viewport_width(800.0);
+        c2.recompute_max_line_cols();
+        assert_eq!(c2.content_width_px(), 810.0);
+        assert_eq!(
+            HScrollbar::measure(c2.content_width_px(), c2.text_viewport_w(), 800.0, 0.0).needed,
+            true,
+            "9px 假设下 810px > 800px 出现——文档化：实测注入后消失"
+        );
+    }
+
     #[test]
     fn set_font_size_clamps_and_rescales_metrics() {
         use editpad_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
