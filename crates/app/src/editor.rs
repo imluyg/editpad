@@ -280,7 +280,7 @@ impl EditorCore {
             return Vec::new();
         };
         let doc = &self.doc;
-        hl.borrow_mut().styled_line(line_idx, target_text, &mut |i| {
+        hl.borrow_mut().styled_line(line_idx, target_text, doc.line_count(), &mut |i| {
             doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned()
         })
     }
