@@ -752,6 +752,44 @@ impl EditorCore {
         self.clamp_scroll();
     }
 
+    /// 拖选时视口边缘的自动滚动量（打磨项）：
+    /// 返回 `(列增量, 行增量)`——语义与 `scroll_by_columns` /
+    /// `scroll_by_lines` 的入参一致（行增量为负 = 视口向文档尾推进）。
+    ///
+    /// 指针进入控件四缘的窄带即产生滚动，越深入越快（线性放大）；
+    /// 位于安全区返回 (0, 0)。事件驱动方案：仅鼠标移动时推进，
+    /// 无定时器参与（已知取舍：指针完全静止时不滚动）。
+    pub fn edge_scroll_delta(
+        &self,
+        local_x: f32,
+        local_y: f32,
+        widget_w: f32,
+        widget_h: f32,
+    ) -> (f32, f32) {
+        const ZONE: f32 = 32.0;
+
+        // 强度 ∈ (0,1]：越贴近边缘滚得越快
+        fn strength(dist: f32, zone: f32) -> f32 {
+            1.0 + ((zone - dist) / zone).max(0.0) * 3.0
+        }
+
+        let mut dy = 0.0f32;
+        if local_y < ZONE {
+            dy = strength(local_y, ZONE) * SCROLL_LINES_PER_NOTCH;
+        } else if local_y > widget_h - ZONE {
+            dy = -strength(widget_h - local_y, ZONE) * SCROLL_LINES_PER_NOTCH;
+        }
+
+        let mut dx = 0.0f32;
+        if local_x < ZONE {
+            dx = -strength(local_x, ZONE);
+        } else if local_x > widget_w - ZONE {
+            dx = strength(widget_w - local_x, ZONE);
+        }
+
+        (dx, dy)
+    }
+
     /// 横向滚动 `cols` 列（正数向右看更后的内容，P13）。
     /// Shift+滚轮、触控板横向分量、水平滚动条共用本入口。
     pub fn scroll_by_columns(&mut self, cols: f32) {
@@ -1755,6 +1793,20 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 if !core.is_dragging() {
                     return;
                 }
+                // 打磨：拖选贴近视口上下/左右缘时自动推进视口，
+                // 选区可延伸到可见范围之外（事件驱动，随鼠标移动推进）
+                let (dx_cols, dy_lines) = core.edge_scroll_delta(
+                    pos.x - bounds.x,
+                    pos.y - bounds.y,
+                    bounds.width,
+                    bounds.height,
+                );
+                if dx_cols != 0.0 {
+                    core.scroll_by_columns(dx_cols);
+                }
+                if dy_lines != 0.0 {
+                    core.scroll_by_lines(dy_lines);
+                }
                 let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
                 if core.cursor != hit {
                     // 拖选：锚点固定在按下时的位置（即移动前的光标）
@@ -2654,5 +2706,30 @@ mod tests {
         assert!(c.caret_visible());
         c.tick_blink(); // 相位翻到隐，但活动窗未过期
         assert!(c.caret_visible(), "活动窗口期内不得隐没");
+    }
+
+    // ---------- 拖选边缘自动滚动 ----------
+
+    #[test]
+    fn drag_edge_autoscroll_pushes_viewport_toward_pointer() {
+        // 语义：行/列增量与 scroll_by_lines/columns 入参同号——
+        // 顶缘 dy>0（向文档头）、底缘 dy<0（向文档尾）、左缘 dx<0、右缘 dx>0
+        let probe = |x: f32, y: f32| {
+            let c = core_with(&"x\n".repeat(50));
+            c.edge_scroll_delta(x, y, 800.0, 600.0)
+        };
+
+        let (dx, dy) = probe(400.0, 10.0);
+        assert!(dy > 0.0 && dx == 0.0, "顶缘应向文档头推进且无横向分量");
+
+        let (dx, dy) = probe(400.0, 590.0);
+        assert!(dy < 0.0 && dx == 0.0, "底缘应向文档尾推进");
+
+        assert_eq!(probe(400.0, 300.0), (0.0, 0.0), "安全区中点无滚动");
+
+        let (dx_l, _) = probe(8.0, 300.0);
+        assert!(dx_l < 0.0, "左缘应向文档头方向横滚");
+        let (dx_r, _) = probe(792.0, 300.0);
+        assert!(dx_r > 0.0, "右缘应向文档尾方向横滚");
     }
 }
