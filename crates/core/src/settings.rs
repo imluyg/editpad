@@ -91,6 +91,10 @@ pub struct Settings {
     /// （core 不掌握系统字体清单），且只影响本次生效，不抹掉用户配置。
     #[serde(default)]
     pub font_family: Option<String>,
+    /// 设置弹窗上次浏览的分类页（P51）：合法键见 [`SETTINGS_PAGES`]，
+    /// 非法/缺省在加载时归一为默认页。纯界面偏好，不参与行为语义。
+    #[serde(default = "default_settings_page")]
+    pub settings_page: String,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -110,6 +114,7 @@ impl Default for Settings {
             remember_session: true,
             snapshot_interval_secs: DEFAULT_SNAPSHOT_INTERVAL_SECS,
             font_family: None,
+            settings_page: SETTINGS_PAGE_APPEARANCE.to_string(),
         }
     }
 }
@@ -134,6 +139,41 @@ pub const EXIT_MODE_ASK: &str = "ask";
 
 /// 字体族名的长度上限（P34）。真实族名远短于此；超长值视为配置损坏。
 pub const MAX_FONT_FAMILY_LEN: usize = 128;
+
+// ---------- 设置弹窗分类页键（P51） ----------
+
+/// 分类页持久化键：config 值与 app 层映射的单一来源（防两套字符串漂移）。
+pub const SETTINGS_PAGE_APPEARANCE: &str = "appearance";
+pub const SETTINGS_PAGE_FONT: &str = "font";
+pub const SETTINGS_PAGE_SAVE: &str = "save";
+pub const SETTINGS_PAGE_SESSION: &str = "session";
+pub const SETTINGS_PAGE_HOTKEYS: &str = "hotkeys";
+pub const SETTINGS_PAGE_ABOUT: &str = "about";
+
+/// 全部合法的分类页键（展示顺序）。
+pub const SETTINGS_PAGES: [&str; 6] = [
+    SETTINGS_PAGE_APPEARANCE,
+    SETTINGS_PAGE_FONT,
+    SETTINGS_PAGE_SAVE,
+    SETTINGS_PAGE_SESSION,
+    SETTINGS_PAGE_HOTKEYS,
+    SETTINGS_PAGE_ABOUT,
+];
+
+/// 分类页键归一（纯函数）：空白/未知值收敛为默认页（外观）。
+pub fn normalize_settings_page(value: &str) -> &'static str {
+    let v = value.trim();
+    SETTINGS_PAGES
+        .iter()
+        .copied()
+        .find(|key| *key == v)
+        .unwrap_or(SETTINGS_PAGE_APPEARANCE)
+}
+
+/// `#[serde(default)]` 用：P51 分类页缺字段时的默认值。
+fn default_settings_page() -> String {
+    SETTINGS_PAGE_APPEARANCE.to_string()
+}
 
 /// `#[serde(default)]` 用：缺字段时的主题默认值。
 fn default_theme() -> String {
@@ -229,6 +269,8 @@ impl Settings {
                 self.font_family = Some(name.trim().to_owned());
             }
         }
+        // P51：分类页键归一——手改/损坏值收敛为默认页
+        self.settings_page = normalize_settings_page(&self.settings_page).to_string();
     }
 
     /// 切换正文字体族（P34）：None = 回退默认等宽。Some 值经与加载归一
@@ -953,6 +995,52 @@ mod tests {
         // 回退默认等宽
         s.set_font_family(None);
         assert_eq!(s.font_family, None);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P51 设置分类页记忆 ----------
+
+    #[test]
+    fn settings_page_normalized_roundtrip_and_legacy_compatible() {
+        // 默认 = 外观页；合法键透传，未知/空白归一默认
+        assert_eq!(Settings::default().settings_page, SETTINGS_PAGE_APPEARANCE);
+        assert_eq!(normalize_settings_page("hotkeys"), SETTINGS_PAGE_HOTKEYS);
+        assert_eq!(normalize_settings_page(" no-such "), SETTINGS_PAGE_APPEARANCE);
+        assert_eq!(normalize_settings_page(""), SETTINGS_PAGE_APPEARANCE);
+        // 六个注册键全部合法（注册表完整性）
+        for key in SETTINGS_PAGES {
+            assert_eq!(normalize_settings_page(key), key, "注册键 {key} 必须合法");
+        }
+
+        // 旧 config.toml 缺 P51 字段 → 默认页（serde default，零迁移升级）
+        let dir = scratch_dir("p51-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("legacy.toml");
+        fs::write(&legacy, "theme = \"dark\"\n").unwrap();
+        assert_eq!(
+            Settings::load_from(&legacy).settings_page,
+            SETTINGS_PAGE_APPEARANCE
+        );
+
+        // 手改损坏值 → 加载归一为默认页
+        let broken = dir.join("broken.toml");
+        fs::write(&broken, "settings_page = \"hacked\"\n").unwrap();
+        assert_eq!(
+            Settings::load_from(&broken).settings_page,
+            SETTINGS_PAGE_APPEARANCE
+        );
+
+        // 往返：选中的页落盘后原样读回
+        let mut s = Settings::default();
+        s.settings_page = SETTINGS_PAGE_HOTKEYS.to_string();
+        let path = dir.join("config.toml");
+        s.save_to(&path).expect("保存应成功");
+        assert_eq!(
+            Settings::load_from(&path).settings_page,
+            SETTINGS_PAGE_HOTKEYS,
+            "P51 字段必须参与 roundtrip"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -1501,11 +1501,15 @@ impl Editpad {
         let dark_mode = settings.is_dark();
         // 设置里的字号可能未归一（旧配置/手改），boot 时按同一规则 clamp
         let font_size = editor::normalize_font_size(settings.font_size);
+        // P51：分类页记忆随配置恢复（非法/缺省键归一为默认页）。
+        // 先取键再移动 settings 进结构体。
+        let settings_page = SettingsPage::from_key(&settings.settings_page);
         let mut state = Self {
             settings,
             dark_mode,
             available_fonts,
             active_font_family: active_font_family.map(leak_font_family),
+            settings_page,
             ..Self::default()
         };
         state.cur().borrow_mut().set_font_size(font_size);
@@ -2437,6 +2441,9 @@ impl Editpad {
             Message::SettingsPageSelected(page) => {
                 self.settings_page = page;
                 self.settings_search.clear();
+                // P51：分类位置即时落盘，重启后回到上次浏览的页
+                self.settings.settings_page = page.key().to_owned();
+                self.persist_settings();
                 Task::none()
             }
             Message::SettingsSearchChanged(query) => {
@@ -4014,10 +4021,18 @@ impl Editpad {
                 .style(settings_action_button_style)
                 .on_press_maybe(msg)
         };
-        row![mk("−", dec), text(value).size(uipx).font(uifont), mk("+", inc)]
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .into()
+        // 值列定宽居中（P51 打磨）：数值变宽（如 2s→60s）时 ± 按钮不再
+        // 左右跳动，整列右缘与其他行控件保持对齐
+        row![
+            mk("−", dec),
+            container(text(value).size(uipx).font(uifont))
+                .width(48)
+                .align_x(iced::alignment::Horizontal::Center),
+            mk("+", inc),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
     }
 
     /// 「正文字体」行的附属块（P47 收编 P34 选择 UI）：当前生效说明 +
@@ -4779,6 +4794,31 @@ impl SettingsPage {
             Self::Session => "会话与隐私",
             Self::Hotkeys => "快捷键",
             Self::About => "关于",
+        }
+    }
+
+    /// config 持久化键（P51）。与 core `SETTINGS_PAGES` 注册表的对应
+    /// 关系由 `settings_nav_keys_match_core_registry` 测试钉住防漂移。
+    fn key(self) -> &'static str {
+        match self {
+            Self::Appearance => editpad_core::SETTINGS_PAGE_APPEARANCE,
+            Self::Font => editpad_core::SETTINGS_PAGE_FONT,
+            Self::Save => editpad_core::SETTINGS_PAGE_SAVE,
+            Self::Session => editpad_core::SETTINGS_PAGE_SESSION,
+            Self::Hotkeys => editpad_core::SETTINGS_PAGE_HOTKEYS,
+            Self::About => editpad_core::SETTINGS_PAGE_ABOUT,
+        }
+    }
+
+    /// 从 config 键恢复分类页（P51）；未知值经 core 归一回默认页。
+    fn from_key(key: &str) -> Self {
+        match editpad_core::normalize_settings_page(key) {
+            editpad_core::SETTINGS_PAGE_FONT => Self::Font,
+            editpad_core::SETTINGS_PAGE_SAVE => Self::Save,
+            editpad_core::SETTINGS_PAGE_SESSION => Self::Session,
+            editpad_core::SETTINGS_PAGE_HOTKEYS => Self::Hotkeys,
+            editpad_core::SETTINGS_PAGE_ABOUT => Self::About,
+            _ => Self::Appearance,
         }
     }
 }
@@ -8227,6 +8267,9 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     #[test]
     fn settings_page_nav_selects_and_clears_search() {
         let mut app = app_with_tabs(2);
+        // P51 起点分类即落盘：注入配置路径，测试绝不碰真实 %APPDATA%
+        let dir = scratch_dir("p47-nav");
+        app.settings_path_override = Some(dir.join("config.toml"));
         dispatch(&mut app, Message::ViewportResized(1024.0, 768.0));
         assert_eq!(app.settings_page, SettingsPage::default(), "默认落在第一分类");
 
@@ -8253,6 +8296,57 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(app.settings_search.is_empty(), "关弹窗必须清空搜索词");
         dispatch(&mut app, Message::SettingsToggled);
         assert_eq!(app.settings_page, SettingsPage::Save, "分类位置跨开合保留");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P51 分类页记忆持久化 ----------
+
+    #[test]
+    fn settings_nav_keys_match_core_registry() {
+        // app 侧键映射与 core 注册表逐一对上（防两套字符串漂移）：
+        // 每个分类的 key 必须经 core 归一后原样返回（= 注册键合法）
+        for page in SettingsPage::ALL {
+            assert_eq!(
+                editpad_core::normalize_settings_page(page.key()),
+                page.key(),
+                "分类 {} 的持久化键不在 core 注册表中",
+                page.title()
+            );
+        }
+        // 顺序一致：ALL 的展示顺序 = 注册表顺序
+        for (page, key) in SettingsPage::ALL.iter().zip(editpad_core::SETTINGS_PAGES) {
+            assert_eq!(page.key(), key);
+        }
+        // 未知键经 core 归一 → 默认页
+        assert_eq!(SettingsPage::from_key("hacked"), SettingsPage::Appearance);
+        assert_eq!(SettingsPage::from_key("hotkeys"), SettingsPage::Hotkeys);
+    }
+
+    #[test]
+    fn settings_page_selection_persists_and_restores() {
+        let dir = scratch_dir("p51-restore");
+        let config = dir.join("config.toml");
+
+        // 选中分类 → 即时落盘
+        let mut app = Editpad::default();
+        app.settings_path_override = Some(config.clone());
+        dispatch(&mut app, Message::SettingsPageSelected(SettingsPage::Hotkeys));
+        assert_eq!(app.settings.settings_page, "hotkeys");
+        assert_eq!(
+            editpad_core::Settings::load_from(&config).settings_page,
+            "hotkeys",
+            "分类选择必须即时写回注入路径的 config.toml"
+        );
+
+        // 重启恢复：boot 同款逻辑（from_key 读配置键）
+        let restored = editpad_core::Settings::load_from(&config);
+        assert_eq!(
+            SettingsPage::from_key(&restored.settings_page),
+            SettingsPage::Hotkeys,
+            "重启后必须回到上次浏览的分类页"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
