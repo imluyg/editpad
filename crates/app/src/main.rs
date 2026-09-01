@@ -70,6 +70,15 @@ enum Message {
     /// 后台查找扫描完成：(任务序号, 命中表)。序号过期的结果直接丢弃（P10）
     FindScanDone(u64, Vec<editpad_core::MatchPos>),
 
+    /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
+    /// 同代在途时应用层幂等跳过，重复发布无害。
+    HighlightPaveNeeded,
+    /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
+    HlPaveProgress(u64, u64),
+    /// 后台高亮铺建完成：(代次, 推进后的高亮器)。期间编辑过（换代）
+    /// 则整体丢弃，缺口由下一帧重新评估续排（P12）
+    HlPaved(u64, editpad_core::LazyHighlighter),
+
     GotoToggled,
     GotoInputChanged(String),
     GotoSubmit,
@@ -280,6 +289,108 @@ fn strings_equal(a: &str, b: &str, case_sensitive: bool) -> bool {
     }
 }
 
+// ---------- 高亮后台分批补建（P12） ----------
+
+/// 每个后台批次铺建的检查点档位数。一档 = STRIDE 行 ≈ 10ms 量级，
+/// 32 档约 0.3s——进度粒度足够顺滑，取消响应延迟有界。
+const HL_PAVE_BATCH_STRIDES: usize = 32;
+
+/// 一次后台高亮铺建任务的输入快照。`doc` 与 `highlighter` 都是调度
+/// 时刻的克隆（rope 结构共享 O(1) / 检查点向量拷贝）；worker 只读它们、
+/// 推进自己的高亮器副本，完成时整体送回，不做任何共享可变状态。
+struct HlPavePayload {
+    gen: u64,
+    doc: editpad_core::Document,
+    highlighter: editpad_core::LazyHighlighter,
+    total_lines: usize,
+    /// 取消标志：编辑换代/新任务排队时置位，worker 批间检查后提前收工。
+    /// 收工时的部分成果仍然有效（完整档位只依赖快照内的一致前缀），
+    /// 会照常送回安装。
+    cancelled: Arc<AtomicBool>,
+    batch_strides: usize,
+}
+
+/// worker 的推进循环：反复 [`advance_checkpoints`](editpad_core::LazyHighlighter::advance_checkpoints)
+/// 直到铺满/取消/无活可干；每批后上报累计档位数。
+/// 独立成函数以便测试注入 panic 路径（同 drive_load 的 loader 注入）。
+fn pave_run(payload: &HlPavePayload, report: &mut dyn FnMut(u64)) -> editpad_core::LazyHighlighter {
+    let mut hl = payload.highlighter.clone();
+    let mut built_total = 0u64;
+    loop {
+        if payload.cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        let built = hl.advance_checkpoints(
+            payload.batch_strides,
+            payload.total_lines,
+            &mut |i| payload.doc.line_str(i),
+        );
+        if built == 0 {
+            break;
+        }
+        built_total += built as u64;
+        report(built_total);
+    }
+    hl
+}
+
+/// 铺建任务的事件流：OS 线程分批推进，std mpsc 桥接到异步端（P5/P10 同款）。
+///
+/// 保证语义：无论推进成功、被取消还是 **panic**，都恰好回一条 `HlPaved`
+/// ——否则「语法分析中…」状态永不解除。panic 兜底回未推进的起点克隆，
+/// 安装它等于无变化，UI 不受损。
+fn build_hl_pave_stream(payload: HlPavePayload) -> impl iced::futures::Stream<Item = Message> {
+    stream::channel(
+        8,
+        move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+            drive_hl_pave(payload, pave_run, &mut output).await;
+        },
+    )
+}
+
+/// 铺建任务的事件驱动（推进函数可注入以便测试）。
+async fn drive_hl_pave<F>(
+    payload: HlPavePayload,
+    pave: F,
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+) where
+    F: FnOnce(&HlPavePayload, &mut dyn FnMut(u64)) -> editpad_core::LazyHighlighter
+        + Send
+        + 'static,
+{
+    enum HlEvent {
+        Progress(u64),
+        Done(editpad_core::LazyHighlighter),
+    }
+    let (notify_tx, notify_rx) = std_mpsc::channel::<HlEvent>();
+    let gen = payload.gen;
+    std::thread::spawn(move || {
+        // AssertUnwindSafe：panic 后仅透传兜底克隆，不再触碰线程局部可变性
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pave(&payload, &mut |done| {
+                    let _ = notify_tx.send(HlEvent::Progress(done));
+                })
+            }));
+        let done = match outcome {
+            Ok(hl) => HlEvent::Done(hl),
+            Err(..) => HlEvent::Done(payload.highlighter.clone()),
+        };
+        let _ = notify_tx.send(done);
+        // notify_tx 在此 drop：接收端循环随之结束
+    });
+
+    while let Ok(event) = notify_rx.recv() {
+        let message = match event {
+            HlEvent::Progress(done) => Message::HlPaveProgress(gen, done),
+            HlEvent::Done(hl) => Message::HlPaved(gen, hl),
+        };
+        if output.send(message).await.is_err() {
+            break;
+        }
+    }
+}
+
 /// P6 编码知情权：saver 只写 UTF-8，原文件若是其他编码（或带 BOM），
 /// 首次保存即发生不可逆转码 / BOM 丢失。返回需要展示的提示；None 表示无需提示。
 fn transcode_notice(original_encoding: &str) -> Option<String> {
@@ -328,6 +439,12 @@ struct Editpad {
     find_seq: u64,
     /// 当前代扫描的取消标志；新任务排队时把旧标志置位（P10 防抖取消）
     find_cancel: Arc<AtomicBool>,
+
+    // ---------- 高亮后台分批补建（P12） ----------
+    /// 在途铺建任务的代次；None = 没有。同代幂等、异代重排
+    hl_paving: Option<u64>,
+    /// 在途铺建任务的取消标志（编辑换代/新任务排队时置位）
+    hl_pave_cancel: Arc<AtomicBool>,
 
     // ---------- 跳转 ----------
     goto_visible: bool,
@@ -649,6 +766,39 @@ impl Editpad {
                 Task::none()
             }
 
+            // ---------- 高亮后台分批补建（P12） ----------
+            Message::HighlightPaveNeeded => self.schedule_highlight_pave(),
+            Message::HlPaveProgress(gen, strides_done) => {
+                // 双重代次检查：任务登记一致且高亮器未换代（换文件后
+                // 旧任务的迟到进度不得污染新会话的状态栏）
+                if self.hl_paving == Some(gen)
+                    && self.editor.borrow().highlight_generation() == Some(gen)
+                {
+                    let total_strides = (self.editor.borrow().doc.line_count()
+                        / editpad_core::highlight::STRIDE)
+                        .max(1);
+                    let pct = (strides_done as usize).min(total_strides) * 100 / total_strides;
+                    self.status = format!("语法分析中…{pct}%（后台）");
+                }
+                Task::none()
+            }
+            Message::HlPaved(gen, paved) => {
+                if self.hl_paving == Some(gen) {
+                    self.hl_paving = None;
+                    // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
+                    // needs_paving 重新评估并续排（从存活检查点出发，代价小）
+                    let installed = self
+                        .editor
+                        .borrow_mut()
+                        .install_highlighter_if_current(gen, paved);
+                    let _ = installed;
+                    if self.status.starts_with("语法分析") {
+                        self.status.clear();
+                    }
+                }
+                Task::none()
+            }
+
             // ---------- 跳转 ----------
             Message::GotoToggled => {
                 self.goto_visible = !self.goto_visible;
@@ -931,6 +1081,42 @@ impl Editpad {
 
     fn find_scanning(&self) -> bool {
         self.find_scan.is_some()
+    }
+
+    /// 安排一次后台高亮铺建（P12）。
+    ///
+    /// * 同代已在途 → 幂等跳过（控件每帧 RedrawRequested 都可能喊一次）；
+    /// * 期间发生过编辑（换代）→ 作废旧任务，从当前存活检查点重新出发；
+    /// * UI 线程成本 = rope 结构共享克隆 + 高亮器检查点向量拷贝，零解析。
+    fn schedule_highlight_pave(&mut self) -> Task<Message> {
+        let current_gen = self.editor.borrow().highlight_generation();
+        if let (Some(active), Some(current)) = (self.hl_paving, current_gen) {
+            if active == current {
+                return Task::none();
+            }
+        }
+        let Some((gen, highlighter)) = self.editor.borrow().highlight_pave_snapshot() else {
+            // 无高亮器（纯文本路径）：清掉可能残留的旧任务登记
+            self.hl_paving = None;
+            return Task::none();
+        };
+        let doc = self.editor.borrow().doc.clone();
+        let total_lines = doc.line_count();
+
+        // 作废上一代任务：批间取消标志 + 结果按代次过滤双保险
+        self.hl_pave_cancel.store(true, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.hl_pave_cancel = cancelled.clone();
+
+        self.hl_paving = Some(gen);
+        Task::stream(build_hl_pave_stream(HlPavePayload {
+            gen,
+            doc,
+            highlighter,
+            total_lines,
+            cancelled,
+            batch_strides: HL_PAVE_BATCH_STRIDES,
+        }))
     }
 
     fn step_match(&mut self, forward: bool) -> Task<Message> {
@@ -1748,5 +1934,241 @@ mod tests {
             "后台扫描在途时不得执行全部替换"
         );
         assert!(!app.dirty);
+    }
+
+    // ---------- P12 高亮后台分批补建 ----------
+
+    /// 测试内派发：显式丢弃 Task（update 的返回值仅运行时消费）
+    fn dispatch(app: &mut Editpad, message: Message) {
+        let _ = app.update(message);
+    }
+
+    /// 构造一个启用了 Rust 语法高亮的 N 行文档应用，返回 (状态, 当时代次)。
+    fn app_with_rs_doc(lines: usize) -> (Editpad, u64) {
+        let app = Editpad::default();
+        let text = "fn f(x: f64) -> f64 { x /* 注释 */ }\n".repeat(lines);
+        {
+            let mut ed = app.editor.borrow_mut();
+            ed.reset_document(editpad_core::Document::from_str(&text));
+            ed.set_language(Some("rs"));
+        }
+        let gen = app
+            .editor
+            .borrow()
+            .highlight_generation()
+            .expect("已启用高亮");
+        (app, gen)
+    }
+
+    fn pave_payload(app: &Editpad, batch: usize) -> (HlPavePayload, u64) {
+        let (gen, highlighter) = app
+            .editor
+            .borrow()
+            .highlight_pave_snapshot()
+            .expect("已启用高亮");
+        let doc = app.editor.borrow().doc.clone();
+        (
+            HlPavePayload {
+                gen,
+                doc,
+                highlighter,
+                total_lines: app.editor.borrow().doc.line_count(),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                batch_strides: batch,
+            },
+            gen,
+        )
+    }
+
+    #[test]
+    fn hl_pave_stream_reports_progress_then_installs_final_state() {
+        let (mut app, _) = app_with_rs_doc(600);
+        let (payload, gen) = pave_payload(&app, 1);
+
+        // 调度登记：HighlightPaveNeeded 应把任务记入在途（幂等性另有专测）
+        dispatch(&mut app, Message::HighlightPaveNeeded);
+        assert!(app.hl_paving.is_some(), "应登记在途铺建任务");
+
+        // 直接驱动一次完整流并逐条喂给 update（模拟运行时投递）
+        let messages = block_on(async {
+            let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
+            drive_hl_pave(payload, pave_run, &mut tx).await;
+            drop(tx);
+            let mut collected = Vec::new();
+            while let Some(message) = rx.next().await {
+                collected.push(message);
+            }
+            collected
+        });
+
+        // 600 行 → 3 个完整档位，batch=1 → 3 条进度 + 恰好 1 条完成
+        let progresses: Vec<u64> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::HlPaveProgress(g, done) => {
+                    assert_eq!(*g, gen, "进度消息必须携带调度代次");
+                    Some(*done)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(progresses, vec![1, 2, 3], "进度应为累计档位数");
+        let dones: Vec<_> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::HlPaved(g, _) => Some(*g),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dones, vec![gen], "恰好一条完成消息且代次一致");
+
+        // 进度消息刷新状态栏；完成消息安装成果并解除登记
+        for message in messages {
+            dispatch(&mut app, message);
+        }
+        assert!(matches!(
+            app.status.as_str(),
+            "语法分析中…100%（后台）" | ""
+        ), "铺建完成后状态应归位，实际 {:?}", app.status);
+        assert_eq!(app.hl_paving, None, "完成后必须解除在途登记");
+        assert_eq!(
+            app.editor.borrow().highlight_checkpoints_len(),
+            Some(1 + 3),
+            "初始检查点 + 3 个后台档位"
+        );
+    }
+
+    #[test]
+    fn stale_hl_pave_result_is_dropped_after_generation_change() {
+        let (mut app, gen0) = app_with_rs_doc(600);
+        dispatch(&mut app, Message::HighlightPaveNeeded);
+        assert_eq!(app.hl_paving, Some(gen0));
+
+        // 编辑换代：真实编辑触发 invalidate_from → 换代
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert_ne!(
+            app.editor.borrow().highlight_generation(),
+            Some(gen0),
+            "编辑必须换代"
+        );
+        let len_now = app.editor.borrow().highlight_checkpoints_len();
+
+        // 迟到的旧代成果（内容无关紧要，代次闸门负责拒收）
+        let (stale_payload, _) = pave_payload(&app, 32);
+        let mut enriched_hl = stale_payload.highlighter.clone();
+        enriched_hl.advance_checkpoints(4, 600, &mut |i| format!("let e{i} = {i};"));
+        dispatch(&mut app, Message::HlPaved(gen0, enriched_hl));
+
+        assert_eq!(app.hl_paving, None, "过期任务的登记必须解除");
+        assert_eq!(
+            app.editor.borrow().highlight_checkpoints_len(),
+            len_now,
+            "换代后的迟到成果不得覆盖当前高亮器"
+        );
+    }
+
+    #[test]
+    fn cancelled_hl_pave_skips_work_but_still_replies_done() {
+        let (app, _) = app_with_rs_doc(600);
+        let (payload, _gen) = pave_payload(&app, 1);
+        payload.cancelled.store(true, Ordering::Relaxed);
+        let base_len = payload.highlighter.checkpoints_len();
+
+        let messages = block_on(async {
+            let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
+            drive_hl_pave(payload, pave_run, &mut tx).await;
+            drop(tx);
+            let mut collected = Vec::new();
+            while let Some(message) = rx.next().await {
+                collected.push(message);
+            }
+            collected
+        });
+
+        assert!(
+            messages.iter().all(|m| !matches!(m, Message::HlPaveProgress(..))),
+            "被取消的任务不得产出任何推进进度"
+        );
+        let dones = messages
+            .iter()
+            .filter(|m| matches!(m, Message::HlPaved(..)))
+            .count();
+        assert_eq!(dones, 1, "取消也必须回一条完成消息保持「恰好一条」语义");
+
+        // 兜底/取消路径送回的是起点克隆：安装它等于无变化，UI 不受损
+        if let Some(Message::HlPaved(_, hl)) = messages.into_iter().next() {
+            assert_eq!(hl.checkpoints_len(), base_len);
+        }
+    }
+
+    #[test]
+    fn hl_pave_runner_panic_still_replies_done() {
+        // 推进函数崩溃也必须回完成消息（起点克隆兜底），
+        // 否则「语法分析中…」永不解除——P5/P10 同款契约
+        let (mut app, _) = app_with_rs_doc(600);
+        let (payload, gen) = pave_payload(&app, 1);
+        let base_len = payload.highlighter.checkpoints_len();
+
+        let messages = block_on(async {
+            let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
+            drive_hl_pave(
+                payload,
+                |_payload, _report| -> editpad_core::LazyHighlighter { panic!("模拟铺建崩溃") },
+                &mut tx,
+            )
+            .await;
+            drop(tx);
+            let mut collected = Vec::new();
+            while let Some(message) = rx.next().await {
+                collected.push(message);
+            }
+            collected
+        });
+
+        assert_eq!(messages.len(), 1, "panic 后只应有兜底完成消息");
+        match &messages[0] {
+            Message::HlPaved(g, hl) => {
+                assert_eq!(*g, gen);
+                assert_eq!(hl.checkpoints_len(), base_len, "兜底必须是未推进的起点");
+            }
+            other => panic!("应为 HlPaved，实际 {other:?}"),
+        }
+
+        // 喂给 update 后登记解除、状态归零（不卡死）
+        dispatch(&mut app, messages.into_iter().next().unwrap());
+        assert_eq!(app.hl_paving, None);
+    }
+
+    #[test]
+    fn schedule_highlight_pave_is_idempotent_until_generation_changes() {
+        let (mut app, _) = app_with_rs_doc(600);
+
+        // 首次调度 + 同代重发：不得作废旧任务（取消标志不变、代次不变）
+        dispatch(&mut app, Message::HighlightPaveNeeded);
+        let flag_first = app.hl_pave_cancel.clone();
+        let slot_first = app.hl_paving;
+        dispatch(&mut app, Message::HighlightPaveNeeded);
+        assert!(
+            Arc::ptr_eq(&flag_first, &app.hl_pave_cancel),
+            "同代重复请求必须幂等跳过"
+        );
+        assert_eq!(app.hl_paving, slot_first);
+
+        // 编辑换代后再发：旧任务作废（换新取消标志）、新代次重新出发
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+        dispatch(&mut app, Message::HighlightPaveNeeded);
+        assert!(
+            !Arc::ptr_eq(&flag_first, &app.hl_pave_cancel),
+            "换代后必须重排新任务"
+        );
+        assert_ne!(app.hl_paving, slot_first, "新任务应携带换代后的代次");
+
+        // 纯文本文档（无高亮器）：请求直接清空登记不派发
+        let mut plain = Editpad::default();
+        plain.editor
+            .borrow_mut()
+            .reset_document(editpad_core::Document::from_str("plain text only\n"));
+        dispatch(&mut plain, Message::HighlightPaveNeeded);
+        assert_eq!(plain.hl_paving, None);
     }
 }

@@ -77,6 +77,81 @@ fn main() {
         "热态 styled_line（{samples} 次均值）      {:8.3} ms/次",
         ms(warm_total) / samples as f64
     );
+
+    // ---------- P12 分批补建模式（新路径） ----------
+    //
+    // UI 线程只做 styled_line_limited 判定（缺档超预算即降级返回 None，
+    // O(1)）；推进全部发生在后台线程的 advance_checkpoints 批间。
+    // 这里量：单批最大耗时（= worker 一批的墙钟）、批次数、累计 CPU。
+    let mut hl2 = LazyHighlighter::new("rs").expect("rust 语法存在");
+    let batch: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32);
+
+    // 降级判定成本：冷启动直接问末行，应立即 None 且几乎不耗时
+    let t = Instant::now();
+    let degraded = hl2
+        .styled_line_limited(
+            last,
+            tail_text.trim_end_matches(['\n', '\r']),
+            total,
+            LazyHighlighter::MAX_INLINE_STRIDES,
+            &mut |i| doc.line_str(i),
+        )
+        .is_none();
+    let degrade_cost = t.elapsed();
+    assert!(degraded, "冷启动末行必须判定为降级（None）");
+    println!(
+        "UI 线程降级判定（styled_line_limited）  {:8.4} ms ← 替代旧冻结的关键",
+        ms(degrade_cost)
+    );
+
+    let mut batches = 0usize;
+    let mut max_batch = Duration::ZERO;
+    let mut total_pave = Duration::ZERO;
+    loop {
+        let t = Instant::now();
+        let built = hl2.advance_checkpoints(batch, total, &mut |i| doc.line_str(i));
+        total_pave += t.elapsed();
+        if t.elapsed() > max_batch {
+            max_batch = t.elapsed();
+        }
+        if built == 0 {
+            break;
+        }
+        batches += 1;
+    }
+    println!(
+        "分批推进（batch={batch} 档）             批次 {batches}，累计 {:.1} ms",
+        ms(total_pave)
+    );
+    println!(
+        "  单批最大耗时                          {:8.1} ms ← 后台线程一批的墙钟",
+        ms(max_batch)
+    );
+    println!(
+        "  平均每批                              {:8.1} ms",
+        ms(total_pave) / batches.max(1) as f64
+    );
+    println!(
+        "  折算每行成本                          {:8.4} ms/行（与同步路径同量级）",
+        ms(total_pave) / last as f64
+    );
+
+    // 铺满后末行应可直接取色（残余 ≤1 档走同步路径）
+    let t = Instant::now();
+    let runs = hl2.styled_line_limited(
+        last,
+        tail_text.trim_end_matches(['\n', '\r']),
+        total,
+        LazyHighlighter::MAX_INLINE_STRIDES,
+        &mut |i| doc.line_str(i),
+    );
+    println!(
+        "铺满后 styled_line_limited(末行)        {:8.3} ms（{} 段，应为 Some）",
+        ms(t.elapsed()), runs.map(|r| r.len()).unwrap_or(0)
+    );
 }
 
 /// 直接探测 Highlighter 构造成本（主题走本样例的 'static 缓存，

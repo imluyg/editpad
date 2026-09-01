@@ -275,14 +275,75 @@ impl EditorCore {
     }
 
     /// 计算第 `line_idx` 行的着色片段；未启用高亮时返回空表。
+    ///
+    /// P12：补建预算受限——缺失检查点档位超过
+    /// [`LazyHighlighter::MAX_INLINE_STRIDES`] 时不再于本线程现算
+    /// （旧实现会在 UI 线程一次性冻结数十秒），而是返回无色渲染，
+    /// 同时经 [`Self::needs_paving`] 由应用层安排后台分批补建；
+    /// 铺建推进到该行后自然恢复配色。
     fn highlight_runs(&self, line_idx: usize, target_text: &str) -> Vec<StyledRun> {
         let Some(hl) = &self.highlight else {
             return Vec::new();
         };
         let doc = &self.doc;
-        hl.borrow_mut().styled_line(line_idx, target_text, doc.line_count(), &mut |i| {
-            doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned()
+        hl.borrow_mut()
+            .styled_line_limited(
+                line_idx,
+                target_text,
+                doc.line_count(),
+                LazyHighlighter::MAX_INLINE_STRIDES,
+                &mut |i| doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned(),
+            )
+            .unwrap_or_default()
+    }
+
+    // ---------- 高亮后台分批补建（P12 协作面） ----------
+
+    /// 可见区域是否还有「内联预算外」的缺档（需要安排后台铺建）。
+    /// 以视口最末行判断：O(1)，每帧在 RedrawRequested 里调用。
+    pub fn needs_paving(&self) -> bool {
+        let Some(hl) = &self.highlight else {
+            return false;
+        };
+        let last_visible = self.visible_range().1;
+        hl.borrow().strides_missing(last_visible) > LazyHighlighter::MAX_INLINE_STRIDES
+    }
+
+    /// 当前高亮器代次；未启用高亮时为 None。
+    pub fn highlight_generation(&self) -> Option<u64> {
+        self.highlight.as_ref().map(|h| h.borrow().generation())
+    }
+
+    /// 检查点数量（测试诊断用；生产路径经 [`Self::needs_paving`] 间接消费）。
+    #[cfg(test)]
+    pub fn highlight_checkpoints_len(&self) -> Option<usize> {
+        self.highlight.as_ref().map(|h| h.borrow().checkpoints_len())
+    }
+
+    /// 后台铺建的起点快照：(代次, 高亮器克隆)。文档克隆由调用方另行完成。
+    /// 未启用高亮时为 None。
+    pub fn highlight_pave_snapshot(&self) -> Option<(u64, LazyHighlighter)> {
+        self.highlight.as_ref().map(|h| {
+            let hl = h.borrow();
+            (hl.generation(), hl.clone())
         })
+    }
+
+    /// 安装一份后台铺建成果；仅当其代次与当前高亮器一致时生效（P12）。
+    /// 返回是否安装。代次不符 = 期间发生过编辑，成果整体丢弃。
+    ///
+    /// 整体替换会丢掉铺建期间同步路径攒下的少量行缓存（重新按需推导，
+    /// 只影响速度不影响正确性），换来的是无需合并逻辑的简单协议。
+    pub fn install_highlighter_if_current(&self, generation: u64, paved: LazyHighlighter) -> bool {
+        let Some(hl) = &self.highlight else {
+            return false;
+        };
+        let mut hl = hl.borrow_mut();
+        if hl.generation() != generation {
+            return false;
+        }
+        *hl = paved;
+        true
     }
 
     /// 用新文档整体替换（全部替换时用），保留撤销链以便反悔。
@@ -1223,7 +1284,16 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         match event {
             // 每帧把真实视口高度同步给核心（可见行数/滚动夹紧依赖它）
             iced::Event::Window(window::Event::RedrawRequested(_)) => {
-                self.core.borrow_mut().set_viewport_height(bounds.height);
+                {
+                    let mut core = self.core.borrow_mut();
+                    core.set_viewport_height(bounds.height);
+                    // P12：可见区缺档超内联预算 → 通知应用层安排后台分批补建。
+                    // 重复发布无害（应用层对同代在途任务幂等跳过）；铺建推进/
+                    // 编辑换代后由下一帧重新评估，无需额外状态。
+                    if core.needs_paving() {
+                        shell.publish(super::Message::HighlightPaveNeeded);
+                    }
+                }
             }
 
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -1711,6 +1781,61 @@ mod tests {
         assert!(c.undo());
         assert_eq!(c.doc.to_text(), "l1\r\nl2\r\n", "撤销完整还原");
         assert_eq!(c.doc.line_ending(), LineEnding::CrLf, "快照携带同一行尾元数据");
+    }
+
+    // ---------- P12 高亮后台分批补建 ----------
+
+    #[test]
+    fn needs_paving_tracks_visible_deficit() {
+        let mut c = core_with(&(0..600).map(|i| format!("fn f{i}() {{}}\n")).collect::<String>());
+        c.set_language(Some("rs"));
+        c.set_viewport_height(400.0);
+        c.clamp_scroll();
+        assert!(
+            !c.needs_paving(),
+            "顶部可见区落在初始检查点预算内，无需后台铺建"
+        );
+
+        // 跳到文末：可见区末行 599 需 5 个档位、只有初始 1 个 → 必须请求铺建
+        c.scroll_top = 100_000.0;
+        c.clamp_scroll();
+        assert!(c.needs_paving(), "大跳转后的可见区缺档必须被识别");
+
+        // 纯文本路径（无高亮器）恒不需要
+        let plain = core_with(&"x\n".repeat(600));
+        assert!(!plain.needs_paving());
+    }
+
+    #[test]
+    fn pave_snapshot_and_conditional_install_flow() {
+        let mut c = core_with(&(0..600).map(|i| format!("let a{i} = {i};\n")).collect::<String>());
+        c.set_language(Some("rs"));
+
+        // 起点快照 + 后台式推进
+        let (gen, snapshot) = c.highlight_pave_snapshot().expect("已启用高亮");
+        assert_eq!(c.highlight_generation(), Some(gen));
+        let mut worker = snapshot.clone();
+        let built = worker.advance_checkpoints(32, 600, &mut |i| format!("let w{i} = {i};"));
+        assert_eq!(built, 3, "600 行的完整档位起点为 128/256/384，共 3 个");
+        assert!(worker.checkpoints_len() > snapshot.checkpoints_len());
+
+        // 代次一致 → 安装成功且状态生效
+        assert!(c.install_highlighter_if_current(gen, worker.clone()));
+        assert_eq!(
+            c.highlight_checkpoints_len(),
+            Some(worker.checkpoints_len()),
+            "安装后检查点应与成果一致"
+        );
+
+        // 代次不符（模拟安装前发生过编辑）→ 整体拒绝
+        c.cursor = CursorPos { line: 599, col: 0 };
+        c.insert_str("x"); // 真实编辑：内部 invalidate_from → 换代
+        let stale_gen = gen;
+        assert_ne!(c.highlight_generation(), Some(stale_gen), "编辑必须换代");
+        assert!(
+            !c.install_highlighter_if_current(stale_gen, worker),
+            "换代后的迟到成果不得覆盖当前高亮器"
+        );
     }
 
     // ---------- 垂直滚动条 ----------

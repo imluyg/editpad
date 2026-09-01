@@ -9,6 +9,7 @@
 //! 检查点截断到 L/STRIDE+1 个，逐行缓存丢弃键 >= L 的条目。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use syntect::highlighting::{
@@ -25,6 +26,16 @@ const THEME_NAME: &str = "InspiredGitHub";
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<Theme> = OnceLock::new();
+/// 高亮器代次的全局单调计数（P12）。
+///
+/// 代次必须跨实例单调：`set_language`/重新打开文件会整体换掉高亮器，
+/// 若每个实例都从 0 起算，旧实例在途的后台补建结果（代次 0）会被
+/// 新实例（也是代次 0）误认成自己的。全局计数器保证不重号。
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn next_generation() -> u64 {
+    GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 
 /// 行文本不含换行符，因此使用 nonewlines 变体的语法定义。
 fn syntax_set() -> &'static SyntaxSet {
@@ -64,6 +75,32 @@ pub struct LazyHighlighter {
     /// 之后的部分是垫付的。任何失效发生时，含垫付的检查点一并截掉，
     /// 杜绝「跳到文末 → 文档增长 → 从脏检查点续算」的错色。
     phantom_from: Option<usize>,
+    /// 高亮器代次（P12）：任何失效（编辑）都会换新号。后台分批补建
+    /// 的在途结果按它过滤——代次不符即整体丢弃，杜绝拿旧文档状态
+    /// 覆盖新文档。全局单调计数保证跨实例也不重号。
+    generation: u64,
+}
+
+// ParseState/HighlightState 在 fancy-regex 后端下均为纯数据字段
+// （Vec/Option/String/ScopeStack），可安全跨线程搬运——后台补建依赖
+// 此性质；此处编译期钉住，后端更换时第一时间暴露。
+#[cfg(test)]
+#[allow(dead_code)]
+fn _assert_highlighter_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<LazyHighlighter>();
+}
+
+impl std::fmt::Debug for LazyHighlighter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 内部状态体积可观且无调试价值，只输出摘要
+        f.debug_struct("LazyHighlighter")
+            .field("syntax_name", &self.syntax_name)
+            .field("checkpoints", &self.checkpoints.len())
+            .field("cached_lines", &self.line_cache.len())
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LazyHighlighter {
@@ -80,11 +117,37 @@ impl LazyHighlighter {
             )],
             line_cache: HashMap::new(),
             phantom_from: None,
+            generation: next_generation(),
         })
     }
 
     pub fn syntax_name(&self) -> &str {
         &self.syntax_name
+    }
+
+    /// 当前代次（P12）：后台补建结果按它过滤。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 已保存的检查点数（含初始态 [0]）。
+    pub fn checkpoints_len(&self) -> usize {
+        self.checkpoints.len()
+    }
+
+    /// 覆盖第 `line_idx` 行还缺几个检查点档位（0 = 已就绪）。
+    pub fn strides_missing(&self, line_idx: usize) -> usize {
+        (line_idx / STRIDE + 1).saturating_sub(self.checkpoints.len())
+    }
+
+    /// 是否还有「真实行组成的完整档位」可建（P12）：后台补建是否还有活干。
+    ///
+    /// 文档尾部不足一档的残余永远不算——那部分留给同步路径按需处理
+    /// （≤1 档，成本与日常随机访问相同），因此本值为 false 即代表
+    /// 后台分批可以收工。
+    pub fn needs_background_pave(&self, total_lines: usize) -> bool {
+        let start = self.checkpoints.len() * STRIDE;
+        start + STRIDE <= total_lines
     }
 
     /// 第 `line_idx` 行（含）之后的状态全部作废。
@@ -93,6 +156,8 @@ impl LazyHighlighter {
     /// （P23）：那些状态缺了文档后来长出来的真实行，续算会错色。
     /// 垫付只可能发生在最后一次补建的末档，重建成本 ≤ 一个档位。
     pub fn invalidate_from(&mut self, line_idx: usize) {
+        // P12：编辑即换代——在途的后台补建结果回来后对不上号，整体丢弃
+        self.generation = next_generation();
         let mut keep = line_idx / STRIDE + 1;
         if let Some(p) = self.phantom_from {
             // 检查点 k 覆盖 [k*STRIDE, (k+1)*STRIDE)；含垫付行的档位全部不要
@@ -204,6 +269,66 @@ impl LazyHighlighter {
         self.line_cache.insert(line_idx, (parse, highlight));
 
         runs
+    }
+
+    /// 内联补建预算：调用线程（UI）单次最多现算的缺失档位数。
+    ///
+    /// 一个档位 = STRIDE 行 ≈ 10ms 量级（实测 75µs/行），是既有热路径
+    /// 的可接受上限；超过即说明用户做了大跳转，必须降级 + 转后台分批。
+    pub const MAX_INLINE_STRIDES: usize = 1;
+
+    /// 与 [`styled_line`](Self::styled_line) 相同，但补建预算受限（P12）。
+    ///
+    /// 缺失档位数超过 `max_inline_strides` 时**不做任何补建**，返回
+    /// `None`——调用方应以无色渲染该行并安排后台分批补建，而不是在
+    /// UI 线程上一次性冻结数十秒。
+    pub fn styled_line_limited(
+        &mut self,
+        line_idx: usize,
+        target_text: &str,
+        total_lines: usize,
+        max_inline_strides: usize,
+        text_of: &mut dyn FnMut(usize) -> String,
+    ) -> Option<Vec<StyledRun>> {
+        if self.strides_missing(line_idx) > max_inline_strides {
+            return None;
+        }
+        Some(self.styled_line(line_idx, target_text, total_lines, text_of))
+    }
+
+    /// 从当前检查点继续向后补建，一次最多 `max_strides` 个档位（P12）。
+    ///
+    /// 只用**真实存在**的行、只建**完整**的档位——起点越过文档末尾或
+    /// 剩余不足一个整档位时停止（返回已建数量），因此本方法永远不会
+    /// 产生垫付空行、不触碰 [`phantom_from`](Self::phantom_from) 语义；
+    /// 文档尾部不足一档的部分留给同步路径按需处理（≤1 档，成本与
+    /// 日常随机访问相同）。
+    ///
+    /// 这是后台分批补建的推进原语：每批调用一次，批间可检查取消标志、
+    /// 上报进度。不改变代次——补建不是失效。
+    pub fn advance_checkpoints(
+        &mut self,
+        max_strides: usize,
+        total_lines: usize,
+        text_of: &mut dyn FnMut(usize) -> String,
+    ) -> usize {
+        let ss = syntax_set();
+        let highlighter = Highlighter::new(theme());
+        let mut built = 0usize;
+        while built < max_strides {
+            let start = self.checkpoints.len() * STRIDE;
+            if start + STRIDE > total_lines {
+                break; // 剩余不足一个完整档位：交给同步路径
+            }
+            let (mut parse, mut highlight) =
+                self.checkpoints.last().cloned().expect("初始检查点恒存在");
+            for i in start..start + STRIDE {
+                advance(&mut parse, &mut highlight, &text_of(i), ss, &highlighter);
+            }
+            self.checkpoints.push((parse, highlight));
+            built += 1;
+        }
+        built
     }
 }
 
@@ -332,5 +457,93 @@ mod tests {
     fn hl_comment_color(hl: &mut LazyHighlighter, line: usize) -> [f32; 4] {
         let runs = hl.styled_line(line, "仍在注释 */", usize::MAX, &mut |_| String::new());
         runs.first().unwrap().color
+    }
+
+    // ---------- P12：有限补建 + 后台分批 ----------
+
+    #[test]
+    fn strides_missing_drives_limited_degrade_contract() {
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let filler = &mut |i: usize| format!("let v{i} = {i};");
+
+        // 初始只有检查点 [0]：第 100 行落在 [0,128) 内已覆盖 → 缺 0 档
+        assert_eq!(hl.strides_missing(100), 0);
+        // 第 200 行需要检查点 [1] → 缺 1 档，恰在预算内：内联现算成功
+        assert_eq!(hl.strides_missing(200), 1);
+        let runs = hl
+            .styled_line_limited(200, "let x = 1;", 600, LazyHighlighter::MAX_INLINE_STRIDES, filler)
+            .expect("缺 1 档属于预算内，必须内联现算");
+        assert!(!runs.is_empty());
+
+        // 第 500 行需 4 个档位、现有 2 个 → 缺 2 超预算 → 拒绝内联
+        assert_eq!(hl.strides_missing(500), 2);
+        assert!(
+            hl.styled_line_limited(500, "let y = 2;", 600, LazyHighlighter::MAX_INLINE_STRIDES, filler)
+                .is_none(),
+            "超预算必须返回 None（降级），不得在调用线程大段补建"
+        );
+    }
+
+    #[test]
+    fn advance_checkpoints_builds_full_strides_and_stops_at_document_edge() {
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        // 300 行：初始检查点已覆盖 [0,128)，完整档位只剩 [128,256) 一个；
+        // 起点 256 的档位越界（256+128=384 > 300）不得建
+        let total = 300usize;
+        let built = hl.advance_checkpoints(10, total, &mut |i| format!("let f{i} = {i};"));
+        assert_eq!(built, 1, "只应建完整档位，实际建了 {built}");
+        assert!(
+            !hl.needs_background_pave(total),
+            "残余不足一档时应判定后台无活可干"
+        );
+        assert!(hl.phantom_from.is_none(), "后台推进绝不产生垫付空行");
+
+        // 再推进无活可干
+        assert_eq!(hl.advance_checkpoints(10, total, &mut |i| format!("{i}")), 0);
+
+        // 残余档位在预算内直接可取（末行走同步路径 ≤1 档），且不 panic
+        let runs = hl
+            .styled_line_limited(
+                total - 1,
+                "let tail = 1;",
+                total,
+                LazyHighlighter::MAX_INLINE_STRIDES,
+                &mut |i| format!("let f{i} = {i};"),
+            )
+            .expect("残余不足预算时末行不应再要求降级");
+        assert!(!runs.is_empty());
+    }
+
+    #[test]
+    fn styled_line_result_identical_whether_paved_inline_or_in_background() {
+        // 同一目标行的配色：同步全量补建 vs 后台分批铺满后取用，必须一致
+        let total = 700usize;
+        let text_of = |i: usize| format!("fn f{i}(x: f64) -> f64 {{ x /* 注释 */ }}");
+
+        let mut sync_hl = LazyHighlighter::new("rs").unwrap();
+        let sync_runs = sync_hl.styled_line(total - 1, "let a = 1;", total, &mut |i| text_of(i));
+
+        let mut bg_hl = LazyHighlighter::new("rs").unwrap();
+        while bg_hl.advance_checkpoints(2, total, &mut |i| text_of(i)) > 0 {}
+        let bg_runs = bg_hl.styled_line(total - 1, "let a = 1;", total, &mut |i| text_of(i));
+
+        assert_eq!(sync_runs, bg_runs, "后台分批铺建的检查点必须产出与同步路径相同的配色");
+    }
+
+    #[test]
+    fn generation_bumps_on_invalidate_only_and_is_globally_monotonic() {
+        let mut hl = LazyHighlighter::new("rs").unwrap();
+        let g0 = hl.generation();
+        let _ = hl.styled_line(10, "let a;", usize::MAX, &mut |i| format!("{i}"));
+        let built = hl.advance_checkpoints(1, usize::MAX, &mut |i| format!("{i}"));
+        assert_eq!(built, 1);
+        assert_eq!(hl.generation(), g0, "读取/补建都不是失效，不得换代");
+
+        hl.invalidate_from(5);
+        assert!(hl.generation() > g0, "编辑失效必须换代（在途结果据此丢弃）");
+
+        // 全局计数器：新实例不与旧实例重号（换语言/换文档场景的正确性前提）
+        let fresh = LazyHighlighter::new("rs").unwrap();
+        assert!(fresh.generation() > hl.generation(), "代次跨实例单调递增");
     }
 }
