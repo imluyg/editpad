@@ -1757,7 +1757,9 @@ impl VScrollbar {
 /// 超宽内容下水平滑块的最小宽度（与垂直侧同理由：必须抓得住）。
 const THUMB_MIN_W: f32 = 32.0;
 /// 滑块/轨道的可视厚度（垂直条的厚度常量复用于水平条的高度）。
-const SCROLLBAR_THUMB_THICKNESS: f32 = 10.0;
+/// P58：水平条 10→6px——用户截图反馈覆盖末行文字过于明显；
+/// 淡出（P54）+ 降厚双管齐下。垂直条宽度（SCROLLBAR_WIDTH）不变。
+const SCROLLBAR_THUMB_THICKNESS: f32 = 6.0;
 /// 水平条命中区高度（下缘窄带，比可视厚度略高好点中）。
 const SCROLLBAR_ZONE_H: f32 = SCROLLBAR_THUMB_THICKNESS + SCROLLBAR_EDGE_INSET * 2.0;
 

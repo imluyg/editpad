@@ -23,7 +23,7 @@ use iced::keyboard::{self, key::Named};
 use iced::widget::{button, checkbox, column, container, mouse_area, opaque, progress_bar, row, rule,
     scrollable, text, text_input, Stack};
 use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
-    Font, Padding, Point, Shadow, Shrink, Subscription, Task, Theme};
+    Font, Padding, Point, Shadow, Subscription, Task, Theme};
 
 use editor::{EditorHandle, EditOp, Motion};
 
@@ -3779,6 +3779,7 @@ impl Editpad {
                     .color([0.5, 0.5, 0.5]),
                 button(text("×").size(uipx).font(uifont))
                     .padding([2, 8])
+                    .style(chrome_button_style)
                     .on_press(Message::TabContextMenuClosed),
             ]
             .spacing(8)
@@ -3787,11 +3788,14 @@ impl Editpad {
         .spacing(2)
         .padding([4, 10]);
 
-        // 固定 / 取消固定（固定页豁免一切关闭路径）
+        // 固定 / 取消固定（固定页豁免一切关闭路径）。
+        // P56：菜单项一律中性列表样式（透明底+悬停淡染），不再用 iced
+        // 默认实心蓝（用户截图：菜单项像全选中的高亮条）
         let pin_label = if tab.pinned { "取消固定" } else { "📌 固定标签页" };
         panel = panel.push(
             button(container(text(pin_label).size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
+                .style(chrome_menu_item_style)
                 .on_press_maybe(interactive.then_some(Message::TogglePinTab(idx))),
         );
         // 保存：仅置脏可用（与工具栏「保存」同一口径）；
@@ -3799,6 +3803,7 @@ impl Editpad {
         panel = panel.push(
             button(container(text("保存").size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
+                .style(chrome_menu_item_style)
                 .on_press_maybe(
                     (interactive && tab.dirty).then_some(Message::SaveTabFromMenu(idx)),
                 ),
@@ -3808,6 +3813,7 @@ impl Editpad {
         panel = panel.push(
             button(container(text(rename_label).size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
+                .style(chrome_menu_item_style)
                 .on_press_maybe(interactive.then_some(Message::RenameOrSaveAsTab(idx))),
         );
 
@@ -3817,6 +3823,7 @@ impl Editpad {
         panel = panel.push(
             button(container(text("关闭").size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
+                .style(chrome_menu_item_style)
                 .on_press_maybe(
                     (interactive && !tab.pinned).then_some(Message::CloseTabAt(idx)),
                 ),
@@ -3832,6 +3839,7 @@ impl Editpad {
                     .width(Fill),
             )
             .width(Fill)
+            .style(chrome_menu_item_style)
             .on_press_maybe(
                 (!others.is_empty() && interactive).then_some(Message::CloseOtherTabs(idx)),
             ),
@@ -3844,6 +3852,7 @@ impl Editpad {
                     .width(Fill),
             )
             .width(Fill)
+            .style(chrome_menu_item_style)
             .on_press_maybe(
                 (!right.is_empty() && interactive).then_some(Message::CloseTabsRight(idx)),
             ),
@@ -3870,7 +3879,7 @@ impl Editpad {
                 container(
                     button(text("×").size(uipx).font(uifont))
                         .padding([2, 9])
-                        .style(settings_action_button_style)
+                        .style(chrome_button_style)
                         .on_press(Message::SettingsToggled),
                 )
                 .width(Fill)
@@ -3920,7 +3929,7 @@ impl Editpad {
                 .width(Fill)
                 .padding([5, 10])
                 .style(move |theme, status| {
-                    settings_nav_button_style(theme, status, selected)
+                    chrome_nav_button_style(theme, status, selected)
                 })
                 .on_press(Message::SettingsPageSelected(page)),
             );
@@ -4058,7 +4067,7 @@ impl Editpad {
                     .font(uifont),
             )
             .padding([3, 12])
-            .style(settings_action_button_style)
+            .style(chrome_button_style)
             .on_press(Message::ThemeToggled)
             .into(),
             "字号" => self.settings_stepper(
@@ -4073,7 +4082,7 @@ impl Editpad {
             // ---- 字体 ----
             FONT_ROW_KEY => button(text("回退默认").size(uipx).font(uifont))
                 .padding([3, 12])
-                .style(settings_action_button_style)
+                .style(chrome_button_style)
                 .on_press_maybe(
                     s.font_family.is_some().then_some(Message::SettingsFontReset),
                 )
@@ -4115,7 +4124,7 @@ impl Editpad {
                 .font(uifont),
             )
             .padding([3, 12])
-            .style(settings_action_button_style)
+            .style(chrome_button_style)
             .on_press(Message::SettingsExitModeToggled)
             .into(),
             "快照心跳间隔（秒）" => self.settings_stepper(
@@ -4145,7 +4154,7 @@ impl Editpad {
         let mk = |label: &str, msg: Option<Message>| {
             button(text(label.to_owned()).size(uipx).font(uifont))
                 .padding([2, 9])
-                .style(settings_action_button_style)
+                .style(chrome_button_style)
                 .on_press_maybe(msg)
         };
         // 值列定宽居中（P51 打磨）：数值变宽（如 2s→60s）时 ± 按钮不再
@@ -4218,7 +4227,7 @@ impl Editpad {
                     )
                     .width(Fill)
                     .padding([4, 8])
-                    .style(settings_list_item_style)
+                    .style(chrome_menu_item_style)
                     .on_press(Message::SettingsFontSelected(
                         (*name).clone(),
                     )),
@@ -4256,16 +4265,21 @@ impl Editpad {
         let uipx = editor::ui_font_px();
         let uifont = self.body_font();
 
+        // P57：工具栏全部换全局中性按钮（白/深底描边+正文字色+悬停淡染），
+        // 取代 iced 默认实心蓝底白字
         let toolbar = row![
             button(text("打开…").size(uipx).font(uifont))
                 .padding([4, 12])
+                .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::OpenRequested)),
             button(text("保存").size(uipx).font(uifont))
                 .padding([4, 12])
+                .style(chrome_button_style)
                 .on_press_maybe((!self.busy && self.tab().dirty)
                     .then_some(Message::SaveRequested)),
             button(text("另存为…").size(uipx).font(uifont))
                 .padding([4, 12])
+                .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::SaveAsRequested)),
             // P22 第三批：Markdown 预览开关（仅 Markdown 语法页可用）
             button(text(if self.preview_visible {
@@ -4276,21 +4290,26 @@ impl Editpad {
             .size(uipx)
             .font(uifont))
             .padding([4, 12])
+            .style(chrome_button_style)
             .on_press_maybe(is_markdown.then_some(Message::PreviewToggled)),
             button(text("查找/替换").size(uipx).font(uifont))
                 .padding([4, 12])
+                .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::FindToggled)),
             button(text("跳转到行").size(uipx).font(uifont))
                 .padding([4, 12])
+                .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::GotoToggled)),
             button(text("最近文件").size(uipx).font(uifont))
                 .padding([4, 12])
+                .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::RecentsToggled)),
             // P48：主题与字号按钮已随设置弹窗（P47）收编移除——工具栏只留
             // 高频动作；外观调节入口 = 设置弹窗 + 编辑器内 Ctrl+滚轮缩放。
             // P27：设置弹窗入口（busy 时禁开，与其余工具栏按钮同一守卫）
             button(text("设置").size(uipx).font(uifont))
                 .padding([4, 12])
+                .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::SettingsToggled)),
             text(if self.tab().dirty { "● 未保存" } else { "" })
                 .size(uipx)
@@ -4325,9 +4344,11 @@ impl Editpad {
                                 .width(150),
                             button(text("✓").size(uipx).font(uifont))
                                 .padding([2, 7])
+                                .style(chrome_button_style)
                                 .on_press(Message::TabRenameCommitted),
                             button(text("×").size(uipx).font(uifont))
                                 .padding([2, 7])
+                                .style(chrome_button_style)
                                 .on_press(Message::TabRenameCancelled),
                         ]
                         .spacing(2)
@@ -4337,6 +4358,8 @@ impl Editpad {
                 }
                 let marker = if i == self.active_tab { "▸ " } else { "  " };
                 let pin = if tab.pinned { "📌 " } else { "" };
+                // P57：页签换中性样式——活动页淡底描边、非活动透明悬停淡染
+                let active = i == self.active_tab;
                 strip = strip.push(
                     mouse_area(
                         button(text(format!(
@@ -4346,6 +4369,9 @@ impl Editpad {
                         .size(uipx)
                         .font(uifont))
                         .padding([2, 10])
+                        .style(move |theme, status| {
+                            chrome_nav_button_style(theme, status, active)
+                        })
                         .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
                     )
                     .on_right_press(Message::TabContextMenu(i)),
@@ -4407,6 +4433,7 @@ impl Editpad {
                 panel = panel.push(
                     button(container(text(entry).size(uipx).font(uifont)).width(Fill))
                         .width(Fill)
+                        .style(chrome_menu_item_style)
                         .on_press_maybe(
                             (!self.busy).then_some(Message::RecentSelected(entry.clone())),
                         ),
@@ -4418,6 +4445,7 @@ impl Editpad {
                     row![
                         button(text("清空记录").size(uipx).font(uifont))
                             .padding([2, 8])
+                            .style(chrome_button_style)
                             .on_press_maybe((!self.busy).then_some(Message::RecentsCleared)),
                         text("从 config.toml 移除全部路径")
                             .size(uipx)
@@ -4457,15 +4485,19 @@ impl Editpad {
                         .width(200),
                     text(position_label).size(uipx).font(uifont),
                     button(text("↑ 上一个").size(uipx).font(uifont))
+                        .style(chrome_button_style)
                         .on_press_maybe(has_matches.then_some(Message::FindPrev)),
                     button(text("↓ 下一个").size(uipx).font(uifont))
+                        .style(chrome_button_style)
                         .on_press_maybe(has_matches.then_some(Message::FindNext)),
                     checkbox(self.case_sensitive)
                         .label("区分大小写")
                         .text_size(uipx)
                         .font(uifont)
                         .on_toggle(Message::CaseToggled),
-                    button(text("×").size(uipx).font(uifont)).on_press(Message::FindToggled),
+                    button(text("×").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press(Message::FindToggled),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -4480,11 +4512,14 @@ impl Editpad {
                         .on_input(Message::ReplaceQueryChanged)
                         .width(200),
                     button(text("替换当前").size(uipx).font(uifont))
+                        .style(chrome_button_style)
                         .on_press_maybe(has_matches.then_some(Message::ReplaceCurrent)),
                     // 扫描在途时禁用：此刻的全文快照可能是过期的
-                    button(text("全部替换").size(uipx).font(uifont)).on_press_maybe(
-                        (!scanning).then_some(Message::ReplaceAll),
-                    ),
+                    button(text("全部替换").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press_maybe(
+                            (!scanning).then_some(Message::ReplaceAll),
+                        ),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -4502,8 +4537,12 @@ impl Editpad {
                         .on_input(Message::GotoInputChanged)
                         .on_submit(Message::GotoSubmit)
                         .width(140),
-                    button(text("跳转").size(uipx).font(uifont)).on_press(Message::GotoSubmit),
-                    button(text("×").size(uipx).font(uifont)).on_press(Message::GotoToggled),
+                    button(text("跳转").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press(Message::GotoSubmit),
+                    button(text("×").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press(Message::GotoToggled),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -4523,14 +4562,17 @@ impl Editpad {
                         .font(uifont),
                     button(text("保存并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press_maybe(
                             (!self.busy).then_some(Message::ConfirmSaveAndClose)
                         ),
                     button(text("放弃更改").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::DiscardAndClose),
                     button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::CancelClose),
                 ]
                 .spacing(8)
@@ -4552,16 +4594,19 @@ impl Editpad {
                     .font(uifont),
                     button(text("放弃更改并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::ConfirmCloseTabDiscard(idx)),
                     // P21 完整版：已命名的页可直接「保存并关闭」
                     button(text("保存并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press_maybe(
                             (!self.busy && self.tabs[idx].path.is_some())
                                 .then_some(Message::CloseTabSave(idx)),
                         ),
                     button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::CancelCloseTab),
                 ]
                 .spacing(8)
@@ -4587,9 +4632,11 @@ impl Editpad {
                     .font(uifont),
                     button(text("放弃更改并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::ConfirmBatchCloseDiscard),
                     button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::CancelBatchCloseTabs),
                 ]
                 .spacing(8)
@@ -4605,10 +4652,13 @@ impl Editpad {
                     text(format!("{} 有未保存的更改，放弃并打开？", path.display()))
                         .size(uipx)
                         .font(uifont),
-                    button(text("放弃更改并打开").size(uipx).font(uifont))                        .padding([4, 12])
+                    button(text("放弃更改并打开").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::ConfirmOpenDiscard),
                     button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::ConfirmOpenCancel),
                 ]
                 .spacing(8)
@@ -4640,9 +4690,11 @@ impl Editpad {
                             .font(uifont),
                             button(text("重新加载").size(uipx).font(uifont))
                                 .padding([4, 12])
+                                .style(chrome_button_style)
                                 .on_press(Message::ConfirmExternalReload(first)),
                             button(text("忽略").size(uipx).font(uifont))
                                 .padding([4, 12])
+                                .style(chrome_button_style)
                                 .on_press(Message::IgnoreExternalChange(first)),
                         ]
                         .spacing(8)
@@ -4652,6 +4704,7 @@ impl Editpad {
                             bar = bar.push(
                                 button(text("全部忽略").size(uipx).font(uifont))
                                     .padding([4, 12])
+                                    .style(chrome_button_style)
                                     .on_press(Message::IgnoreAllExternalChanges),
                             );
                         }
@@ -4672,9 +4725,11 @@ impl Editpad {
                         .font(uifont),
                     button(text("恢复").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::SessionRecoverAccepted),
                     button(text("丢弃").size(uipx).font(uifont))
                         .padding([4, 12])
+                        .style(chrome_button_style)
                         .on_press(Message::SessionRecoverDiscarded),
                 ]
                 .spacing(8)
@@ -4761,11 +4816,17 @@ impl Editpad {
             card_h,
         );
         let card = opaque(
-            // P46：宽度必须 Shrink——scrollable 默认宽度是 Fill，
-            // 会把菜单卡片横向撑满整窗（功能文字左侧、右侧一大片空白）
-            container(scrollable(self.tab_context_panel(idx)).height(card_h).width(Shrink))
-                .padding(4)
-                .style(popup_card_style),
+            // P56：宽度必须定宽 CTX_MENU_W——P46 的 Shrink 修法在 iced
+            // 布局下不成立（Fill 子控件在 Shrink 测量中会撑到窗口宽，
+            // 用户截图实测卡片 ~970px）；定宽与贴边钳制共用同一常量，
+            // 估宽即实宽，不再有漂移
+            container(
+                scrollable(self.tab_context_panel(idx))
+                    .height(card_h)
+                    .width(CTX_MENU_W),
+            )
+            .padding(4)
+            .style(popup_card_style),
         );
         mouse_area(
             container(card)
@@ -5188,9 +5249,9 @@ fn settings_colors(theme: &Theme) -> SettingsColors {
     }
 }
 
-/// P47：侧栏导航项样式——选中 = 底色 + 1px 描边（ 选中态）；
-/// 未选中 = 透明，悬停淡染。
-fn settings_nav_button_style(
+/// P56/P57：导航项 / 页签样式（设置侧栏分类、标签条页签共用）——
+/// 选中 = 底色 + 1px 描边（弱选中指示），未选中透明、悬停淡染。
+fn chrome_nav_button_style(
     theme: &Theme,
     status: button::Status,
     selected: bool,
@@ -5219,9 +5280,11 @@ fn settings_nav_button_style(
     style
 }
 
-/// P47：设置行内小按钮（主题切换 / 步进 / 回退默认 / 关窗行为 / ×）：
-/// 控件底 + 描边，悬停淡染、按压转点缀色描边、禁用降为次要色。
-fn settings_action_button_style(theme: &Theme, status: button::Status) -> button::Style {
+/// P57：全局壳层中性按钮（工具栏/确认条/提示条/微按钮/设置弹窗控件
+/// 共用）——控件底 + 1px 描边 + 正文字色，悬停淡染、按压描边转点缀色、
+/// 禁用降为次要色。取代 iced 默认的实心 primary 蓝底白字（用户截图反馈：
+/// 按钮一度像全选中的高亮条，菜单里尤其严重）。
+fn chrome_button_style(theme: &Theme, status: button::Status) -> button::Style {
     let sc = settings_colors(theme);
     let mut style = button::Style {
         background: Some(Background::Color(sc.control_bg)),
@@ -5237,21 +5300,31 @@ fn settings_action_button_style(theme: &Theme, status: button::Status) -> button
     match status {
         button::Status::Hovered => style.background = Some(Background::Color(sc.hover)),
         button::Status::Pressed => style.border.color = sc.accent,
-        button::Status::Disabled => style.text_color = sc.desc,
+        button::Status::Disabled => {
+            style.text_color = sc.desc;
+            style.border.color = sc.separator;
+        }
         button::Status::Active => {}
     }
     style
 }
 
-/// P47：字体候选列表项——透明底 + 悬停淡染（ 列表观感，无描边）。
-fn settings_list_item_style(theme: &Theme, status: button::Status) -> button::Style {
+/// P56：菜单项 / 下拉列表项样式（右键菜单、最近文件、字体候选共用）——
+/// 常态透明融入卡片、正文字色，悬停淡染，禁用降为次要色。取代 iced
+/// 默认实心蓝（菜单项一度像全选中的高亮条）。
+fn chrome_menu_item_style(theme: &Theme, status: button::Status) -> button::Style {
     let sc = settings_colors(theme);
     button::Style {
         background: Some(Background::Color(match status {
             button::Status::Hovered | button::Status::Pressed => sc.hover,
             _ => Color::TRANSPARENT,
         })),
-        text_color: sc.text,
+        // P56：禁用降为次要色（与 chrome_button_style 同一口径）
+        text_color: if matches!(status, button::Status::Disabled) {
+            sc.desc
+        } else {
+            sc.text
+        },
         border: Border {
             color: Color::TRANSPARENT,
             width: 1.0,
@@ -9135,6 +9208,58 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(app.renaming_tab.is_none() && app.rename_input.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P56/P57 全局中性样式 ----------
+
+    #[test]
+    fn chrome_styles_are_neutral_and_status_aware() {
+        let bg_of = |s: &button::Style| match s.background {
+            Some(Background::Color(c)) => Some(c),
+            _ => None,
+        };
+        for (label, theme) in [("浅色", Theme::Light), ("深色", Theme::Dark)] {
+            // 按钮：悬停必须有视觉反馈、禁用必须降灰（不再是实心蓝底白字）
+            let active = chrome_button_style(&theme, button::Status::Active);
+            let hovered = chrome_button_style(&theme, button::Status::Hovered);
+            let disabled = chrome_button_style(&theme, button::Status::Disabled);
+            assert_ne!(
+                bg_of(&active),
+                bg_of(&hovered),
+                "{label}: 悬停必须有视觉反馈"
+            );
+            assert_ne!(active.text_color, disabled.text_color, "{label}: 禁用必须降灰");
+            assert_ne!(
+                active.border.color, disabled.border.color,
+                "{label}: 禁用描边应弱化"
+            );
+
+            // 菜单项：常态透明融入卡片、悬停淡染（不再像全选中的高亮条）
+            let item = chrome_menu_item_style(&theme, button::Status::Active);
+            let item_hover = chrome_menu_item_style(&theme, button::Status::Hovered);
+            assert_eq!(bg_of(&item), Some(Color::TRANSPARENT), "{label}: 菜单项常态透明");
+            assert_ne!(
+                bg_of(&item),
+                bg_of(&item_hover),
+                "{label}: 菜单项悬停必须有淡染"
+            );
+            let item_disabled =
+                chrome_menu_item_style(&theme, button::Status::Disabled);
+            assert_ne!(
+                item.text_color, item_disabled.text_color,
+                "{label}: 菜单项禁用必须降灰"
+            );
+
+            // 页签：活动页淡底 + 描边，非活动透明无边
+            let tab_active = chrome_nav_button_style(&theme, button::Status::Active, true);
+            let tab_idle = chrome_nav_button_style(&theme, button::Status::Active, false);
+            assert!(bg_of(&tab_active).is_some(), "{label}: 活动页签应有底色");
+            assert!(bg_of(&tab_idle).is_none(), "{label}: 非活动页签应透明");
+            assert_ne!(
+                tab_active.border.color, tab_idle.border.color,
+                "{label}: 活动页签应有描边指示"
+            );
+        }
     }
 
     #[test]
