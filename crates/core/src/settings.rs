@@ -33,6 +33,11 @@ pub struct Settings {
     /// 编辑器字号，加载时 clamp 到 `[MIN_FONT_SIZE, MAX_FONT_SIZE]`。
     #[serde(default = "default_font_size")]
     pub font_size: f32,
+    /// 是否记住最近打开的文件（P20 隐私选项）。默认 true 保持既有行为；
+    /// 关闭后 `push_recent` 变 no-op，且加载时清空存量列表——
+    /// config.toml 不再留任何文件路径痕迹。
+    #[serde(default = "default_true")]
+    pub remember_recent_files: bool,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -43,6 +48,7 @@ impl Default for Settings {
             recent_files: Vec::new(),
             theme: THEME_LIGHT.to_string(),
             font_size: DEFAULT_FONT_SIZE,
+            remember_recent_files: true,
         }
     }
 }
@@ -55,6 +61,11 @@ fn default_theme() -> String {
 /// `#[serde(default)]` 用：缺字段时的字号默认值。
 fn default_font_size() -> f32 {
     DEFAULT_FONT_SIZE
+}
+
+/// `#[serde(default)]` 用：P20 开关缺字段时的默认值（true，不惊扰老用户）。
+fn default_true() -> bool {
+    true
 }
 
 impl Settings {
@@ -79,6 +90,11 @@ impl Settings {
         } else {
             DEFAULT_FONT_SIZE
         };
+        // P20：关闭「记住最近文件」时，存量列表一并清空——
+        // 只关开关不清数据等于没关（config.toml 里仍躺着完整路径）。
+        if !self.remember_recent_files && !self.recent_files.is_empty() {
+            self.recent_files.clear();
+        }
     }
 
     /// 当前是否为深色主题（仅规范值 `"dark"` 视为深色）。
@@ -121,11 +137,21 @@ impl Settings {
     }
 
     /// 记录一次打开：去重后提到最前，超出上限截断。
+    /// P20：关闭「记住最近文件」后变 no-op——路径根本不落盘。
     pub fn push_recent(&mut self, path: &Path) {
+        if !self.remember_recent_files {
+            return;
+        }
         let entry = path.display().to_string();
         self.recent_files.retain(|p| p != &entry);
         self.recent_files.insert(0, entry);
         self.recent_files.truncate(MAX_RECENT_FILES);
+    }
+
+    /// 清空最近文件列表（P20「清空记录」按钮）。
+    /// 只改内存；调用方随后 `save()` 才会从 config.toml 抹掉痕迹。
+    pub fn clear_recent_files(&mut self) {
+        self.recent_files.clear();
     }
 }
 
@@ -290,6 +316,76 @@ mod tests {
             Settings::load_from(&path).recent_files,
             vec!["C:/b.txt".to_string(), "C:/a.txt".to_string()]
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P20 最近文件隐私选项 ----------
+
+    #[test]
+    fn push_recent_is_noop_when_remember_disabled() {
+        // 关闭「记住最近文件」：打开动作不得在配置里留下任何路径
+        let mut s = Settings::default();
+        s.remember_recent_files = false;
+        s.push_recent(Path::new("C:/secret/report.docx"));
+        s.push_recent(Path::new("D:/私人/合同.pdf"));
+        assert!(s.recent_files.is_empty(), "关闭后 push_recent 必须 no-op");
+    }
+
+    #[test]
+    fn loading_with_remember_disabled_purges_existing_list() {
+        // 只关开关不清数据等于没关：加载时存量列表必须被清空
+        let dir = scratch_dir("p20-purge");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "remember_recent_files = false\nrecent_files = [\"C:/old/a.txt\", \"C:/old/b.txt\"]",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.remember_recent_files);
+        assert!(loaded.recent_files.is_empty(), "存量路径必须随加载清空");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn clear_recent_files_roundtrips_to_disk() {
+        // 「清空记录」按钮语义：内存清空 + 落盘后 config.toml 里不再有路径
+        let dir = scratch_dir("p20-clear");
+        let path = dir.join("config.toml");
+
+        let mut s = Settings::default();
+        s.push_recent(Path::new("C:/keep-before-clear.txt"));
+        s.save_to(&path).expect("首次保存应成功");
+
+        s.clear_recent_files();
+        assert!(s.recent_files.is_empty());
+        s.save_to(&path).expect("清空后保存应成功");
+
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("keep-before-clear"),
+            "落盘内容不得再含任何历史路径"
+        );
+        assert!(Settings::load_from(&path).recent_files.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_config_without_remember_flag_keeps_recording() {
+        // 旧 config.toml 缺 P20 字段 → 默认 true，行为与升级前一致
+        let dir = scratch_dir("p20-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "recent_files = [\"C:/old.txt\"]").unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert!(loaded.remember_recent_files, "缺字段必须回默认 true");
+        assert_eq!(loaded.recent_files.len(), 1, "既有记录不受影响");
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -85,6 +85,8 @@ enum Message {
 
     RecentsToggled,
     RecentSelected(String),
+    /// P20：清空最近文件记录（写回空表并立即落盘）
+    RecentsCleared,
     /// Esc 关闭全部浮动栏
     BarsDismissed,
 
@@ -830,6 +832,13 @@ impl Editpad {
                 Task::none()
             }
             Message::RecentSelected(entry) => self.request_open(PathBuf::from(entry)),
+            Message::RecentsCleared => {
+                // P20 隐私：立即写回空列表，config.toml 不再含历史路径
+                self.settings.clear_recent_files();
+                self.settings.save();
+                self.status = "已清空最近文件记录".to_owned();
+                Task::none()
+            }
 
             Message::BarsDismissed => {
                 self.find_visible = false;
@@ -1287,6 +1296,19 @@ impl Editpad {
                         .on_press_maybe(
                             (!self.busy).then_some(Message::RecentSelected(entry.clone())),
                         ),
+                );
+            }
+            // P20 隐私出口：一键抹掉 config.toml 里的全部历史路径
+            if !self.settings.recent_files.is_empty() {
+                panel = panel.push(
+                    row![
+                        button(text("清空记录"))
+                            .padding([2, 8])
+                            .on_press_maybe((!self.busy).then_some(Message::RecentsCleared)),
+                        text("从 config.toml 移除全部路径").color([0.5, 0.5, 0.5]),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
                 );
             }
             body = body.push(rule::horizontal(1)).push(panel);
