@@ -52,10 +52,14 @@ const GUTTER_FONT_SCALE: f32 = 13.0 / 16.0;
 pub const BODY_FONT: Font = Font::MONOSPACE;
 
 /// UI 控件字号的固定基准（px）。**P36 用户裁决：UI 不随正文字号缩放**——
-/// A-/A+ 与 Ctrl+滚轮只调节文件内容，UI 控件保持固定尺寸。
-/// 取 16px = iced 默认文本尺寸（`Settings::default_text_size`），
+/// Ctrl+滚轮（P48 落地）与设置弹窗的步进只调节文件内容，UI 控件保持
+/// 固定尺寸。取 16px = iced 默认文本尺寸（`Settings::default_text_size`），
 /// 与未缩放时的既有观感持平。
 pub const UI_FONT_BASE_PX: f32 = 16.0;
+
+/// Ctrl+滚轮缩放与设置面板步进共用的单步字号增量（px）。单一来源：
+/// 两处入口的手感必须一致。
+pub(crate) const FONT_ZOOM_STEP: f32 = 2.0;
 
 /// UI 字号相对基准的微调系数（[`GUTTER_FONT_SCALE`] 先例；1.0 = 持平）。
 pub const UI_FONT_SCALE: f32 = 1.0;
@@ -1774,16 +1778,40 @@ impl EditorHandle {
     /// 的反面教材：能靠每帧传参的状态就不要落库）。
     /// 默认语义 = [`BODY_FONT`]（P33 的 CJK 钉字仍生效）。
     pub fn view(&self, font: Font) -> Element<'_, super::Message> {
-        Element::new(EditorView { core: self.clone(), font })
+        Element::new(EditorView { core: self.clone(), font, zoom_accum: 0.0 })
     }
 }
 
 // ---------- 控件实现 ----------
 
+/// P48：Ctrl+滚轮缩放的单步判定（纯函数可单测）。
+/// * `Lines`（滚轮格）：非零即一步，方向取符号（Windows 一格 y=±1）；
+/// * `Pixels`（触控板）：增量已折算成行数累积，|累积| ≥ 1 行发一步并
+///   **清零**（保留余量会触控板轻扫连发多步；清零 = 一步一格，与滚轮
+///   手感一致）。反向增量先抵消同向累积。
+/// 返回 (新累积值, 步数符号；0 = 本帧不发)。
+fn wheel_zoom_step(accum: f32, delta_lines: f32, is_pixels: bool) -> (f32, f32) {
+    if is_pixels {
+        let accum = accum + delta_lines;
+        if accum.abs() >= 1.0 {
+            (0.0, if accum > 0.0 { 1.0 } else { -1.0 })
+        } else {
+            (accum, 0.0)
+        }
+    } else if delta_lines != 0.0 {
+        (accum, delta_lines.signum())
+    } else {
+        (accum, 0.0)
+    }
+}
+
 struct EditorView {
     core: EditorHandle,
     /// 本帧正文/行号栏使用的字形族（P34；默认 = [`BODY_FONT`]）。
     font: Font,
+    /// P48：Ctrl+滚轮缩放的触控板累积器（Pixels 增量折算行数，满 1 行
+    /// 发一步后清零；滚轮 Lines 增量不经过它）。
+    zoom_accum: f32,
 }
 
 impl EditorView {
@@ -2406,6 +2434,29 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 if !cursor.is_over(bounds) {
                     return;
                 }
+                // P48：Ctrl+滚轮 = 正文字号缩放（P36 设计口径的落地：只动
+                // 文件内容，UI 控件字号固定）。经 FontSizeDelta 走应用层的
+                // clamp/当前页生效/落盘链路，与设置面板步进同一手感
+                // （FONT_ZOOM_STEP）；触控板 Pixels 增量按行高折算累积，
+                // 满一格发一步。事件捕获，不再参与滚动。
+                if self.core.borrow().mods.control() {
+                    let lh = self.core.borrow().line_height().max(1e-3);
+                    let (lines, is_pixels) = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => (*y, false),
+                        mouse::ScrollDelta::Pixels { y, .. } => (*y / lh, true),
+                    };
+                    let (accum, step) =
+                        wheel_zoom_step(self.zoom_accum, lines, is_pixels);
+                    self.zoom_accum = accum;
+                    if step != 0.0 {
+                        shell.publish(super::Message::FontSizeDelta(
+                            FONT_ZOOM_STEP * step.signum(),
+                        ));
+                    }
+                    shell.request_redraw();
+                    shell.capture_event();
+                    return;
+                }
                 // P3：winit 0.30 Windows 上滚轮上推上报 LineDelta(y=+1)，其 changelog
                 // 明确「positive Y means moving the content down」（视口向文档头走）；
                 // scroll_by_lines 内部已是 scroll_top -= lines，这里再取负就会方向反转。
@@ -2564,13 +2615,30 @@ mod tests {
 
     #[test]
     fn ui_typography_constants_contract() {
-        // P36 口径：UI 字号固定、不随正文字号缩放——A-/A+ 与 Ctrl+滚轮
-        // 只调节文件内容；固定基准与 iced 默认文本尺寸(16px)持平
-        // （第 25 轮「UI 14px」记录已勘误）
+        // P36 口径：UI 字号固定、不随正文字号缩放——Ctrl+滚轮（P48 落地）
+        // 与设置面板步进只调节文件内容；固定基准与 iced 默认文本尺寸
+        // (16px) 持平（第 25 轮「UI 14px」记录已勘误）
         assert_eq!(UI_FONT_BASE_PX, 16.0);
         assert!((ui_font_px() - UI_FONT_BASE_PX * UI_FONT_SCALE).abs() < f32::EPSILON);
         // 字形族口径：UI 与正文共用同一换装点（P34 落地时只需改 BODY_FONT）
         assert_eq!(BODY_FONT, Font::MONOSPACE);
+        // P48：缩放单步增量单一来源（设置面板步进与 Ctrl+滚轮共用）
+        assert_eq!(FONT_ZOOM_STEP, 2.0);
+    }
+
+    #[test]
+    fn wheel_zoom_step_counts_notches_and_accumulates_touchpad() {
+        // 滚轮格：非零即一步，方向取符号；零增量不发
+        assert_eq!(wheel_zoom_step(0.0, 1.0, false), (0.0, 1.0));
+        assert_eq!(wheel_zoom_step(0.0, -1.0, false), (0.0, -1.0));
+        assert_eq!(wheel_zoom_step(0.5, 0.0, false), (0.5, 0.0));
+        // 触控板：折算行数累积，满 ±1 行发一步并清零
+        //（用 2 的幂避免 f32 字面量精度噪声）
+        assert_eq!(wheel_zoom_step(0.0, 0.25, true), (0.25, 0.0));
+        assert_eq!(wheel_zoom_step(0.75, 0.25, true), (0.0, 1.0));
+        assert_eq!(wheel_zoom_step(-0.75, -0.25, true), (0.0, -1.0));
+        // 反向增量先抵消同向累积
+        assert_eq!(wheel_zoom_step(0.75, -0.25, true), (0.5, 0.0));
     }
 
     #[test]
@@ -3194,6 +3262,7 @@ mod tests {
         let view = EditorView {
             core: EditorHandle(Rc::new(RefCell::new(core_with("")))),
             font: BODY_FONT,
+            zoom_accum: 0.0,
         };
         view.ensure_measured_char_width();
         let core = view.core.borrow();

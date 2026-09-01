@@ -3837,10 +3837,10 @@ impl Editpad {
                 format!("{:.0}", self.display_font_size()),
                 (self.display_font_size()
                     > editpad_core::settings::MIN_FONT_SIZE)
-                    .then_some(Message::FontSizeDelta(-2.0)),
+                    .then_some(Message::FontSizeDelta(-editor::FONT_ZOOM_STEP)),
                 (self.display_font_size()
                     < editpad_core::settings::MAX_FONT_SIZE)
-                    .then_some(Message::FontSizeDelta(2.0)),
+                    .then_some(Message::FontSizeDelta(editor::FONT_ZOOM_STEP)),
             ),
             // ---- 字体 ----
             FONT_ROW_KEY => button(text("回退默认").size(uipx).font(uifont))
@@ -4016,7 +4016,7 @@ impl Editpad {
             .as_deref()
             == Some("Markdown");
         // P33/P36：UI 全部控件与正文同族，字号固定不随正文缩放——
-        // A-/A+ 与 Ctrl+滚轮只调节文件内容；P34：族随设置切换
+        // Ctrl+滚轮（P48）与设置面板只调节文件内容；P34：族随设置切换
         let uipx = editor::ui_font_px();
         let uifont = self.body_font();
 
@@ -4050,32 +4050,8 @@ impl Editpad {
             button(text("最近文件").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::RecentsToggled)),
-            button(text(if self.dark_mode {
-                "主题:深色"
-            } else {
-                "主题:浅色"
-            })
-            .size(uipx)
-            .font(uifont))
-            .padding([4, 12])
-            .on_press(Message::ThemeToggled),
-            row![
-                button(text("A-").size(uipx).font(uifont))
-                    .padding([4, 10])
-                    .on_press_maybe((self.display_font_size()
-                        > editpad_core::settings::MIN_FONT_SIZE)
-                        .then_some(Message::FontSizeDelta(-2.0))),
-                text(format!("{:.0}", self.display_font_size()))
-                    .size(uipx)
-                    .font(uifont),
-                button(text("A+").size(uipx).font(uifont))
-                    .padding([4, 10])
-                    .on_press_maybe((self.display_font_size()
-                        < editpad_core::settings::MAX_FONT_SIZE)
-                        .then_some(Message::FontSizeDelta(2.0))),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
+            // P48：主题与字号按钮已随设置弹窗（P47）收编移除——工具栏只留
+            // 高频动作；外观调节入口 = 设置弹窗 + 编辑器内 Ctrl+滚轮缩放。
             // P27：设置弹窗入口（busy 时禁开，与其余工具栏按钮同一守卫）
             button(text("设置").size(uipx).font(uifont))
                 .padding([4, 12])
@@ -4613,6 +4589,7 @@ const HOTKEYS: &[(&str, &str)] = &[
     ("Ctrl+Home", "跳到文档首"),
     ("Ctrl+End", "跳到文档尾"),
     ("Shift+滚轮", "横向滚动"),
+    ("Ctrl+滚轮", "缩放正文字号（设置里也可步进调节）"),
 ];
 
 // ---------- 设置弹窗分类导航（P47，侧栏分类风格） ----------
@@ -4687,7 +4664,7 @@ const SETTINGS_ROWS: &[SettingsRow] = &[
         page: SettingsPage::Appearance,
         key: "字号",
         title: "字号",
-        desc: "正文文字大小；编辑器内也可用 Ctrl+滚轮 或 A-/A+ 调节。",
+        desc: "正文文字大小；编辑器内 Ctrl+滚轮 缩放，或在此步进调节。",
     },
     SettingsRow {
         page: SettingsPage::Font,
@@ -8201,6 +8178,41 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(rows.iter().any(|r| {
             r.page == SettingsPage::Font && r.key == FONT_ROW_KEY && r.title == FONT_ROW_KEY
         }));
+    }
+
+    #[test]
+    fn font_size_delta_clamps_and_persists_to_injected_path() {
+        // P48：工具栏 A-/A+ 移除后，FontSizeDelta 的入口 = 设置面板步进
+        // 与 Ctrl+滚轮（共用 FONT_ZOOM_STEP）——clamp 与落盘契约不变
+        let dir = scratch_dir("p48-zoom");
+        let config = dir.join("config.toml");
+        let mut app = Editpad::default();
+        app.settings_path_override = Some(config.clone());
+
+        dispatch(&mut app, Message::FontSizeDelta(editor::FONT_ZOOM_STEP));
+        assert_eq!(app.settings.font_size, 18.0);
+        assert_eq!(
+            app.cur_handle.borrow().font_size(),
+            18.0,
+            "当前页必须立即生效（P36 口径：只调正文）"
+        );
+
+        // 越界方向被夹在边界上（Ctrl+滚轮连滚不越界）
+        for _ in 0..80 {
+            dispatch(&mut app, Message::FontSizeDelta(editor::FONT_ZOOM_STEP));
+        }
+        assert_eq!(app.settings.font_size, editpad_core::settings::MAX_FONT_SIZE);
+        for _ in 0..300 {
+            dispatch(&mut app, Message::FontSizeDelta(-editor::FONT_ZOOM_STEP));
+        }
+        assert_eq!(app.settings.font_size, editpad_core::settings::MIN_FONT_SIZE);
+
+        assert_eq!(
+            editpad_core::Settings::load_from(&config).font_size,
+            app.settings.font_size,
+            "缩放必须即时落盘"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
