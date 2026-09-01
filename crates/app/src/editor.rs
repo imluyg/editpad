@@ -125,10 +125,25 @@ pub struct EditorCore {
     pub anchor: Option<CursorPos>,
     /// 视口顶部的行号（浮点支持像素级平滑滚动）
     pub scroll_top: f32,
+    /// 视口左缘的列偏移（像素；P13 水平滚动，行号栏不随之移动）
+    pub scroll_left: f32,
     viewport_h: f32,
+    /// 视口宽度（像素，整控件含行号栏；RedrawRequested 时同步）。
+    /// 正文区可视宽 = 本值 − 行号栏宽。
+    viewport_w: f32,
     dragging: bool,
     /// 垂直滚动条拖拽中：Some(按下点相对滑块顶部的像素偏移)
     scrollbar_grab: Option<f32>,
+    /// 水平滚动条拖拽中：Some(按下点相对滑块左缘的像素偏移)（P13）
+    hscrollbar_grab: Option<f32>,
+    /// 最近一次键盘修饰键状态（控件层跟踪；滚轮事件不带修饰键，
+    /// Shift+滚轮横向滚动依赖它，P13）
+    pub mods: iced::keyboard::Modifiers,
+    /// 全文档最大显示列数的高水位（P13）：水平行程的尺寸依据。
+    /// 编辑只上调（量受影响行），整体替换文档时精确重算；
+    /// 撤销/重做后可能略高于真实值（可向右滚出一小段空白），
+    /// 属已知取舍——精确收缩需要 O(n) 重扫，不值得每步撤销付出。
+    max_line_cols: usize,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// 语法高亮器；None = 纯文本快速路径。RefCell 让只读的 draw 也能推进状态。
@@ -149,9 +164,14 @@ impl Default for EditorCore {
             cursor: CursorPos::default(),
             anchor: None,
             scroll_top: 0.0,
+            scroll_left: 0.0,
             viewport_h: 400.0,
+            viewport_w: 800.0,
             dragging: false,
             scrollbar_grab: None,
+            hscrollbar_grab: None,
+            mods: iced::keyboard::Modifiers::empty(),
+            max_line_cols: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             highlight: None,
@@ -253,8 +273,10 @@ impl EditorCore {
         self.cursor = CursorPos::default();
         self.anchor = None;
         self.scroll_top = 0.0;
+        self.scroll_left = 0.0;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.recompute_max_line_cols();
         if let Some(hl) = &self.highlight {
             hl.borrow_mut().invalidate_from(0);
         }
@@ -353,6 +375,8 @@ impl EditorCore {
         self.cursor = CursorPos::default();
         self.anchor = None;
         self.scroll_top = 0.0;
+        self.scroll_left = 0.0;
+        self.recompute_max_line_cols();
         if let Some(hl) = &self.highlight {
             hl.borrow_mut().invalidate_from(0);
         }
@@ -459,6 +483,7 @@ impl EditorCore {
             None => self.doc.line_to_char(self.cursor.line) + self.cursor.col,
         };
         self.anchor = None;
+        let first_line = self.cursor.line;
 
         self.doc.insert(start_offset, &text);
         self.invalidate_highlight_from(start_offset);
@@ -471,6 +496,8 @@ impl EditorCore {
         } else {
             self.cursor.col += tail_cols;
         }
+        // P13：受影响行（插入跨行时含沿途各行）宽度只上调高水位
+        self.raise_max_line_cols(first_line..=self.cursor.line);
         self.ensure_visible();
     }
 
@@ -533,6 +560,8 @@ impl EditorCore {
         let end = start + 1 + usize::from(self.is_crlf_at(start));
         self.doc.remove_range(start, end);
         self.invalidate_highlight_from(start);
+        // P13：并行后的新行可能更宽（也可能只是收缩——高水位不回退）
+        self.raise_max_line_cols(self.cursor.line..=self.cursor.line);
         self.ensure_visible();
     }
 
@@ -549,6 +578,9 @@ impl EditorCore {
         let end = offset + 1 + usize::from(self.is_crlf_at(offset));
         self.doc.remove_range(offset, end);
         self.invalidate_highlight_from(offset);
+        // P13：下一行并入当前行，合并结果可能更宽
+        let merged = self.cursor.line;
+        self.raise_max_line_cols(merged..=merged);
         self.ensure_visible();
     }
 
@@ -562,6 +594,9 @@ impl EditorCore {
                 let col = start - self.doc.line_to_char(line);
                 self.cursor = CursorPos { line, col };
                 self.invalidate_highlight_from(start);
+                // P13：跨行删除后首尾两行拼成一行的宽度可能变化
+                let joined = self.cursor.line;
+                self.raise_max_line_cols(joined..=joined);
             }
             self.anchor = None;
             self.ensure_visible();
@@ -658,10 +693,60 @@ impl EditorCore {
         self.clamp_scroll();
     }
 
+    /// 横向滚动 `cols` 列（正数向右看更后的内容，P13）。
+    /// Shift+滚轮、触控板横向分量、水平滚动条共用本入口。
+    pub fn scroll_by_columns(&mut self, cols: f32) {
+        let target = self.scroll_left + cols * self.char_width();
+        // 巨量滚动时中间量可能溢出为 ±inf：按方向饱和，交给钳制收口
+        self.scroll_left = if target.is_finite() {
+            target
+        } else if cols > 0.0 {
+            f32::MAX
+        } else {
+            f32::MIN
+        };
+        self.clamp_scroll_horizontal();
+    }
+
     pub fn clamp_scroll(&mut self) {
         self.scroll_top = self.scroll_top.max(0.0);
         let max = (self.doc.line_count() as f32 - self.viewport_h / self.line_height()).max(0.0);
         self.scroll_top = self.scroll_top.min(max + 1.0);
+    }
+
+    /// 正文区可视宽度（像素）= 视口宽 − 行号栏宽。
+    fn text_viewport_w(&self) -> f32 {
+        (self.viewport_w - self.gutter_width()).max(0.0)
+    }
+
+    /// 水平行程钳制：左缘不出负，右缘不超出最宽行
+    /// （高水位偏大时允许滚进一小段空白，见字段注释）。
+    pub fn clamp_scroll_horizontal(&mut self) {
+        let content_w = self.max_line_cols as f32 * self.char_width();
+        let max = (content_w - self.text_viewport_w()).max(0.0);
+        if self.scroll_left.is_finite() {
+            self.scroll_left = self.scroll_left.clamp(0.0, max);
+        } else {
+            self.scroll_left = 0.0;
+        }
+    }
+
+    /// 水平方向的光标可见性：光标像素位置越出左右缘即平移视口。
+    fn ensure_visible_horizontal(&mut self) {
+        let text = self.line_text(self.cursor.line);
+        let col = self.cursor.col.min(text.chars().count());
+        let cx = prefix_width(&text, col) * self.char_width();
+        let view_w = self.text_viewport_w();
+        if view_w <= 0.0 {
+            return;
+        }
+        if cx < self.scroll_left {
+            self.scroll_left = cx;
+        } else if cx > self.scroll_left + view_w - CARET_WIDTH {
+            // 光标竖线本身也要完整可见
+            self.scroll_left = cx - view_w + CARET_WIDTH;
+        }
+        self.clamp_scroll_horizontal();
     }
 
     fn ensure_visible(&mut self) {
@@ -674,6 +759,38 @@ impl EditorCore {
             self.scroll_top = line - self.viewport_h / self.line_height() + 1.0;
         }
         self.clamp_scroll();
+        self.ensure_visible_horizontal();
+    }
+
+    // ---------- P13 水平行程的宽度追踪 ----------
+
+    /// 全量重算最大显示列数（整体换文档时调用；O(n)，加载路径本来 O(n)）。
+    fn recompute_max_line_cols(&mut self) {
+        let count = self.doc.line_count();
+        let mut max = 0usize;
+        for line in 0..count {
+            let cols = display_cols(self.line_text(line).as_str()) as usize;
+            if cols > max {
+                max = cols;
+            }
+        }
+        self.max_line_cols = max;
+    }
+
+    /// 把 `[first_line, last_line]` 内各行宽度并入高水位（编辑后调用）。
+    fn raise_max_line_cols(&mut self, lines: std::ops::RangeInclusive<usize>) {
+        for line in lines {
+            let cols = display_cols(self.line_text(line).as_str()) as usize;
+            if cols > self.max_line_cols {
+                self.max_line_cols = cols;
+            }
+        }
+    }
+
+    /// 当前最大显示列数（测试诊断用；水平滚动条以高水位 × 列宽定行程）。
+    #[cfg(test)]
+    pub fn max_line_display_cols(&self) -> usize {
+        self.max_line_cols
     }
 
     /// 可见的行号闭区间 [first, last]（已夹紧到文档范围）。
@@ -698,13 +815,14 @@ impl EditorCore {
     }
 
     /// 命中测试：控件内坐标 -> 光标位置（CJK 双宽感知）。
+    /// P13：x 需先减去水平滚动偏移——点击坐标在视口系，字符列在文档系。
     pub fn hit_test(&self, x: f32, y: f32) -> CursorPos {
         let gutter = self.gutter_width();
         let char_w = self.char_width();
         let line_f = self.scroll_top + (y.max(0.0) / self.line_height());
         let line = ((line_f.floor() as i64).clamp(0, self.doc.line_count() as i64 - 1)) as usize;
         let text = self.line_text(line);
-        let rel = (x - gutter).max(0.0);
+        let rel = (x - gutter + self.scroll_left).max(0.0);
 
         let mut col = text.chars().count();
         let mut acc = 0.0f32;
@@ -738,12 +856,14 @@ impl EditorCore {
     }
 
     /// 相对控件的光标矩形（供输入法定位候选框，双宽感知）。
+    /// P13：x 含水平滚动偏移的抵扣——返回值是视口系坐标。
     pub fn caret_rect_relative(&self) -> Rectangle {
         let text = self.line_text(self.cursor.line);
         Rectangle {
             x: self.gutter_width()
                 + prefix_width(&text, self.cursor.col.min(text.chars().count()))
-                    * self.char_width(),
+                    * self.char_width()
+                - self.scroll_left,
             y: (self.cursor.line as f32 - self.scroll_top) * self.line_height(),
             width: CARET_WIDTH,
             height: self.line_height(),
@@ -753,6 +873,12 @@ impl EditorCore {
     pub fn set_viewport_height(&mut self, h: f32) {
         self.viewport_h = h.max(self.line_height());
         self.clamp_scroll();
+    }
+
+    /// 同步视口宽度（P13；RedrawRequested 时与高度一起更新）。
+    pub fn set_viewport_width(&mut self, w: f32) {
+        self.viewport_w = w.max(0.0);
+        self.clamp_scroll_horizontal();
     }
 
     /// 视口高度（像素）。应用层暂未消费，供测试与后续里程碑（如状态栏显示）使用。
@@ -914,6 +1040,90 @@ impl VScrollbar {
     }
 }
 
+/// 超宽内容下水平滑块的最小宽度（与垂直侧同理由：必须抓得住）。
+const THUMB_MIN_W: f32 = 32.0;
+/// 滑块/轨道的可视厚度（垂直条的厚度常量复用于水平条的高度）。
+const SCROLLBAR_THUMB_THICKNESS: f32 = 10.0;
+/// 水平条命中区高度（下缘窄带，比可视厚度略高好点中）。
+const SCROLLBAR_ZONE_H: f32 = SCROLLBAR_THUMB_THICKNESS + SCROLLBAR_EDGE_INSET * 2.0;
+
+/// 水平滚动条几何（P13）。坐标体系与 [`VScrollbar`] 对称：
+/// 全部为**相对控件**的像素坐标，贴控件下缘；轨道横贯整个控件宽度，
+/// 行程比例按「正文区可视宽」计算（行号栏不参与横向滚动）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HScrollbar {
+    /// 内容超出视口宽才为 true
+    needed: bool,
+    track_x: f32,
+    track_w: f32,
+    thumb_x: f32,
+    thumb_w: f32,
+    /// 可横向滚动的行程（像素）。
+    range_px: f32,
+}
+
+impl HScrollbar {
+    /// * `content_px`：最宽行的像素宽度（高水位 × 列宽）；
+    /// * `view_px`：正文区可视宽度（视口宽 − 行号栏）。
+    fn measure(content_px: f32, view_px: f32, widget_w: f32, scroll_left: f32) -> Self {
+        let needed = view_px > 0.0 && content_px > view_px;
+        let track_x = SCROLLBAR_TRACK_PAD;
+        let track_w = (widget_w - SCROLLBAR_TRACK_PAD * 2.0).max(0.0);
+        if !needed || track_w <= 0.0 {
+            return Self {
+                needed: false,
+                track_x,
+                track_w,
+                thumb_x: track_x,
+                thumb_w: 0.0,
+                range_px: 0.0,
+            };
+        }
+        let range_px = (content_px - view_px).max(1.0);
+        let thumb_w = (track_w * view_px / content_px).clamp(THUMB_MIN_W, track_w);
+        let travel = (track_w - thumb_w).max(0.0);
+        let ratio = (scroll_left / range_px).clamp(0.0, 1.0);
+        Self {
+            needed: true,
+            track_x,
+            track_w,
+            thumb_x: track_x + ratio * travel,
+            thumb_w,
+            range_px,
+        }
+    }
+
+    /// 滑块左缘目标 x → scroll_left（已夹紧到行程内）。
+    fn scroll_for_thumb_x(&self, thumb_left_x: f32) -> f32 {
+        let travel = (self.track_w - self.thumb_w).max(1e-3);
+        let ratio = ((thumb_left_x - self.track_x) / travel).clamp(0.0, 1.0);
+        ratio * self.range_px
+    }
+
+    /// 点击轨道：把滑块中心对准点击处（连续按住可继续拖拽）。
+    fn scroll_for_track_click(&self, click_x: f32) -> f32 {
+        self.scroll_for_thumb_x(click_x - self.thumb_w * 0.5)
+    }
+
+    /// 控件局部坐标是否落在滚动条交互区（下缘窄带）。
+    fn hits(&self, local_x: f32, local_y: f32, widget_h: f32) -> bool {
+        self.needed
+            && local_y >= widget_h - SCROLLBAR_ZONE_H
+            && local_x >= self.track_x
+            && local_x <= self.track_x + self.track_w
+    }
+
+    /// 滑块矩形（相对控件），供绘制与拖拽命中。
+    fn thumb_rect(&self, widget_h: f32) -> Rectangle {
+        Rectangle {
+            x: self.thumb_x,
+            y: widget_h - SCROLLBAR_EDGE_INSET - SCROLLBAR_THUMB_THICKNESS,
+            width: self.thumb_w,
+            height: SCROLLBAR_THUMB_THICKNESS,
+        }
+    }
+}
+
 // ---------- 共享句柄 ----------
 
 /// 跨帧共享的编辑器状态句柄（Clone 廉价）。
@@ -1025,6 +1235,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         let colors = EditorColors::resolve(theme);
         let lh = core.line_height();
         let char_w = core.char_width();
+        // P13：横向滚动偏移——正文/选区/光标的文档系坐标统一扣减它，
+        // 行号栏固定不动（与主流编辑器一致）
+        let scroll_left = core.scroll_left;
 
         // 背景与行号栏
         renderer.fill_quad(
@@ -1070,7 +1283,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
-                            x: bounds.x + gutter_w + x0,
+                            x: bounds.x + gutter_w + x0 - scroll_left,
                             y: bounds.y + (row - core.scroll_top) * lh,
                             width: (x1 - x0).max(char_w),
                             height: lh,
@@ -1123,7 +1336,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         shaping: core_text::Shaping::Advanced,
                         wrapping: core_text::Wrapping::None,
                     },
-                    Point::new(bounds.x + gutter_w, y),
+                    Point::new(bounds.x + gutter_w - scroll_left, y),
                     palette.text,
                     bounds,
                 );
@@ -1155,7 +1368,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                             shaping: core_text::Shaping::Advanced,
                             wrapping: core_text::Wrapping::None,
                         },
-                        Point::new(bounds.x + gutter_w + offset_px, y),
+                        Point::new(bounds.x + gutter_w + offset_px - scroll_left, y),
                         Color::from_rgba8(
                             (r * 255.0).round() as u8,
                             (g * 255.0).round() as u8,
@@ -1248,6 +1461,36 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             thumb_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
             renderer.fill_quad(thumb_quad, colors.scrollbar_thumb);
         }
+
+        // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）
+        let hsb = HScrollbar::measure(
+            core.max_line_cols as f32 * char_w,
+            (bounds.width - gutter_w).max(0.0),
+            bounds.width,
+            core.scroll_left,
+        );
+        if hsb.needed {
+            let track_rect = Rectangle {
+                x: bounds.x + hsb.track_x,
+                y: bounds.y + bounds.height - SCROLLBAR_EDGE_INSET - SCROLLBAR_THUMB_THICKNESS,
+                width: hsb.track_w,
+                height: SCROLLBAR_THUMB_THICKNESS,
+            };
+            let mut track_quad = renderer::Quad::default();
+            track_quad.bounds = track_rect;
+            track_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
+            renderer.fill_quad(track_quad, colors.scrollbar_track);
+
+            let thumb = hsb.thumb_rect(bounds.height);
+            let mut thumb_quad = renderer::Quad::default();
+            thumb_quad.bounds = Rectangle {
+                x: bounds.x + thumb.x,
+                y: bounds.y + thumb.y,
+                ..thumb
+            };
+            thumb_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
+            renderer.fill_quad(thumb_quad, colors.scrollbar_thumb);
+        }
     }
 
     fn update(
@@ -1282,11 +1525,12 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         }
 
         match event {
-            // 每帧把真实视口高度同步给核心（可见行数/滚动夹紧依赖它）
+            // 每帧把真实视口尺寸同步给核心（可见行数/滚动夹紧依赖它）
             iced::Event::Window(window::Event::RedrawRequested(_)) => {
                 {
                     let mut core = self.core.borrow_mut();
                     core.set_viewport_height(bounds.height);
+                    core.set_viewport_width(bounds.width);
                     // P12：可见区缺档超内联预算 → 通知应用层安排后台分批补建。
                     // 重复发布无害（应用层对同代在途任务幂等跳过）；铺建推进/
                     // 编辑换代后由下一帧重新评估，无需额外状态。
@@ -1294,6 +1538,12 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         shell.publish(super::Message::HighlightPaveNeeded);
                     }
                 }
+            }
+
+            // 跟踪修饰键（P13）：滚轮事件不携带修饰键，
+            // Shift+滚轮横向滚动只能靠这里维护的最近状态
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
+                self.core.borrow_mut().mods = *mods;
             }
 
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -1306,7 +1556,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 };
 
                 // 滚动条优先于文本命中：落在交互区则进入拖拽/轨道跳转，
-                // 不触发文本选区
+                // 不触发文本选区。垂直条优先判定，右下角归属垂直条。
                 {
                     let core = self.core.borrow();
                     let sb = VScrollbar::measure(
@@ -1317,34 +1567,58 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         core.scroll_top,
                     );
                     let (local_x, local_y) = (pos.x - bounds.x, pos.y - bounds.y);
-                    if !sb.hits(local_x, local_y, bounds.width) {
-                        // 未命中滚动条：走普通文本按下流程（借用在此结束）
+                    if sb.hits(local_x, local_y, bounds.width) {
                         drop(core);
-                        {
-                            let mut core = self.core.borrow_mut();
-                            let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
-                            core.dragging = true;
-                            core.anchor = None;
-                            core.cursor = hit;
+                        let mut core = self.core.borrow_mut();
+                        if local_y >= sb.thumb_y && local_y <= sb.thumb_y + sb.thumb_h {
+                            core.scrollbar_grab = Some(local_y - sb.thumb_y);
+                        } else {
+                            core.scroll_top = sb.scroll_for_track_click(local_y);
+                            core.clamp_scroll();
+                            core.scrollbar_grab = Some(sb.thumb_h * 0.5);
                         }
-                        shell.publish(super::Message::EditorNavChanged);
+                        core.dragging = false; // 绝不因此进入文本拖选
                         shell.request_redraw();
                         shell.capture_event();
                         return;
                     }
-                    // 命中滑块 → 记录抓取偏移；命中轨道 → 先把滑块中心对到点击处
-                    let mut core = self.core.borrow_mut();
-                    if local_y >= sb.thumb_y && local_y <= sb.thumb_y + sb.thumb_h {
-                        core.scrollbar_grab = Some(local_y - sb.thumb_y);
-                    } else {
-                        core.scroll_top = sb.scroll_for_track_click(local_y);
-                        core.clamp_scroll();
-                        core.scrollbar_grab = Some(sb.thumb_h * 0.5);
+
+                    // 水平滚动条（P13）：下缘窄带，交互语义与垂直条对称
+                    let hsb = HScrollbar::measure(
+                        core.max_line_cols as f32 * core.char_width(),
+                        (bounds.width - core.gutter_width()).max(0.0),
+                        bounds.width,
+                        core.scroll_left,
+                    );
+                    if hsb.hits(local_x, local_y, bounds.height) {
+                        drop(core);
+                        let mut core = self.core.borrow_mut();
+                        if local_x >= hsb.thumb_x && local_x <= hsb.thumb_x + hsb.thumb_w {
+                            core.hscrollbar_grab = Some(local_x - hsb.thumb_x);
+                        } else {
+                            core.scroll_left = hsb.scroll_for_track_click(local_x);
+                            core.clamp_scroll_horizontal();
+                            core.hscrollbar_grab = Some(hsb.thumb_w * 0.5);
+                        }
+                        core.dragging = false;
+                        shell.request_redraw();
+                        shell.capture_event();
+                        return;
                     }
-                    core.dragging = false; // 绝不因此进入文本拖选
+
+                    // 未命中任何滚动条：走普通文本按下流程
+                    drop(core);
+                    {
+                        let mut core = self.core.borrow_mut();
+                        let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                        core.dragging = true;
+                        core.anchor = None;
+                        core.cursor = hit;
+                    }
+                    shell.publish(super::Message::EditorNavChanged);
+                    shell.request_redraw();
+                    shell.capture_event();
                 }
-                shell.request_redraw();
-                shell.capture_event();
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let Some(pos) = cursor.position_over(bounds) else {
@@ -1352,7 +1626,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 };
                 let mut core = self.core.borrow_mut();
 
-                // 滚动条拖拽中：按抓取偏移反解 scroll_top
+                // 垂直滚动条拖拽中：按抓取偏移反解 scroll_top
                 if let Some(grab) = core.scrollbar_grab {
                     let sb = VScrollbar::measure(
                         core.doc.line_count(),
@@ -1363,6 +1637,22 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     );
                     core.scroll_top = sb.scroll_for_thumb_y(pos.y - bounds.y - grab);
                     core.clamp_scroll();
+                    drop(core);
+                    shell.request_redraw();
+                    shell.capture_event();
+                    return;
+                }
+
+                // 水平滚动条拖拽中（P13）：按抓取偏移反解 scroll_left
+                if let Some(grab) = core.hscrollbar_grab {
+                    let hsb = HScrollbar::measure(
+                        core.max_line_cols as f32 * core.char_width(),
+                        (bounds.width - core.gutter_width()).max(0.0),
+                        bounds.width,
+                        core.scroll_left,
+                    );
+                    core.scroll_left = hsb.scroll_for_thumb_x(pos.x - bounds.x - grab);
+                    core.clamp_scroll_horizontal();
                     drop(core);
                     shell.request_redraw();
                     shell.capture_event();
@@ -1389,19 +1679,42 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 let mut core = self.core.borrow_mut();
                 core.dragging = false;
                 core.scrollbar_grab = None;
+                core.hscrollbar_grab = None;
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if !cursor.is_over(bounds) {
                     return;
                 }
-                let lines = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => *y * SCROLL_LINES_PER_NOTCH,
-                    mouse::ScrollDelta::Pixels { y, .. } => *y / self.core.borrow().line_height(),
-                };
                 // P3：winit 0.30 Windows 上滚轮上推上报 LineDelta(y=+1)，其 changelog
                 // 明确「positive Y means moving the content down」（视口向文档头走）；
                 // scroll_by_lines 内部已是 scroll_top -= lines，这里再取负就会方向反转。
-                self.core.borrow_mut().scroll_by_lines(lines);
+                // P13：Shift+滚轮改走横向（Windows 惯例，winit 不代做换轴，
+                // 修饰键靠 KeyModifiersChanged 维护的最近状态）；触控板的
+                // 原生横向分量（x≠0）也直接横滚。
+                let (dx_cols, dy_lines, shift) = {
+                    let core = self.core.borrow();
+                    match delta {
+                        mouse::ScrollDelta::Lines { x, y } => (
+                            *x * SCROLL_LINES_PER_NOTCH,
+                            *y * SCROLL_LINES_PER_NOTCH,
+                            core.mods.shift(),
+                        ),
+                        mouse::ScrollDelta::Pixels { x, y } => (
+                            *x / core.char_width().max(1e-3),
+                            *y / core.line_height().max(1e-3),
+                            core.mods.shift(),
+                        ),
+                    }
+                };
+                if shift {
+                    self.core.borrow_mut().scroll_by_columns(dy_lines);
+                } else {
+                    let mut core = self.core.borrow_mut();
+                    if dx_cols != 0.0 {
+                        core.scroll_by_columns(dx_cols);
+                    }
+                    core.scroll_by_lines(dy_lines);
+                }
                 shell.request_redraw();
                 shell.capture_event();
             }
@@ -1454,6 +1767,20 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             // 滚动条上：拖拽中给 Grabbing，悬停给 Grab；正文仍是文本光标
             if sb.hits(pos.x - bounds.x, pos.y - bounds.y, bounds.width) {
                 return if core.scrollbar_grab.is_some() {
+                    mouse::Interaction::Grabbing
+                } else {
+                    mouse::Interaction::Grab
+                };
+            }
+            // 水平滚动条（P13）同款指针语义
+            let hsb = HScrollbar::measure(
+                core.max_line_cols as f32 * core.char_width(),
+                (bounds.width - core.gutter_width()).max(0.0),
+                bounds.width,
+                core.scroll_left,
+            );
+            if hsb.hits(pos.x - bounds.x, pos.y - bounds.y, bounds.height) {
+                return if core.hscrollbar_grab.is_some() {
                     mouse::Interaction::Grabbing
                 } else {
                     mouse::Interaction::Grab
@@ -1835,6 +2162,151 @@ mod tests {
         assert!(
             !c.install_highlighter_if_current(stale_gen, worker),
             "换代后的迟到成果不得覆盖当前高亮器"
+        );
+    }
+
+    // ---------- P13 水平滚动 ----------
+
+    fn core_with_wide_line() -> EditorCore {
+        // 一条 1000 列的超长行 + 若干短行：内容必然超出任何常规视口宽
+        let mut c = core_with(&format!("{}\nshort\n", "x".repeat(1000)));
+        c.set_viewport_width(400.0);
+        c
+    }
+
+    #[test]
+    fn hscrollbar_geometry_mirrors_vertical_contract() {
+        let char_w = 16.0 * 0.5625;
+        let content_px = 1000.0 * char_w;
+
+        // 内容不超宽 → 不需要水平滚动条
+        let fit = HScrollbar::measure(100.0, 400.0, 800.0, 0.0);
+        assert!(!fit.needed);
+        assert!(HScrollbar::measure(0.0, 400.0, 800.0, 0.0).needed == false);
+
+        // 超宽 → 出现，滑块宽 ∝ 视口占比（未触底时）
+        let sb = HScrollbar::measure(content_px, 400.0, 800.0, 0.0);
+        assert!(sb.needed);
+        let expect_w = (sb.track_w * 400.0 / content_px).clamp(THUMB_MIN_W, sb.track_w);
+        assert!((sb.thumb_w - expect_w).abs() < 1e-3);
+        assert!(sb.thumb_w > THUMB_MIN_W, "此比例下不应触底");
+
+        // 极宽内容（20 万列）滑块触底到最小宽度
+        let huge = HScrollbar::measure(200_000.0 * char_w, 400.0, 800.0, 0.0);
+        assert_eq!(huge.thumb_w, THUMB_MIN_W);
+
+        // 拖拽逆映射恒等；两端夹紧
+        for &scroll in &[0.0f32, 100.0, 777.7] {
+            let back = sb.scroll_for_thumb_x(sb.thumb_x + scroll / sb.range_px * (sb.track_w - sb.thumb_w));
+            assert!(
+                (back - scroll.min(sb.range_px)).abs() < 0.01,
+                "scroll={scroll} 反解={back}"
+            );
+        }
+        assert_eq!(sb.scroll_for_thumb_x(sb.track_x - 40.0), 0.0);
+        assert!((sb.scroll_for_thumb_x(sb.track_x + sb.track_w) - sb.range_px).abs() < 1e-3);
+
+        // 轨道点击把滑块中心对准点击处
+        let click = sb.track_x + sb.track_w * 0.8;
+        let scrolled = sb.scroll_for_track_click(click);
+        let after = HScrollbar::measure(content_px, 400.0, 800.0, scrolled);
+        let center_after = after.thumb_x + after.thumb_w / 2.0;
+        assert!((center_after - click).abs() < 1.5);
+
+        // 命中区只在下缘窄带
+        assert!(!sb.hits(400.0, 700.0, 720.0), "中部不得算命中");
+    }
+
+    #[test]
+    fn wide_document_tracks_max_cols_and_enables_hscroll() {
+        let mut c = core_with_wide_line();
+        c.set_viewport_height(300.0);
+        assert_eq!(c.max_line_display_cols(), 1000, "reset 时应精确重算最宽行");
+
+        // 高水位只上调：编辑短行不缩水，编辑出更长的行要跟上
+        c.cursor = CursorPos { line: 1, col: 5 };
+        c.insert_str("yyyyyyyyyy"); // 短行 15 列，仍小于 1000
+        assert_eq!(c.max_line_display_cols(), 1000);
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.insert_str(&"z".repeat(1200)); // 更长的新行
+        assert_eq!(c.max_line_display_cols(), 1200);
+
+        // 整体替换后精确重算（高水位回落）
+        c.replace_whole_document(Document::from_str("tiny"));
+        assert_eq!(c.max_line_display_cols(), 4);
+    }
+
+    #[test]
+    fn ensure_visible_follows_cursor_horizontally() {
+        let mut c = core_with_wide_line();
+        c.set_viewport_height(300.0);
+        assert_eq!(c.scroll_left, 0.0);
+
+        // 光标放到超长行末尾 → 视口右移让行尾可见
+        c.cursor = CursorPos { line: 0, col: 1000 };
+        c.ensure_visible_pub();
+        assert!(c.scroll_left > 0.0, "行尾光标必须推动横向滚动");
+
+        // 光标回到行首（Home/左移到 0 列）→ 视口回到最左
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.ensure_visible_pub();
+        assert_eq!(c.scroll_left, 0.0, "第 0 列必须滚回左缘");
+
+        // 手动横滚到中间再点视口内的位置 → 不打扰当前横向位置
+        c.scroll_by_columns(50.0);
+        let mid = c.scroll_left;
+        c.cursor = CursorPos { line: 0, col: 60 };
+        c.ensure_visible_pub();
+        assert!((c.scroll_left - mid).abs() < f32::EPSILON.max(mid * 1e-6),
+            "可见范围内的光标不得扰动横向滚动");
+    }
+
+    #[test]
+    fn scroll_by_columns_clamps_to_content_width() {
+        let mut c = core_with_wide_line();
+        c.clamp_scroll_horizontal();
+        assert_eq!(c.scroll_left, 0.0, "空行程时保持 0");
+
+        c.scroll_by_columns(-5000.0);
+        assert_eq!(c.scroll_left, 0.0, "左向越界夹到 0");
+
+        c.scroll_by_columns(f32::MAX / 2.0); // 巨量右滚 → 夹到最大行程
+        let max_expected =
+            (c.max_line_display_cols() as f32 * c.char_width()) - c.text_viewport_w();
+        assert!((c.scroll_left - max_expected).abs() < 1.0, "右缘应贴住最宽行");
+    }
+
+    #[test]
+    fn hit_test_accounts_for_horizontal_scroll_offset() {
+        let mut c = core_with_wide_line();
+        c.set_viewport_height(300.0);
+        // 同一文档坐标的列，在滚动前后用相差 scroll_left 的 x 点击应命中同列
+        let gutter = c.gutter_width();
+        let char_w = c.char_width();
+        let target_col = 20usize;
+
+        c.scroll_left = 0.0;
+        let hit_unscrolled = c.hit_test(gutter + target_col as f32 * char_w + 1.0, 10.0);
+        c.scroll_by_columns(30.0); // 视口右移 30 列
+        let hit_scrolled =
+            c.hit_test(gutter + (target_col as f32 - 30.0) * char_w + 1.0, 10.0);
+        assert_eq!(hit_unscrolled.col, target_col);
+        assert_eq!(hit_scrolled.col, target_col, "横滚后命中测试必须补偿 scroll_left");
+    }
+
+    #[test]
+    fn caret_rect_shifts_by_scroll_left() {
+        let mut c = core_with_wide_line();
+        c.set_viewport_height(300.0);
+        c.cursor = CursorPos { line: 0, col: 100 };
+        c.ensure_visible_pub();
+        let before = c.caret_rect_relative().x;
+
+        c.scroll_by_columns(40.0);
+        let after = c.caret_rect_relative().x;
+        assert!(
+            (before - after - 40.0 * c.char_width()).abs() < 1e-3,
+            "光标矩形必须随横向滚动平移（IME 候选框与绘制共用此路径）"
         );
     }
 
