@@ -38,6 +38,13 @@ pub struct Settings {
     /// config.toml 不再留任何文件路径痕迹。
     #[serde(default = "default_true")]
     pub remember_recent_files: bool,
+    /// 即时保存开关（P18）。用户点名要此功能，默认开启；
+    /// 编辑停手超过 [`Self::autosave_delay_secs`] 秒自动落盘。
+    #[serde(default = "default_true")]
+    pub autosave_enabled: bool,
+    /// 自动保存防抖秒数：加载时收敛到 `[1, 60]`。
+    #[serde(default = "default_autosave_delay_secs")]
+    pub autosave_delay_secs: u32,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -49,9 +56,17 @@ impl Default for Settings {
             theme: THEME_LIGHT.to_string(),
             font_size: DEFAULT_FONT_SIZE,
             remember_recent_files: true,
+            autosave_enabled: true,
+            autosave_delay_secs: DEFAULT_AUTOSAVE_DELAY_SECS,
         }
     }
 }
+
+/// 自动保存防抖默认秒数。
+pub const DEFAULT_AUTOSAVE_DELAY_SECS: u32 = 2;
+/// 防抖秒数允许范围（闭区间），越界值加载时被 clamp。
+pub const MIN_AUTOSAVE_DELAY_SECS: u32 = 1;
+pub const MAX_AUTOSAVE_DELAY_SECS: u32 = 60;
 
 /// `#[serde(default)]` 用：缺字段时的主题默认值。
 fn default_theme() -> String {
@@ -66,6 +81,11 @@ fn default_font_size() -> f32 {
 /// `#[serde(default)]` 用：P20 开关缺字段时的默认值（true，不惊扰老用户）。
 fn default_true() -> bool {
     true
+}
+
+/// `#[serde(default)]` 用：P18 防抖秒数缺字段时的默认值。
+fn default_autosave_delay_secs() -> u32 {
+    DEFAULT_AUTOSAVE_DELAY_SECS
 }
 
 impl Settings {
@@ -95,6 +115,10 @@ impl Settings {
         if !self.remember_recent_files && !self.recent_files.is_empty() {
             self.recent_files.clear();
         }
+        // P18：防抖秒数收敛到合法区间（0 秒会变成每秒写盘风暴）
+        self.autosave_delay_secs = self
+            .autosave_delay_secs
+            .clamp(MIN_AUTOSAVE_DELAY_SECS, MAX_AUTOSAVE_DELAY_SECS);
     }
 
     /// 当前是否为深色主题（仅规范值 `"dark"` 视为深色）。
@@ -386,6 +410,41 @@ mod tests {
         let loaded = Settings::load_from(&path);
         assert!(loaded.remember_recent_files, "缺字段必须回默认 true");
         assert_eq!(loaded.recent_files.len(), 1, "既有记录不受影响");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P18 即时保存设置 ----------
+
+    #[test]
+    fn autosave_defaults_on_with_two_second_delay() {
+        let s = Settings::default();
+        assert!(s.autosave_enabled, "用户点名要即时保存，默认必须开启");
+        assert_eq!(s.autosave_delay_secs, 2);
+
+        // 旧配置缺 P18 字段 → 同样得到默认值
+        let dir = scratch_dir("p18-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "theme = \"dark\"\n").unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(loaded.autosave_enabled);
+        assert_eq!(loaded.autosave_delay_secs, 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn autosave_delay_clamped_to_legal_range() {
+        let dir = scratch_dir("p18-clamp");
+        fs::create_dir_all(&dir).unwrap();
+
+        let zero = dir.join("zero.toml");
+        fs::write(&zero, "autosave_enabled = true\nautosave_delay_secs = 0\n").unwrap();
+        assert_eq!(Settings::load_from(&zero).autosave_delay_secs, 1, "0 秒会变成写盘风暴，收敛到下界");
+
+        let huge = dir.join("huge.toml");
+        fs::write(&huge, "autosave_delay_secs = 9999\n").unwrap();
+        assert_eq!(Settings::load_from(&huge).autosave_delay_secs, 60);
 
         fs::remove_dir_all(&dir).ok();
     }

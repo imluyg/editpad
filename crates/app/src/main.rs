@@ -62,7 +62,10 @@ enum Message {
     SaveRequested,
     SaveAsRequested,
     SaveTargetChosen(Option<PathBuf>),
-    Saved(Result<(), String>),
+    /// 保存完成：(落盘内容的内容版本号, 结果)（P18 版本守卫）
+    Saved(u64, Result<(), String>),
+    /// 自动保存完成：(快照版本, 结果)。版本不符=期间又有编辑，不清脏
+    Autosaved(u64, Result<(), String>),
 
     FindToggled,
     FindQueryChanged(String),
@@ -421,6 +424,30 @@ fn transcode_notice(original_encoding: &str) -> Option<String> {
     }
 }
 
+// ---------- 即时保存（P18） ----------
+
+/// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 分块原子落盘」，
+/// 结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待结果，
+/// 且 inflight 去重保证同一时刻至多一个这样的线程）。
+async fn drive_autosave_once(
+    path: PathBuf,
+    doc: editpad_core::Document,
+    version: u64,
+    delay: std::time::Duration,
+) -> Message {
+    let (tx, rx) = std_mpsc::channel::<Result<(), String>>();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        let result =
+            editpad_core::save_document_atomic(&path, &doc).map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    let result = rx
+        .recv()
+        .unwrap_or_else(|_| Err("自动保存线程意外终止".to_owned()));
+    Message::Autosaved(version, result)
+}
+
 #[derive(Default)]
 struct Editpad {
     // ---------- 文档状态 ----------
@@ -434,6 +461,14 @@ struct Editpad {
     /// 对话框/IO 进行中，防止重复触发
     busy: bool,
     status: String,
+
+    // ---------- 即时保存（P18） ----------
+    /// 内容版本号：每次真实改动 +1（含撤销/重做/整体替换）
+    content_version: u64,
+    /// 自动保存防抖任务在途：至多一个挂起，编辑重排由版本守卫兜底
+    autosave_inflight: bool,
+    /// 最后一次内容改动的时刻：防抖窗口的计时起点
+    last_edit_at: Option<std::time::Instant>,
 
     // ---------- 设置 ----------
     settings: editpad_core::Settings,
@@ -506,11 +541,21 @@ impl Editpad {
         match message {
             // ---------- 编辑器 ----------
             Message::Edit(op) => {
-                if self.apply_edit(op) && self.find_visible {
+                let changed = self.apply_edit(op);
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+                if changed {
                     // P10：编辑后不再同步重扫（每键全文扫描会卡 UI），排队后台防抖扫描
-                    return self.schedule_find_scan();
+                    if self.find_visible {
+                        tasks.push(self.schedule_find_scan());
+                    }
+                    // P18：编辑置脏后排队一次防抖自动保存（inflight 去重）
+                    tasks.push(self.maybe_schedule_autosave());
                 }
-                Task::none()
+                if tasks.is_empty() {
+                    Task::none()
+                } else {
+                    Task::batch(tasks)
+                }
             }
             Message::EditorNavChanged => Task::none(), // 视图重建即可刷新状态栏
 
@@ -642,8 +687,9 @@ impl Editpad {
                 self.busy = false;
                 self.save()
             }
-            Message::Saved(Ok(())) => {
-                self.dirty = false;
+            Message::Saved(version, Ok(())) => {
+                // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
+                self.dirty = self.content_version != version;
                 self.busy = false;
                 if let Some(path) = self.path.clone() {
                     self.record_recent(&path);
@@ -663,11 +709,31 @@ impl Editpad {
                 }
                 Task::none()
             }
-            Message::Saved(Err(error)) => {
+            Message::Saved(_, Err(error)) => {
                 self.busy = false;
                 // 保存失败不关窗：留在应用里让用户处理
                 self.pending_close = false;
                 self.status = format!("保存失败:{error}");
+                Task::none()
+            }
+
+            // ---------- 即时保存（P18） ----------
+            Message::Autosaved(version, result) => {
+                self.autosave_inflight = false;
+                match result {
+                    Ok(()) => {
+                        // 版本一致 = 快照之后没有新编辑：可以安全清脏；
+                        // 不一致则保持置脏，由新一轮防抖任务覆盖最新内容
+                        if self.content_version == version {
+                            self.dirty = false;
+                        }
+                    }
+                    Err(error) => {
+                        // 失败必须留痕（不能无声吞掉），但不打断编辑；
+                        // 清掉 inflight 后，下一次编辑会重新排队
+                        self.status = format!("自动保存失败:{error}");
+                    }
+                }
                 Task::none()
             }
 
@@ -767,11 +833,18 @@ impl Editpad {
                         .borrow_mut()
                         .replace_whole_document(editpad_core::Document::from_str(&new_contents));
                     self.dirty = true;
+                    // P18：内容版本与防抖起点同步推进
+                    self.content_version += 1;
+                    self.last_edit_at = Some(std::time::Instant::now());
                 }
                 // P10：替换后的重扫走后台防抖，不再同步刷
-                let task = self.schedule_find_scan();
+                let mut tasks = vec![self.schedule_find_scan()];
+                if count > 0 {
+                    // P18：内容变了 → 排队一次防抖自动保存
+                    tasks.push(self.maybe_schedule_autosave());
+                }
                 self.status = format!("已替换 {count} 处");
-                return task;
+                return Task::batch(tasks);
             }
             Message::FindScanDone(seq, found) => {
                 // 过期结果丢弃：只认当前排队中的那次扫描（P10 的 job 序号过滤，
@@ -810,12 +883,19 @@ impl Editpad {
                             .borrow_mut()
                             .replace_whole_document(editpad_core::Document::from_str(&pretty));
                         self.dirty = true;
+                        // P18：内容版本与防抖起点同步推进
+                        self.content_version += 1;
+                        self.last_edit_at = Some(std::time::Instant::now());
                         self.status = "已格式化 JSON".to_owned();
                         if self.find_visible {
                             // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
-                            return self.schedule_find_scan();
+                            let find_task = self.schedule_find_scan();
+                            return Task::batch([
+                                find_task,
+                                self.maybe_schedule_autosave(),
+                            ]);
                         }
-                        Task::none()
+                        return self.maybe_schedule_autosave();
                     }
                     Err(error) => {
                         self.status = format!("JSON 格式化失败：{error}");
@@ -976,6 +1056,9 @@ impl Editpad {
 
         if changed {
             self.dirty = true;
+            // P18：内容版本 +1 并刷新防抖起点（自动保存的触发依据）
+            self.content_version += 1;
+            self.last_edit_at = Some(std::time::Instant::now());
             self.status.clear();
         } else if let Some(hint) = hint {
             self.status = hint.to_owned();
@@ -1040,6 +1123,8 @@ impl Editpad {
             });
         // 窗口关闭请求：exit_on_close_request(false) 后以订阅事件流转
         let close_requests = window::close_requests().map(Message::CloseRequested);
+        // P18 即时保存不走订阅：编辑后由 maybe_schedule_autosave 直接派发
+        // 「睡眠防抖→落盘」的专用线程（inflight 去重，至多一个挂起）
         Subscription::batch([load, events, close_requests])
     }
 
@@ -1071,9 +1156,53 @@ impl Editpad {
         // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
         let doc = self.editor.borrow().doc.clone();
+        // P18 版本守卫：记录本次落盘对应的内容版本
+        let version = self.content_version;
         Task::perform(
-            async move { editpad_core::save_document_atomic(&path, &doc) },
-            |result| Message::Saved(result.map_err(|e| e.to_string())),
+            async move {
+                let saved = editpad_core::save_document_atomic(&path, &doc)
+                    .map_err(|e| e.to_string());
+                (version, saved)
+            },
+            move |(version, result)| Message::Saved(version, result),
+        )
+    }
+
+    // ---------- 即时保存（P18） ----------
+
+    /// 自动保存条件是否就绪（不含防抖时间判断）：
+    /// 已命名、有未存改动、无在途 IO、不与手动保存互斥、当前没有挂起任务。
+    fn autosave_ready(&self) -> bool {
+        self.settings.autosave_enabled
+            && self.dirty
+            && self.path.is_some()
+            && self.active_load.is_none()
+            && !self.busy
+            && !self.autosave_inflight
+    }
+
+    /// 编辑后调用：条件就绪且无挂起任务时，派发一个「睡满防抖窗 →
+    /// 落盘 → 回报版本」的专用任务（P5/P10 同构的 OS 线程桥接）。
+    ///
+    /// 至多一个挂起：打字连击期间不重复排队；任务醒来落盘的是
+    /// **调度时刻**的快照——若期间又有编辑，版本守卫会保持置脏，
+    /// 本次编辑结束后由新任务覆盖最新内容（最终一致）。
+    fn maybe_schedule_autosave(&mut self) -> Task<Message> {
+        if !self.autosave_ready() {
+            return Task::none();
+        }
+        let Some(path) = self.path.clone() else {
+            return Task::none();
+        };
+        let doc = self.editor.borrow().doc.clone();
+        let version = self.content_version;
+        let delay = std::time::Duration::from_secs(
+            u64::from(self.settings.autosave_delay_secs),
+        );
+        self.autosave_inflight = true;
+        Task::perform(
+            async move { drive_autosave_once(path, doc, version, delay).await },
+            |message| message,
         )
     }
 
@@ -1866,6 +1995,114 @@ mod tests {
             handle_key(keyboard::Key::Character("f".into()), keyboard::Modifiers::CTRL),
             Some(Message::FindToggled)
         ));
+    }
+
+    // ---------- P18 即时保存 ----------
+
+    /// 构造一个已按 .txt 加载完成的应用（纯文本路径）。
+    fn loaded_txt_app() -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/note.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((editpad_core::Document::from_str("base"), String::new(), "UTF-8".to_owned())),
+            ),
+        );
+        app
+    }
+
+    #[test]
+    fn edit_schedules_single_inflight_autosave_and_success_clears_dirty() {
+        let mut app = loaded_txt_app();
+        assert!(app.settings.autosave_enabled);
+
+        // 编辑置脏并派发防抖任务
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.dirty);
+        assert!(app.autosave_inflight, "首次编辑应排队防抖任务");
+        let scheduled_version = app.content_version;
+
+        // 连续再编辑：inflight 去重不重复排队；版本继续推进
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+        assert!(app.autosave_inflight);
+        assert_eq!(app.content_version, scheduled_version + 1);
+
+        // 任务回报且版本一致 → 清脏解除挂起
+        dispatch(
+            &mut app,
+            Message::Autosaved(scheduled_version + 1, Ok(())),
+        );
+        assert!(!app.dirty, "版本一致时落盘应清脏");
+        assert!(!app.autosave_inflight);
+    }
+
+    #[test]
+    fn autosave_stale_version_keeps_dirty() {
+        // 快照之后又有编辑：迟到的「保存成功」不得清脏（否则丢改动标记）
+        let mut app = loaded_txt_app();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let stale = app.content_version;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+
+        dispatch(&mut app, Message::Autosaved(stale, Ok(())));
+
+        assert!(
+            app.dirty && !app.autosave_inflight,
+            "版本不符应保持置脏并解除挂起"
+        );
+    }
+
+    #[test]
+    fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
+        let mut app = loaded_txt_app();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.autosave_inflight);
+
+        let version = app.content_version;
+        dispatch(
+            &mut app,
+            Message::Autosaved(version, Err("disk full".into())),
+        );
+
+        assert!(!app.autosave_inflight, "失败也要解除挂起");
+        assert!(app.dirty, "失败必须保持置脏");
+        assert!(
+            app.status.contains("自动保存失败") && app.status.contains("disk full"),
+            "失败必须留痕不能无声吞掉，实际 {:?}",
+            app.status
+        );
+
+        // 失败解除挂起后，下一次编辑仍可重新排队
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("z".into())));
+        assert!(app.autosave_inflight, "新编辑应重新排队");
+    }
+
+    #[test]
+    fn autosave_skipped_for_untitled_or_disabled() {
+        // 未命名文档（path == None）：绝不自动落盘
+        let mut untitled = Editpad::default();
+        dispatch(&mut untitled, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(untitled.dirty);
+        assert!(
+            !untitled.autosave_inflight,
+            "未命名文档不参与自动保存"
+        );
+
+        // 设置关闭：同样跳过
+        let mut app = loaded_txt_app();
+        app.settings.autosave_enabled = false;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.dirty);
+        assert!(!app.autosave_inflight, "开关关闭时不排队");
+
+        // busy（手动 IO 进行中）时也跳过
+        let mut busy_app = loaded_txt_app();
+        busy_app.busy = true;
+        dispatch(&mut busy_app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(!busy_app.autosave_inflight, "busy 时不得排队自动保存");
     }
 
     #[test]
