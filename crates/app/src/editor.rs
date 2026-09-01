@@ -12,6 +12,7 @@
 //! 语法高亮留待 M2b 以逐行状态缓存接入。
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use iced::advanced::{
@@ -249,6 +250,17 @@ pub struct EditorCore {
     /// 键相同即「已按当前字体/字号测过（无论成败）」，避免每帧重测；
     /// 字体切换（P34）/字号变更（set_font_size 折算后仍会重测校准）时换键。
     metric_key: Option<(Font, f32)>,
+    /// 行级真实布局缓存（第 40 轮根治）：line → 每个字符起点的真实像素 x
+    /// （长度 = 行字符数 + 1，末项 = 行尾 x）。由控件层每帧按可见行 shaping
+    /// 注入（与正文绘制同源段落）；未注入的行回退列模型。命中时光标/选区/
+    /// 点击/高亮分片一律按字形真实位置定位——与绘制零误差，字体回退、
+    /// 分数宽度、连字、TAB 实际展开全部如实反映，静态列模型的任何假设
+    /// 破缺（非等宽字体、非整倍字号）都不再产生累计漂移。
+    row_layouts: HashMap<usize, Vec<f32>>,
+    /// 已注入行宽的最大值（与 row_layouts 同步维护）：水平行程钳制上界的
+    /// 真实补充——列模型 `max_line_cols` 对分数/超宽字形可能欠估，
+    /// 不补则超宽行滚不到头、光标越界。
+    max_row_width_px: f32,
 }
 
 /// 光标闪烁半周期。
@@ -285,6 +297,8 @@ impl Default for EditorCore {
             // P42：默认未实测，走 0.5625 固定假设（既有契约不变）
             measured_char_w: None,
             metric_key: None,
+            row_layouts: HashMap::new(),
+            max_row_width_px: 0.0,
         }
     }
 }
@@ -451,6 +465,66 @@ fn measure_char_width(font: Font, size: f32) -> Option<f32> {
     Some(total / MEASURE_SAMPLE_CHARS as f32)
 }
 
+/// 第 40 轮根治：对单行文本按与正文绘制**完全同源**的段落（同 font/字号/
+/// Shaping::Advanced/Wrapping::None）做 shaping，收集每个字符起点的真实
+/// 像素 x。`xs[i]` = 第 i 个字符左缘，末项 = 行尾 x（= 段落总宽）。
+///
+/// * 字形选择（P33 钉字/P34 用户字体/逐字回退）、连字、TAB 展开、分数宽度
+///   （如 ▀ 15.01px）全部来自 cosmic-text 同一布局引擎——光标/选区/点击
+///   按此定位即与绘制零误差，静态列模型的任何假设破缺都不再累计漂移；
+/// * `glyph.cluster` = 字符起始字节偏移（cosmic-text 0.15）；同簇多字形
+///   （连字）取最左 x；输出做单调兜底防御乱序；
+/// * 空行/量度失败返回可用的最小布局或 None（调用方回退列模型）。
+fn shape_row_xs(font: Font, size: f32, text: &str) -> Option<Vec<f32>> {
+    if !(size.is_finite() && size > 0.0) {
+        return None;
+    }
+    if text.is_empty() {
+        return Some(vec![0.0]);
+    }
+    let paragraph = <iced::Renderer as core_text::Renderer>::Paragraph::with_text(
+        core_text::Text {
+            content: text,
+            bounds: Size::new(f32::INFINITY, f32::INFINITY),
+            size: Pixels(size),
+            line_height: core_text::LineHeight::Absolute(Pixels(size * 1.375)),
+            font,
+            align_x: core_text::Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: core_text::Shaping::Advanced,
+            wrapping: core_text::Wrapping::None,
+        },
+    );
+    let mut xs = vec![0.0f32];
+    for run in paragraph.buffer().layout_runs() {
+        for g in run.glyphs.iter() {
+            // cosmic-text 0.15：g.start = run 起始字符索引 + rustybuzz
+            // cluster（**字节**偏移，见 shape.rs `start_run + info.cluster`）
+            // ——对多字节字符必须按字节回切计数；整行单 run 时 start_run=0，
+            // start 即纯字节偏移。绘制位置 = g.x + g.x_offset×字号
+            // （physical() 仅多做像素取整 ≤0.5px，取逻辑口径三处自洽）。
+            let x = g.x + g.x_offset * g.font_size;
+            let char_idx = text[..g.start.min(text.len())].chars().count();
+            if char_idx >= xs.len() {
+                xs.resize(char_idx + 1, x);
+            }
+            // 同簇多字形（连字断点）取最左起点
+            if x < xs[char_idx] {
+                xs[char_idx] = x;
+            }
+        }
+    }
+    // 行尾 x = 段落总宽（与整行绘制同源；覆盖末字符无字形/尾随空白）
+    xs.push(paragraph.min_bounds().width);
+    // 单调兜底：布局引擎按簇序输出，理论已单调；防御性收敛
+    for i in 1..xs.len() {
+        if xs[i] < xs[i - 1] {
+            xs[i] = xs[i - 1];
+        }
+    }
+    Some(xs)
+}
+
 impl EditorCore {
     // ---------- 字号与几何度量 ----------
 
@@ -473,6 +547,45 @@ impl EditorCore {
     pub fn char_width(&self) -> f32 {
         self.measured_char_w
             .unwrap_or_else(|| self.font_size * 0.5625)
+    }
+
+    // ---------- 行级真实布局（第 40 轮根治） ----------
+
+    /// 注入一行字符起点的真实像素 x（`xs[i]` = 第 i 个字符起点，末项 = 行尾）。
+    /// 同时抬升真实行宽高水位（水平行程钳制用）。
+    pub fn set_row_layout(&mut self, line: usize, xs: Vec<f32>) {
+        if let Some(&w) = xs.last() {
+            self.max_row_width_px = self.max_row_width_px.max(w);
+        }
+        self.row_layouts.insert(line, xs);
+    }
+
+    /// 清空全部行级布局与行宽高水位（控件层每帧重建可见行时调用，
+    /// 保证无陈旧残留——编译/滚动后旧行布局不会冒充新内容）。
+    pub fn clear_row_layouts(&mut self) {
+        self.row_layouts.clear();
+        self.max_row_width_px = 0.0;
+    }
+
+    /// 行内第 `col` 个字符起点的真实像素 x；未注入返回 None（调用方回退
+    /// 列模型 `prefix_width × char_width`）。越界 col 取行尾（与列模型
+    /// 的 min(chars.count()) 口径一致）。
+    pub fn row_x(&self, line: usize, col: usize) -> Option<f32> {
+        let xs = self.row_layouts.get(&line)?;
+        let last = xs.len() - 1;
+        Some(xs[col.min(last)])
+    }
+
+    /// 已注入的行宽（像素）。当前由水平行程钳制经由
+    /// [`Self::max_row_width_px`] 消费；本查询供测试断言行级布局内容。
+    #[allow(dead_code)]
+    pub fn row_width_px(&self, line: usize) -> Option<f32> {
+        self.row_layouts.get(&line).and_then(|xs| xs.last().copied())
+    }
+
+    /// 已注入行宽的最大值（水平行程钳制的真实补充上界）。
+    pub fn max_row_width_px(&self) -> f32 {
+        self.max_row_width_px
     }
 
     /// P42：注入实测列宽（控件层量得真实字形 advance 后调用）。
@@ -1116,7 +1229,9 @@ impl EditorCore {
     /// 水平行程钳制：左缘不出负，右缘不超出最宽行
     /// （高水位偏大时允许滚进一小段空白，见字段注释）。
     pub fn clamp_scroll_horizontal(&mut self) {
-        let content_w = self.max_line_cols as f32 * self.char_width();
+        // 第 40 轮：真实行宽高水位并取最大——列模型对分数/超宽字形可能
+        // 欠估，不补则超宽行（emoji/全宽符号）滚不到头、光标被钳出视口
+        let content_w = (self.max_line_cols as f32 * self.char_width()).max(self.max_row_width_px());
         let max = (content_w - self.text_viewport_w()).max(0.0);
         if self.scroll_left.is_finite() {
             self.scroll_left = self.scroll_left.clamp(0.0, max);
@@ -1129,7 +1244,10 @@ impl EditorCore {
     fn ensure_visible_horizontal(&mut self) {
         let text = self.line_text(self.cursor.line);
         let col = self.cursor.col.min(text.chars().count());
-        let cx = prefix_width(&text, col) * self.char_width();
+        // 第 40 轮：真实字形位置优先（与 caret_rect_relative 同口径）
+        let cx = self
+            .row_x(self.cursor.line, col)
+            .unwrap_or_else(|| prefix_width(&text, col) * self.char_width());
         let view_w = self.text_viewport_w();
         if view_w <= 0.0 {
             return;
@@ -1219,6 +1337,21 @@ impl EditorCore {
         let text = self.line_text(line);
         let rel = (x - gutter + self.scroll_left).max(0.0);
 
+        // 第 40 轮：真实字形布局命中（与绘制同源，字符边界 = 真实 x 中点，
+        // 与列模型的「左半/右半」选位语义一致）；未注入回退列模型
+        if let Some(xs) = self.row_layouts.get(&line) {
+            let mut col = xs.len() - 1;
+            for (k, pair) in xs.windows(2).enumerate() {
+                let mid = (pair[0] + pair[1]) * 0.5;
+                if rel < mid {
+                    col = k;
+                    break;
+                }
+                col = k + 1;
+            }
+            return CursorPos { line, col };
+        }
+
         let mut col = text.chars().count();
         let mut acc = 0.0f32; // 累计显示列（含 Tab 制表位推进）
         for (i, ch) in text.chars().enumerate() {
@@ -1277,12 +1410,15 @@ impl EditorCore {
 
     /// 相对控件的光标矩形（供输入法定位候选框，双宽感知）。
     /// P13：x 含水平滚动偏移的抵扣——返回值是视口系坐标。
-    pub fn caret_rect_relative(&self) -> Rectangle {        let text = self.line_text(self.cursor.line);
+    pub fn caret_rect_relative(&self) -> Rectangle {
+        let text = self.line_text(self.cursor.line);
+        let col = self.cursor.col.min(text.chars().count());
+        // 第 40 轮：优先真实字形位置；未注入回退列模型
+        let x_px = self
+            .row_x(self.cursor.line, col)
+            .unwrap_or_else(|| prefix_width(&text, col) * self.char_width());
         Rectangle {
-            x: self.gutter_width()
-                + prefix_width(&text, self.cursor.col.min(text.chars().count()))
-                    * self.char_width()
-                - self.scroll_left,
+            x: self.gutter_width() + x_px - self.scroll_left,
             y: (self.cursor.line as f32 - self.scroll_top) * self.line_height(),
             width: CARET_WIDTH,
             height: self.line_height(),
@@ -1608,6 +1744,35 @@ impl EditorView {
             self.core.borrow_mut().set_measured_char_width(w);
         }
     }
+
+    /// 第 40 轮：可见行真实字形布局注入——对可见行做与正文绘制同源的
+    /// shaping，把每个字符起点的真实像素 x 注入 EditorCore（先清后注，
+    /// 无陈旧残留；行内容/字体/字号/滚动变化后下一帧自动对齐）。
+    ///
+    /// 成本：每帧对可见行（~50 行）各做一次段落 shaping（microsecond 级，
+    /// 与既有绘制塑造同量级），换来的是一劳永逸的「光标/点击/选区与字形
+    /// 零误差」——不再依赖任何静态列宽假设（主流编辑器的 DirectWrite
+    /// glyph placement 同款思路）。
+    fn refresh_row_layouts(&self) {
+        let (font, size) = (self.font, self.core.borrow().font_size());
+        let rows: Vec<(usize, Vec<f32>)> = {
+            let core = self.core.borrow();
+            let (first, last) = core.visible_range();
+            let mut out = Vec::with_capacity((last - first + 1).min(512));
+            for line in first..=last {
+                let text = core.line_text(line);
+                if let Some(xs) = shape_row_xs(font, size, &text) {
+                    out.push((line, xs));
+                }
+            }
+            out
+        };
+        let mut core = self.core.borrow_mut();
+        core.clear_row_layouts();
+        for (line, xs) in rows {
+            core.set_row_layout(line, xs);
+        }
+    }
 }
 
 /// 浅色主题的固定配色（保持 v1 观感）；深色主题在 draw 时由 palette 派生。
@@ -1677,6 +1842,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
     ) -> layout::Node {
         // P42：每帧最先校准列宽（实测 advance 注入，键相同即跳过）
         self.ensure_measured_char_width();
+        // 第 40 轮：可见行真实字形布局注入——光标/点击/选区按字形位置定位。
+        // 每帧重建（先清后注），无陈旧残留；行内容编辑后下一帧自动对齐。
+        self.refresh_row_layouts();
         layout::Node::new(limits.resolve(Length::Fill, Length::Fill, Size::INFINITE))
     }
 
@@ -1740,9 +1908,16 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 if end_col <= start_col {
                     continue;
                 }
-                let x0 = prefix_width(&text, start_col.min(text.chars().count())) * char_w;
-                let x1 =
-                    prefix_width(&text, end_col.min(text.chars().count())) * char_w;
+                let x0 = core
+                    .row_x(line, start_col.min(text.chars().count()))
+                    .unwrap_or_else(|| {
+                        prefix_width(&text, start_col.min(text.chars().count())) * char_w
+                    });
+                let x1 = core
+                    .row_x(line, end_col.min(text.chars().count()))
+                    .unwrap_or_else(|| {
+                        prefix_width(&text, end_col.min(text.chars().count())) * char_w
+                    });
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1813,8 +1988,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     if segment.is_empty() {
                         continue;
                     }
-                    let offset_px =
-                        prefix_width(&text, run.start_col) * char_w;
+                    let offset_px = core
+                        .row_x(line, run.start_col)
+                        .unwrap_or_else(|| prefix_width(&text, run.start_col) * char_w);
                     let [r, g, b, a] = run.color;
                     renderer.fill_text(
                         core_text::Text {
@@ -2667,15 +2843,15 @@ mod tests {
         assert_eq!(c.char_width(), 8.0);
     }
 
-    /// 量单个字符的真实 advance（像素/字符）：与正文绘制同款 cosmic-text
-    /// 段落参数（Shaping::Advanced + Wrapping::None），8 字符采样取均值。
-    fn measure_char_advance(font: Font, size: f32, ch: char) -> Option<f32> {
-        if !(size.is_finite() && size > 0.0) || ch.is_control() {
+    /// 量一段文本的真实 advance 宽（像素）：与正文绘制同款 cosmic-text
+    /// 段落参数（Shaping::Advanced + Wrapping::None），段落总宽。
+    fn measure_text_advance(font: Font, size: f32, text: &str) -> Option<f32> {
+        if !(size.is_finite() && size > 0.0) {
             return None;
         }
         let paragraph = <iced::Renderer as core_text::Renderer>::Paragraph::with_text(
             core_text::Text {
-                content: ch.to_string().repeat(8).as_str(),
+                content: text,
                 bounds: Size::new(f32::INFINITY, f32::INFINITY),
                 size: Pixels(size),
                 line_height: core_text::LineHeight::Absolute(Pixels(size * 1.375)),
@@ -2690,7 +2866,176 @@ mod tests {
         if !(total.is_finite() && total > 0.0) {
             return None;
         }
-        Some(total / 8.0)
+        Some(total)
+    }
+
+    /// 量单个字符的真实 advance（像素/字符）：8 字符采样取均值。
+    fn measure_char_advance(font: Font, size: f32, ch: char) -> Option<f32> {
+        if ch.is_control() {
+            return None;
+        }
+        measure_text_advance(font, size, &ch.to_string().repeat(8))
+            .map(|w| w / 8.0)
+    }
+
+    /// 端到端自洽（第 40 轮根治）：`shape_row_xs` 注入布局必须与真实 shaping
+    /// 逐前缀一致——光标/点击/选区按注入布局定位即与绘制同源零误差。
+    /// 历史沿革：早期断言对象是「列模型 vs 真实」——实测暴露 ★☆☀☁♠♥
+    /// （6 字符累计 49.8px）、✅ emoji（+14px）、▀▄█▌（分数宽度 15.01px）
+    /// 等不可静态修复的漂移源，故列模型仅作「未注入行」的回退兜底，
+    /// 其偏差在此作为文档输出（不再断言）。
+    #[test]
+    fn injected_row_layout_matches_real_shaping() {
+        let Ok(mut font_system) = iced::advanced::graphics::text::font_system().write() else {
+            return;
+        };
+        let families: Vec<String> = font_system
+            .raw()
+            .db_mut()
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(n, _)| n.clone()))
+            .collect();
+        drop(font_system);
+        let Some(family) = pick_cjk_mono_family(&families) else {
+            return;
+        };
+        let font = Font {
+            family: iced::font::Family::Name(family),
+            ..Font::MONOSPACE
+        };
+        let Some(narrow) = measure_char_advance(font, 16.0, '0') else {
+            return;
+        };
+        // 各行覆盖：纯 ASCII / 纯中文 / 混排 / 分数宽度块元素 / 未覆盖
+        // 符号段 / emoji（回退字形）/ Tab / 常见日志行
+        let lines: &[&str] = &[
+            "abc123",
+            "中文中文中文",
+            "a中a中a",
+            "──分割线──",
+            "▀▄█▌",
+            "→ 箭头 → ◆",
+            "…省略…",
+            "hello world 2026-08-25 12:00:00 INFO",
+            "执行完毕：成功 ✅ 继续",
+            "★☆☀☁♠♥",
+            "x·y°C℃№×÷≈≠≤≥",
+            "quite a long ascii line with many words to amplify any drift",
+            "制表\t位\t\t测试",
+        ];
+        let mut worst = 0.0f32;
+        let mut worst_line = String::new();
+        for text in lines {
+            let chars: Vec<char> = text.chars().collect();
+            let Some(xs) = shape_row_xs(font, 16.0, text) else {
+                continue;
+            };
+            assert_eq!(
+                xs.len(),
+                chars.len() + 1,
+                "行 {text:?} 布局长度 = 字符数+1"
+            );
+            // xs[k] = 第 k 字符起点 = 前 k 个字符的真实总宽（k=0 → 0）
+            for (k, _ch) in chars.iter().enumerate() {
+                let prefix: String = chars[..k].iter().collect();
+                let Some(real) = measure_text_advance(font, 16.0, &prefix) else {
+                    continue;
+                };
+                let delta = (xs[k] - real).abs();
+                if delta > worst {
+                    worst = delta;
+                    worst_line = text.to_string();
+                }
+                let k_p1 = k + 1;
+                assert!(
+                    delta < 0.5,
+                    "行 {text:?} 第{k_p1}字符起点 {:.2}px ≠ 前 {k} 字符真实宽 {real:.2}px",
+                    xs[k]
+                );
+            }
+            let Some(real_total) = measure_text_advance(font, 16.0, text) else {
+                continue;
+            };
+            let delta_tail = (xs[chars.len()] - real_total).abs();
+            if delta_tail > worst {
+                worst = delta_tail;
+                worst_line = text.to_string();
+            }
+            assert!(
+                delta_tail < 0.5,
+                "行 {text:?} 行尾 注入 {:.2}px ≠ 真实 {real_total:.2}px",
+                xs[chars.len()]
+            );
+            // 文档输出：列模型在此行的偏差（说明「未注入回退」的兜底量级）
+            let mut model_cols = 0f32;
+            for ch in chars.iter() {
+                let w = char_cols(*ch, model_cols as usize) as f32;
+                model_cols += w;
+            }
+            let model: f32 = model_cols * narrow;
+            eprintln!(
+                "[文档] 行 {text:?} 列模型行宽 {model:.1}px vs 真实 {real_total:.1}px（偏差 {:.1}px，注入布局后光标不再受其影响）",
+                (model - real_total).abs()
+            );
+        }
+        eprintln!(
+            "[对拍通过] 族={family}，'0'={narrow:.2}px：注入布局与真实排版逐前缀误差最大 {worst:.3}px（行 {worst_line:?}）"
+        );
+    }
+
+    /// 第 40 轮：注入行级真实布局后，caret/选区/hit_test 全部按真实字形
+    /// 位置定位且互相往返一致（行含分数宽度/全宽/emoji 混合）；清空后
+    /// 回退列模型（既有行为不变）。
+    #[test]
+    fn row_layout_drives_caret_selection_and_hit_test() {
+        let text = "★☆☀ 我✅a";
+        let Some(xs) = shape_row_xs(BODY_FONT, 16.0, text) else {
+            return;
+        };
+        let mut c = core_with(text);
+        c.set_viewport_height(300.0);
+        c.set_row_layout(0, xs.clone());
+        let gutter = c.gutter_width();
+
+        // caret：每列起点 x == 注入值（字形画在哪光标就在哪）
+        for col in 0..xs.len() {
+            c.cursor = CursorPos { line: 0, col };
+            let caret = c.caret_rect_relative();
+            assert!(
+                (caret.x - (gutter + xs[col])).abs() < 1e-3,
+                "caret col={col} x={} 应为 {}",
+                caret.x,
+                gutter + xs[col]
+            );
+        }
+
+        // hit_test：字符中点两侧往返（左半→k，右半→k+1）
+        for k in 0..(xs.len() - 1) {
+            let mid = (xs[k] + xs[k + 1]) * 0.5;
+            let hit_left = c.hit_test(gutter + mid - 0.1, 0.0);
+            let hit_right = c.hit_test(gutter + mid + 0.1, 0.0);
+            assert_eq!(hit_left, CursorPos { line: 0, col: k }, "中点左 k={k}");
+            assert_eq!(
+                hit_right,
+                CursorPos { line: 0, col: k + 1 },
+                "中点右 k={k}"
+            );
+        }
+        // 行尾之后点击夹紧到行尾
+        let tail = c.hit_test(gutter + xs.last().unwrap() + 40.0, 0.0);
+        assert_eq!(tail, CursorPos { line: 0, col: xs.len() - 1 });
+        // 行宽高水位（水平行程钳制的真实补充上界）
+        assert!((c.max_row_width_px() - xs.last().unwrap()).abs() < 1e-3);
+        assert_eq!(c.row_width_px(0), Some(xs.last().copied().unwrap()));
+
+        // 清空 → 全部回退列模型（既有路径行为不变）
+        c.clear_row_layouts();
+        assert_eq!(c.max_row_width_px(), 0.0);
+        assert_eq!(c.row_width_px(0), None);
+        let caret = c.caret_rect_relative();
+        let col = c.cursor.col.min(text.chars().count());
+        let expect = gutter + prefix_width(text, col) * c.char_width();
+        assert!((caret.x - expect).abs() < 1e-3, "清空后应回退列模型");
     }
 
     /// 第 40 轮诊断：列模型分类（[`is_wide`]）与等宽 CJK 字体真实字形宽度
