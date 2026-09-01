@@ -298,10 +298,27 @@ impl Default for EditorCore {
 /// 制表位间距（显示列）。
 const TAB_STOP_COLS: usize = 4;
 
+/// 字符是否按「全宽（2 列）」计。
+///
+/// 基础段来自 Unicode East Asian Width W/F 并集；**第 40 轮按等宽 CJK 字体
+/// 实测补充**：以下符号段在 NSimSun（P33 默认钉字）内真实渲染为 2 列全宽，
+/// 旧表按 1 列计 → 光标压在这些字符中间且后续逐字符累计漂移
+/// （对照测试 `wide_classification_matches_real_glyph_advance` 是护栏）。
+/// 取舍：默认正文 = CJK 等宽字体，按全宽分类；用户 P34 另选纯西文等宽字体
+/// 时这些字符将反向有 ~1 列误差，属「非等宽/CJK 外字体列对齐漂移」已知取舍。
 fn is_wide(c: char) -> bool {
     matches!(
         c as u32,
-        0x1100..=0x115F
+        0x00A1..=0x00BF // ¡¢£¤¥¦§¨©ª«¬®¯°±²³´µ¶·¸¹º»¼½¾¿（CJK 字体全宽）
+            | 0x00D7 // × 乘号
+            | 0x00F7 // ÷ 除号
+            | 0x1100..=0x115F
+            | 0x2014..=0x2027 // — ― ‖ ‘ ’ ‚ ‛ “ ” „ ‟ † ‡ • … ‰/引号族
+            | 0x2030..=0x203B // ‰ ‱ ′ ″ ‴ ※ 等
+            | 0x2100..=0x213A // ℃ ℅ № 等字母符号
+            | 0x2190..=0x21FF // ← ↑ → ↓ ↔ 等箭头
+            | 0x2200..=0x22FF // ∀ ∂ ∑ ≈ ≠ ≤ ≥ 等数学符号
+            | 0x2500..=0x25FF // ─ │ ┌ ┐ └ ┘ ├ ┤ ▀ ▄ █ ■ □ ◆ 制表/块/几何
             | 0x2E80..=0x303E
             | 0x3041..=0x33FF
             | 0x3400..=0x4DBF
@@ -2648,6 +2665,117 @@ mod tests {
         assert_eq!(c.char_width(), 10.0);
         c.set_font_size(16.0);
         assert_eq!(c.char_width(), 8.0);
+    }
+
+    /// 量单个字符的真实 advance（像素/字符）：与正文绘制同款 cosmic-text
+    /// 段落参数（Shaping::Advanced + Wrapping::None），8 字符采样取均值。
+    fn measure_char_advance(font: Font, size: f32, ch: char) -> Option<f32> {
+        if !(size.is_finite() && size > 0.0) || ch.is_control() {
+            return None;
+        }
+        let paragraph = <iced::Renderer as core_text::Renderer>::Paragraph::with_text(
+            core_text::Text {
+                content: ch.to_string().repeat(8).as_str(),
+                bounds: Size::new(f32::INFINITY, f32::INFINITY),
+                size: Pixels(size),
+                line_height: core_text::LineHeight::Absolute(Pixels(size * 1.375)),
+                font,
+                align_x: core_text::Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: core_text::Shaping::Advanced,
+                wrapping: core_text::Wrapping::None,
+            },
+        );
+        let total = paragraph.min_bounds().width;
+        if !(total.is_finite() && total > 0.0) {
+            return None;
+        }
+        Some(total / 8.0)
+    }
+
+    /// 第 40 轮诊断：列模型分类（[`is_wide`]）与等宽 CJK 字体真实字形宽度
+    /// 逐字符对拍——光标压字/漂移的候选根因 = 分类与实际 advance 不符
+    /// （如制表绘图/块元素/箭头/数学符号在中文字体内多为全宽，却被判 1 列）。
+    /// 失败输出即修复清单；无 CJK 等宽字体环境时跳过（零断言）。
+    #[test]
+    fn wide_classification_matches_real_glyph_advance() {
+        let Ok(mut font_system) = iced::advanced::graphics::text::font_system().write() else {
+            return;
+        };
+        let families: Vec<String> = font_system
+            .raw()
+            .db_mut()
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(n, _)| n.clone()))
+            .collect();
+        drop(font_system);
+        let Some(family) = pick_cjk_mono_family(&families) else {
+            return;
+        };
+        let font = Font {
+            family: iced::font::Family::Name(family),
+            ..Font::MONOSPACE
+        };
+        let Some(narrow) = measure_char_advance(font, 16.0, '0') else {
+            return;
+        };
+        let cases: &[(char, &str)] = &[
+            ('A', "ASCII 字母"),
+            ('0', "ASCII 数字"),
+            (',', "半角逗号"),
+            (' ', "半角空格"),
+            ('·', "间隔号 U+00B7"),
+            ('我', "CJK 汉字"),
+            ('，', "全角逗号 U+FF0C"),
+            ('：', "全角冒号 U+FF1A"),
+            ('！', "全角叹号 U+FF01"),
+            ('　', "全角空格 U+3000"),
+            ('「', "直角引号 U+300C"),
+            ('、', "顿号 U+3001"),
+            ('。', "句号 U+3002"),
+            ('—', "破折号 U+2014"),
+            ('…', "省略号 U+2026"),
+            ('─', "制表横线 U+2500"),
+            ('│', "制表竖线 U+2502"),
+            ('├', "制表交叉 U+251C"),
+            ('└', "制表拐角 U+2514"),
+            ('█', "块元素 U+2588"),
+            ('▀', "块元素 U+2580"),
+            ('◆', "几何图形 U+25C6"),
+            ('→', "箭头 U+2192"),
+            ('←', "箭头 U+2190"),
+            ('×', "乘号 U+00D7"),
+            ('÷', "除号 U+00F7"),
+            ('≈', "约等号 U+2248"),
+            ('≠', "不等号 U+2260"),
+            ('≤', "小于等于 U+2264"),
+            ('≥', "大于等于 U+2265"),
+            ('°', "度号 U+00B0"),
+            ('№', "编号 U+2116"),
+            ('℃', "摄氏度 U+2103"),
+        ];
+        let mut mismatches = Vec::new();
+        for &(ch, label) in cases {
+            let Some(w) = measure_char_advance(font, 16.0, ch) else {
+                continue;
+            };
+            let ratio = w / narrow;
+            let actual_wide = ratio >= 1.5;
+            let expect_wide = is_wide(ch);
+            if actual_wide != expect_wide {
+                mismatches.push(format!(
+                    "U+{:04X} {label:<10} ratio={ratio:.2} 表判 {}列 实际 {}列",
+                    ch as u32,
+                    if expect_wide { 2 } else { 1 },
+                    if actual_wide { 2 } else { 1 },
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "列模型分类与等宽 CJK 字体真实字形不符（族={family}，'0' 宽 {narrow:.2}px）：\n{}",
+            mismatches.join("\n")
+        );
     }
 
     #[test]
