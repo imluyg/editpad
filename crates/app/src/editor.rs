@@ -22,7 +22,7 @@ use iced::advanced::{
     widget::Tree,
     Clipboard, Shell, Widget,
 };
-use iced::{alignment, mouse, window, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
+use iced::{alignment, border::Radius, mouse, window, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
 
 use editpad_core::{Document, LazyHighlighter, StyledRun};
 
@@ -127,6 +127,8 @@ pub struct EditorCore {
     pub scroll_top: f32,
     viewport_h: f32,
     dragging: bool,
+    /// 垂直滚动条拖拽中：Some(按下点相对滑块顶部的像素偏移)
+    scrollbar_grab: Option<f32>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// 语法高亮器；None = 纯文本快速路径。RefCell 让只读的 draw 也能推进状态。
@@ -149,6 +151,7 @@ impl Default for EditorCore {
             scroll_top: 0.0,
             viewport_h: 400.0,
             dragging: false,
+            scrollbar_grab: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             highlight: None,
@@ -749,6 +752,107 @@ impl EditorCore {
     }
 }
 
+// ---------- 垂直滚动条 ----------
+//
+// 覆盖式（overlay）设计：不改变文本排版与命中测试的坐标体系，
+// 只在控件右缘绘制并在鼠标事件里优先拦截。内容不超出视口时整个
+// 滚动条不存在（用户要求：没超就不需要）。
+
+/// 滑块/轨道厚度。
+const SCROLLBAR_WIDTH: f32 = 10.0;
+/// 滚动条距控件右缘的间隙。
+const SCROLLBAR_EDGE_INSET: f32 = 3.0;
+/// 轨道距控件上下缘的内缩。
+const SCROLLBAR_TRACK_PAD: f32 = 2.0;
+/// 超长文档下滑块的最小高度（否则 50MB 文档的滑块只剩几个像素抓不住）。
+const THUMB_MIN_H: f32 = 32.0;
+/// 命中区总宽（比可视宽度略宽，好点中）。
+const SCROLLBAR_ZONE_W: f32 = SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET * 2.0;
+
+/// 垂直滚动条几何。全部为**相对控件**的像素坐标；由
+/// [`VScrollbar::measure`] 从当前状态推导——窗口缩放、字号调整、
+/// 文档变化都会在下一帧自然反映，无需额外同步。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VScrollbar {
+    /// 内容超出视口才为 true
+    needed: bool,
+    track_y: f32,
+    track_h: f32,
+    thumb_y: f32,
+    thumb_h: f32,
+    /// 可滚动行程（行）。口径与 `clamp_scroll` 的 max+1 对齐：
+    /// 允许滚到末行后留一行空白，与滚轮行为一致。
+    range_lines: f32,
+}
+
+impl VScrollbar {
+    fn measure(
+        content_lines: usize,
+        viewport_h: f32,
+        line_h: f32,
+        widget_h: f32,
+        scroll_top: f32,
+    ) -> Self {
+        let content_h = content_lines.max(1) as f32 * line_h;
+        let needed = line_h > 0.0 && viewport_h > 0.0 && content_h > viewport_h;
+        let track_y = SCROLLBAR_TRACK_PAD;
+        let track_h = (widget_h - SCROLLBAR_TRACK_PAD * 2.0).max(0.0);
+        if !needed || track_h <= 0.0 {
+            return Self {
+                needed: false,
+                track_y,
+                track_h,
+                thumb_y: track_y,
+                thumb_h: 0.0,
+                range_lines: 0.0,
+            };
+        }
+        let rows_in_view = viewport_h / line_h;
+        let range_lines = (content_lines as f32 - rows_in_view + 1.0).max(1.0);
+        let thumb_h = (track_h * viewport_h / content_h).clamp(THUMB_MIN_H, track_h);
+        let travel = (track_h - thumb_h).max(0.0);
+        let ratio = (scroll_top / range_lines).clamp(0.0, 1.0);
+        Self {
+            needed: true,
+            track_y,
+            track_h,
+            thumb_y: track_y + ratio * travel,
+            thumb_h,
+            range_lines,
+        }
+    }
+
+    /// 滑块顶部目标 y → scroll_top（已夹紧到行程内）。
+    fn scroll_for_thumb_y(&self, thumb_top_y: f32) -> f32 {
+        let travel = (self.track_h - self.thumb_h).max(1e-3);
+        let ratio = ((thumb_top_y - self.track_y) / travel).clamp(0.0, 1.0);
+        ratio * self.range_lines
+    }
+
+    /// 点击轨道：把滑块中心对准点击处（连续按住可继续拖拽）。
+    fn scroll_for_track_click(&self, click_y: f32) -> f32 {
+        self.scroll_for_thumb_y(click_y - self.thumb_h * 0.5)
+    }
+
+    /// 控件局部坐标是否落在滚动条交互区。
+    fn hits(&self, local_x: f32, local_y: f32, widget_w: f32) -> bool {
+        self.needed
+            && local_x >= widget_w - SCROLLBAR_ZONE_W
+            && local_y >= self.track_y
+            && local_y <= self.track_y + self.track_h
+    }
+
+    /// 滑块矩形（x/y 相对控件左上角），供绘制与拖拽命中。
+    fn thumb_rect(&self, widget_w: f32) -> Rectangle {
+        Rectangle {
+            x: widget_w - SCROLLBAR_EDGE_INSET - SCROLLBAR_WIDTH,
+            y: self.thumb_y,
+            width: SCROLLBAR_WIDTH,
+            height: self.thumb_h,
+        }
+    }
+}
+
 // ---------- 共享句柄 ----------
 
 /// 跨帧共享的编辑器状态句柄（Clone 廉价）。
@@ -792,6 +896,8 @@ struct EditorColors {
     gutter_text: Color,
     preedit_text: Color,
     preedit_underline: Color,
+    scrollbar_track: Color,
+    scrollbar_thumb: Color,
 }
 
 impl EditorColors {
@@ -809,6 +915,9 @@ impl EditorColors {
                 gutter_text: GUTTER_TEXT,
                 preedit_text: PREEDIT_TEXT,
                 preedit_underline: PREEDIT_UNDERLINE,
+                // 滚动条用前景色低透明度叠加，两种主题都自然成立
+                scrollbar_track: Color::from_rgba8(0x00, 0x00, 0x00, 0.05),
+                scrollbar_thumb: Color::from_rgba8(0x00, 0x00, 0x00, 0.30),
             };
         }
         let text = palette.text;
@@ -819,6 +928,8 @@ impl EditorColors {
             gutter_text: Color { a: 0.55, ..text },
             preedit_text: text,
             preedit_underline: Color { a: 0.6, ..text },
+            scrollbar_track: Color { a: 0.06, ..palette.text },
+            scrollbar_thumb: Color { a: 0.38, ..palette.text },
         }
     }
 }
@@ -1045,6 +1156,37 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             },
             colors.caret,
         );
+
+        // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）
+        let sb = VScrollbar::measure(
+            core.doc.line_count(),
+            core.viewport_h,
+            lh,
+            bounds.height,
+            core.scroll_top,
+        );
+        if sb.needed {
+            let track_rect = Rectangle {
+                x: bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - SCROLLBAR_WIDTH,
+                y: bounds.y + sb.track_y,
+                width: SCROLLBAR_WIDTH,
+                height: sb.track_h,
+            };
+            let mut track_quad = renderer::Quad::default();
+            track_quad.bounds = track_rect;
+            track_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
+            renderer.fill_quad(track_quad, colors.scrollbar_track);
+
+            let thumb = sb.thumb_rect(bounds.width);
+            let mut thumb_quad = renderer::Quad::default();
+            thumb_quad.bounds = Rectangle {
+                x: bounds.x + thumb.x,
+                y: bounds.y + thumb.y,
+                ..thumb
+            };
+            thumb_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
+            renderer.fill_quad(thumb_quad, colors.scrollbar_thumb);
+        }
     }
 
     fn update(
@@ -1092,14 +1234,45 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 let Some(pos) = cursor.position_over(bounds) else {
                     return;
                 };
+
+                // 滚动条优先于文本命中：落在交互区则进入拖拽/轨道跳转，
+                // 不触发文本选区
                 {
+                    let core = self.core.borrow();
+                    let sb = VScrollbar::measure(
+                        core.doc.line_count(),
+                        core.viewport_h,
+                        core.line_height(),
+                        bounds.height,
+                        core.scroll_top,
+                    );
+                    let (local_x, local_y) = (pos.x - bounds.x, pos.y - bounds.y);
+                    if !sb.hits(local_x, local_y, bounds.width) {
+                        // 未命中滚动条：走普通文本按下流程（借用在此结束）
+                        drop(core);
+                        {
+                            let mut core = self.core.borrow_mut();
+                            let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                            core.dragging = true;
+                            core.anchor = None;
+                            core.cursor = hit;
+                        }
+                        shell.publish(super::Message::EditorNavChanged);
+                        shell.request_redraw();
+                        shell.capture_event();
+                        return;
+                    }
+                    // 命中滑块 → 记录抓取偏移；命中轨道 → 先把滑块中心对到点击处
                     let mut core = self.core.borrow_mut();
-                    let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
-                    core.dragging = true;
-                    core.anchor = None;
-                    core.cursor = hit;
+                    if local_y >= sb.thumb_y && local_y <= sb.thumb_y + sb.thumb_h {
+                        core.scrollbar_grab = Some(local_y - sb.thumb_y);
+                    } else {
+                        core.scroll_top = sb.scroll_for_track_click(local_y);
+                        core.clamp_scroll();
+                        core.scrollbar_grab = Some(sb.thumb_h * 0.5);
+                    }
+                    core.dragging = false; // 绝不因此进入文本拖选
                 }
-                shell.publish(super::Message::EditorNavChanged);
                 shell.request_redraw();
                 shell.capture_event();
             }
@@ -1108,6 +1281,24 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     return;
                 };
                 let mut core = self.core.borrow_mut();
+
+                // 滚动条拖拽中：按抓取偏移反解 scroll_top
+                if let Some(grab) = core.scrollbar_grab {
+                    let sb = VScrollbar::measure(
+                        core.doc.line_count(),
+                        core.viewport_h,
+                        core.line_height(),
+                        bounds.height,
+                        core.scroll_top,
+                    );
+                    core.scroll_top = sb.scroll_for_thumb_y(pos.y - bounds.y - grab);
+                    core.clamp_scroll();
+                    drop(core);
+                    shell.request_redraw();
+                    shell.capture_event();
+                    return;
+                }
+
                 if !core.is_dragging() {
                     return;
                 }
@@ -1125,7 +1316,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 }
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                self.core.borrow_mut().dragging = false;
+                let mut core = self.core.borrow_mut();
+                core.dragging = false;
+                core.scrollbar_grab = None;
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if !cursor.is_over(bounds) {
@@ -1178,7 +1371,26 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         _viewport: &Rectangle,
         _renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        if cursor.is_over(layout.bounds()) {
+        let bounds = layout.bounds();
+        if let Some(pos) = cursor.position_over(bounds) {
+            let core = self.core.borrow();
+            let sb = VScrollbar::measure(
+                core.doc.line_count(),
+                core.viewport_h,
+                core.line_height(),
+                bounds.height,
+                core.scroll_top,
+            );
+            // 滚动条上：拖拽中给 Grabbing，悬停给 Grab；正文仍是文本光标
+            if sb.hits(pos.x - bounds.x, pos.y - bounds.y, bounds.width) {
+                return if core.scrollbar_grab.is_some() {
+                    mouse::Interaction::Grabbing
+                } else {
+                    mouse::Interaction::Grab
+                };
+            }
+        }
+        if cursor.is_over(bounds) {
             mouse::Interaction::Text
         } else {
             mouse::Interaction::None
@@ -1499,5 +1711,115 @@ mod tests {
         assert!(c.undo());
         assert_eq!(c.doc.to_text(), "l1\r\nl2\r\n", "撤销完整还原");
         assert_eq!(c.doc.line_ending(), LineEnding::CrLf, "快照携带同一行尾元数据");
+    }
+
+    // ---------- 垂直滚动条 ----------
+
+    #[test]
+    fn scrollbar_hidden_when_content_fits() {
+        // 内容不超视口 → 不需要滚动条（用户要求的核心行为）
+        assert!(!VScrollbar::measure(10, 500.0, 22.0, 500.0, 0.0).needed);
+        // 空文档 / 单行同样隐藏
+        assert!(!VScrollbar::measure(0, 500.0, 22.0, 500.0, 0.0).needed);
+        assert!(!VScrollbar::measure(1, 100.0, 22.0, 300.0, 0.0).needed);
+    }
+
+    #[test]
+    fn scrollbar_appears_on_overflow_with_proportional_thumb() {
+        let (lines, lh, vh, wh) = (1000usize, 20.0, 400.0, 400.0);
+        let sb = VScrollbar::measure(lines, vh, lh, wh, 0.0);
+        assert!(sb.needed);
+
+        // 滑块高度 = 视口占比 × 轨道高（未触底最小值时）
+        let expect_h = (sb.track_h * vh / (lines as f32 * lh)).max(THUMB_MIN_H);
+        assert!((sb.thumb_h - expect_h).abs() < 1e-3);
+        assert!(sb.thumb_y >= sb.track_y);
+
+        // 滚动到 clamp 允许的最大值（行数-可见行+1）→ 滑块应贴到轨道底部
+        let max_scroll = lines as f32 - vh / lh + 1.0;
+        let bot = VScrollbar::measure(lines, vh, lh, wh, max_scroll + 10.0);
+        assert!(
+            (bot.thumb_y + bot.thumb_h - (bot.track_y + bot.track_h)).abs() < 1e-2,
+            "超出行程的 scroll_top 应被夹到滑块贴底"
+        );
+    }
+
+    #[test]
+    fn thumb_drag_roundtrips_through_inverse_mapping() {
+        let (lines, lh, vh, wh) = (2000usize, 22.0, 550.0, 800.0);
+        for &scroll in &[0.0f32, 7.5, 123.4, 900.0] {
+            let sb = VScrollbar::measure(lines, vh, lh, wh, scroll);
+            assert!(sb.needed);
+            // 滑块位置反解回 scroll_top 必须是恒等映射
+            let back = sb.scroll_for_thumb_y(sb.thumb_y);
+            assert!(
+                (back - scroll.min(sb.range_lines)).abs() < 0.01,
+                "scroll={scroll} 反解={back}"
+            );
+        }
+        // 拖出上下边界都要夹紧
+        let sb = VScrollbar::measure(lines, vh, lh, wh, 100.0);
+        assert_eq!(sb.scroll_for_thumb_y(sb.track_y - 50.0), 0.0, "拖过头=回到顶部");
+        let over = sb.scroll_for_thumb_y(sb.track_y + sb.track_h + 50.0);
+        assert!((over - sb.range_lines).abs() < 1e-3, "拖到底=最大行程");
+    }
+
+    #[test]
+    fn track_click_centers_thumb_on_cursor() {
+        let sb = VScrollbar::measure(1500usize, 660.0, 22.0, 660.0, 10.0);
+        assert!(sb.needed);
+        let click = sb.track_y + sb.track_h * 0.8;
+        let scrolled = sb.scroll_for_track_click(click);
+        // 点击后滑块中心应落在点击处附近（±1px）
+        let after = VScrollbar::measure(1500usize, 660.0, 22.0, 660.0, scrolled);
+        let center_after = after.thumb_y + after.thumb_h / 2.0;
+        assert!((center_after - click).abs() < 1.5, "点击 {click}，中心停在 {center_after}");
+    }
+
+    #[test]
+    fn huge_document_keeps_grabbable_thumb_min_height() {
+        // 50MB 场景：几十万行 → 视口占比极小，滑块不得小于可抓握的最小高度
+        let sb = VScrollbar::measure(600_000usize, 800.0, 22.0, 800.0, 0.0);
+        assert_eq!(sb.thumb_h, THUMB_MIN_H);
+        // 最小滑块仍能覆盖完整行程
+        let bottom = sb.scroll_for_thumb_y(sb.track_y + sb.track_h);
+        assert!((bottom - sb.range_lines).abs() < 1e-3);
+    }
+
+    #[test]
+    fn scrollbar_flows_through_core_state() {
+        // 经 EditorCore 的真实链路：设视口 → 推导 → 用逆映射模拟拖拽 → 夹紧
+        let mut c = core_with(&"line\n".repeat(500));
+        c.set_viewport_height(400.0);
+        c.scroll_top = 12345.0; // 故意越界
+        c.clamp_scroll();
+
+        let sb = VScrollbar::measure(
+            c.doc.line_count(),
+            c.viewport_h,
+            c.line_height(),
+            400.0,
+            c.scroll_top,
+        );
+        assert!(sb.needed);
+        c.scroll_top = sb.scroll_for_thumb_y(sb.track_y + (sb.track_h - sb.thumb_h) * 0.5);
+        c.clamp_scroll();
+        assert!(c.scroll_top > 0.0 && c.scroll_top <= sb.range_lines);
+
+        // 文档缩到视口内后滚动条消失
+        c.reset_document(Document::from_str("short"));
+        c.set_viewport_height(400.0);
+        let sb = VScrollbar::measure(
+            c.doc.line_count(),
+            c.viewport_h,
+            c.line_height(),
+            400.0,
+            c.scroll_top,
+        );
+        assert!(!sb.needed, "内容装得下就必须隐藏滚动条");
+
+        // 命中区只在右侧窄带
+        assert!(sb.hits(798.0, 300.0, 800.0) == false || !sb.needed);
+        assert!(!sb.hits(100.0, 300.0, 800.0), "正文区域不得算进滚动条命中区");
     }
 }
