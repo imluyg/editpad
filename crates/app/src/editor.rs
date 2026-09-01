@@ -1295,6 +1295,8 @@ impl EditorCore {
             f32::MIN
         };
         self.clamp_scroll_horizontal();
+        // P54：横向滚动同样点亮滚动条（两条共用一个活动戳，见 draw）
+        self.touch_scrollbar_activity();
     }
 
     pub fn clamp_scroll(&mut self) {
@@ -2293,7 +2295,8 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         }
 
         // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）。
-        // P45：行程统一走「列模型 ∪ 真实行宽」口径，与滚动钳制一致
+        // P45：行程统一走「列模型 ∪ 真实行宽」口径，与滚动钳制一致。
+        // P54：与竖直条共用活动戳，同款淡入淡出（横向滚动点亮，闲置淡出）。
         let hsb = HScrollbar::measure(
             core.content_width_px(),
             (bounds.width - gutter_w).max(0.0),
@@ -2301,26 +2304,37 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             core.scroll_left,
         );
         if hsb.needed {
-            let track_rect = Rectangle {
-                x: bounds.x + hsb.track_x,
-                y: bounds.y + bounds.height - SCROLLBAR_EDGE_INSET - SCROLLBAR_THUMB_THICKNESS,
-                width: hsb.track_w,
-                height: SCROLLBAR_THUMB_THICKNESS,
-            };
-            let mut track_quad = renderer::Quad::default();
-            track_quad.bounds = track_rect;
-            track_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
-            renderer.fill_quad(track_quad, colors.scrollbar_track);
+            let sb_alpha = core.scrollbar_visibility();
+            if sb_alpha > 0.004 {
+                let track_color = Color {
+                    a: colors.scrollbar_track.a * sb_alpha,
+                    ..colors.scrollbar_track
+                };
+                let thumb_color = Color {
+                    a: colors.scrollbar_thumb.a * sb_alpha,
+                    ..colors.scrollbar_thumb
+                };
+                let track_rect = Rectangle {
+                    x: bounds.x + hsb.track_x,
+                    y: bounds.y + bounds.height - SCROLLBAR_EDGE_INSET - SCROLLBAR_THUMB_THICKNESS,
+                    width: hsb.track_w,
+                    height: SCROLLBAR_THUMB_THICKNESS,
+                };
+                let mut track_quad = renderer::Quad::default();
+                track_quad.bounds = track_rect;
+                track_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
+                renderer.fill_quad(track_quad, track_color);
 
-            let thumb = hsb.thumb_rect(bounds.height);
-            let mut thumb_quad = renderer::Quad::default();
-            thumb_quad.bounds = Rectangle {
-                x: bounds.x + thumb.x,
-                y: bounds.y + thumb.y,
-                ..thumb
-            };
-            thumb_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
-            renderer.fill_quad(thumb_quad, colors.scrollbar_thumb);
+                let thumb = hsb.thumb_rect(bounds.height);
+                let mut thumb_quad = renderer::Quad::default();
+                thumb_quad.bounds = Rectangle {
+                    x: bounds.x + thumb.x,
+                    y: bounds.y + thumb.y,
+                    ..thumb
+                };
+                thumb_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
+                renderer.fill_quad(thumb_quad, thumb_color);
+            }
         }
     }
 
@@ -2420,16 +2434,20 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     }
 
                     // 水平滚动条（P13）：下缘窄带，交互语义与垂直条对称。
-                    // P45：行程口径与钳制一致（列模型 ∪ 真实行宽）
+                    // P45：行程口径与钳制一致（列模型 ∪ 真实行宽）。
+                    // P54：淡出隐藏中同样不拦截点击（与垂直条同款门控）。
                     let hsb = HScrollbar::measure(
                         core.content_width_px(),
                         (bounds.width - core.gutter_width()).max(0.0),
                         bounds.width,
                         core.scroll_left,
                     );
-                    if hsb.hits(local_x, local_y, bounds.height) {
+                    if hsb.hits(local_x, local_y, bounds.height)
+                        && core.scrollbar_visibility() > 0.05
+                    {
                         drop(core);
                         let mut core = self.core.borrow_mut();
+                        core.touch_scrollbar_activity();
                         if local_x >= hsb.thumb_x && local_x <= hsb.thumb_x + hsb.thumb_w {
                             core.hscrollbar_grab = Some(local_x - hsb.thumb_x);
                         } else {
@@ -2465,7 +2483,8 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 let mut core = self.core.borrow_mut();
 
                 // P53：悬停进入竖直滚动条命中区 → 提前点亮（淡出隐藏时
-                // 先可见再可点）；拖拽中随移动续期，条不中途消失
+                // 先可见再可点）；拖拽中随移动续期，条不中途消失。
+                // P54：水平条同款（命中区在下缘窄带）。
                 {
                     let sb = VScrollbar::measure(
                         core.doc.line_count(),
@@ -2474,9 +2493,17 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         bounds.height,
                         core.scroll_top,
                     );
+                    let hsb = HScrollbar::measure(
+                        core.content_width_px(),
+                        (bounds.width - core.gutter_width()).max(0.0),
+                        bounds.width,
+                        core.scroll_left,
+                    );
                     let (local_x, local_y) = (pos.x - bounds.x, pos.y - bounds.y);
                     if sb.hits(local_x, local_y, bounds.width)
+                        || hsb.hits(local_x, local_y, bounds.height)
                         || core.scrollbar_grab.is_some()
+                        || core.hscrollbar_grab.is_some()
                     {
                         core.touch_scrollbar_activity();
                     }
@@ -2841,6 +2868,10 @@ mod tests {
         c.sb_activity = None;
         c.apply_motion(Motion::Left, false);
         assert_eq!(c.scrollbar_visibility(), 0.0, "视口未移动不得点亮");
+
+        // P54：横向滚动同样点亮（水平条与竖直条共用活动戳）
+        c.scroll_by_columns(5.0);
+        assert!(c.scrollbar_visibility() > 0.99, "横向滚动应点亮滚动条");
     }
 
     #[test]

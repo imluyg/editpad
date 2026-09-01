@@ -127,9 +127,15 @@ enum Message {
     /// 菜单「保存」：切到第 `idx` 页并复用既有活动页保存流
     /// （v1 决策：右键保存先切页，Saved 回报/最近文件/转码提示全部走活动页语义）
     SaveTabFromMenu(usize),
-    /// 菜单「另存为/重命名」：切到第 `idx` 页走既有另存为对话框
-    /// （§3 P28 第 2 条：重命名 v1 用另存为兜底）
+    /// 菜单「另存为/重命名」：切到第 `idx` 页；命名页走就地重命名输入框
+    /// （P55），未命名页保留另存为对话框兜底（§3 P28 第 2 条）
     RenameOrSaveAsTab(usize),
+    /// 就地重命名的输入框变化（纯 UI 态；提交时才校验与落盘）
+    TabRenameInputChanged(String),
+    /// 就地重命名提交：校验名称 → 磁盘改名 → 页路径/戳/最近文件迁移
+    TabRenameCommitted,
+    /// 就地重命名取消（× 按钮 / Esc），一切保持原状
+    TabRenameCancelled,
     /// 关闭第 `idx` 页（CloseTabRequest 的参数化版本：置脏弹既有确认条，
     /// 固定页拒绝并提示）
     CloseTabAt(usize),
@@ -1133,6 +1139,10 @@ struct Editpad {
     /// 按标签顺序排列。None/空 = 提示条不可见。Esc（BarsDismissed）/
     /// 逐个裁决/全部忽略即清。
     external_change: Option<Vec<usize>>,
+    /// P55：就地重命名的目标页下标；Some = 标签条上该页显示为输入框。
+    renaming_tab: Option<usize>,
+    /// P55：就地重命名的输入内容（预填当前文件名，纯 UI 态）。
+    rename_input: String,
 
     // ---------- 字体选择（P34） ----------
     /// 启动期从 fontdb 枚举的系统字体族名清单（去重、不区分大小写排序）。
@@ -1266,6 +1276,8 @@ impl Default for Editpad {
             settings_page: SettingsPage::default(),
             settings_search: String::new(),
             external_change: None,
+            renaming_tab: None,
+            rename_input: String::new(),
             available_fonts: Vec::new(),
             active_font_family: None,
             font_filter: String::new(),
@@ -2137,6 +2149,9 @@ impl Editpad {
                 self.batch_close_confirm = None;
                 // P50：Esc 一并收起外部修改提示条
                 self.external_change = None;
+                // P55：Esc 一并取消就地重命名（一切保持原状）
+                self.renaming_tab = None;
+                self.rename_input.clear();
                 // P10：取消在途扫描 + 清结果（含序号失效）
                 self.cancel_find_scan();
                 Task::none()
@@ -2388,11 +2403,30 @@ impl Editpad {
             }
             Message::RenameOrSaveAsTab(i) => {
                 self.tab_context_menu = None;
-                // §3 P28 第 2 条：重命名 v1 用「另存为」兜底；未命名页同款。
                 if !self.busy && i < self.tabs.len() {
                     self.set_active_tab(i);
+                    // P55：命名页 → 就地重命名输入框（预填当前文件名）；
+                    // 未命名页保留「另存为」对话框兜底（§3 P28 第 2 条）
+                    if let Some(path) = self.tabs[i].path.clone() {
+                        self.renaming_tab = Some(i);
+                        self.rename_input = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        return Task::none();
+                    }
                     return self.save_as_dialog();
                 }
+                Task::none()
+            }
+            Message::TabRenameInputChanged(value) => {
+                self.rename_input = value;
+                Task::none()
+            }
+            Message::TabRenameCommitted => self.commit_tab_rename(),
+            Message::TabRenameCancelled => {
+                self.renaming_tab = None;
+                self.rename_input.clear();
                 Task::none()
             }
             Message::CloseTabAt(idx) => {
@@ -2745,6 +2779,70 @@ impl Editpad {
             queue.push(idx);
         }
         self.external_change = if queue.is_empty() { None } else { Some(queue) };
+    }
+
+    /// P55：就地重命名提交——校验名称 → 磁盘改名 → 页路径/比对戳/
+    /// 最近文件与光标记忆随路径迁移。失败保持输入态让用户改（状态栏
+    /// 留原因）；busy/加载中拒绝提交（在途 Loaded 会用旧路径覆写页路径）。
+    fn commit_tab_rename(&mut self) -> Task<Message> {
+        let Some(idx) = self.renaming_tab else {
+            return Task::none();
+        };
+        let Some(old) = self.tabs.get(idx).and_then(|t| t.path.clone()) else {
+            // 页已关/未命名：输入态自然失效
+            self.renaming_tab = None;
+            self.rename_input.clear();
+            return Task::none();
+        };
+        if self.busy || self.active_load.is_some() {
+            self.status = "加载/保存进行中，请稍后再重命名".to_owned();
+            return Task::none();
+        }
+        let Some(target) = rename_target_path(&old, &self.rename_input) else {
+            self.status = "名称不能为空或含 \\/:*?\"<>| 等字符".to_owned();
+            return Task::none(); // 保持输入态
+        };
+        if target == old {
+            // 名字没变：静默收摊
+            self.renaming_tab = None;
+            self.rename_input.clear();
+            self.status.clear();
+            return Task::none();
+        }
+        if target.exists() {
+            self.status = format!("重命名失败:目标已存在「{}」", target.display());
+            return Task::none(); // 保持输入态
+        }
+        match fs::rename(&old, &target) {
+            Ok(()) => {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.path = Some(target.clone());
+                    // P50：路径变了旧戳作废，按新路径重记
+                    tab.file_stamp = file_stamp(&target);
+                }
+                // P20/P32：最近文件与光标记忆随路径迁移（旧路径条目失效）
+                let old_key = old.display().to_string();
+                let new_key = target.display().to_string();
+                if let Some(view) = self.settings.recent_views.remove(&old_key) {
+                    self.settings.recent_views.insert(new_key.clone(), view);
+                }
+                if let Some(pos) =
+                    self.settings.recent_files.iter().position(|p| *p == old_key)
+                {
+                    self.settings.recent_files[pos] = new_key.clone();
+                }
+                self.persist_settings();
+                // 会话清单里记的是旧路径，下一拍重写
+                self.session_manifest_stale = true;
+                self.renaming_tab = None;
+                self.rename_input.clear();
+                self.status = format!("已重命名为「{new_key}」");
+            }
+            Err(error) => {
+                self.status = format!("重命名失败:{error}");
+            }
+        }
+        Task::none()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -4214,6 +4312,29 @@ impl Editpad {
         {
             let mut strip = row![].spacing(2).padding([4, 6]);
             for (i, tab) in self.tabs.iter().enumerate() {
+                // P55：就地重命名——该页的标签按钮替换为输入框 + ✓/× 微型按钮
+                // （Enter 等价 ✓；Esc 走 BarsDismissed 取消）
+                if self.renaming_tab == Some(i) {
+                    strip = strip.push(
+                        row![
+                            text_input("新名称", &self.rename_input)
+                                .size(uipx)
+                                .font(uifont)
+                                .on_input(Message::TabRenameInputChanged)
+                                .on_submit(Message::TabRenameCommitted)
+                                .width(150),
+                            button(text("✓").size(uipx).font(uifont))
+                                .padding([2, 7])
+                                .on_press(Message::TabRenameCommitted),
+                            button(text("×").size(uipx).font(uifont))
+                                .padding([2, 7])
+                                .on_press(Message::TabRenameCancelled),
+                        ]
+                        .spacing(2)
+                        .align_y(Alignment::Center),
+                    );
+                    continue;
+                }
                 let marker = if i == self.active_tab { "▸ " } else { "  " };
                 let pin = if tab.pinned { "📌 " } else { "" };
                 strip = strip.push(
@@ -4775,6 +4896,22 @@ const HOTKEYS: &[(&str, &str)] = &[
 ];
 
 // ---------- 外部修改检测（P50） ----------
+
+/// P55：重命名目标路径推导（纯函数可单测）——同目录下改名；空名/含
+/// 路径分隔符/Windows 非法文件名字符 → None（调用方提示并保持输入态）。
+/// 首尾空白裁剪（输入框手滑容忍）。
+fn rename_target_path(old: &Path, new_name: &str) -> Option<PathBuf> {
+    let name = new_name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if name.chars().any(|c| {
+        matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+    }) {
+        return None;
+    }
+    Some(old.with_file_name(name))
+}
 
 /// 取外部修改比对戳 (mtime, size)：元数据或 mtime 不可得（文件已被删/
 /// 平台不支持）时返回 None（调用方按「无从比对」处理）。
@@ -8856,6 +8993,148 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::WindowFocused);
         assert!(app.external_change.is_none() && app.active_load.is_none());
         app.busy = false;
+    }
+
+    // ---------- P55 就地重命名 ----------
+
+    #[test]
+    fn rename_target_path_contract() {
+        let old = Path::new("C:/dir/旧名.txt");
+        // 合法：同目录 + 裁剪首尾空白
+        assert_eq!(
+            rename_target_path(old, "  新名.md  "),
+            Some(PathBuf::from("C:/dir/新名.md"))
+        );
+        // 空名 / 纯空白 / 路径分隔符 / Windows 非法字符 → None
+        assert_eq!(rename_target_path(old, ""), None);
+        assert_eq!(rename_target_path(old, "   "), None);
+        assert_eq!(rename_target_path(old, "a/b"), None);
+        assert_eq!(rename_target_path(old, "a\\b"), None);
+        assert_eq!(rename_target_path(old, "a:b"), None);
+        assert_eq!(rename_target_path(old, "a*b?"), None);
+        assert_eq!(rename_target_path(old, "\"<a>|"), None);
+    }
+
+    #[test]
+    fn tab_rename_inline_renames_file_and_migrates_recents() {
+        let dir = scratch_dir("p55-rename");
+        let old_path = dir.join("origin.txt");
+        std::fs::write(&old_path, "data").unwrap();
+        let config = dir.join("config.toml");
+
+        let mut app = Editpad::default();
+        // 提交链路含 persist_settings：必须注入，绝不碰真实 %APPDATA%
+        app.settings_path_override = Some(config);
+        dispatch(&mut app, Message::FileDropped(old_path.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("data"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 菜单「重命名」：命名页 → 就地输入框（不进对话框、不置 busy）
+        dispatch(&mut app, Message::RenameOrSaveAsTab(0));
+        assert_eq!(app.renaming_tab, Some(0));
+        assert_eq!(app.rename_input, "origin.txt", "预填当前文件名");
+        assert!(!app.busy, "就地重命名不进对话框阶段");
+        let _ = app.view(); // 输入框视图可构造
+
+        // 提交：磁盘改名 + 页路径/戳/最近文件迁移
+        dispatch(&mut app, Message::TabRenameInputChanged("改名.txt".into()));
+        dispatch(&mut app, Message::TabRenameCommitted);
+        let new_path = dir.join("改名.txt");
+        assert!(!old_path.exists(), "旧文件必须已改名");
+        assert_eq!(
+            std::fs::read_to_string(&new_path).unwrap(),
+            "data",
+            "内容原样保留"
+        );
+        assert_eq!(app.tabs[0].path.as_ref(), Some(&new_path));
+        assert!(app.tabs[0].file_stamp.is_some(), "新路径重记比对戳");
+        assert!(app.renaming_tab.is_none() && app.rename_input.is_empty());
+        assert!(app.session_manifest_stale, "清单记的是旧路径，必须置陈旧");
+        // 最近文件迁移
+        assert!(
+            app.settings.recent_files.iter().any(|p| p.ends_with("改名.txt")),
+            "最近文件必须迁移到新路径"
+        );
+        assert!(
+            !app.settings.recent_files.iter().any(|p| p.ends_with("origin.txt")),
+            "旧路径条目不得残留"
+        );
+
+        // 取消：一切保持原状
+        dispatch(&mut app, Message::RenameOrSaveAsTab(0));
+        assert_eq!(app.renaming_tab, Some(0));
+        dispatch(&mut app, Message::TabRenameInputChanged("whatever.txt".into()));
+        dispatch(&mut app, Message::TabRenameCancelled);
+        assert!(app.renaming_tab.is_none());
+        assert_eq!(app.tabs[0].path.as_ref(), Some(&new_path), "取消不改路径");
+        assert!(new_path.exists() && !dir.join("whatever.txt").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tab_rename_rejects_invalid_and_colliding_names() {
+        let dir = scratch_dir("p55-invalid");
+        let origin = dir.join("a.txt");
+        std::fs::write(&origin, "x").unwrap();
+        let collide = dir.join("b.txt");
+        std::fs::write(&collide, "y").unwrap();
+
+        let mut app = Editpad::default();
+        // 同名收摊分支也会 persist_settings：注入防碰真实 %APPDATA%
+        app.settings_path_override = Some(dir.join("config.toml"));
+        dispatch(&mut app, Message::FileDropped(origin.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("x"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 非法字符：报错并保持输入态
+        dispatch(&mut app, Message::RenameOrSaveAsTab(0));
+        dispatch(&mut app, Message::TabRenameInputChanged("bad:name".into()));
+        dispatch(&mut app, Message::TabRenameCommitted);
+        assert_eq!(app.renaming_tab, Some(0), "非法名保持输入态");
+        assert!(!app.status.is_empty());
+        assert!(origin.exists(), "非法名不得动磁盘");
+
+        // 目标已存在：报错并保持输入态，两文件都原样
+        dispatch(&mut app, Message::TabRenameInputChanged("b.txt".into()));
+        dispatch(&mut app, Message::TabRenameCommitted);
+        assert_eq!(app.renaming_tab, Some(0));
+        assert!(app.status.contains("已存在"));
+        assert!(origin.exists() && collide.exists());
+
+        // 名字没变（裁剪后）：静默收摊不改磁盘
+        dispatch(&mut app, Message::TabRenameInputChanged("  a.txt  ".into()));
+        dispatch(&mut app, Message::TabRenameCommitted);
+        assert!(app.renaming_tab.is_none());
+        assert_eq!(app.tabs[0].path.as_ref(), Some(&origin));
+        assert!(app.status.is_empty(), "同名收摊不报错");
+
+        // Esc（BarsDismissed）取消
+        dispatch(&mut app, Message::RenameOrSaveAsTab(0));
+        dispatch(&mut app, Message::BarsDismissed);
+        assert!(app.renaming_tab.is_none() && app.rename_input.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
