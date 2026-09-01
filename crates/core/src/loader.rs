@@ -102,10 +102,15 @@ where
 // * 非 UTF-8 时第二遍用 encoding_rs 增量解码器（跨块序列自动缝合）。
 
 /// 流式加载直入 rope 的结果（P19）。
+///
+/// `sample` 是解码后正文的前若干字符（≤4KB），供 P22 无扩展名
+/// 内容嗅探使用——对 UTF-16 等宽编码文件同样有效（嗅探看解码文本）。
 #[derive(Debug, Clone)]
 pub struct LoadedDocument {
     pub doc: Document,
     pub encoding: &'static str,
+    /// 解码后文本头部样本（供语言嗅探）
+    pub sample: String,
 }
 
 /// 流式加载为文档：内存峰值与文件大小近似线性（≈rope 本身）。
@@ -161,11 +166,16 @@ where
 
     match plan {
         Plan::Direct(encoding, label, bom_len) => {
+            let mut head = HeadSample::default();
             let doc = build_pass(
                 &mut reader, path, &chunk[..first_len], bom_len, encoding,
-                total_bytes, 0, total_bytes, &mut on_progress, None,
+                total_bytes, 0, total_bytes, &mut on_progress, None, &mut head,
             )?;
-            Ok(LoadedDocument { doc, encoding: label })
+            Ok(LoadedDocument {
+                doc,
+                encoding: label,
+                sample: head.buf,
+            })
         }
         Plan::ScanThenBuild => {
             // ---- 第一遍：全文扫描（NUL 短路 + 严格 UTF-8 增量校验）----
@@ -206,10 +216,11 @@ where
                 (GBK, "GBK", true)
             };
             let mut stats = BuildStats::default();
+            let mut head = HeadSample::default();
             let doc = build_pass(
                 &mut reader, path, &chunk[..first_len], 0, encoding,
                 total_bytes, base, total_bytes - base, &mut on_progress,
-                Some(&mut stats),
+                Some(&mut stats), &mut head,
             )?;
             if check_ratio
                 && stats.replacements as f32 / stats.chars.max(1) as f32
@@ -219,7 +230,11 @@ where
                     path: path.to_path_buf(),
                 });
             }
-            Ok(LoadedDocument { doc, encoding: label })
+            Ok(LoadedDocument {
+                doc,
+                encoding: label,
+                sample: head.buf,
+            })
         }
     }
 }
@@ -304,6 +319,31 @@ struct BuildStats {
     chars: usize,
 }
 
+/// 解码文本头部样本采集上限（字符数）：足够 shebang/XML/JSON/YAML 嗅探。
+const SAMPLE_HEAD_CHARS: usize = 4096;
+
+/// 采集解码输出的前 [`SAMPLE_HEAD_CHARS`] 个字符（P22 嗅探用）。
+#[derive(Default)]
+struct HeadSample {
+    buf: String,
+    full: bool,
+}
+
+impl HeadSample {
+    fn push(&mut self, text: &str) {
+        if self.full {
+            return;
+        }
+        for c in text.chars() {
+            self.buf.push(c);
+            if self.buf.chars().count() >= SAMPLE_HEAD_CHARS {
+                self.full = true;
+                break;
+            }
+        }
+    }
+}
+
 /// 把一段解码输出吸收进构建器：rope 推送 + 行尾计数 + 占比统计。
 fn absorb(
     decoder: &mut encoding_rs::Decoder,
@@ -313,6 +353,7 @@ fn absorb(
     builder: &mut RopeBuilder,
     eol: &mut EolCounter,
     mut stats: Option<&mut BuildStats>,
+    head: &mut HeadSample,
 ) {
     use encoding_rs::CoderResult;
     out.clear();
@@ -332,6 +373,7 @@ fn absorb(
     }
     builder.append(out);
     eol.push(out);
+    head.push(out);
     if let Some(s) = stats.as_deref_mut() {
         s.chars += out.chars().count();
         s.replacements += out.matches('\u{FFFD}').count();
@@ -355,6 +397,7 @@ fn build_pass(
     progress_span: u64,
     on_progress: &mut dyn FnMut(LoadProgress),
     mut stats: Option<&mut BuildStats>,
+    head: &mut HeadSample,
 ) -> Result<Document, CoreError> {
     let mut builder = RopeBuilder::new();
     let mut eol = EolCounter::new();
@@ -365,7 +408,7 @@ fn build_pass(
 
     // 首块（跳过 BOM 字节）
     if first_chunk.len() > skip {
-        absorb(&mut decoder, &first_chunk[skip..], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut());
+        absorb(&mut decoder, &first_chunk[skip..], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), head);
     }
     let mut done = first_chunk.len() as u64;
 
@@ -379,11 +422,11 @@ fn build_pass(
             break;
         }
         done += n as u64;
-        absorb(&mut decoder, &chunk[..n], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut());
+        absorb(&mut decoder, &chunk[..n], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), head);
         report(on_progress, progress_base + done.min(progress_span), total_bytes);
     }
     // 冲刷解码器尾部（未完的多字节序列 / 未配对代理）
-    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, None);
+    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, None, head);
     report(on_progress, total_bytes, total_bytes);
 
     Ok(Document::from_parts(builder.finish(), eol.finish()))

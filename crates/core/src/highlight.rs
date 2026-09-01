@@ -9,13 +9,16 @@
 //! 检查点截断到 L/STRIDE+1 个，逐行缓存丢弃键 >= L 的条目。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use syntect::highlighting::{
     HighlightIterator, HighlightState, Highlighter, Theme, ThemeSet,
 };
-use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet};
+
+use crate::syntaxes::{LOG, TOML};
 
 /// 检查点间距（行）。
 pub const STRIDE: usize = 128;
@@ -39,7 +42,19 @@ fn next_generation() -> u64 {
 
 /// 行文本不含换行符，因此使用 nonewlines 变体的语法定义。
 fn syntax_set() -> &'static SyntaxSet {
-    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_nonewlines)
+    SYNTAX_SET.get_or_init(|| {
+        // P22 第一批：默认包 + 内嵌迷你语法（Log/TOML）合并初始化，
+        // 仍走本 OnceLock 懒加载路径，不破坏检查点机制与启动开销模型
+        let mut builder = SyntaxSet::load_defaults_nonewlines().into_builder();
+        for (yaml, fallback) in [(LOG, "Editpad Log"), (TOML, "Editpad TOML")] {
+            match SyntaxDefinition::load_from_str(yaml, false, Some(fallback)) {
+                Ok(def) => builder.add(def),
+                // 内嵌语法写错只损失该格式配色，绝不拖垮编辑器
+                Err(error) => eprintln!("内嵌语法 {fallback} 加载失败: {error}"),
+            }
+        }
+        builder.build()
+    })
 }
 
 fn theme() -> &'static Theme {
@@ -65,8 +80,7 @@ type State = (ParseState, HighlightState);
 
 /// 可选语言下的懒高亮器。
 #[derive(Clone)]
-pub struct LazyHighlighter {
-    syntax_name: String,
+pub struct LazyHighlighter {    syntax_name: String,
     /// checkpoints[k] = 解析完第 `k*STRIDE - 1` 行后的状态；`[0]` 为初始态。
     checkpoints: Vec<State>,
     /// 行后状态缓存：key = 已解析完的行号。
@@ -108,17 +122,28 @@ impl LazyHighlighter {
     pub fn new(extension: &str) -> Option<Self> {
         let ext = extension.trim_start_matches('.').to_ascii_lowercase();
         let syntax = syntax_set().find_syntax_by_extension(&ext)?;
+        Some(Self::from_syntax(syntax.clone()))
+    }
+
+    /// 按语法名构造（P22）：别名层与嗅探层的落点，
+    /// 名字必须来自 [`syntax_for_extension`] / [`sniff_language`] / 内置索引。
+    pub fn new_by_name(name: &str) -> Option<Self> {
+        let syntax = syntax_set().find_syntax_by_name(name)?;
+        Some(Self::from_syntax(syntax.clone()))
+    }
+
+    fn from_syntax(syntax: syntect::parsing::SyntaxReference) -> Self {
         let highlighter = Highlighter::new(theme());
-        Some(Self {
+        Self {
             syntax_name: syntax.name.clone(),
             checkpoints: vec![(
-                ParseState::new(syntax),
+                ParseState::new(&syntax),
                 HighlightState::new(&highlighter, ScopeStack::new()),
             )],
             line_cache: HashMap::new(),
             phantom_from: None,
             generation: next_generation(),
-        })
+        }
     }
 
     pub fn syntax_name(&self) -> &str {
@@ -336,6 +361,126 @@ fn end_reached(start: usize, end: usize) -> bool {
     end <= start
 }
 
+// ---------- 语言解析：扩展名别名 + 无扩展名嗅探（P22 第一批） ----------
+
+/// 内置扩展索引未覆盖时的自维护别名表：扩展名 → 语法名。
+///
+/// 顺序无关（全表精确匹配）；ini/cfg/conf 借道 TOML 语法只是
+/// 「节名+键值+字符串」的近似着色（`;` 注释不识别），已知取舍。
+const ALIAS_TABLE: &[(&str, &str)] = &[
+    ("log", "Editpad Log"),
+    ("markdown", "Markdown"),
+    ("md", "Markdown"),
+    ("toml", "Editpad TOML"),
+    ("ini", "Editpad TOML"),
+    ("cfg", "Editpad TOML"),
+    ("conf", "Editpad TOML"),
+    ("mk", "Makefile"),
+    ("yml", "YAML"),
+    ("dockerfile", "Dockerfile"),
+    ("txt", "Plain Text"),
+];
+
+/// 扩展名 → 语法名：先查 syntect 内建扩展索引，未命中再查别名表。
+pub fn syntax_for_extension(ext: &str) -> Option<String> {
+    let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    if let Some(syntax) = syntax_set().find_syntax_by_extension(&ext) {
+        return Some(syntax.name.clone());
+    }
+    ALIAS_TABLE
+        .iter()
+        .find(|(alias, _)| *alias == ext)
+        .map(|(_, name)| name.to_string())
+}
+
+/// shebang 解释器名 → 语法名候选（按序取第一个内置存在的）。
+/// 名字以 syntect 默认包实测为准（Bash 语法的实名是
+/// 「Bourne Again Shell (bash)」，另有 Shell-Unix-Generic 兜底）。
+fn shebang_candidates(base: &str) -> &'static [&'static str] {
+    match base {
+        "bash" | "sh" | "zsh" | "dash" => &["Bourne Again Shell (bash)", "Shell-Unix-Generic"],
+        "python" | "python3" | "python2" => &["Python"],
+        "perl" => &["Perl"],
+        "ruby" => &["Ruby"],
+        "node" | "nodejs" => &["JavaScript"],
+        _ => &[],
+    }
+}
+
+/// 无扩展名 / 扩展名无解时按内容嗅探语法（P22 第一批）：
+/// shebang、`<?xml`、JSON 前缀启发、YAML 文档分隔符、
+/// Dockerfile/Makefile 约定文件名。只读样本前 4KB。
+pub fn sniff_language(sample: &str, file_name: Option<&str>) -> Option<String> {
+    // 约定文件名优先于内容（大小写不敏感）
+    if let Some(name) = file_name {
+        match name.to_ascii_lowercase().as_str() {
+            "dockerfile" => return Some("Dockerfile".to_owned()),
+            "makefile" | "gnumakefile" | "bsdmakefile" => return Some("Makefile".to_owned()),
+            _ => {}
+        }
+    }
+
+    let head = sample.get(..4096).unwrap_or(sample);
+    let trimmed = head.trim_start();
+
+    // shebang：取解释器路径末段（剥 env、剥 .exe）
+    if let Some(rest) = trimmed.strip_prefix("#!") {
+        let mut tokens = rest.split_whitespace();
+        let mut interp = tokens.next().unwrap_or("").to_ascii_lowercase();
+        if interp == "env" || interp.ends_with("/env") || interp.ends_with("\\env") {
+            interp = tokens.next().unwrap_or_default().to_ascii_lowercase();
+        }
+        let base = interp.rsplit(['/', '\\']).next().unwrap_or("");
+        let base = base.strip_suffix(".exe").unwrap_or(base);
+        for candidate in shebang_candidates(base) {
+            if let Some(syntax) = syntax_set().find_syntax_by_name(candidate) {
+                return Some(syntax.name.clone());
+            }
+        }
+        return None;
+    }
+
+    // XML 声明
+    if trimmed.starts_with("<?xml") {
+        return Some("XML".to_owned());
+    }
+
+    // YAML 文档分隔符开头
+    if trimmed.starts_with("---") {
+        let after = trimmed[3..].chars().next();
+        if after.is_none() || after == Some('\n') || after == Some('\r') {
+            return Some("YAML".to_owned());
+        }
+    }
+
+    // JSON 前缀启发：首非空白是 { 或 [ 且样本同时含引号与冒号
+    if let Some(first) = trimmed.chars().next() {
+        if (first == '{' || first == '[')
+            && head.contains('"')
+            && head.contains(':')
+        {
+            return Some("JSON".to_owned());
+        }
+    }
+
+    None
+}
+
+/// 统一入口：给定路径（可空）与解码后文本样本，返回应使用的语法名。
+/// 顺序：约定文件名/内容嗅探仅在扩展名无解时介入；扩展名命中即返回。
+pub fn resolve_language(path: Option<&Path>, sample: &str) -> Option<String> {
+    if let Some(path) = path {
+        if let Some(ext) = path.extension().and_then(std::ffi::OsStr::to_str) {
+            if let Some(name) = syntax_for_extension(ext) {
+                return Some(name);
+            }
+        }
+    }
+    let file_name = path.and_then(Path::file_name).and_then(std::ffi::OsStr::to_str);
+    sniff_language(sample, file_name)
+}
+
+
 /// 推进一行状态：解析并驱动高亮状态（丢弃着色结果）。
 fn advance(
     parse: &mut ParseState,
@@ -545,5 +690,135 @@ mod tests {
         // 全局计数器：新实例不与旧实例重号（换语言/换文档场景的正确性前提）
         let fresh = LazyHighlighter::new("rs").unwrap();
         assert!(fresh.generation() > hl.generation(), "代次跨实例单调递增");
+    }
+
+    // ---------- P22 第一批：别名层 + 内嵌语法 + 嗅探 ----------
+
+    #[test]
+    fn builtin_extensions_win_before_alias_table() {
+        // 内建索引命中：直接给规范语法名
+        for (ext, name) in [("rs", "Rust"), ("py", "Python"), ("json", "JSON"), ("yml", "YAML")] {
+            assert_eq!(syntax_for_extension(ext).as_deref(), Some(name), "{ext}");
+        }
+        // 别名表兜底
+        for (ext, name) in [
+            ("log", "Editpad Log"),
+            ("toml", "Editpad TOML"),
+            ("md", "Markdown"),
+            ("markdown", "Markdown"),
+            ("ini", "Editpad TOML"),
+            ("cfg", "Editpad TOML"),
+            ("conf", "Editpad TOML"),
+            ("mk", "Makefile"),
+            ("txt", "Plain Text"),
+        ] {
+            assert_eq!(syntax_for_extension(ext).as_deref(), Some(name), "{ext}");
+        }
+        // 完全未知 → None（交由嗅探）
+        assert_eq!(syntax_for_extension("xyzzy"), None);
+        // 大小写与前置点归一
+        assert_eq!(syntax_for_extension(".RS").as_deref(), Some("Rust"));
+    }
+
+    #[test]
+    fn embedded_log_and_toml_syntaxes_are_registered_and_color_levels() {
+        let set = syntax_set();
+        assert!(set.find_syntax_by_name("Editpad Log").is_some());
+        assert!(set.find_syntax_by_name("Editpad TOML").is_some());
+
+        // Log：ERROR 行与 INFO 行的首段颜色必须可区分（级别分色的验收口径）
+        let mut log_hl = LazyHighlighter::new_by_name("Editpad Log").expect("Log 语法存在");
+        let error_runs = log_hl.styled_line(0, "[2026-08-24 10:00:00] ERROR boom", 1, &mut |_| String::new());
+        let info_runs = log_hl.styled_line(1, "[2026-08-24 10:00:01] INFO fine", 1, &mut |_| String::new());
+        assert!(!error_runs.is_empty() && !info_runs.is_empty());
+        // 级别分色的验收口径：两行全部着色段的颜色序列必须不同
+        // （ERROR 行含 invalid 红色系，INFO 行只有 string/numeric 系）
+        let err_colors: Vec<_> = error_runs.iter().map(|r| r.color).collect();
+        let info_colors: Vec<_> = info_runs.iter().map(|r| r.color).collect();
+        assert_ne!(
+            err_colors, info_colors,
+            "ERROR 与 INFO 行应呈现不同配色（级别词分色）"
+        );
+
+        // TOML：注释/节名/字符串至少产出多段配色
+        let mut toml_hl = LazyHighlighter::new_by_name("Editpad TOML").expect("TOML 语法存在");
+        let runs = toml_hl.styled_line(
+            0,
+            "# 注释\n[section]\nkey = \"value\"",
+            3,
+            &mut |_| String::new(),
+        );
+        assert!(runs.len() >= 2, "TOML 应产出分段配色");
+    }
+
+    #[test]
+    fn sniffing_covers_shebang_xml_json_yaml_and_convention_names() {
+        // shebang 各解释器（名字以默认包实名为准）
+        for (sample, expected) in [
+            ("#!/bin/bash\nset -e", "Bourne Again Shell (bash)"),
+            ("#! /usr/bin/env python3\nprint(1)", "Python"),
+            ("#!/usr/bin/perl -w\n", "Perl"),
+            ("#!/usr/bin/ruby\n", "Ruby"),
+            ("#!C:\\tools\\node.exe\n", "JavaScript"),
+        ] {
+            assert_eq!(
+                sniff_language(sample, None).as_deref(),
+                Some(expected),
+                "{sample}"
+            );
+        }
+        // 未识别的 shebang → None
+        assert_eq!(sniff_language("#!/opt/weird/run", None), None);
+
+        // XML / JSON / YAML
+        assert_eq!(
+            sniff_language("<?xml version=\"1.0\"?>\n<root/>", None).as_deref(),
+            Some("XML")
+        );
+        assert_eq!(
+            sniff_language("{\"a\": [1, 2], \"b\": \"中文\"}", None).as_deref(),
+            Some("JSON")
+        );
+        assert_eq!(
+            sniff_language("[{\"k\": 1}]", None).as_deref(),
+            Some("JSON")
+        );
+        assert_eq!(sniff_language("---\ntitle: x\n", None).as_deref(), Some("YAML"));
+
+        // 约定文件名优先且大小写不敏感
+        assert_eq!(
+            sniff_language("", Some("DockerFile")).as_deref(),
+            Some("Dockerfile")
+        );
+        assert_eq!(
+            sniff_language("", Some("Makefile")).as_deref(),
+            Some("Makefile")
+        );
+
+        // 普通无扩展名内容 → None
+        assert_eq!(sniff_language("just some words\n", None), None);
+    }
+
+    #[test]
+    fn resolve_language_prefers_extension_then_sniff_fallback() {
+        use std::path::Path;
+
+        // 扩展名命中即返回，不再嗅探（.log 内容是 JSON 也按 Log 处理——扩展名可信）
+        let p = Path::new("logs/app.log");
+        assert_eq!(
+            resolve_language(Some(p), "{\"level\": 1}").as_deref(),
+            Some("Editpad Log")
+        );
+
+        // 无扩展名 + shebang → 嗅探接管
+        let p = Path::new("build");
+        assert_eq!(
+            resolve_language(Some(p), "#!/bin/sh\necho hi").as_deref(),
+            Some("Bourne Again Shell (bash)")
+        );
+
+        // 有扩展名但完全未知 → 嗅探仍有机会（约定文件名场景之外的内容嗅探）
+        let p = Path::new("artifact.xyzzy");
+        assert_eq!(resolve_language(Some(p), "plain"), None);
     }
 }

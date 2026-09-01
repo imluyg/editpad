@@ -52,11 +52,12 @@ enum Message {
     FileChosen(Option<PathBuf>),
     /// 后台加载进度：(任务 id, 已读字节, 总字节)
     LoadProgress(u64, u64, u64),
-    /// 后台加载完成：(任务 id, (rope 直入的文档, 编码标签))。
-    /// P19 起携带 Document，不再有全量 String 中转
+    /// 后台加载完成：(任务 id, (rope 直入的文档, 嗅探样本, 编码标签))。
+    /// P19 起携带 Document，不再有全量 String 中转；
+    /// P22 起附带解码头部样本供语言嗅探
     Loaded(
         u64,
-        Result<(editpad_core::Document, String), String>,
+        Result<(editpad_core::Document, String, String), String>,
     ),
     SaveRequested,
     SaveAsRequested,
@@ -205,7 +206,9 @@ async fn drive_load<L>(
             LoadEvent::Progress(p) => Message::LoadProgress(job_id, p.bytes_read, p.total_bytes),
             LoadEvent::Done(result) => Message::Loaded(
                 job_id,
-                result.map(|loaded| (loaded.doc, loaded.encoding.to_string())),
+                result.map(|loaded| {
+                    (loaded.doc, loaded.sample, loaded.encoding.to_string())
+                }),
             ),
         };
         if output.send(message).await.is_err() {
@@ -582,19 +585,18 @@ impl Editpad {
                 self.active_load = None;
                 self.progress = None;
                 match result {
-                    Ok((doc, encoding)) => {
-                        // 按扩展名启用语法高亮（未知类型自动退回纯文本）
-                        let extension = self
-                            .pending_path
-                            .as_ref()
-                            .and_then(|p| p.extension())
-                            .and_then(std::ffi::OsStr::to_str)
-                            .map(str::to_owned);
+                    Ok((doc, sample, encoding)) => {
+                        // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
+                        // 内容嗅探（shebang/XML/JSON/YAML/约定文件名）
+                        let language = editpad_core::resolve_language(
+                            self.pending_path.as_deref(),
+                            &sample,
+                        );
                         {
                             let mut ed = self.editor.borrow_mut();
                             // P19：rope 直入，不再有 from_str 的二次全文拷贝
                             ed.reset_document(doc);
-                            ed.set_language(extension.as_deref());
+                            ed.set_language_by_name(language.as_deref());
                         }
                         if let Some(path) = self.pending_path.take() {
                             self.record_recent(&path);
@@ -1658,10 +1660,7 @@ mod tests {
         let doc = editpad_core::Document::from_str("reloaded\n");
         dispatch(
             &mut app,
-            Message::Loaded(
-                seq_first,
-                Ok((doc, "UTF-8".to_owned())),
-            ),
+            Message::Loaded(seq_first, Ok((doc, String::new(), "UTF-8".to_owned()))),
         );
         assert!(app.active_load.is_none(), "完成后任务应解除");
         dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
@@ -1691,8 +1690,47 @@ mod tests {
         // 关窗后迟到的加载完成消息照常按 job 过滤消化，不 panic
         let doc = editpad_core::Document::from_str("late arrival");
         let seq = app.job_seq;
-        dispatch(&mut app, Message::Loaded(seq, Ok((doc, "UTF-8".to_owned()))));
+        dispatch(
+            &mut app,
+            Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+        );
         assert!(app.active_load.is_none());
+    }
+
+    #[test]
+    fn loaded_language_routes_through_alias_and_sniff() {
+        // P22：扩展名别名层 —— .log 命中「Editpad Log」内嵌语法
+        // （即使内容长得像 JSON，扩展名可信优先）
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/logs/app.log")));
+        let doc = editpad_core::Document::from_str("{\"level\":1}");
+        let sample = "{\"level\":1}";
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(seq, Ok((doc, sample.to_owned(), "UTF-8".to_owned()))),
+        );
+        assert_eq!(
+            app.editor.borrow().highlight_syntax_name().as_deref(),
+            Some("Editpad Log")
+        );
+
+        // 无扩展名 + shebang 样本 → 内容嗅探接管
+        let mut app2 = Editpad::default();
+        dispatch(&mut app2, Message::FileDropped(PathBuf::from("C:/bin/build")));
+        let doc2 = editpad_core::Document::from_str("#!/bin/sh\necho hi\n");
+        let seq2 = app2.job_seq;
+        dispatch(
+            &mut app2,
+            Message::Loaded(
+                seq2,
+                Ok((doc2, "#!/bin/sh\necho hi\n".to_owned(), "UTF-8".to_owned())),
+            ),
+        );
+        assert_eq!(
+            app2.editor.borrow().highlight_syntax_name().as_deref(),
+            Some("Bourne Again Shell (bash)")
+        );
     }
 
     #[test]
@@ -1767,7 +1805,7 @@ mod tests {
             })
             .collect();
         assert_eq!(dones.len(), 1, "恰好一条 Loaded");
-        let (id, Ok((doc, encoding))) = dones[0] else {
+        let (id, Ok((doc, _sample, encoding))) = dones[0] else {
             panic!("应为成功加载，实际 {:?}", dones[0]);
         };
         assert_eq!(id, 7);

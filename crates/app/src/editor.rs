@@ -313,9 +313,19 @@ impl EditorCore {
         self.preedit = None;
     }
 
-    /// 按文件扩展名启用语法高亮；None 关闭（纯文本快速路径）。
+    /// 按文件扩展名启用语法高亮（测试辅助；生产路径已改走
+    /// [`Self::set_language_by_name`]）。
+    #[cfg(test)]
     pub fn set_language(&mut self, extension: Option<&str>) {
         self.highlight = extension.and_then(LazyHighlighter::new).map(RefCell::new);
+    }
+
+    /// 按语法名启用高亮（P22）：名字来自 core 的别名层/嗅探层解析；
+    /// None 关闭（纯文本快速路径）。
+    pub fn set_language_by_name(&mut self, name: Option<&str>) {
+        self.highlight = name
+            .and_then(LazyHighlighter::new_by_name)
+            .map(RefCell::new);
     }
 
     /// 第 `offset` 字符偏移之后的高亮状态失效。
@@ -364,6 +374,14 @@ impl EditorCore {
     /// 当前高亮器代次；未启用高亮时为 None。
     pub fn highlight_generation(&self) -> Option<u64> {
         self.highlight.as_ref().map(|h| h.borrow().generation())
+    }
+
+    /// 使用的语法名（测试诊断用）。
+    #[cfg(test)]
+    pub fn highlight_syntax_name(&self) -> Option<String> {
+        self.highlight
+            .as_ref()
+            .map(|h| h.borrow().syntax_name().to_owned())
     }
 
     /// 检查点数量（测试诊断用；生产路径经 [`Self::needs_paving`] 间接消费）。
