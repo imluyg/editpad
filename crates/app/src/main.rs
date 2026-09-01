@@ -20,8 +20,8 @@ use std::sync::{Arc, mpsc as std_mpsc};
 
 use iced::futures::SinkExt;
 use iced::keyboard::{self, key::Named};
-use iced::widget::{button, checkbox, column, container, progress_bar, row, rule, scrollable,
-    text, text_input};
+use iced::widget::{button, checkbox, column, container, mouse_area, progress_bar, row, rule,
+    scrollable, text, text_input};
 use iced::{stream, window, Alignment, Element, Fill, Font, Subscription, Task, Theme};
 
 use editor::{EditorHandle, EditOp, Motion};
@@ -107,6 +107,32 @@ enum Message {
     CancelCloseTab,
     /// 保存第 `idx` 页并在成功后关闭（P21 完整版；未命名页不支持）
     CloseTabSave(usize),
+
+    // ---------- 标签右键菜单（P28） ----------
+    /// 在第 `idx` 个标签页上打开右键菜单（标签按钮外包 mouse_area 捕获右键；
+    /// 左键仍由内部 button 消费，切换不受影响）
+    TabContextMenu(usize),
+    /// 收起右键菜单（选中单项 / Esc / 切换标签时）
+    TabContextMenuClosed,
+    /// 固定/取消固定第 `idx` 页：固定页豁免单页与批量关闭
+    TogglePinTab(usize),
+    /// 菜单「保存」：切到第 `idx` 页并复用既有活动页保存流
+    /// （v1 决策：右键保存先切页，Saved 回报/最近文件/转码提示全部走活动页语义）
+    SaveTabFromMenu(usize),
+    /// 菜单「另存为/重命名」：切到第 `idx` 页走既有另存为对话框
+    /// （§3 P28 第 2 条：重命名 v1 用另存为兜底）
+    RenameOrSaveAsTab(usize),
+    /// 关闭第 `idx` 页（CloseTabRequest 的参数化版本：置脏弹既有确认条，
+    /// 固定页拒绝并提示）
+    CloseTabAt(usize),
+    /// 关闭除第 `keep` 页以外的全部非固定页（任一目标置脏 → 先聚合确认）
+    CloseOtherTabs(usize),
+    /// 关闭第 `from` 页右侧的全部非固定页（同上）
+    CloseTabsRight(usize),
+    /// 批量关闭确认条「放弃更改并关闭」：统一放弃目标列表各页并移除
+    ConfirmBatchCloseDiscard,
+    /// 取消批量关闭确认条
+    CancelBatchCloseTabs,
     /// 切换 Markdown 预览面板（仅当前语法为 Markdown 时生效；P22 第三批）
     PreviewToggled,
     /// 光标闪烁心跳（打磨项）：翻转闪烁相位并触发重绘
@@ -659,6 +685,33 @@ fn session_restore_allowed(enable_snapshots: bool, remember_session: bool) -> bo
     enable_snapshots && remember_session
 }
 
+// ---------- 标签右键菜单（P28） ----------
+
+/// 批量关闭的范围（纯函数 [`batch_close_targets`] 的入参）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchCloseScope {
+    /// 除 `keep` 页以外的全部候选
+    Others(usize),
+    /// `from` 页右侧的全部候选
+    RightOf(usize),
+}
+
+/// 批量关闭的目标集合（纯函数便于测试，§3 P28 第 3 条）：
+/// 在指定范围内收集全部**非固定**页下标（升序）。固定页豁免批量关闭；
+/// keep/from 越界时返回空表（无目标 = 菜单项禁用、update 层 no-op）。
+fn batch_close_targets(tabs: &[Tab], scope: BatchCloseScope) -> Vec<usize> {
+    let len = tabs.len();
+    match scope {
+        BatchCloseScope::Others(keep) if keep < len => (0..len)
+            .filter(|&i| i != keep && !tabs[i].pinned)
+            .collect(),
+        BatchCloseScope::RightOf(from) if from < len => ((from + 1)..len)
+            .filter(|&i| !tabs[i].pinned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// 恢复链中一个待载入的命名干净页：路径、目标占位页下标与待还原视图。
 #[derive(Debug, Clone)]
 struct RestoreLoad {
@@ -825,6 +878,10 @@ struct Tab {
     /// 仍有效 → 沿用不重写」的复用判定不会错位；账目随页走（增删页/
     /// 调序后仍与正确的内容文件配对）。
     heartbeat_snap: Option<(u64, String)>,
+    /// 固定标记（P28）：固定页豁免单页与批量关闭（菜单项灰掉），
+    /// 标签条以 📌 标识。v1 取舍：不自动前置排序（保持用户手动排列的
+    /// 稳定顺序）；不入会话快照清单（会话内临时状态）。
+    pinned: bool,
 }
 
 impl Tab {
@@ -839,6 +896,7 @@ impl Tab {
             last_edit_at: None,
             untitled_num: None,
             heartbeat_snap: None,
+            pinned: false,
         }
     }
 
@@ -953,6 +1011,12 @@ struct Editpad {
     // ---------- 标签页关闭确认（P21） ----------
     /// Some(idx) = 第 idx 个标签页置脏，正在确认「放弃更改并关闭」
     close_tab_confirm: Option<usize>,
+    // ---------- 标签右键菜单（P28） ----------
+    /// Some(idx) = 正在展示第 idx 个标签页的右键菜单
+    tab_context_menu: Option<usize>,
+    /// Some(targets) = 批量关闭（关闭其他/右侧）目标列表，任一置脏时
+    /// 先弹一次聚合确认；确认后统一放弃并移除。固定页不在列表内。
+    batch_close_confirm: Option<Vec<usize>>,
     // ---------- 未命名页编号（P25） ----------
     /// 下一个未命名页序号（全局单调，不复用已关闭页的号码）
     untitled_next: u64,
@@ -1031,6 +1095,8 @@ impl Default for Editpad {
             main_window: None,
             open_confirm: None,
             close_tab_confirm: None,
+            tab_context_menu: None,
+            batch_close_confirm: None,
             pending_close_tab: None,
             dark_mode: false,
             preview_visible: false,
@@ -1121,6 +1187,55 @@ impl Editpad {
         // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名
         self.refresh_cur_handle();
         true
+    }
+
+    /// 批量移除多个标签页（P28）：按下标从大到小逐个 remove，
+    /// 保证剩余下标始终有效；全部移光时重置一个新的空标签页
+    /// （tabs 恒非空不变式，同 [`Self::close_tab_now`]）。
+    /// 返回实际移除的页数。越界/重复下标安全跳过。
+    fn close_tabs_now(&mut self, indices: &[usize]) -> usize {
+        let mut idxs = indices.to_vec();
+        idxs.sort_unstable();
+        idxs.dedup();
+        let mut removed = 0usize;
+        for &idx in idxs.iter().rev() {
+            if idx < self.tabs.len() {
+                self.tabs.remove(idx);
+                removed += 1;
+            }
+        }
+        if removed == 0 {
+            return 0;
+        }
+        if self.tabs.is_empty() {
+            self.tabs.push(Tab::empty());
+            let last = self.tabs.len() - 1;
+            self.assign_untitled_num(last);
+        }
+        self.session_manifest_stale = true;
+        self.refresh_cur_handle();
+        removed
+    }
+
+    /// 开启批量关闭流程（P28）：目标列表非空且任一置脏 → 弹一次聚合
+    /// 确认条（确认后统一放弃，§3 P28 第 3 条）；全部干净 → 直接移除。
+    /// 无可关目标时静默 no-op。同一时刻只保留一条确认条。
+    fn begin_batch_close(&mut self, scope: BatchCloseScope) {
+        // 菜单项无论走向如何都算「已选中」，右键菜单随之收起
+        self.tab_context_menu = None;
+        if self.busy {
+            return;
+        }
+        let targets = batch_close_targets(&self.tabs, scope);
+        if targets.is_empty() {
+            return;
+        }
+        if targets.iter().any(|&i| self.tabs[i].dirty) {
+            self.close_tab_confirm = None;
+            self.batch_close_confirm = Some(targets);
+        } else if self.close_tabs_now(&targets) > 0 {
+            self.cancel_find_scan();
+        }
     }
 
     /// 打开文件应落入的标签下标：当前页「未命名且干净且为空」→
@@ -1698,6 +1813,9 @@ impl Editpad {
                 self.open_confirm = None;
                 // P21：Esc 也取消标签页关闭确认
                 self.close_tab_confirm = None;
+                // P28：Esc 同时收起右键菜单与批量关闭确认
+                self.tab_context_menu = None;
+                self.batch_close_confirm = None;
                 // P10：取消在途扫描 + 清结果（含序号失效）
                 self.cancel_find_scan();
                 Task::none()
@@ -1711,24 +1829,31 @@ impl Editpad {
                 self.set_active_tab(last);
                 // 查找态全局：切页即作废旧命中，防串页
                 self.cancel_find_scan();
+                // P28：页集合已变，右键菜单随之下收
+                self.tab_context_menu = None;
                 Task::none()
             }
             Message::SwitchTabNext => {
                 let next = (self.active_tab + 1) % self.tabs.len();
                 self.set_active_tab(next);
                 self.cancel_find_scan();
+                self.tab_context_menu = None;
                 Task::none()
             }
             Message::SwitchTab(i) => {
                 if i < self.tabs.len() && i != self.active_tab {
                     self.set_active_tab(i);
                     self.cancel_find_scan();
+                    self.tab_context_menu = None;
                 }
                 Task::none()
             }
             Message::CloseTabRequest => {
                 let idx = self.active_tab;
-                if self.tabs[idx].dirty {
+                // P28：固定页对键盘路径（Ctrl+W）同样豁免，与右键菜单一致
+                if self.tabs[idx].pinned {
+                    self.status = "固定标签页需先取消固定再关闭".to_owned();
+                } else if self.tabs[idx].dirty {
                     // 置脏页先确认（骨架版仅提供「放弃更改」出口）
                     self.close_tab_confirm = Some(idx);
                 } else if self.close_tab_now(idx) {
@@ -1881,6 +2006,96 @@ impl Editpad {
                         self.pending_close_tab = None;
                     }
                 }
+                Task::none()
+            }
+
+            // ---------- 标签右键菜单（P28） ----------
+            Message::TabContextMenu(i) => {
+                // busy（对话框/IO 中）不开菜单；越界下标（页刚被关掉）忽略
+                if !self.busy && i < self.tabs.len() {
+                    self.tab_context_menu = Some(i);
+                }
+                Task::none()
+            }
+            Message::TabContextMenuClosed => {
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            Message::TogglePinTab(i) => {
+                self.tab_context_menu = None;
+                if let Some(tab) = self.tabs.get_mut(i) {
+                    tab.pinned = !tab.pinned;
+                }
+                Task::none()
+            }
+            Message::SaveTabFromMenu(i) => {
+                self.tab_context_menu = None;
+                // v1 决策：右键保存 = 先切到目标页再走既有活动页保存流——
+                // Saved 回报、最近文件记录、转码提示全部复用活动页语义，
+                // 不为后台页另铺一条带 idx 的回报管线。未命名置脏页自动
+                // 落另存为对话框（与 Ctrl+S 同语义）。
+                if !self.busy && i < self.tabs.len() && self.tabs[i].dirty {
+                    self.set_active_tab(i);
+                    return match self.tab().path.clone() {
+                        Some(_) => self.save(),
+                        None => self.save_as_dialog(),
+                    };
+                }
+                Task::none()
+            }
+            Message::RenameOrSaveAsTab(i) => {
+                self.tab_context_menu = None;
+                // §3 P28 第 2 条：重命名 v1 用「另存为」兜底；未命名页同款。
+                if !self.busy && i < self.tabs.len() {
+                    self.set_active_tab(i);
+                    return self.save_as_dialog();
+                }
+                Task::none()
+            }
+            Message::CloseTabAt(idx) => {
+                self.tab_context_menu = None;
+                if !self.busy && idx < self.tabs.len() {
+                    if self.tabs[idx].pinned {
+                        self.status = "固定标签页需先取消固定再关闭".to_owned();
+                    } else if self.tabs[idx].dirty {
+                        // 置脏走既有单页确认条（含「保存并关闭」出口）
+                        self.batch_close_confirm = None;
+                        self.close_tab_confirm = Some(idx);
+                    } else if self.close_tab_now(idx) {
+                        self.cancel_find_scan();
+                    }
+                }
+                Task::none()
+            }
+            Message::CloseOtherTabs(keep) => {
+                self.begin_batch_close(BatchCloseScope::Others(keep));
+                Task::none()
+            }
+            Message::CloseTabsRight(from) => {
+                self.begin_batch_close(BatchCloseScope::RightOf(from));
+                Task::none()
+            }
+            Message::ConfirmBatchCloseDiscard => {
+                if let Some(targets) = self.batch_close_confirm.take() {
+                    // 统一放弃：先清各页置脏与内容（与 ConfirmCloseTabDiscard
+                    // 同款，防「已移除页的 rope 仍被别名引用」的错觉），再移除。
+                    for &idx in &targets {
+                        if let Some(tab) = self.tabs.get_mut(idx) {
+                            tab.dirty = false;
+                            tab.path = None;
+                            tab.editor
+                                .borrow_mut()
+                                .reset_document(editpad_core::Document::new());
+                        }
+                    }
+                    if self.close_tabs_now(&targets) > 0 {
+                        self.cancel_find_scan();
+                    }
+                }
+                Task::none()
+            }
+            Message::CancelBatchCloseTabs => {
+                self.batch_close_confirm = None;
                 Task::none()
             }
 
@@ -2946,6 +3161,80 @@ impl Editpad {
             .map(str::to_owned)
     }
 
+    /// P28 标签右键菜单面板：固定/保存/另存为(重命名)/关闭/关闭其他/
+    /// 关闭右侧。菜单项按页面状态禁用（busy、干净页的保存、固定页的
+    /// 关闭、无可关目标的批量项）；调用方保证 idx < tabs.len()。
+    fn tab_context_panel(&self, idx: usize) -> Element<'_, Message> {
+        let tab = &self.tabs[idx];
+        let interactive = !self.busy;
+
+        let mut panel = column![
+            row![
+                text(format!("「{}」", tab.base_name())).color([0.5, 0.5, 0.5]),
+                button(text("×"))
+                    .padding([2, 8])
+                    .on_press(Message::TabContextMenuClosed),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(2)
+        .padding([4, 10]);
+
+        // 固定 / 取消固定（固定页豁免一切关闭路径）
+        let pin_label = if tab.pinned { "取消固定" } else { "📌 固定标签页" };
+        panel = panel.push(
+            button(container(text(pin_label)).width(Fill))
+                .width(Fill)
+                .on_press_maybe(interactive.then_some(Message::TogglePinTab(idx))),
+        );
+        // 保存：仅置脏可用（与工具栏「保存」同一口径）；
+        // 未命名页在 update 层自动落另存为
+        panel = panel.push(
+            button(container(text("保存")).width(Fill))
+                .width(Fill)
+                .on_press_maybe(
+                    (interactive && tab.dirty).then_some(Message::SaveTabFromMenu(idx)),
+                ),
+        );
+        // 另存为 / 重命名（v1 同一动作兜底，§3 P28 第 2 条）
+        let rename_label = if tab.path.is_some() { "重命名…" } else { "另存为…" };
+        panel = panel.push(
+            button(container(text(rename_label)).width(Fill))
+                .width(Fill)
+                .on_press_maybe(interactive.then_some(Message::RenameOrSaveAsTab(idx))),
+        );
+
+        panel = panel.push(rule::horizontal(1));
+
+        // 关闭：固定页拒绝（update 层守卫 + 菜单项灰掉双保险）
+        panel = panel.push(
+            button(container(text("关闭")).width(Fill))
+                .width(Fill)
+                .on_press_maybe(
+                    (interactive && !tab.pinned).then_some(Message::CloseTabAt(idx)),
+                ),
+        );
+        // 关闭其他 / 关闭右侧：无可关目标（全部是固定页或没有其他页）时禁用
+        let others = batch_close_targets(&self.tabs, BatchCloseScope::Others(idx));
+        let right = batch_close_targets(&self.tabs, BatchCloseScope::RightOf(idx));
+        panel = panel.push(
+            button(container(text(format!("关闭其他标签页({})", others.len()))).width(Fill))
+                .width(Fill)
+                .on_press_maybe(
+                    (!others.is_empty() && interactive).then_some(Message::CloseOtherTabs(idx)),
+                ),
+        );
+        panel = panel.push(
+            button(container(text(format!("关闭右侧标签页({})", right.len()))).width(Fill))
+                .width(Fill)
+                .on_press_maybe(
+                    (!right.is_empty() && interactive).then_some(Message::CloseTabsRight(idx)),
+                ),
+        );
+        panel.into()
+    }
+
     /// P27 设置弹窗面板：收编原本只能手改 config.toml 的散落设置
     /// （主题/字号/即时保存/隐私/会话）+ 只读热键速查表。改动即写回。
     fn settings_panel(&self) -> Element<'_, Message> {
@@ -3156,22 +3445,36 @@ impl Editpad {
         .padding([8, 10]);
 
         // P21 标签条：恒显示（单页也给出「当前文件名」的可见反馈）。
-        // 点击切换；置脏页带 ● 前缀；活动页加 ▸ 指示。
+        // 点击切换；置脏页带 ● 前缀；活动页加 ▸ 指示；固定页加 📌（P28）。
+        // P28：按钮外包 mouse_area 捕获右键弹菜单——MouseArea 先把事件
+        // 交给子组件，左键被 button 捕获后自身跳过，故切换不受影响；
+        // 右键无人捕获，落到 on_right_press。
         let mut body = column![toolbar, rule::horizontal(1)];
         {
             let mut strip = row![].spacing(2).padding([4, 6]);
             for (i, tab) in self.tabs.iter().enumerate() {
                 let marker = if i == self.active_tab { "▸ " } else { "  " };
+                let pin = if tab.pinned { "📌 " } else { "" };
                 strip = strip.push(
-                    button(text(format!(
-                        "{marker}{}",
-                        tab.display_name()
-                    )))
-                    .padding([2, 10])
-                    .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
+                    mouse_area(
+                        button(text(format!(
+                            "{marker}{pin}{}",
+                            tab.display_name()
+                        )))
+                        .padding([2, 10])
+                        .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
+                    )
+                    .on_right_press(Message::TabContextMenu(i)),
                 );
             }
             body = body.push(strip);
+        }
+
+        // P28 右键菜单面板（下标失效 = 页刚被关掉，不渲染）
+        if let Some(idx) = self.tab_context_menu {
+            if idx < self.tabs.len() {
+                body = body.push(rule::horizontal(1)).push(self.tab_context_panel(idx));
+            }
         }
 
         // 中间主区域：Markdown 预览面板 或 自绘虚拟化编辑器
@@ -3354,6 +3657,32 @@ impl Editpad {
                     button(text("取消"))
                         .padding([4, 12])
                         .on_press(Message::CancelCloseTab),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        // P28 批量关闭确认条：关闭其他/右侧的目标中有置脏页时弹一次，
+        // 确认后统一放弃并移除（固定页本就不在目标列表内）
+        if let Some(targets) = &self.batch_close_confirm {
+            let total = targets.len();
+            let dirty = targets
+                .iter()
+                .filter(|&&i| self.tabs.get(i).is_some_and(|t| t.dirty))
+                .count();
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text(format!(
+                        "要关闭的 {total} 个标签页中 {dirty} 个有未保存的更改，全部放弃并关闭？"
+                    )),
+                    button(text("放弃更改并关闭"))
+                        .padding([4, 12])
+                        .on_press(Message::ConfirmBatchCloseDiscard),
+                    button(text("取消"))
+                        .padding([4, 12])
+                        .on_press(Message::CancelBatchCloseTabs),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -3755,6 +4084,279 @@ mod tests {
             app.confirm_visible,
             "任一页置脏都必须弹关窗确认"
         );
+    }
+
+    // ---------- P28 标签右键菜单 ----------
+
+    /// 构造 N 页应用：页 0 置脏（内容 "d0"），其余干净；返回应用。
+    fn app_with_tabs(n: usize) -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("d0".into())));
+        for _ in 1..n {
+            dispatch(&mut app, Message::NewTab);
+        }
+        app
+    }
+
+    #[test]
+    fn batch_close_targets_excludes_pinned_and_handles_out_of_range() {
+        // 布局：[0]=固定 [1] [2]=固定 [3]
+        let mut tabs = vec![Tab::empty(), Tab::empty(), Tab::empty(), Tab::empty()];
+        tabs[0].pinned = true;
+        tabs[2].pinned = true;
+
+        // 关闭其他(keep=1)：候选 {0,2,3} 排除固定页 0/2 → 仅剩 3
+        assert_eq!(
+            batch_close_targets(&tabs, BatchCloseScope::Others(1)),
+            vec![3],
+            "固定页必须被豁免出批量目标"
+        );
+        // 关闭其他(keep=3)：其余页里只有非固定的页 1 可关
+        assert_eq!(
+            batch_close_targets(&tabs, BatchCloseScope::Others(3)),
+            vec![1],
+        );
+        // 关闭其他(keep=3) 但除 keep 外全固定 → 空
+        tabs[1].pinned = true;
+        assert_eq!(
+            batch_close_targets(&tabs, BatchCloseScope::Others(3)),
+            Vec::<usize>::new(),
+        );
+        tabs[1].pinned = false;
+
+        // 关闭右侧：只收 from 右侧的非固定页
+        assert_eq!(
+            batch_close_targets(&tabs, BatchCloseScope::RightOf(1)),
+            vec![3],
+            "右侧的固定页 2 必须被豁免"
+        );
+        assert_eq!(
+            batch_close_targets(&tabs, BatchCloseScope::RightOf(2)),
+            vec![3],
+        );
+
+        // 越界安全：keep/from 超出范围一律空表（菜单项据此禁用）
+        assert_eq!(
+            batch_close_targets(&tabs, BatchCloseScope::Others(9)),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            batch_close_targets(&tabs, BatchCloseScope::RightOf(9)),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn context_menu_opens_closes_and_respects_busy_guard() {
+        // 注意：app_with_tabs(2) 的活动页在下标 1（NewTab 会自动切换）
+        let mut app = app_with_tabs(2);
+
+        // 右键第 0 页 → 菜单打开并指向该页
+        dispatch(&mut app, Message::TabContextMenu(0));
+        assert_eq!(app.tab_context_menu, Some(0));
+
+        // 左键切到另一页（0 ≠ 当前活动页 1）→ 菜单随切换收起
+        dispatch(&mut app, Message::SwitchTab(0));
+        assert_eq!(app.tab_context_menu, None);
+
+        // Esc 收起（BarsDismissed 一并清批量确认态）
+        dispatch(&mut app, Message::TabContextMenu(1));
+        dispatch(&mut app, Message::BarsDismissed);
+        assert_eq!(app.tab_context_menu, None);
+
+        // busy 中右键不开菜单
+        app.busy = true;
+        dispatch(&mut app, Message::TabContextMenu(0));
+        assert_eq!(app.tab_context_menu, None, "busy 时不得打开右键菜单");
+        app.busy = false;
+
+        // × 按钮 / 显式收起消息
+        dispatch(&mut app, Message::TabContextMenu(0));
+        dispatch(&mut app, Message::TabContextMenuClosed);
+        assert_eq!(app.tab_context_menu, None);
+
+        // 已被关掉的页下标：忽略不 panic
+        dispatch(&mut app, Message::CloseTabAt(1));
+        dispatch(&mut app, Message::TabContextMenu(5));
+        assert_eq!(app.tab_context_menu, None);
+    }
+
+    #[test]
+    fn close_tab_at_routes_clean_dirty_and_pinned_pages() {
+        let mut app = app_with_tabs(2);
+
+        // 干净后台页：即刻关闭
+        dispatch(&mut app, Message::CloseTabAt(1));
+        assert_eq!(app.tabs.len(), 1, "干净页应被立即关闭");
+
+        // 置脏页：转既有单页确认条（含保存并关闭出口）
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::SwitchTab(0));
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert_eq!(app.close_tab_confirm, Some(0), "置脏页应弹关闭确认条");
+        dispatch(&mut app, Message::CancelCloseTab);
+
+        // 固定页：拒绝关闭并留痕状态栏
+        dispatch(&mut app, Message::TogglePinTab(0));
+        assert!(app.tabs[0].pinned, "固定开关应翻转");
+        let len_before = app.tabs.len();
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert_eq!(app.tabs.len(), len_before, "固定页不得被关闭");
+        assert!(
+            app.status.contains("取消固定"),
+            "拒绝原因应写入状态栏，实际:{}",
+            app.status
+        );
+        // 再翻转一次恢复非固定；Ctrl+W 对固定页同样豁免（键盘路径一致性）
+        dispatch(&mut app, Message::TogglePinTab(0));
+        assert!(!app.tabs[0].pinned);
+        dispatch(&mut app, Message::TogglePinTab(0));
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.tabs.len(), len_before, "Ctrl+W 不得绕过固定豁免");
+        assert!(app.status.contains("取消固定"));
+        dispatch(&mut app, Message::TogglePinTab(0));
+        assert!(!app.tabs[0].pinned);
+    }
+
+    #[test]
+    fn close_other_tabs_aggregates_dirty_confirm_and_spares_pinned() {
+        // 页 0 固定+置脏；页 1 干净；页 2 置脏。在页 1 上「关闭其他」。
+        let mut app = app_with_tabs(3);
+        dispatch(&mut app, Message::TogglePinTab(0)); // 页 0 固定（仍置脏）
+        dispatch(&mut app, Message::SwitchTab(2));
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("d2".into())));
+        dispatch(&mut app, Message::SwitchTab(1));
+
+        dispatch(&mut app, Message::CloseOtherTabs(1));
+        // 目标 = 非固定且非 keep = 仅 {2}（页 0 因固定被豁免）；
+        // 含置脏页 → 弹聚合确认而非直接关
+        let targets = app.batch_close_confirm.clone().expect("应弹聚合确认");
+        assert_eq!(targets, vec![2], "固定页必须被豁免出批量目标");
+
+        // 取消：一切原样
+        dispatch(&mut app, Message::CancelBatchCloseTabs);
+        assert_eq!(app.tabs.len(), 3);
+        assert!(app.tabs[2].dirty);
+
+        // 再次确认放弃：仅移除目标页，固定页与 keep 页幸存
+        dispatch(&mut app, Message::CloseOtherTabs(1));
+        dispatch(&mut app, Message::ConfirmBatchCloseDiscard);
+        assert_eq!(app.tabs.len(), 2, "只有目标页被移除");
+        assert!(app.tabs[0].pinned && app.tabs[0].dirty, "固定置脏页原样幸存");
+        assert_eq!(app.batch_close_confirm, None);
+        assert_eq!(app.tab_context_menu, None, "选中菜单项后菜单应收起");
+
+        // 幸存两页全干净后「关闭其他」= 无置脏目标直接关，不再弹确认
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(0)); // 显式放弃固定置脏页
+        dispatch(&mut app, Message::CloseOtherTabs(0));
+        assert!(app.batch_close_confirm.is_none(), "全部干净不应弹确认");
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn close_right_tabs_only_touches_right_side_non_pinned() {
+        // 4 页（页 0 置脏，其余干净）：页 2 固定。「在页 0 上关闭其他」
+        // → 目标 = {1, 3} 全干净 → 立即移除，固定页 2 与 keep 页 0 幸存。
+        let mut app = app_with_tabs(4);
+        dispatch(&mut app, Message::TogglePinTab(2));
+
+        dispatch(&mut app, Message::CloseOtherTabs(0));
+        assert!(app.batch_close_confirm.is_none());
+        assert_eq!(app.tabs.len(), 2);
+        assert!(app.tabs[1].pinned, "原页 2（现下标 1）仍固定且幸存");
+
+        // 重验 CloseTabsRight 的右侧口径与置脏聚合：
+        // 4 页，页 0 干净、页 1 置脏。
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::NewTab); // 挤掉初始空净页的就地打开优惠
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::SwitchTab(1));
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("d1".into())));
+        dispatch(&mut app, Message::SwitchTab(0));
+
+        dispatch(&mut app, Message::CloseTabsRight(0));
+        let targets = app.batch_close_confirm.clone().expect("含置脏页应弹确认");
+        assert_eq!(targets, vec![1, 2, 3], "右侧全部非固定页入列");
+        dispatch(&mut app, Message::CancelBatchCloseTabs);
+        assert_eq!(app.tabs.len(), 4);
+
+        // 清掉置脏的右侧页后，右侧关闭立即生效
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(1));
+        dispatch(&mut app, Message::CloseTabsRight(0));
+        assert!(app.batch_close_confirm.is_none());
+        assert_eq!(app.tabs.len(), 1, "右侧干净页应被直接移除");
+    }
+
+    #[test]
+    fn menu_save_and_rename_route_through_active_tab_flow() {
+        let mut app = Editpad::default();
+
+        // 页 0 命名并置脏；页 1 新建未命名
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((editpad_core::Document::from_str("A"), String::new(), "UTF-8".to_owned())),
+            ),
+        );
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("change".into())));
+        dispatch(&mut app, Message::NewTab);
+        assert_eq!(app.active_tab, 1);
+
+        // 菜单「保存」后台命名置脏页：先切页再走活动页保存流（busy 进入保存任务）
+        dispatch(&mut app, Message::SaveTabFromMenu(0));
+        assert_eq!(app.active_tab, 0, "菜单保存应先切到目标页");
+        assert!(app.busy, "应进入既有保存流的 busy 守卫");
+        app.busy = false;
+
+        // 干净页的菜单保存：no-op（与工具栏「保存」同口径，按钮侧禁用）
+        dispatch(&mut app, Message::SaveTabFromMenu(1));
+        assert!(!app.busy, "干净页保存应为 no-op");
+
+        // 菜单「重命名」= 切页 + 另存为对话框阶段
+        dispatch(&mut app, Message::RenameOrSaveAsTab(1));
+        assert_eq!(app.active_tab, 1, "重命名应切到目标页");
+        assert!(app.busy, "另存为对话框阶段应置 busy");
+        app.busy = false;
+
+        // 未命名置脏页的菜单保存自动落另存为（Ctrl+S 同语义）
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.tab().path.is_none() && app.tab().dirty);
+        let active = app.active_tab;
+        dispatch(&mut app, Message::SaveTabFromMenu(active));
+        assert!(app.busy, "未命名页保存应转入另存为对话框");
+    }
+
+    #[test]
+    fn batch_close_never_empties_tabs_and_keeps_invariants() {
+        // 两页全部固定：在页 0 上「关闭其他」→ 无可关目标 no-op。
+        let mut app = app_with_tabs(2);
+        dispatch(&mut app, Message::TogglePinTab(0));
+        dispatch(&mut app, Message::TogglePinTab(1));
+        dispatch(&mut app, Message::CloseOtherTabs(0));
+        assert_eq!(app.tabs.len(), 2, "无可关目标应保持原样");
+        assert!(app.batch_close_confirm.is_none());
+
+        // 单页应用上关闭其他/右侧：同样 no-op
+        let mut solo = Editpad::default();
+        dispatch(&mut solo, Message::CloseOtherTabs(0));
+        dispatch(&mut solo, Message::CloseTabsRight(0));
+        assert_eq!(solo.tabs.len(), 1);
+
+        // close_tabs_now 兜底：移除最后一页时重置新空页（tabs 恒非空不变式）
+        let mut bare = Editpad::default();
+        let removed = bare.close_tabs_now(&[0]);
+        assert_eq!(removed, 1);
+        assert_eq!(bare.tabs.len(), 1, "移除最后一页应重置新空页");
+        assert!(!bare.tab().dirty);
+        assert!(bare.cur_handle.borrow().doc.is_empty());
+        // 越界/重复下标安全
+        assert_eq!(bare.close_tabs_now(&[5]), 0);
+        assert_eq!(bare.close_tabs_now(&[0, 0]), 1);
     }
 
     #[test]
