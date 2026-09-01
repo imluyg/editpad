@@ -23,7 +23,7 @@ use iced::keyboard::{self, key::Named};
 use iced::widget::{button, checkbox, column, container, mouse_area, opaque, progress_bar, row, rule,
     scrollable, text, text_input, Stack};
 use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
-    Font, Padding, Point, Shadow, Subscription, Task, Theme, Vector};
+    Font, Padding, Point, Shadow, Subscription, Task, Theme};
 
 use editor::{EditorHandle, EditOp, Motion};
 
@@ -4301,15 +4301,19 @@ impl Editpad {
     /// P39：标签右键菜单浮层——整窗透明背板（点击即收起）+ 锚在指针
     /// 位置、贴边钳制后的菜单卡片。opaque 双层防穿透：背板捕获菜单外
     /// 点击不落到正文，卡片捕获卡片内空白处点击不触发背板关闭。
+    /// P43：卡片高度按窗口钳制（小窗口不溢出、不盖满全屏），内容超高
+    /// 时内部滚动——与设置弹窗同款适配策略。
     fn context_menu_overlay(&self, idx: usize) -> Element<'_, Message> {
+        let vh = self.viewport_size.1;
+        let card_h = ctx_menu_card_h(vh);
         let (ax, ay) = clamp_menu_anchor(
             self.menu_anchor,
             self.viewport_size,
             CTX_MENU_W,
-            CTX_MENU_H,
+            card_h,
         );
         let card = opaque(
-            container(self.tab_context_panel(idx))
+            container(scrollable(self.tab_context_panel(idx)).height(card_h))
                 .padding(4)
                 .style(popup_card_style),
         );
@@ -4358,7 +4362,20 @@ impl Editpad {
 /// + 内边距。仅用于贴边钳制，与实际 Shrink 宽度的少量偏差可接受。
 const CTX_MENU_W: f32 = 200.0;
 /// 右键菜单卡片的估高（px）：标题行 + 6 个菜单项 + 分隔线 + 内边距。
+/// 窗口高度未知或极小（≤48px）时作为保守值：钳制与滚动共用。
 const CTX_MENU_H: f32 = 280.0;
+
+/// P43：右键菜单卡片高度适配——窗口高度已知且足够时最高占
+/// `vh − 16`（上下各留 8px 边距），内容超高时卡片内部滚动；
+/// 窗口高度未知/过小（首帧或极小窗）回退常量估高（仍保证 ≤ 全高，
+/// 永不盖满界面）。纯函数可单测。
+fn ctx_menu_card_h(vh: f32) -> f32 {
+    if vh > 48.0 {
+        (vh - 16.0).min(CTX_MENU_H)
+    } else {
+        CTX_MENU_H
+    }
+}
 
 /// P39：浮层锚点贴边钳制——菜单整体保持在窗口内（右缘翻左/下缘翻上
 /// 的效果 = 把锚点往回拉）。窗口尺寸未知（宽或高为 0）时该轴不钳制；
@@ -4380,8 +4397,13 @@ fn clamp_menu_anchor(
     (x.max(0.0), y.max(0.0))
 }
 
-/// P39/P40：浮层卡片样式——主题背景 + 1px 描边 + 投影，深浅主题通用
-/// （从 palette 派生，与编辑器 EditorColors::resolve 同一口径）。
+/// P39/P40：浮层卡片样式——主题背景 + 1px 描边（**无投影**），深浅主题
+/// 通用（从 palette 派生，与编辑器 EditorColors::resolve 同一口径）。
+///
+/// 无投影是有意取舍（P43 追加）：tiny-skia 后端部分重绘的 damage 区只覆盖
+/// quad.bounds + 1px，而 shadow 模糊带外扩 blur_radius（4px）且在 alpha 合成
+/// 下残留叠加——鼠标移动反复触发 hover 重绘时阴影逐帧变浓，表现为
+/// 「弹窗随鼠标移动越来越暗」。1px 描边 + 圆角已足以区分浮层与背景。
 fn popup_card_style(theme: &Theme) -> container::Style {
     let palette = theme.palette();
     container::Style {
@@ -4391,11 +4413,7 @@ fn popup_card_style(theme: &Theme) -> container::Style {
             width: 1.0,
             radius: Radius::from(6.0),
         },
-        shadow: Shadow {
-            color: Color { a: 0.25, ..Color::BLACK },
-            offset: Vector::new(0.0, 4.0),
-            blur_radius: 16.0,
-        },
+        shadow: Shadow::default(),
         ..container::Style::default()
     }
 }
@@ -4798,7 +4816,25 @@ mod tests {
 
     // ---------- P39/P40 浮层弹窗 ----------
 
-    #[test]
+    /// P43 回归：右键菜单卡片高度随窗口钳制（小窗不溢出、终生不盖满全屏）。
+#[test]
+fn ctx_menu_card_h_adapts_to_viewport() {
+    // 常规窗口（600 高）：内容本身约 260px，卡在常量估高上（上下留边）
+    assert_eq!(ctx_menu_card_h(600.0), CTX_MENU_H);
+    // 大窗口也不突破估高
+    assert_eq!(ctx_menu_card_h(1080.0), CTX_MENU_H);
+    // 小窗：高度 = 窗高 − 16 边距（内容超高时内部滚动），不再盖满全屏
+    assert_eq!(ctx_menu_card_h(200.0), 184.0);
+    assert_eq!(ctx_menu_card_h(100.0), 84.0);
+    // 未知/极小窗口：回退保守估高（首帧未收到 Resized 的兜底）
+    assert_eq!(ctx_menu_card_h(0.0), CTX_MENU_H);
+    assert_eq!(ctx_menu_card_h(40.0), CTX_MENU_H);
+    // 与锚点钳制联用：卡片恒在窗口内（小窗下 y 夹 0，不越下缘）
+    let (_, ay) = clamp_menu_anchor((100.0, 500.0), (800.0, 120.0), CTX_MENU_W, ctx_menu_card_h(120.0));
+    assert!(ay + ctx_menu_card_h(120.0) <= 120.0, "锚点+高度必须落在窗内");
+}
+
+#[test]
     fn clamp_menu_anchor_keeps_overlay_inside_window() {
         // 常规位置不钳制
         assert_eq!(
