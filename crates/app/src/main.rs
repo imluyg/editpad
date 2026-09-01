@@ -617,13 +617,16 @@ impl Editpad {
                     // 扫描在途时禁止全部替换：此刻的全文快照可能是过期的
                     return Task::none();
                 }
-                let contents = self.editor.borrow().doc.to_text();
-                let (new_contents, count) = editpad_core::replace_all(
-                    &contents,
-                    &self.find_query,
-                    &self.replace_query,
-                    self.case_sensitive,
-                );
+                // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
+                let (new_contents, count) = {
+                    let editor = self.editor.borrow();
+                    editpad_core::replace_all_document(
+                        &editor.doc,
+                        &self.find_query,
+                        &self.replace_query,
+                        self.case_sensitive,
+                    )
+                };
                 if count > 0 {
                     self.editor
                         .borrow_mut()
@@ -1692,5 +1695,58 @@ mod tests {
         fresh.find_query = "zzz".into();
         let _ = fresh.update(Message::FindNext);
         assert!(fresh.find_scan.is_some(), "Enter 应懒触发一次后台扫描");
+    }
+
+    // ---------- P11 全部替换（rope 流式路径） ----------
+
+    #[test]
+    fn replace_all_swaps_document_and_sets_dirty() {
+        let mut app = Editpad::default();
+        app.editor
+            .borrow_mut()
+            .reset_document(editpad_core::Document::from_str("foo bar foo\nfoo"));
+        app.find_visible = true;
+        app.find_query = "foo".into();
+        app.replace_query = "baz".into();
+
+        let _ = app.update(Message::ReplaceAll);
+        assert_eq!(
+            app.editor.borrow().doc.to_text(),
+            "baz bar baz\nbaz",
+            "全部替换应改写文档内容"
+        );
+        assert!(app.dirty, "全部替换后必须置脏");
+        assert_eq!(app.status, "已替换 3 处");
+
+        // 无命中时不改文档也不置脏
+        let mut app2 = Editpad::default();
+        app2.editor
+            .borrow_mut()
+            .reset_document(editpad_core::Document::from_str("untouched"));
+        app2.find_query = "zzz".into();
+        app2.replace_query = "x".into();
+        let _ = app2.update(Message::ReplaceAll);
+        assert_eq!(app2.editor.borrow().doc.to_text(), "untouched");
+        assert!(!app2.dirty);
+        assert_eq!(app2.status, "已替换 0 处");
+    }
+
+    #[test]
+    fn replace_all_is_blocked_while_scan_in_flight() {
+        // P10 守卫在 P11 新路径上仍然生效：扫描在途时的全文快照可能过期
+        let mut app = Editpad::default();
+        app.editor
+            .borrow_mut()
+            .reset_document(editpad_core::Document::from_str("keep me"));
+        app.find_query = "me".into();
+        app.replace_query = "you".into();
+        app.find_scan = Some(11);
+        let _ = app.update(Message::ReplaceAll);
+        assert_eq!(
+            app.editor.borrow().doc.to_text(),
+            "keep me",
+            "后台扫描在途时不得执行全部替换"
+        );
+        assert!(!app.dirty);
     }
 }

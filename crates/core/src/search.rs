@@ -118,7 +118,53 @@ pub fn prev_from(matches: &[MatchPos], line: usize, col: usize) -> Option<usize>
         .or(if matches.is_empty() { None } else { Some(matches.len() - 1) })
 }
 
+/// 单字节大小写折叠：仅 ASCII 受影响，与 [`ascii_case_eq`] 同一口径
+/// （≥0x80 的 UTF-8 字节原样保留，多字节字符永远精确比较）。
+#[inline]
+fn fold_byte(b: u8, case_sensitive: bool) -> u8 {
+    if case_sensitive {
+        b
+    } else {
+        b.to_ascii_lowercase()
+    }
+}
+
+/// 在 `hay[from..]` 中找第一个「折叠后等于 fq」的字节窗口，返回命中起点；
+/// 没有完整窗口则返回 None。
+///
+/// 字节级匹配的正确性依据 UTF-8 自同步性：任何字符编码的首字节要么是
+/// ASCII（<0x80）要么是前导字节（≥0xC0），续字节一律落在 0x80..0xC0——
+/// 所以查询首字节只可能等值于某个字符边界上的字节，逐字节推进不会把
+/// 多字节字符切进命中窗口。
+fn find_next(hay: &[u8], fq: &[u8], case_sensitive: bool, from: usize) -> Option<usize> {
+    let first = fq[0];
+    let len = fq.len();
+    let mut i = from;
+    while i + len <= hay.len() {
+        // 首字节快速过滤：绝大多数位置在此被跳过
+        if fold_byte(hay[i], case_sensitive) != first {
+            i += 1;
+            continue;
+        }
+        if hay[i..i + len]
+            .iter()
+            .zip(fq)
+            .all(|(&h, &q)| fold_byte(h, case_sensitive) == q)
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// 全部替换，返回 (新文本, 替换次数)。
+///
+/// P11 重写：直接在 UTF-8 字节上扫描推进，不再把全文收集成
+/// `Vec<char>`（每字符 4 字节，50MB 文档的替换峰值曾达原文 ×5），
+/// 内存峰值降为「输入 + 输出」两份。折叠语义与旧实现完全一致：
+/// 仅 ASCII 折叠、最左优先、命中后整体跳过查询长度（不重叠）、
+/// 空查询是 no-op。
 pub fn replace_all(
     text: &str,
     query: &str,
@@ -128,27 +174,93 @@ pub fn replace_all(
     if query.is_empty() {
         return (text.to_owned(), 0);
     }
-    let t: Vec<char> = text.chars().collect();
-    let q: Vec<char> = query.chars().collect();
-    if q.len() > t.len() {
-        return (text.to_owned(), 0);
-    }
-
+    let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
     let mut out = String::with_capacity(text.len());
-    let mut i = 0usize;
     let mut count = 0usize;
-    while i <= t.len() - q.len() {
-        if (0..q.len()).all(|k| char_eq(q[k], t[i + k], case_sensitive)) {
-            out.push_str(replacement);
-            i += q.len();
-            count += 1;
-        } else {
-            out.push(t[i]);
-            i += 1;
-        }
+    let mut pos = 0usize; // 已消费的原文边界 = 下一个搜索起点
+    while let Some(hit) = find_next(text.as_bytes(), &fq, case_sensitive, pos) {
+        out.push_str(&text[pos..hit]);
+        out.push_str(replacement);
+        pos = hit + fq.len();
+        count += 1;
     }
-    out.extend(t[i.min(t.len())..].iter());
+    out.push_str(&text[pos..]);
     (out, count)
+}
+
+/// 在 [`Document`]（rope）上直接全部替换（P11/P19 协同项）。
+///
+/// 与 `replace_all(&doc.to_text(), ..)` 相比省掉整份全文 String 拷贝：
+/// 按存储块零拷贝迭代、流式写入输出串，峰值内存 ≈ 输出文本自身 +
+/// 一个小于查询长度的跨块残段缓冲。匹配语义与 [`replace_all`] 完全
+/// 一致；空查询返回 (全文, 0)，保持 no-op 约定。
+pub fn replace_all_document(
+    doc: &Document,
+    query: &str,
+    replacement: &str,
+    case_sensitive: bool,
+) -> (String, usize) {
+    if query.is_empty() {
+        let mut whole = String::new();
+        for chunk in doc.chunks() {
+            whole.push_str(chunk);
+        }
+        return (whole, 0);
+    }
+    let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
+    let mut out = String::new();
+    // 跨块残段：块边界可能落在任意位置，末尾不足一个查询长度的尾巴
+    // 先攒着，与下一块拼接后再扫（复用分配，峰值 ≈ 存储块 + 查询长度）
+    let mut carry = String::new();
+    let mut count = 0usize;
+    for chunk in doc.chunks() {
+        carry.push_str(chunk);
+        count += drain_matches(&mut carry, &mut out, &fq, replacement, case_sensitive, false);
+    }
+    count += drain_matches(&mut carry, &mut out, &fq, replacement, case_sensitive, true);
+    (out, count)
+}
+
+/// 把 `carry` 里能确定的扫描结果冲进 `out`（流式替换的内核）。
+///
+/// * `final_pass=false`：块迭代进行中——末尾不足一个查询长度的残段
+///   可能与下一块拼出跨块命中，保留在 `carry` 里等待后续数据；
+/// * `final_pass=true`：数据到齐，冲刷全部剩余内容并清空 `carry`。
+///
+/// 返回本次确认的替换次数。ropey 的块边界必落在字符边界上，但本函数
+/// 的游标按字节推进，切分点需回退对齐到字符边界再分家。
+fn drain_matches(
+    carry: &mut String,
+    out: &mut String,
+    fq: &[u8],
+    replacement: &str,
+    case_sensitive: bool,
+    final_pass: bool,
+) -> usize {
+    let mut count = 0usize;
+    let mut consumed = 0usize; // carry 中已确认处理完的边界（恒为字符边界）
+    while let Some(hit) = find_next(carry.as_bytes(), fq, case_sensitive, consumed) {
+        out.push_str(&carry[consumed..hit]);
+        out.push_str(replacement);
+        consumed = hit + fq.len();
+        count += 1;
+    }
+    if final_pass {
+        out.push_str(&carry[consumed..]);
+        carry.clear();
+        return count;
+    }
+    // 末尾不足一个查询长度的残段留给下一轮；其余已确认无命中的原文直接冲走
+    let mut keep_from = consumed.max(carry.len().saturating_sub(fq.len() - 1));
+    while keep_from > consumed && !carry.is_char_boundary(keep_from) {
+        keep_from -= 1;
+    }
+    if keep_from > consumed {
+        out.push_str(&carry[consumed..keep_from]);
+    }
+    // 就地丢弃已确认前缀（尾部 memmove，不重新分配）
+    carry.replace_range(..keep_from, "");
+    count
 }
 
 #[cfg(test)]
@@ -307,5 +419,170 @@ mod tests {
         );
         // 空查询约定：返回空表
         assert!(find_all_document(&doc, "", true).is_empty());
+    }
+
+    // ---------- P11：字节级替换与 rope 流式替换 ----------
+
+    /// 旧实现的等价参照：P11 之前的 Vec<char> 逐字符算法，用于对拍。
+    /// （4 字节/char，50MB 文档峰值 ≈ 原文 ×5——正是本次重写要消掉的。）
+    fn replace_all_vecchar_reference(
+        text: &str,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> (String, usize) {
+        if query.is_empty() {
+            return (text.to_owned(), 0);
+        }
+        let t: Vec<char> = text.chars().collect();
+        let q: Vec<char> = query.chars().collect();
+        if q.len() > t.len() {
+            return (text.to_owned(), 0);
+        }
+        let mut out = String::new();
+        let mut i = 0usize;
+        let mut count = 0usize;
+        while i <= t.len() - q.len() {
+            if (0..q.len()).all(|k| ascii_case_eq(q[k], t[i + k], case_sensitive)) {
+                out.push_str(replacement);
+                i += q.len();
+                count += 1;
+            } else {
+                out.push(t[i]);
+                i += 1;
+            }
+        }
+        out.extend(t[i.min(t.len())..].iter());
+        (out, count)
+    }
+
+    #[test]
+    fn replace_all_matches_vecchar_reference_on_fixtures() {
+        // 覆盖：多字节字符、4 字节 emoji、CRLF/孤立 CR、Tab、大小写折叠、
+        // 查询比原文长、空替换、替换文本含查询本身、命中首尾相邻
+        let fixtures = [
+            "",
+            "aaa",
+            "aaaa",
+            "ab AB ab\nbaba\n",
+            "中文ABC中文abc",
+            "🚀🚀x🚀",
+            "a\r\nb\r\nc\r\n",
+            "x\r\ny\nz\rw",
+            "\ttab\tsep\t\n",
+            "abcabcabc",
+            "needleatstartneedleatend",
+        ];
+        for text in fixtures {
+            for query in ["a", "aa", "ab", "中", "中文", "🚀", "\r", "\r\n", "needle", "zz"] {
+                for replacement in ["", "X", "XY长", "ab"] {
+                    for cs in [true, false] {
+                        assert_eq!(
+                            replace_all(text, query, replacement, cs),
+                            replace_all_vecchar_reference(text, query, replacement, cs),
+                            "不一致: text={text:?} query={query:?} repl={replacement:?} cs={cs}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replace_all_greedy_leftmost_semantics_are_pinned() {
+        // 最左优先 + 命中后整体跳过查询长度（不重叠）：
+        // "aaaa" 替换 "aa" → 两处；"aaa" → 一处 + 尾部残余
+        assert_eq!(replace_all("aaaa", "aa", "b", true), ("bb".to_owned(), 2));
+        assert_eq!(replace_all("aaa", "aa", "b", true), ("ba".to_owned(), 1));
+
+        // 多字节字符不被切坏：emoji 与中文夹着的命中原样保留其余字符
+        assert_eq!(replace_all("🚀中🚀", "中", "", true), ("🚀🚀".to_owned(), 1));
+        assert_eq!(
+            replace_all("中文内容", "内容", "text", true),
+            ("中文text".to_owned(), 1)
+        );
+
+        // 不区分大小写时 ASCII 折叠、非 ASCII 精确：İ(U+0130) 与 ı(U+0131)
+        // 都不折叠为 i，只有 'i' 和 'I' 两处命中
+        assert_eq!(replace_all("İiIı", "i", "X", false), ("İXXı".to_owned(), 2));
+    }
+
+    #[test]
+    fn replace_all_document_matches_replace_all_exactly() {
+        let fixtures = [
+            "",
+            "single line no newline",
+            "foo bar foo\nbar foo\n",
+            "a\r\nb\r\nc",
+            "x\r\ny\nz\rw",
+            "中文中文\n🚀🚀中\n",
+            "aaaa aa\naa",
+        ];
+        for text in fixtures {
+            let doc = Document::from_str(text);
+            for query in ["a", "aa", "foo", "中", "🚀", "\r\n", "zz"] {
+                for cs in [true, false] {
+                    assert_eq!(
+                        replace_all_document(&doc, query, "X", cs),
+                        replace_all(text, query, "X", cs),
+                        "不一致: text={text:?} query={query:?} cs={cs}"
+                    );
+                }
+            }
+        }
+        // 空查询 no-op：返回全文与 0 次
+        let doc = Document::from_str("hello\nworld");
+        assert_eq!(replace_all_document(&doc, "", "X", true), (doc.to_text(), 0));
+    }
+
+    #[test]
+    fn replace_all_document_matches_on_random_texts() {
+        for seed in [2u64, 0xFEED_FACE, 98765] {
+            let text = pseudo_random_text(seed, 20_000);
+            let doc = Document::from_str(&text);
+            for query in ["a", "ab", "c\n", "中", "xx", "a\r", "🚀"] {
+                let (streamed, n_streamed) = replace_all_document(&doc, query, "<R>", false);
+                let (plain, n_plain) = replace_all(&text, query, "<R>", false);
+                assert_eq!(streamed, plain, "seed={seed} query={query:?}");
+                assert_eq!(n_streamed, n_plain);
+            }
+        }
+    }
+
+    #[test]
+    fn replace_all_document_hits_across_chunk_boundaries() {
+        // 单行远超 ropey 存储块：把命中串放到一串不同偏移上，
+        // 无论块边界落在命中的哪个位置（前缀/中间/后缀跨块）都必须命中
+        let needle = "needle";
+        let total = 60_000usize;
+        let mut offset = 0usize;
+        while offset + needle.len() <= total - 100 {
+            let mut text = String::with_capacity(total);
+            text.push_str(&"x".repeat(offset));
+            text.push_str(needle);
+            text.push_str(&"y".repeat(total - offset - needle.len()));
+            let doc = Document::from_str(&text);
+            let (out, n) = replace_all_document(&doc, needle, "NEEDLE", true);
+            assert_eq!(n, 1, "offset={offset} 应恰有一处命中");
+            let mut expected = String::with_capacity(total);
+            expected.push_str(&"x".repeat(offset));
+            expected.push_str("NEEDLE");
+            expected.push_str(&"y".repeat(total - offset - needle.len()));
+            assert_eq!(out, expected, "offset={offset} 替换结果不一致");
+            offset += 511; // 步长取奇数，覆盖相对块边界的全部相位
+        }
+    }
+
+    #[test]
+    fn replace_all_document_query_longer_than_chunk_still_works() {
+        // 查询比单个存储块还长的极端情况：残段缓冲必须能攒到完整窗口
+        let query = "Q".repeat(9_000);
+        let mut text = "a".repeat(20_000);
+        text.push_str(&query);
+        text.push_str(&"b".repeat(20_000));
+        let doc = Document::from_str(&text);
+        let (out, n) = replace_all_document(&doc, &query, "HIT", true);
+        assert_eq!(n, 1);
+        assert_eq!(out, format!("{}HIT{}", "a".repeat(20_000), "b".repeat(20_000)));
     }
 }
