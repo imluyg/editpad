@@ -1289,6 +1289,23 @@ impl Default for Editpad {
 impl Editpad {
     // ---------- 多标签访问器（P21） ----------
 
+    /// 新建标签页的唯一出口：`Tab::empty()` + 套用全局字号设置。
+    ///
+    /// 历史教训（P43）：曾有多处直接用 `Tab::empty()` 建页——`EditorCore`
+    /// 默认字号恒为 16，恢复会话/新建页/关光补页全部脱离设置里的字号，
+    /// 表现为「调到 24 生效、重启后字体回到原大小，但设置面板仍显示 24」
+    /// （恢复路径整体替换 tabs，boot 仅对首个默认页应用过字号）。
+    /// 今后凡「新建页」一律走这里；boot 首帧仍显式 set_font_size 兜底
+    /// （fresh_tab 幂等，重复应用无害）。
+    fn fresh_tab(&mut self) -> Tab {
+        let tab = Tab::empty();
+        // 设置里的字号可能未归一（旧配置/手改），与 boot 同一 clamp 规则
+        tab.editor
+            .borrow_mut()
+            .set_font_size(editor::normalize_font_size(self.settings.font_size));
+        tab
+    }
+
     /// 进入 busy（对话框/IO 互斥）。P39 浮层化后的新约束：同时收起
     /// 右键菜单浮层——它的透明背板会挡住整窗点击，busy 期间不能留它挡道
     /// （旧内嵌面板无此问题，故此前各 busy 置位点都无需理会菜单态）。
@@ -1357,7 +1374,8 @@ impl Editpad {
         self.remember_tab_views(&[idx]);
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
-            self.tabs.push(Tab::empty());
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
             let last = self.tabs.len() - 1;
             self.assign_untitled_num(last);
         }
@@ -1389,7 +1407,8 @@ impl Editpad {
             return 0;
         }
         if self.tabs.is_empty() {
-            self.tabs.push(Tab::empty());
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
             let last = self.tabs.len() - 1;
             self.assign_untitled_num(last);
         }
@@ -2034,7 +2053,8 @@ impl Editpad {
 
             // ---------- 多标签（P21） ----------
             Message::NewTab => {
-                self.tabs.push(Tab::empty());
+                let tab = self.fresh_tab();
+                self.tabs.push(tab);
                 let last = self.tabs.len() - 1;
                 self.assign_untitled_num(last);
                 self.set_active_tab(last);
@@ -2535,7 +2555,8 @@ impl Editpad {
             return Task::none();
         }
         if tab >= self.tabs.len() {
-            self.tabs.push(Tab::empty());
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
         }
         self.register_load_job(path, tab);
         // P21：加载落在新页时直接切过去（符合「打开即聚焦」直觉）。
@@ -3065,7 +3086,7 @@ impl Editpad {
 
         for &i in &kept {
             let meta = &manifest.tabs[i];
-            let mut tab = Tab::empty();
+            let mut tab = self.fresh_tab();
             match (&meta.path, meta.file.as_deref()) {
                 // ---- 未命名页：内容只可能来自快照 ----
                 (None, _) => {
@@ -3253,7 +3274,8 @@ impl Editpad {
         }
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
-            self.tabs.push(Tab::empty());
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
         }
         for entry in &mut self.restore_queue {
             if entry.tab > idx {
@@ -5689,6 +5711,72 @@ mod tests {
         assert!(app.active_load.is_none());
         assert_eq!(app.restore_pending, 0, "恢复链排空");
         assert!(app.status.is_empty(), "全部成功的恢复不打扰状态栏");
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    /// P43 回归：新建标签页唯一出口必须套用全局字号设置
+    /// （曾有多处直接 `Tab::empty()`，编辑器默认 16px 脱离设置）。
+    #[test]
+    fn fresh_tab_carries_global_font_size() {
+        let mut app = Editpad::default();
+        app.settings.font_size = 22.0;
+        let tab = app.fresh_tab();
+        assert_eq!(tab.editor.borrow().font_size(), 22.0);
+
+        // 归一规则与 boot 同源：非法（超界/负）值收敛到合法区间
+        let mut app = Editpad::default();
+        app.settings.font_size = 9999.0;
+        assert_eq!(
+            app.fresh_tab().editor.borrow().font_size(),
+            editor::normalize_font_size(9999.0)
+        );
+        let mut app = Editpad::default();
+        app.settings.font_size = -5.0;
+        assert_eq!(
+            app.fresh_tab().editor.borrow().font_size(),
+            editor::normalize_font_size(-5.0)
+        );
+    }
+
+    /// P43 回归：会话恢复（P30）创建的标签页必须套用全局字号——
+    /// 曾恢复路径整体替换 tabs，boot 只给恢复前默认页应用过字号，
+    /// 表现为「字号调到 24 生效，重启后字体回到原大小，设置面板仍 24」。
+    #[test]
+    fn restored_tabs_carry_global_font_size() {
+        let dir = snapshot_scratch_dir("p43-restore-font-size");
+        let tab = editpad_core::snapshot::SessionTab {
+            path: None,
+            untitled_num: Some(3),
+            dirty: true,
+            file: None,
+            cursor_line: 0,
+            cursor_col: 2,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+        };
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[editpad_core::snapshot::SessionPage {
+                tab,
+                doc: editpad_core::Document::from_str("待恢复的草稿"),
+            }],
+            0,
+            2,
+        )
+        .unwrap();
+
+        let mut app = Editpad::default();
+        app.settings.font_size = 24.0;
+        let _ = app.restore_from_manifest(&dir, &manifest);
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            app.tabs[0].editor.borrow().font_size(),
+            24.0,
+            "恢复页必须应用全局字号设置"
+        );
+        assert_eq!(app.settings.font_size, 24.0, "设置本身不受影响");
 
         editpad_core::snapshot::clear_session(&dir);
     }
