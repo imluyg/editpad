@@ -155,7 +155,16 @@ pub struct EditorCore {
     /// 编辑器是否持有键盘焦点（点击编辑区置真，点击其他控件置假）。
     /// 输入法事件会广播给所有控件，必须靠它过滤——否则在查找框打字会进正文。
     pub focused: bool,
+    /// 光标闪烁相位（打磨项）：应用层心跳每 ~530ms 翻转一次；
+    /// 任何光标活动会重置为可见并刷新活动时刻，静止超时后按相位隐现。
+    blink_on: bool,
+    last_activity: Option<std::time::Instant>,
 }
+
+/// 光标闪烁半周期。
+pub const CARET_BLINK_MS: u64 = 530;
+/// 光标活动后的常显窗口（移动/输入时不受闪烁相位影响）。
+const CARET_ACTIVE_MS: u128 = 450;
 
 impl Default for EditorCore {
     fn default() -> Self {
@@ -178,6 +187,8 @@ impl Default for EditorCore {
             preedit: None,
             font_size: FONT_SIZE_DEFAULT,
             focused: true,
+            blink_on: true,
+            last_activity: None,
         }
     }
 }
@@ -798,6 +809,7 @@ impl EditorCore {
     }
 
     fn ensure_visible(&mut self) {
+        self.poke_caret();
         let first = self.scroll_top;
         let last = self.scroll_top + self.viewport_h / self.line_height() - 1.0;
         let line = self.cursor.line as f32;
@@ -903,10 +915,34 @@ impl EditorCore {
         GUTTER_MIN + digits as f32 * self.char_width() * 0.7
     }
 
+    // ---------- 光标闪烁（打磨项） ----------
+
+    /// 心跳：翻转闪烁相位（由应用层 ~530ms 一次的节拍驱动）。
+    pub fn tick_blink(&mut self) {
+        if self.last_activity.is_none_or(|t| t.elapsed().as_millis() >= CARET_ACTIVE_MS) {
+            self.blink_on = !self.blink_on;
+        }
+    }
+
+    /// 光标活动（移动/输入/点击）：立即常显并重置活动时刻。
+    pub fn poke_caret(&mut self) {
+        self.blink_on = true;
+        self.last_activity = Some(std::time::Instant::now());
+    }
+
+    /// 此刻是否应绘制光标：活动窗口期内常显，静止期按相位隐现。
+    pub fn caret_visible(&self) -> bool {
+        if let Some(t) = self.last_activity {
+            if t.elapsed().as_millis() < CARET_ACTIVE_MS {
+                return true;
+            }
+        }
+        self.blink_on
+    }
+
     /// 相对控件的光标矩形（供输入法定位候选框，双宽感知）。
     /// P13：x 含水平滚动偏移的抵扣——返回值是视口系坐标。
-    pub fn caret_rect_relative(&self) -> Rectangle {
-        let text = self.line_text(self.cursor.line);
+    pub fn caret_rect_relative(&self) -> Rectangle {        let text = self.line_text(self.cursor.line);
         Rectangle {
             x: self.gutter_width()
                 + prefix_width(&text, self.cursor.col.min(text.chars().count()))
@@ -1472,19 +1508,21 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
-        // 光标竖线
+        // 光标竖线（静止期按闪烁相位隐现；活动窗口期内常显）
         let caret = core.caret_rect_relative();
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle {
-                    x: bounds.x + caret.x,
-                    y: bounds.y + caret.y,
-                    ..caret
+        if core.caret_visible() {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x + caret.x,
+                        y: bounds.y + caret.y,
+                        ..caret
+                    },
+                    ..renderer::Quad::default()
                 },
-                ..renderer::Quad::default()
-            },
-            colors.caret,
-        );
+                colors.caret,
+            );
+        }
 
         // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）
         let sb = VScrollbar::measure(
@@ -2596,5 +2634,25 @@ mod tests {
         // 命中区只在右侧窄带
         assert!(sb.hits(798.0, 300.0, 800.0) == false || !sb.needed);
         assert!(!sb.hits(100.0, 300.0, 800.0), "正文区域不得算进滚动条命中区");
+    }
+
+    // ---------- 光标闪烁 ----------
+
+    #[test]
+    fn caret_blink_phase_toggles_and_activity_forces_visible() {
+        let mut c = core_with("hello");
+        assert!(c.caret_visible(), "初始相位可见");
+
+        // 心跳翻转相位
+        c.tick_blink();
+        assert!(!c.caret_visible(), "静止期应按相位隐没");
+        c.tick_blink();
+        assert!(c.caret_visible());
+
+        // 活动窗口：移动光标后 450ms 内无论相位都常显
+        c.poke_caret();
+        assert!(c.caret_visible());
+        c.tick_blink(); // 相位翻到隐，但活动窗未过期
+        assert!(c.caret_visible(), "活动窗口期内不得隐没");
     }
 }

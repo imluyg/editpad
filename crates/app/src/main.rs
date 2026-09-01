@@ -104,6 +104,8 @@ enum Message {
     CloseTabSave(usize),
     /// 切换 Markdown 预览面板（仅当前语法为 Markdown 时生效；P22 第三批）
     PreviewToggled,
+    /// 光标闪烁心跳（打磨项）：翻转闪烁相位并触发重绘
+    CaretTick,
     /// 格式化 JSON（Ctrl+Shift+F，仅当前语法为 JSON 时生效；P22 第二批）
     FormatJson,
     /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
@@ -864,7 +866,16 @@ impl Editpad {
             ..Self::default()
         };
         state.cur().borrow_mut().set_font_size(font_size);
-        (state, Task::none())
+        // P18 打磨：启动光标闪烁心跳链（自我续期，占用一个睡眠节拍）
+        let caret_chain = Task::perform(
+            async {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    editor::CARET_BLINK_MS,
+                ));
+            },
+            |_| Message::CaretTick,
+        );
+        (state, caret_chain)
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1375,6 +1386,19 @@ impl Editpad {
             Message::CancelCloseTab => {
                 self.close_tab_confirm = None;
                 Task::none()
+            }
+            Message::CaretTick => {
+                // 打磨项：翻转闪烁相位（update 本身会触发重绘）。
+                // 心跳链在 new() 启动后自我续期，占用一个常驻睡眠节拍。
+                self.cur_handle.borrow_mut().tick_blink();
+                Task::perform(
+                    async {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            editor::CARET_BLINK_MS,
+                        ));
+                    },
+                    |_| Message::CaretTick,
+                )
             }
             Message::PreviewToggled => {
                 // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
