@@ -544,8 +544,14 @@ fn transcode_notice(original_encoding: &str) -> Option<String> {
 // ---------- Markdown 预览面板（P22 第三批） ----------
 
 /// 把解析出的块级元素排成只读预览列（滚动容器包裹）。
-fn markdown_preview_element(source: &str) -> Element<'static, Message> {
+///
+/// `font_size` = 当前正文字号：预览排版整体随 Ctrl+滚轮缩放（P33 口径），
+/// 各级基准值与旧硬编码一致（正文默认 16px 时逐项像素相等）。
+fn markdown_preview_element(source: &str, font_size: f32) -> Element<'static, Message> {
     use iced::font::Weight;
+
+    // 预览各级字号相对正文默认 16px 的既有比例
+    let scaled = |base: f32| base * (font_size / 16.0);
 
     let blocks = editpad_core::markdown::parse_markdown(source);
     let mut col = column![].spacing(10).padding(14);
@@ -553,23 +559,24 @@ fn markdown_preview_element(source: &str) -> Element<'static, Message> {
         match block {
             editpad_core::markdown::MdBlock::Heading { level, spans } => {
                 let px = match level {
-                    1 => 26.0,
-                    2 => 23.0,
-                    3 => 20.0,
-                    4 => 18.0,
-                    5 => 17.0,
-                    _ => 16.0,
+                    1 => scaled(26.0),
+                    2 => scaled(23.0),
+                    3 => scaled(20.0),
+                    4 => scaled(18.0),
+                    5 => scaled(17.0),
+                    _ => scaled(16.0),
                 };
                 col = col.push(md_spans_row(spans, px, true));
             }
             editpad_core::markdown::MdBlock::Paragraph { spans } => {
-                col = col.push(md_spans_row(spans, 15.0, false));
+                col = col.push(md_spans_row(spans, scaled(15.0), false));
             }
             editpad_core::markdown::MdBlock::ListItem { spans } => {
-                let mut line = row![text("• ").size(15)];
+                let mut line = row![text("• ").size(scaled(15.0)).font(editor::BODY_FONT)];
                 for span in spans {
                     let font = md_font(span.is_bold(), span.is_italic());
-                    let mut t = text(span.text.clone()).size(15).font(font);
+                    let mut t =
+                        text(span.text.clone()).size(scaled(15.0)).font(font);
                     if span.is_code() {
                         t = t.color([0.12, 0.36, 0.6]);
                     }
@@ -578,11 +585,16 @@ fn markdown_preview_element(source: &str) -> Element<'static, Message> {
                 col = col.push(line);
             }
             editpad_core::markdown::MdBlock::Quote { spans } => {
-                let mut line = row![text("▌ ").color([0.55, 0.55, 0.6])];
+                let mut line = row![
+                    text("▌ ")
+                        .size(scaled(15.0))
+                        .font(editor::BODY_FONT)
+                        .color([0.55, 0.55, 0.6])
+                ];
                 for span in spans {
                     let font = md_font(span.is_bold(), span.is_italic());
                     let t = text(span.text.clone())
-                        .size(15)
+                        .size(scaled(15.0))
                         .font(font)
                         .color([0.45, 0.45, 0.5]);
                     line = line.push(t);
@@ -593,10 +605,10 @@ fn markdown_preview_element(source: &str) -> Element<'static, Message> {
                 for line in lines {
                     col = col.push(
                         text(format!("▏ {line}"))
-                            .size(14)
+                            .size(scaled(14.0))
                             .font(Font {
                                 weight: Weight::Normal,
-                                ..Font::MONOSPACE
+                                ..editor::BODY_FONT
                             })
                             .color([0.25, 0.35, 0.45]),
                     );
@@ -637,7 +649,7 @@ fn md_spans_row(
         let font = Font {
             weight,
             style,
-            ..Font::MONOSPACE
+            ..editor::BODY_FONT
         };
         let mut t = text(span.text.clone()).size(px).font(font);
         if span.is_code() {
@@ -660,7 +672,43 @@ fn md_font(bold: bool, italic: bool) -> Font {
         } else {
             iced::font::Style::Normal
         },
-        ..Font::MONOSPACE
+        ..editor::BODY_FONT
+    }
+}
+
+// ---------- 字体一致性（P33） ----------
+
+/// 启动期把 `Family::Monospace` 的解析目标钉到系统里第一个可用的 CJK
+/// 等宽字体（方案 c，候选与优先级见 [`editor::CJK_MONO_CANDIDATES`]）。
+///
+/// 根因回顾：正文主字体 MONOSPACE 在 Windows 上不含 CJK 字形，cosmic-text
+/// 对缺字形的文本按内建回退表（font/fallback/windows.rs：Han 按 locale 分流
+/// ja→Yu Gothic / zh→Microsoft YaHei UI…）逐 run 兜底——共享码位汉字
+/// （如「我」）与简化专有字（如「现/试」）落入不同回退字体，正是用户截图里
+/// 「逐字字形不一」的主缺陷。主字体一旦覆盖 CJK，逐字回退不再参与。
+///
+/// 实现要点：
+/// * 入口 = `iced::advanced::graphics::text::font_system()`（iced 0.14 公开
+///   全局，wgpu / tiny-skia 两后端共用）；`raw().db_mut()` 直达 fontdb；
+/// * 只改解析目标、不装载任何字体字节——零体积、零内存增量（预算总则入账）；
+/// * 进程内一次（AtomicBool 幂等），且发生在首帧排版之前，无缓存失效问题；
+/// * 无候选命中（非 CJK 环境/极简系统）静默保持现状，零行为变化。
+fn apply_default_cjk_mono_pin() {
+    static APPLIED: AtomicBool = AtomicBool::new(false);
+    if APPLIED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(mut font_system) = iced::advanced::graphics::text::font_system().write() else {
+        return;
+    };
+    let families: Vec<String> = font_system
+        .raw()
+        .db_mut()
+        .faces()
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+        .collect();
+    if let Some(family) = editor::pick_cjk_mono_family(&families) {
+        font_system.raw().db_mut().set_monospace_family(family);
     }
 }
 
@@ -1255,6 +1303,10 @@ impl Editpad {
     }
 
     fn new() -> (Self, Task<Message>) {
+        // P33：先把 Family::Monospace 的解析目标钉到 CJK 等宽候选（幂等、
+        // 进程内一次）——必须发生在首帧排版之前，否则排版缓存里已固化的
+        // 逐字回退不会重排
+        apply_default_cjk_mono_pin();
         let settings = editpad_core::Settings::load();
         // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
         // （对齐 P20「记住最近文件」先例）
@@ -3208,11 +3260,17 @@ impl Editpad {
     fn tab_context_panel(&self, idx: usize) -> Element<'_, Message> {
         let tab = &self.tabs[idx];
         let interactive = !self.busy;
+        // P33：UI 字号/字形族统一口径（与正文同族、随 Ctrl+滚轮缩放）
+        let uipx = self.display_font_size() * editor::UI_FONT_SCALE;
+        let uifont = editor::BODY_FONT;
 
         let mut panel = column![
             row![
-                text(format!("「{}」", tab.base_name())).color([0.5, 0.5, 0.5]),
-                button(text("×"))
+                text(format!("「{}」", tab.base_name()))
+                    .size(uipx)
+                    .font(uifont)
+                    .color([0.5, 0.5, 0.5]),
+                button(text("×").size(uipx).font(uifont))
                     .padding([2, 8])
                     .on_press(Message::TabContextMenuClosed),
             ]
@@ -3225,14 +3283,14 @@ impl Editpad {
         // 固定 / 取消固定（固定页豁免一切关闭路径）
         let pin_label = if tab.pinned { "取消固定" } else { "📌 固定标签页" };
         panel = panel.push(
-            button(container(text(pin_label)).width(Fill))
+            button(container(text(pin_label).size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
                 .on_press_maybe(interactive.then_some(Message::TogglePinTab(idx))),
         );
         // 保存：仅置脏可用（与工具栏「保存」同一口径）；
         // 未命名页在 update 层自动落另存为
         panel = panel.push(
-            button(container(text("保存")).width(Fill))
+            button(container(text("保存").size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
                 .on_press_maybe(
                     (interactive && tab.dirty).then_some(Message::SaveTabFromMenu(idx)),
@@ -3241,7 +3299,7 @@ impl Editpad {
         // 另存为 / 重命名（v1 同一动作兜底，§3 P28 第 2 条）
         let rename_label = if tab.path.is_some() { "重命名…" } else { "另存为…" };
         panel = panel.push(
-            button(container(text(rename_label)).width(Fill))
+            button(container(text(rename_label).size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
                 .on_press_maybe(interactive.then_some(Message::RenameOrSaveAsTab(idx))),
         );
@@ -3250,7 +3308,7 @@ impl Editpad {
 
         // 关闭：固定页拒绝（update 层守卫 + 菜单项灰掉双保险）
         panel = panel.push(
-            button(container(text("关闭")).width(Fill))
+            button(container(text("关闭").size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
                 .on_press_maybe(
                     (interactive && !tab.pinned).then_some(Message::CloseTabAt(idx)),
@@ -3260,18 +3318,28 @@ impl Editpad {
         let others = batch_close_targets(&self.tabs, BatchCloseScope::Others(idx));
         let right = batch_close_targets(&self.tabs, BatchCloseScope::RightOf(idx));
         panel = panel.push(
-            button(container(text(format!("关闭其他标签页({})", others.len()))).width(Fill))
-                .width(Fill)
-                .on_press_maybe(
-                    (!others.is_empty() && interactive).then_some(Message::CloseOtherTabs(idx)),
-                ),
+            button(
+                container(text(format!("关闭其他标签页({})", others.len()))
+                    .size(uipx)
+                    .font(uifont))
+                    .width(Fill),
+            )
+            .width(Fill)
+            .on_press_maybe(
+                (!others.is_empty() && interactive).then_some(Message::CloseOtherTabs(idx)),
+            ),
         );
         panel = panel.push(
-            button(container(text(format!("关闭右侧标签页({})", right.len()))).width(Fill))
-                .width(Fill)
-                .on_press_maybe(
-                    (!right.is_empty() && interactive).then_some(Message::CloseTabsRight(idx)),
-                ),
+            button(
+                container(text(format!("关闭右侧标签页({})", right.len()))
+                    .size(uipx)
+                    .font(uifont))
+                    .width(Fill),
+            )
+            .width(Fill)
+            .on_press_maybe(
+                (!right.is_empty() && interactive).then_some(Message::CloseTabsRight(idx)),
+            ),
         );
         panel.into()
     }
@@ -3280,14 +3348,17 @@ impl Editpad {
     /// （主题/字号/即时保存/隐私/会话）+ 只读热键速查表。改动即写回。
     fn settings_panel(&self) -> Element<'_, Message> {
         let s = &self.settings;
+        // P33：UI 字号/字形族统一口径（与正文同族、随 Ctrl+滚轮缩放）
+        let uipx = self.display_font_size() * editor::UI_FONT_SCALE;
+        let uifont = editor::BODY_FONT;
 
         // 热键速查表（只读）：数据源 = HOTKEYS，与 README「快捷键」段同源
-        let mut hotkey_col = column![text("热键（速查）").size(16)].spacing(2);
+        let mut hotkey_col = column![text("热键（速查）").size(uipx).font(uifont)].spacing(2);
         for (combo, desc) in HOTKEYS {
             hotkey_col = hotkey_col.push(
                 row![
-                    text(*combo).width(150),
-                    text(*desc).color([0.5, 0.5, 0.5]),
+                    text(*combo).size(uipx).font(uifont).width(150),
+                    text(*desc).size(uipx).font(uifont).color([0.5, 0.5, 0.5]),
                 ]
                 .spacing(8),
             );
@@ -3296,8 +3367,8 @@ impl Editpad {
         container(
             column![
                 row![
-                    text("设置").size(20),
-                    button(text("×"))
+                    text("设置").size(uipx * 1.25).font(uifont),
+                    button(text("×").size(uipx).font(uifont))
                         .padding([2, 8])
                         .on_press(Message::SettingsToggled),
                 ]
@@ -3306,26 +3377,30 @@ impl Editpad {
                 rule::horizontal(1),
 
                 // ---- 外观 ----
-                text("外观").size(16),
+                text("外观").size(uipx).font(uifont),
                 row![
-                    text("主题"),
-                    button(text(if s.is_dark() { "深色" } else { "浅色" }))
+                    text("主题").size(uipx).font(uifont),
+                    button(text(if s.is_dark() { "深色" } else { "浅色" })
+                        .size(uipx)
+                        .font(uifont))
                         .padding([2, 8])
                         .on_press(Message::ThemeToggled),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
                 row![
-                    text("字号"),
-                    button(text("A-"))
+                    text("字号").size(uipx).font(uifont),
+                    button(text("A-").size(uipx).font(uifont))
                         .padding([2, 8])
                         .on_press_maybe(
                             (self.display_font_size()
                                 > editpad_core::settings::MIN_FONT_SIZE)
                                 .then_some(Message::FontSizeDelta(-2.0))
                         ),
-                    text(format!("{:.0}", self.display_font_size())),
-                    button(text("A+"))
+                    text(format!("{:.0}", self.display_font_size()))
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("A+").size(uipx).font(uifont))
                         .padding([2, 8])
                         .on_press_maybe(
                             (self.display_font_size()
@@ -3337,21 +3412,25 @@ impl Editpad {
                 .align_y(Alignment::Center),
 
                 // ---- 即时保存（P18） ----
-                text("即时保存").size(16),
+                text("即时保存").size(uipx).font(uifont),
                 checkbox(s.autosave_enabled)
                     .label("停手后自动落盘")
+                    .text_size(uipx)
+                    .font(uifont)
                     .on_toggle(Message::SettingsAutosaveToggled),
                 row![
-                    text("防抖秒数"),
-                    button(text("-"))
+                    text("防抖秒数").size(uipx).font(uifont),
+                    button(text("-").size(uipx).font(uifont))
                         .padding([2, 8])
                         .on_press_maybe(
                             (s.autosave_delay_secs
                                 > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
                                 .then_some(Message::SettingsAutosaveDelayDelta(-1))
                         ),
-                    text(format!("{}", s.autosave_delay_secs)),
-                    button(text("+"))
+                    text(format!("{}", s.autosave_delay_secs))
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("+").size(uipx).font(uifont))
                         .padding([2, 8])
                         .on_press_maybe(
                             (s.autosave_delay_secs
@@ -3363,39 +3442,49 @@ impl Editpad {
                 .align_y(Alignment::Center),
 
                 // ---- 隐私与会话（P20/P29/P30/P31） ----
-                text("隐私与会话").size(16),
+                text("隐私与会话").size(uipx).font(uifont),
                 checkbox(s.remember_recent_files)
                     .label("记住最近打开的文件")
+                    .text_size(uipx)
+                    .font(uifont)
                     .on_toggle(Message::SettingsRememberRecentToggled),
                 checkbox(s.enable_snapshots)
                     .label("会话快照（关窗自动保存未存内容）")
+                    .text_size(uipx)
+                    .font(uifont)
                     .on_toggle(Message::SettingsSnapshotsToggled),
                 checkbox(s.remember_session)
                     .label("启动时恢复上次界面")
+                    .text_size(uipx)
+                    .font(uifont)
                     .on_toggle(Message::SettingsRememberSessionToggled),
                 row![
-                    text("关窗行为"),
+                    text("关窗行为").size(uipx).font(uifont),
                     button(text(if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
                         "快照直退"
                     } else {
                         "每次询问"
-                    }))
+                    })
+                    .size(uipx)
+                    .font(uifont))
                     .padding([2, 8])
                     .on_press(Message::SettingsExitModeToggled),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
                 row![
-                    text("心跳间隔秒数"),
-                    button(text("-"))
+                    text("心跳间隔秒数").size(uipx).font(uifont),
+                    button(text("-").size(uipx).font(uifont))
                         .padding([2, 8])
                         .on_press_maybe(
                             (s.snapshot_interval_secs
                                 > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
                                 .then_some(Message::SettingsIntervalDelta(-5))
                         ),
-                    text(format!("{}", s.snapshot_interval_secs)),
-                    button(text("+"))
+                    text(format!("{}", s.snapshot_interval_secs))
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("+").size(uipx).font(uifont))
                         .padding([2, 8])
                         .on_press_maybe(
                             (s.snapshot_interval_secs
@@ -3424,16 +3513,19 @@ impl Editpad {
             .highlight_syntax_name()
             .as_deref()
             == Some("Markdown");
+        // P33：UI 字号/字形族统一口径——全部控件与正文同族、随 Ctrl+滚轮缩放
+        let uipx = self.display_font_size() * editor::UI_FONT_SCALE;
+        let uifont = editor::BODY_FONT;
 
         let toolbar = row![
-            button(text("打开…"))
+            button(text("打开…").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::OpenRequested)),
-            button(text("保存"))
+            button(text("保存").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy && self.tab().dirty)
                     .then_some(Message::SaveRequested)),
-            button(text("另存为…"))
+            button(text("另存为…").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::SaveAsRequested)),
             // P22 第三批：Markdown 预览开关（仅 Markdown 语法页可用）
@@ -3441,33 +3533,39 @@ impl Editpad {
                 "关闭预览"
             } else {
                 "MD 预览"
-            }))
+            })
+            .size(uipx)
+            .font(uifont))
             .padding([4, 12])
             .on_press_maybe(is_markdown.then_some(Message::PreviewToggled)),
-            button(text("查找/替换"))
+            button(text("查找/替换").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::FindToggled)),
-            button(text("跳转到行"))
+            button(text("跳转到行").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::GotoToggled)),
-            button(text("最近文件"))
+            button(text("最近文件").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::RecentsToggled)),
             button(text(if self.dark_mode {
                 "主题:深色"
             } else {
                 "主题:浅色"
-            }))
+            })
+            .size(uipx)
+            .font(uifont))
             .padding([4, 12])
             .on_press(Message::ThemeToggled),
             row![
-                button(text("A-"))
+                button(text("A-").size(uipx).font(uifont))
                     .padding([4, 10])
                     .on_press_maybe((self.display_font_size()
                         > editpad_core::settings::MIN_FONT_SIZE)
                         .then_some(Message::FontSizeDelta(-2.0))),
-                text(format!("{:.0}", self.display_font_size())),
-                button(text("A+"))
+                text(format!("{:.0}", self.display_font_size()))
+                    .size(uipx)
+                    .font(uifont),
+                button(text("A+").size(uipx).font(uifont))
                     .padding([4, 10])
                     .on_press_maybe((self.display_font_size()
                         < editpad_core::settings::MAX_FONT_SIZE)
@@ -3476,10 +3574,13 @@ impl Editpad {
             .spacing(4)
             .align_y(Alignment::Center),
             // P27：设置弹窗入口（busy 时禁开，与其余工具栏按钮同一守卫）
-            button(text("设置"))
+            button(text("设置").size(uipx).font(uifont))
                 .padding([4, 12])
                 .on_press_maybe((!self.busy).then_some(Message::SettingsToggled)),
-            text(if self.tab().dirty { "● 未保存" } else { "" }).color([0.85, 0.55, 0.1]),
+            text(if self.tab().dirty { "● 未保存" } else { "" })
+                .size(uipx)
+                .font(uifont)
+                .color([0.85, 0.55, 0.1]),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -3501,7 +3602,9 @@ impl Editpad {
                         button(text(format!(
                             "{marker}{pin}{}",
                             tab.display_name()
-                        )))
+                        ))
+                        .size(uipx)
+                        .font(uifont))
                         .padding([2, 10])
                         .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
                     )
@@ -3521,7 +3624,7 @@ impl Editpad {
         // 中间主区域：Markdown 预览面板 或 自绘虚拟化编辑器
         if self.preview_visible && is_markdown {
             let text = self.cur_handle.borrow().doc.to_text();
-            body = body.push(markdown_preview_element(&text));
+            body = body.push(markdown_preview_element(&text, self.display_font_size()));
         } else {
             body = body.push(self.cur_handle.view());
         }
@@ -3529,7 +3632,7 @@ impl Editpad {
         if let Some((bytes_read, total_bytes)) = self.progress {
             body = body.push(
                 row![
-                    text("加载中…"),
+                    text("加载中…").size(uipx).font(uifont),
                     container(
                         progress_bar(0.0..=total_bytes.max(1) as f32, bytes_read as f32)
                     )
@@ -3538,7 +3641,9 @@ impl Editpad {
                         "{} / {} KB",
                         bytes_read / 1024,
                         total_bytes.max(1) / 1024
-                    )),
+                    ))
+                    .size(uipx)
+                    .font(uifont),
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center)
@@ -3549,11 +3654,16 @@ impl Editpad {
         if self.recents_visible {
             let mut panel = column![].spacing(2).padding([4, 10]);
             if self.settings.recent_files.is_empty() {
-                panel = panel.push(text("（暂无最近文件）").color([0.5, 0.5, 0.5]));
+                panel = panel.push(
+                    text("（暂无最近文件）")
+                        .size(uipx)
+                        .font(uifont)
+                        .color([0.5, 0.5, 0.5]),
+                );
             }
             for entry in &self.settings.recent_files {
                 panel = panel.push(
-                    button(container(text(entry)).width(Fill))
+                    button(container(text(entry).size(uipx).font(uifont)).width(Fill))
                         .width(Fill)
                         .on_press_maybe(
                             (!self.busy).then_some(Message::RecentSelected(entry.clone())),
@@ -3564,10 +3674,13 @@ impl Editpad {
             if !self.settings.recent_files.is_empty() {
                 panel = panel.push(
                     row![
-                        button(text("清空记录"))
+                        button(text("清空记录").size(uipx).font(uifont))
                             .padding([2, 8])
                             .on_press_maybe((!self.busy).then_some(Message::RecentsCleared)),
-                        text("从 config.toml 移除全部路径").color([0.5, 0.5, 0.5]),
+                        text("从 config.toml 移除全部路径")
+                            .size(uipx)
+                            .font(uifont)
+                            .color([0.5, 0.5, 0.5]),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -3595,18 +3708,22 @@ impl Editpad {
             body = body.push(rule::horizontal(1)).push(
                 row![
                     text_input("查找内容", &self.find_query)
+                        .size(uipx)
+                        .font(uifont)
                         .on_input(Message::FindQueryChanged)
                         .on_submit(Message::FindNext)
                         .width(200),
-                    text(position_label),
-                    button(text("↑ 上一个"))
+                    text(position_label).size(uipx).font(uifont),
+                    button(text("↑ 上一个").size(uipx).font(uifont))
                         .on_press_maybe(has_matches.then_some(Message::FindPrev)),
-                    button(text("↓ 下一个"))
+                    button(text("↓ 下一个").size(uipx).font(uifont))
                         .on_press_maybe(has_matches.then_some(Message::FindNext)),
                     checkbox(self.case_sensitive)
                         .label("区分大小写")
+                        .text_size(uipx)
+                        .font(uifont)
                         .on_toggle(Message::CaseToggled),
-                    button(text("×")).on_press(Message::FindToggled),
+                    button(text("×").size(uipx).font(uifont)).on_press(Message::FindToggled),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -3616,12 +3733,14 @@ impl Editpad {
             body = body.push(
                 row![
                     text_input("替换为", &self.replace_query)
+                        .size(uipx)
+                        .font(uifont)
                         .on_input(Message::ReplaceQueryChanged)
                         .width(200),
-                    button(text("替换当前"))
+                    button(text("替换当前").size(uipx).font(uifont))
                         .on_press_maybe(has_matches.then_some(Message::ReplaceCurrent)),
                     // 扫描在途时禁用：此刻的全文快照可能是过期的
-                    button(text("全部替换")).on_press_maybe(
+                    button(text("全部替换").size(uipx).font(uifont)).on_press_maybe(
                         (!scanning).then_some(Message::ReplaceAll),
                     ),
                 ]
@@ -3634,13 +3753,15 @@ impl Editpad {
         if self.goto_visible {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text("跳转到行:"),
+                    text("跳转到行:").size(uipx).font(uifont),
                     text_input("行号", &self.goto_input)
+                        .size(uipx)
+                        .font(uifont)
                         .on_input(Message::GotoInputChanged)
                         .on_submit(Message::GotoSubmit)
                         .width(140),
-                    button(text("跳转")).on_press(Message::GotoSubmit),
-                    button(text("×")).on_press(Message::GotoToggled),
+                    button(text("跳转").size(uipx).font(uifont)).on_press(Message::GotoSubmit),
+                    button(text("×").size(uipx).font(uifont)).on_press(Message::GotoToggled),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -3657,16 +3778,18 @@ impl Editpad {
         if self.confirm_visible {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text("文档有未保存的更改，确定要关闭吗？"),
-                    button(text("保存并关闭"))
+                    text("文档有未保存的更改，确定要关闭吗？")
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("保存并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press_maybe(
                             (!self.busy).then_some(Message::ConfirmSaveAndClose)
                         ),
-                    button(text("放弃更改"))
+                    button(text("放弃更改").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::DiscardAndClose),
-                    button(text("取消"))
+                    button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::CancelClose),
                 ]
@@ -3684,18 +3807,20 @@ impl Editpad {
                     text(format!(
                         "第 {} 个标签页有未保存的更改",
                         idx.saturating_add(1)
-                    )),
-                    button(text("放弃更改并关闭"))
+                    ))
+                    .size(uipx)
+                    .font(uifont),
+                    button(text("放弃更改并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::ConfirmCloseTabDiscard(idx)),
                     // P21 完整版：已命名的页可直接「保存并关闭」
-                    button(text("保存并关闭"))
+                    button(text("保存并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press_maybe(
                             (!self.busy && self.tabs[idx].path.is_some())
                                 .then_some(Message::CloseTabSave(idx)),
                         ),
-                    button(text("取消"))
+                    button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::CancelCloseTab),
                 ]
@@ -3717,11 +3842,13 @@ impl Editpad {
                 row![
                     text(format!(
                         "要关闭的 {total} 个标签页中 {dirty} 个有未保存的更改，全部放弃并关闭？"
-                    )),
-                    button(text("放弃更改并关闭"))
+                    ))
+                    .size(uipx)
+                    .font(uifont),
+                    button(text("放弃更改并关闭").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::ConfirmBatchCloseDiscard),
-                    button(text("取消"))
+                    button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::CancelBatchCloseTabs),
                 ]
@@ -3735,10 +3862,12 @@ impl Editpad {
         if let Some(path) = &self.open_confirm {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text(format!("{} 有未保存的更改，放弃并打开？", path.display())),
-                    button(text("放弃更改并打开"))                        .padding([4, 12])
+                    text(format!("{} 有未保存的更改，放弃并打开？", path.display()))
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("放弃更改并打开").size(uipx).font(uifont))                        .padding([4, 12])
                         .on_press(Message::ConfirmOpenDiscard),
-                    button(text("取消"))
+                    button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::ConfirmOpenCancel),
                 ]
@@ -3754,11 +3883,13 @@ impl Editpad {
         if self.recover_prompt.is_some() {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text("检测到上次未正常退出的未保存工作区"),
-                    button(text("恢复"))
+                    text("检测到上次未正常退出的未保存工作区")
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("恢复").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::SessionRecoverAccepted),
-                    button(text("丢弃"))
+                    button(text("丢弃").size(uipx).font(uifont))
                         .padding([4, 12])
                         .on_press(Message::SessionRecoverDiscarded),
                 ]
@@ -3770,8 +3901,13 @@ impl Editpad {
 
         if !self.status.is_empty() {
             body = body.push(
-                container(text(format!("⚠ {}", self.status)).color([0.9, 0.25, 0.25]))
-                    .padding([4, 10]),
+                container(
+                    text(format!("⚠ {}", self.status))
+                        .size(uipx)
+                        .font(uifont)
+                        .color([0.9, 0.25, 0.25]),
+                )
+                .padding([4, 10]),
             );
         }
 
@@ -3784,14 +3920,22 @@ impl Editpad {
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| format!("({})", self.tab().base_name()))
             )
+            .size(uipx)
+            .font(uifont)
             .width(Fill),
             text(if self.tab().encoding_label.is_empty() {
                 "—".to_owned()
             } else {
                 self.tab().encoding_label.clone()
-            }),
-            text(format!("{} 行", self.cur_handle.borrow().doc.line_count())),
-            text(format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1)),
+            })
+            .size(uipx)
+            .font(uifont),
+            text(format!("{} 行", self.cur_handle.borrow().doc.line_count()))
+                .size(uipx)
+                .font(uifont),
+            text(format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1))
+                .size(uipx)
+                .font(uifont),
         ]
         .spacing(24)
         .align_y(Alignment::Center)
@@ -3928,6 +4072,18 @@ mod tests {
         assert_eq!(panic_message(&"字符串字面量"), "字符串字面量");
         assert_eq!(panic_message(&(String::from("堆上字符串"))), "堆上字符串");
         assert_eq!(panic_message(&42_i32), "未知原因");
+    }
+
+    // ---------- P33 字体一致性 ----------
+
+    #[test]
+    fn font_pin_smoke_call_twice_is_safe() {
+        // P33 冒烟：公开路径 iced::advanced::graphics::text::font_system()
+        // 在测试环境真实可用（不只是类型层面编译通过）；AtomicBool 幂等
+        // 保证二次调用直接短路。副作用仅为 fontdb 的 Family::Monospace
+        // 解析目标被钉到 CJK 等宽候选——测试无渲染断言，不受影响。
+        apply_default_cjk_mono_pin();
+        apply_default_cjk_mono_pin();
     }
 
     // ---------- P8 AltGr ----------

@@ -36,6 +36,66 @@ const GUTTER_MIN: f32 = 12.0;
 const FONT_SIZE_DEFAULT: f32 = 16.0;
 /// 行号栏字号相对正文的比例（16px 正文时即原来的 13px）。
 const GUTTER_FONT_SCALE: f32 = 13.0 / 16.0;
+
+// ---------- 字体一致性（P33） ----------
+//
+// 正文与 UI 的单一换装点：画布、行号栏、UI 控件全部引用 BODY_FONT，
+// 字号全部从正文字号推导——P34（字体选择设置）落地时只需替换常量。
+
+/// 正文与 UI 共用的字形族。
+///
+/// 现状 = `Font::MONOSPACE`，其 CJK 缺口由 [`apply_default_cjk_mono_pin`]
+/// 在启动期把 `Family::Monospace` 的解析目标钉到系统里的 CJK 等宽字体来补齐
+/// （方案 c：零体积治本，不捆绑字体文件）。
+pub const BODY_FONT: Font = Font::MONOSPACE;
+
+/// UI 控件字号 = 正文字号 × 该系数（[`GUTTER_FONT_SCALE`] 先例）。
+///
+/// 勘误留痕：iced 0.14 默认文本尺寸实测为 **16px**
+/// （`iced_core::settings::Settings::default_text_size`），与默认正文字号相同
+/// ——第 25 轮「UI 14px vs 正文 16px」的记录有误，两层割裂实际只在字形族。
+/// 取 1.0 保持既有观感不变；本常量的意义是把「UI 随 Ctrl+滚轮缩放」的口径
+/// 显式化，日后想分级只改这一个数字。
+pub const UI_FONT_SCALE: f32 = 1.0;
+
+/// CJK 等宽候选优先级表（P33 方案 c 钉字）：启动期从左到右扫描，
+/// 第一个系统已安装的族名被设为 fontdb `Family::Monospace` 的解析目标。
+///
+/// - 更纱黑体 / Noto Mono CJK SC：社区推荐的中文等宽（用户自装时最优）；
+/// - NSimSun（新宋体）/ MingLiU（细明体）：Windows 自带简/繁中文等宽；
+/// - MS Gothic（ＭＳ ゴシック）/ Yu Gothic Mono：Windows 自带日文等宽；
+/// - 全部未命中 → 不动（保持系统默认等宽解析，非 CJK 环境零行为变化）。
+///
+/// 刻意不含 SimSun（宋体）：其 ASCII 半宽非严格等宽，会破坏 P14 列映射。
+pub const CJK_MONO_CANDIDATES: [&str; 6] = [
+    "Sarasa Mono SC",
+    "Noto Sans Mono CJK SC",
+    "NSimSun",
+    "MingLiU",
+    "MS Gothic",
+    "Yu Gothic Mono",
+];
+
+/// 族名归一：去空白 + 小写。候选表条目都是 ASCII 形态族名，
+/// 与 fontdb 枚举出的本地化族名做同样宽松的比较即可覆盖大小写/空格变体。
+fn normalize_family(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 从已装字体族名集中挑出第一个命中的 CJK 等宽候选（纯函数便于测试）：
+/// 候选表顺序即优先级；无命中返回 None（调用方保持现状不动）。
+pub fn pick_cjk_mono_family(available: &[String]) -> Option<&'static str> {
+    CJK_MONO_CANDIDATES.iter().find_map(|cand| {
+        let want = normalize_family(cand);
+        available
+            .iter()
+            .any(|family| normalize_family(family) == want)
+            .then_some(*cand)
+    })
+}
 const CARET_WIDTH: f32 = 2.0;
 const MAX_UNDO: usize = 128;
 const SCROLL_LINES_PER_NOTCH: f32 = 3.0;
@@ -1454,7 +1514,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     bounds: Size::new(gutter_w - GUTTER_MIN, lh),
                     size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                     line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                    font: Font::MONOSPACE,
+                    font: BODY_FONT,
                     align_x: core_text::Alignment::Right,
                     align_y: alignment::Vertical::Top,
                     shaping: core_text::Shaping::Basic,
@@ -1478,7 +1538,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         bounds: Size::new((bounds.width - gutter_w).max(0.0), lh),
                         size: Pixels(core.font_size()),
                         line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                        font: Font::MONOSPACE,
+                        font: BODY_FONT,
                         align_x: core_text::Alignment::Default,
                         align_y: alignment::Vertical::Top,
                         shaping: core_text::Shaping::Advanced,
@@ -1510,7 +1570,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                             ),
                             size: Pixels(core.font_size()),
                             line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                            font: Font::MONOSPACE,
+                            font: BODY_FONT,
                             align_x: core_text::Alignment::Default,
                             align_y: alignment::Vertical::Top,
                             shaping: core_text::Shaping::Advanced,
@@ -1552,7 +1612,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         bounds: Size::new(width + 60.0, lh),
                         size: Pixels(core.font_size()),
                         line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                        font: Font::MONOSPACE,
+                        font: BODY_FONT,
                         align_x: core_text::Alignment::Default,
                         align_y: alignment::Vertical::Top,
                         shaping: core_text::Shaping::Advanced,
@@ -1969,6 +2029,49 @@ mod tests {
         let mut c = EditorCore::default();
         c.reset_document(Document::from_str(text));
         c
+    }
+
+    // ---------- P33 字体一致性 ----------
+
+    #[test]
+    fn cjk_mono_candidates_pick_by_priority_with_loose_family_matching() {
+        // 优先级：候选表顺序决定命中（更纱黑体 > Noto > NSimSun > …）
+        let installed = ["Noto Sans Mono CJK SC".to_owned(), "Sarasa Mono SC".to_owned()];
+        assert_eq!(pick_cjk_mono_family(&installed), Some("Sarasa Mono SC"));
+
+        // 大小写与空白宽松匹配（fontdb 枚举出的族名形态不保证规范）
+        let odd = ["  SARASA   MONO  sc ".to_owned(), "Consolas".to_owned()];
+        assert_eq!(pick_cjk_mono_family(&odd), Some("Sarasa Mono SC"));
+
+        // Windows 自带链：无用户自装字体时落到 NSimSun（新宋体）
+        let builtin = ["Microsoft YaHei UI".to_owned(), "nsimsun".to_owned()];
+        assert_eq!(pick_cjk_mono_family(&builtin), Some("NSimSun"));
+
+        // 全部未命中（非 CJK 环境/极简系统）→ None，调用方保持现状零变化
+        let none = ["Consolas".to_owned(), "Arial".to_owned()];
+        assert_eq!(pick_cjk_mono_family(&none), None);
+    }
+
+    #[test]
+    fn cjk_candidate_table_entries_are_unique_and_exclude_simsun() {
+        let mut seen: Vec<String> = Vec::new();
+        for cand in CJK_MONO_CANDIDATES {
+            let key = normalize_family(cand);
+            assert!(!seen.contains(&key), "候选族名归一后重复：{cand}");
+            seen.push(key);
+        }
+        // 刻意排除 SimSun（宋体）：其 ASCII 半宽非严格等宽，
+        // 钉成主字体会破坏 P14 制表位/列映射假设
+        assert!(CJK_MONO_CANDIDATES.iter().all(|c| *c != "SimSun"));
+    }
+
+    #[test]
+    fn ui_typography_constants_contract() {
+        // 字号口径：默认字号 × UI_FONT_SCALE 与 iced 0.14 默认文本尺寸(16px)
+        // 持平——统一口径不得改变默认观感（第 25 轮「UI 14px」记录已勘误）
+        assert!((FONT_SIZE_DEFAULT * UI_FONT_SCALE - 16.0).abs() < f32::EPSILON);
+        // 字形族口径：UI 与正文共用同一换装点（P34 落地时只需改 BODY_FONT）
+        assert_eq!(BODY_FONT, Font::MONOSPACE);
     }
 
     #[test]
