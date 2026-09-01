@@ -1,0 +1,1866 @@
+use super::*;
+use iced::widget::column;
+use super::settings_ui::{
+    chrome_button_style, chrome_menu_item_style, chrome_nav_button_style, settings_card_size,
+    settings_card_style, settings_checkbox_style, settings_colors, settings_divider,
+    settings_input_style, settings_rows, settings_search_hit, settings_separator, FONT_ROW_KEY,
+    SettingsPage, SettingsRow,
+};
+
+impl Editpad {
+    /// 应用主题（boot 从设置读入，工具栏可切换）。
+    pub(crate) fn theme(&self) -> Theme {
+        if self.dark_mode {
+            Theme::Dark
+        } else {
+            Theme::Light
+        }
+    }
+
+    /// 设置里归一后的当前字号（显示与按钮可用性判断都用它）。
+    pub(crate) fn display_font_size(&self) -> f32 {
+        editor::normalize_font_size(self.settings.font_size)
+    }
+
+    /// 正文与 UI 的统一字形族（P34 换装点）：生效族名 Some → 以
+    /// `Family::Name` 引用（系统字体已在 fontdb 里，无需装载字节），
+    /// None / 未配置 → 默认等宽（P33 的 CJK 钉字仍生效）。
+    /// iced 排版缓存按 Font 值做键——运行期换族即换键，无陈旧缓存问题。
+    pub(crate) fn body_font(&self) -> Font {
+        match self.active_font_family {
+            Some(name) => Font {
+                family: iced::font::Family::Name(name),
+                ..editor::BODY_FONT
+            },
+            None => editor::BODY_FONT,
+        }
+    }
+
+    /// 「放弃更改并关闭」：P21 聚合放弃 + P29 连快照一起丢
+    /// （§3 P29 第 4 条——不清场的话，下次启动会把已放弃的内容
+    /// 当会话恢复回来）。`snapshot_dir` 注入点同 [`Self::handle_close_request`]。
+    pub(crate) fn discard_all_and_close(&mut self, snapshot_dir: Option<PathBuf>) -> Task<Message> {
+        // P21：放弃关闭 = 全部标签页的未保存标记一并放弃
+        for tab in &mut self.tabs {
+            tab.dirty = false;
+        }
+        self.confirm_visible = false;
+        if self.settings.enable_snapshots {
+            if let Some(dir) = snapshot_dir {
+                editpad_core::snapshot::clear_session(&dir);
+            }
+        }
+        self.close_window()
+    }
+
+    // ---------- 周期快照心跳（P31） ----------
+
+    /// Tab → 清单页元数据的统一映射。`file` 由调用方决定：
+    /// 退出流恒 None（全量重写）；心跳流对「版本未变的置脏页」预填
+    /// 旧文件名（core 侧据此复用不重写）。
+    fn session_tab_metadata(
+        t: &Tab,
+        file: Option<String>,
+    ) -> editpad_core::snapshot::SessionTab {
+        let ed = t.editor.borrow();
+        editpad_core::snapshot::SessionTab {
+            path: t.path.as_ref().map(|p| p.display().to_string()),
+            untitled_num: t.untitled_num,
+            dirty: t.dirty,
+            file,
+            cursor_line: ed.cursor.line,
+            cursor_col: ed.cursor.col,
+            scroll_top: ed.scroll_top,
+            scroll_left: ed.scroll_left,
+        }
+    }
+
+    /// 心跳选页：返回需要**重写内容**的 (下标, 派发时刻版本) 列表。
+    /// 判定核心在 core 的 [`editpad_core::snapshot::heartbeat_page_selected`]：
+    /// 置脏 + 未超大小上限（按 rope 真实字节数）+ 版本自上次快照有推进。
+    fn heartbeat_plan(&self) -> Vec<(usize, u64)> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let last = t.heartbeat_snap.as_ref().map(|(v, _)| *v);
+                editpad_core::snapshot::heartbeat_page_selected(
+                    t.dirty,
+                    t.editor.borrow().doc.text_len_bytes() as u64,
+                    last,
+                    t.version,
+                )
+            })
+            .map(|(i, t)| (i, t.version))
+            .collect()
+    }
+
+    /// 组装全部页的心跳提交输入（逐页意图见 core [`HeartbeatPage`]）：
+    /// * 计划内的页 `rewrite=true` → 内容落新文件；
+    /// * 计划外但账目显示版本未变的置脏页：预填旧文件名 → 复用不重写；
+    /// * 计划外的其余置脏页（超限节流）：不预填 → 只记账不落内容；
+    /// * 干净页只记元数据。文档一律 rope 结构共享克隆（O(1)）。
+    fn build_heartbeat_pages(
+        &self,
+        plan: &[(usize, u64)],
+    ) -> Vec<editpad_core::snapshot::HeartbeatPage> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| {
+                let rewrite = plan.iter().any(|(i, _)| *i == idx);
+                let reuse = t
+                    .heartbeat_snap
+                    .as_ref()
+                    .filter(|(v, _)| !rewrite && *v == t.version)
+                    .map(|(_, f)| f.clone());
+                editpad_core::snapshot::HeartbeatPage {
+                    page: editpad_core::snapshot::SessionPage {
+                        tab: Self::session_tab_metadata(t, reuse),
+                        doc: t.editor.borrow().doc.clone(),
+                    },
+                    rewrite,
+                }
+            })
+            .collect()
+    }
+
+    /// 心跳提交准备：无变化且清单不过期时返回 None（本轮零 IO）。
+    pub(crate) fn prepare_heartbeat_commit(&self, dir: &Path) -> Option<HeartbeatPayload> {
+        let plan = self.heartbeat_plan();
+        if plan.is_empty() && !self.session_manifest_stale {
+            return None;
+        }
+        Some(HeartbeatPayload {
+            dir: dir.to_path_buf(),
+            pages: self.build_heartbeat_pages(&plan),
+            active: self.active_tab,
+            next_untitled: self.untitled_next,
+            plan,
+        })
+    }
+
+    /// 心跳回报落地（update 与测试同步入口共用的唯一出口）：
+    /// 成功 → 清过期标记，按派发时刻的计划逐页回填账目——
+    /// 版本仍一致且仍置脏才记（期间编辑过/转干净/已关闭的页自然跳过，
+    /// 其下一拍会重新入选或不再需要）；失败 → 全部账目作废（下一拍
+    /// 全量重试），状态栏留痕不无声吞掉（P18 同款取舍）。
+    pub(crate) fn heartbeat_apply(&mut self, outcome: HeartbeatOutcome) {
+        self.heartbeat_inflight = false;
+        match outcome.result {
+            Ok(manifest) => {
+                self.session_manifest_stale = false;
+                for (idx, version) in outcome.plan {
+                    let Some(tab) = self.tabs.get_mut(idx) else {
+                        continue; // 期间被关闭/下标漂移：放弃这条账目
+                    };
+                    if !(tab.dirty && tab.version == version) {
+                        continue;
+                    }
+                    if let Some(name) =
+                        manifest.tabs.get(idx).and_then(|t| t.file.clone())
+                    {
+                        tab.heartbeat_snap = Some((version, name));
+                    }
+                }
+            }
+            Err(error) => {
+                for tab in &mut self.tabs {
+                    tab.heartbeat_snap = None;
+                }
+                self.status = format!("快照心跳失败:{error}");
+            }
+        }
+    }
+
+    /// 同步执行一次完整心跳周期——生产路径走异步 [`Self::drive_heartbeat`]，
+    /// 本入口供测试端到端验证磁盘产物与账目回填（共用 prepare/apply 两半）。
+    #[cfg(test)]
+    pub(crate) fn run_heartbeat_cycle(&mut self, dir: &Path) -> Option<HeartbeatOutcome> {
+        let payload = self.prepare_heartbeat_commit(dir)?;
+        self.heartbeat_inflight = true;
+        let result = editpad_core::snapshot::write_heartbeat_session(
+            &payload.dir,
+            &payload.pages,
+            payload.active,
+            payload.next_untitled,
+        )
+        .map_err(|e| e.to_string());
+        let outcome = HeartbeatOutcome {
+            plan: payload.plan,
+            result,
+        };
+        self.heartbeat_apply(outcome.clone());
+        Some(outcome)
+    }
+
+    // ---------- 关窗流（P29 快照直退） ----------
+
+    /// 关窗请求处置：快照直退的前提 = 总开关开启 + 模式为快照 + 快照目录
+    /// 可用；任一不满足即回退旧行为（置脏弹确认条 / 干净直接关）。
+    ///
+    /// `snapshot_dir` 由调用方解析传入——测试注入项目内目录，
+    /// 避免触碰真实 %APPDATA%（None = 无目录可用，功能自动降级）。
+    pub(crate) fn handle_close_request(&mut self, id: window::Id, snapshot_dir: Option<PathBuf>) -> Task<Message> {
+        // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
+        self.main_window = Some(id);
+        // P32：关窗前把全部命名页的光标/滚动回写最近文件记忆
+        // （快照直退与旧确认条两条路径都要覆盖；未命名页自然跳过）
+        let all: Vec<usize> = (0..self.tabs.len()).collect();
+        self.remember_tab_views(&all);
+        // P30：remember_session 关闭 = 退出不写会话清单，回退旧确认条
+        if !session_restore_allowed(
+            self.settings.enable_snapshots,
+            self.settings.remember_session,
+        ) || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
+        {
+            return self.confirm_or_close();
+        }
+        match snapshot_dir {
+            Some(dir) => self.exit_via_snapshot(&dir),
+            None => self.confirm_or_close(),
+        }
+    }
+
+    /// 旧关窗行为（P29 前的原语义）：任一标签页置脏即弹确认（聚合口径）。
+    fn confirm_or_close(&mut self) -> Task<Message> {
+        if self.any_dirty() {
+            self.confirm_visible = true;
+            Task::none()
+        } else {
+            self.close_window()
+        }
+    }
+
+    /// P29 退出零询问：全部置脏页写内容快照 → 清单提交 → 直接关窗。
+    ///
+    /// 同步执行——关窗瞬间阻塞 UI 数百毫秒量级（50MB 分块写 ~200ms），
+    /// 换取「快照必然反映最终状态」的无竞话语义；窗口即将关闭，用户无感。
+    /// 干净页只记元数据（路径/光标/滚动），不产生内容文件；
+    /// 失败降级：回退旧确认条（数据仍在内存不丢），状态栏留原因。
+    pub(crate) fn exit_via_snapshot(&mut self, dir: &Path) -> Task<Message> {
+        let pages: Vec<editpad_core::snapshot::SessionPage> = self
+            .tabs
+            .iter()
+            .map(|t| editpad_core::snapshot::SessionPage {
+                // 退出流全量重写：file 恒 None，置脏页一律落新文件
+                tab: Self::session_tab_metadata(t, None),
+                doc: t.editor.borrow().doc.clone(),
+            })
+            .collect();
+        match editpad_core::snapshot::write_session(
+            dir,
+            &pages,
+            self.active_tab,
+            self.untitled_next,
+        ) {
+            Ok(_) => {
+                self.status.clear();
+                self.close_window()
+            }
+            Err(error) => {
+                self.status = format!("会话快照失败:{error}");
+                self.confirm_or_close()
+            }
+        }
+    }
+
+    /// 关闭主窗口；id 来自 close_requests 订阅的捕获。
+    pub(crate) fn close_window(&self) -> Task<Message> {
+        match self.main_window {
+            Some(id) => window::close(id),
+            None => Task::none(),
+        }
+    }
+
+    // ---------- 启动会话恢复（P30） ----------
+
+    /// 启动时会话恢复入口：开关任一关闭 = 空白启动（存量会话清场，
+    /// 「只关开关不清数据等于没关」沿用 P20 先例）；清单缺失/损坏/空页
+    /// = 无会话；clean_exit=false（上次异常退出，P31 心跳的中间态即此
+    /// 形态）= 弹一次性恢复提示等用户裁决；否则静默全量还原。
+    pub(crate) fn boot_restore(&mut self) -> Task<Message> {
+        if !session_restore_allowed(
+            self.settings.enable_snapshots,
+            self.settings.remember_session,
+        ) {
+            // enable_snapshots=false 的清场已在 new() 做过；这里补上
+            // remember_session=false 的清场
+            if !self.settings.remember_session {
+                if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
+                    editpad_core::snapshot::clear_session(&dir);
+                }
+            }
+            return Task::none();
+        }
+        match editpad_core::snapshot::snapshot_dir() {
+            Some(dir) => self.restore_from_dir(&dir),
+            None => Task::none(),
+        }
+    }
+
+    /// 从注入的快照目录执行恢复决策。生产路径经 [`Self::boot_restore`]；
+    /// 测试注入项目内目录，避免触碰真实 %APPDATA%（同 P29 先例）。
+    pub(crate) fn restore_from_dir(&mut self, dir: &Path) -> Task<Message> {
+        let Some(manifest) = editpad_core::snapshot::read_manifest(dir) else {
+            return Task::none(); // 无会话/损坏清单一律按空白启动，绝不 panic
+        };
+        if manifest.tabs.is_empty() {
+            return Task::none();
+        }
+        if !manifest.clean_exit {
+            // 孤儿检测 = 崩溃恢复入口（§3 P30 第 2 条）：弹一次性提示，
+            // 数据原封留在磁盘，等用户选择恢复或丢弃
+            self.recover_prompt = Some(manifest);
+            return Task::none();
+        }
+        self.restore_from_manifest(dir, &manifest)
+    }
+
+    /// 按清单重建标签页（P30 主路径）：
+    /// * 未命名页与置脏命名页从快照**同步**还原内容——v1 一律信快照
+    ///   （§3 P30 第 3 条，主流编辑器「所见即所得」），不从磁盘重载覆盖；
+    /// * 干净命名页建占位页排队，逐个经既有加载管线回填（失败跳过不阻断）；
+    /// * 未命名编号延续单调性；激活页最后切换；
+    /// * 内存护栏在规划期整体截断（先保激活页）。
+    pub(crate) fn restore_from_manifest(
+        &mut self,
+        dir: &Path,
+        manifest: &editpad_core::snapshot::SessionManifest,
+    ) -> Task<Message> {
+        let (kept, dropped) =
+            plan_restore_order(manifest, dir, MULTI_TAB_MEM_CAP_BYTES);
+        self.restore_dropped = dropped;
+        self.restore_failed = 0;
+
+        let mut tabs: Vec<Tab> = Vec::with_capacity(kept.len());
+        let mut queue: Vec<RestoreLoad> = Vec::new();
+        let mut next_untitled = 2u64;
+
+        for &i in &kept {
+            let meta = &manifest.tabs[i];
+            let mut tab = self.fresh_tab();
+            match (&meta.path, meta.file.as_deref()) {
+                // ---- 未命名页：内容只可能来自快照 ----
+                (None, _) => {
+                    tab.untitled_num = meta.untitled_num;
+                    if let Some(n) = meta.untitled_num {
+                        next_untitled = next_untitled.max(n.saturating_add(1));
+                    }
+                    if meta.dirty {
+                        match editpad_core::snapshot::read_page(dir, meta) {
+                            Some(doc) => {
+                                {
+                                    let mut ed = tab.editor.borrow_mut();
+                                    ed.reset_document(doc);
+                                    // P38：快照内容不是磁盘内容，不得当落盘
+                                    // 基线——否则撤销回快照态会错误清脏，
+                                    // 未存改动在零询问退出后静默丢失
+                                    ed.clear_saved_baseline();
+                                    ed.restore_view(
+                                        meta.cursor_line,
+                                        meta.cursor_col,
+                                        meta.scroll_top,
+                                        meta.scroll_left,
+                                    );
+                                    // 内容嗅探让未命名草稿同样享受配色
+                                    let sample = head_sample(&ed.doc);
+                                    ed.set_language_by_name(
+                                        editpad_core::resolve_language(None, &sample)
+                                            .as_deref(),
+                                    );
+                                }
+                                tab.dirty = true;
+                            }
+                            None => {
+                                // 快照缺失/损坏：内容已不可得——留空页继续，
+                                // 计入失败汇总（单页失败不阻断，§3 P30 第 6 条）
+                                self.restore_failed += 1;
+                            }
+                        }
+                    }
+                }
+                // ---- 置脏命名页：信快照（所见即所得） ----
+                (Some(path), Some(_)) => {
+                    match editpad_core::snapshot::read_page(dir, meta) {
+                        Some(doc) => {
+                            {
+                                let mut ed = tab.editor.borrow_mut();
+                                ed.reset_document(doc);
+                                // P38：同未命名页——快照 ≠ 磁盘，基线保守置空，
+                                // 撤销回快照态不得清脏（磁盘还是旧内容）
+                                ed.clear_saved_baseline();
+                                ed.restore_view(
+                                    meta.cursor_line,
+                                    meta.cursor_col,
+                                    meta.scroll_top,
+                                    meta.scroll_left,
+                                );
+                                let sample = head_sample(&ed.doc);
+                                ed.set_language_by_name(
+                                    editpad_core::resolve_language(
+                                        Some(Path::new(path)),
+                                        &sample,
+                                    )
+                                    .as_deref(),
+                                );
+                            }
+                            tab.path = Some(PathBuf::from(path));
+                            // 快照恒为 UTF-8 落盘；原文件编码知情权随下次保存归一
+                            tab.encoding_label = "UTF-8".to_owned();
+                            tab.dirty = true;
+                        }
+                        None => {
+                            // 快照读不出（半截写盘等）：退化为按干净命名页
+                            // 从磁盘加载——内容退回上次保存态的现实兜底，
+                            // 但未存改动确实丢了，计入失败汇总如实告知
+                            self.restore_failed += 1;
+                            queue.push(RestoreLoad {
+                                path: PathBuf::from(path),
+                                tab: tabs.len(),
+                                cursor_line: meta.cursor_line,
+                                cursor_col: meta.cursor_col,
+                                scroll_top: meta.scroll_top,
+                                scroll_left: meta.scroll_left,
+                            });
+                        }
+                    }
+                }
+                // ---- 干净命名页：占位 + 排队走既有加载管线 ----
+                (Some(path), None) => {
+                    if meta.dirty {
+                        // P31 超限节流页（置脏但心跳从未落其内容）：
+                        // 退回磁盘上次保存态，未存改动不可得——如实入汇总
+                        self.restore_failed += 1;
+                    }
+                    queue.push(RestoreLoad {
+                        path: PathBuf::from(path),
+                        tab: tabs.len(),
+                        cursor_line: meta.cursor_line,
+                        cursor_col: meta.cursor_col,
+                        scroll_top: meta.scroll_top,
+                        scroll_left: meta.scroll_left,
+                    });
+                }
+            }
+            tabs.push(tab);
+        }
+
+        self.tabs = tabs;
+        // 激活页最后还原；编号计数取「清单值」与「实际用号+1」的较大者
+        self.active_tab = manifest.active.min(self.tabs.len().saturating_sub(1));
+        self.cur_handle = self.tabs[self.active_tab].editor.clone();
+        next_untitled = next_untitled.max(manifest.next_untitled);
+        self.untitled_next = next_untitled;
+
+        self.restore_queue = queue;
+        self.restore_pending = self.restore_queue.len();
+        self.begin_restore_load()
+    }
+
+    /// 恢复链：载入队列中的下一个命名页（队列空则收尾出汇总）。
+    /// 与用户打开的区别：绝不切焦点、不做逐次内存守卫（规划期已整体
+    /// 截断）、登记待还原视图供 Loaded 回填光标滚动。
+    pub(crate) fn begin_restore_load(&mut self) -> Task<Message> {
+        // 队列语义必须 FIFO（remove(0) 而非 pop()）：加载顺序 = 清单下标
+        // 顺序，占位页与排队项的下标对应关系才不会错位（LIFO 会让
+        // 「失败移除」作用在错误的页上——回归测试现场抓过）
+        if self.restore_queue.is_empty() {
+            self.finish_restore_summary();
+            return Task::none();
+        }
+        let entry = self.restore_queue.remove(0);
+        if self.busy || self.active_load.is_some() {
+            // 载入通道被占用（理论不可达：恢复链独占调度）：塞回队首等下轮
+            self.restore_queue.insert(0, entry);
+            return Task::none();
+        }
+        let id = self.register_load_job(entry.path, entry.tab);
+        self.restore_views
+            .insert(id, (entry.cursor_line, entry.cursor_col, entry.scroll_top, entry.scroll_left));
+        Task::none()
+    }
+
+    /// 恢复链的一步收尾：待载数递减；队列排空时出汇总状态。
+    /// 返回是否需要续排下一页（Loaded 处理器据此链接任务）。
+    pub(crate) fn settle_restore_step(&mut self) -> bool {
+        self.restore_pending = self.restore_pending.saturating_sub(1);
+        if self.restore_queue.is_empty() {
+            self.finish_restore_summary();
+            false
+        } else {
+            true
+        }
+    }
+
+    /// 恢复收尾汇总：只有出现值得告知的情况才打扰状态栏
+    /// （失败页/截断页）；全部成功则保持安静，界面本身即是恢复事实。
+    fn finish_restore_summary(&mut self) {
+        let mut notes: Vec<String> = Vec::new();
+        if self.restore_failed > 0 {
+            notes.push(format!("{} 页未能恢复原内容", self.restore_failed));
+        }
+        if self.restore_dropped > 0 {
+            notes.push(format!("{} 页超出内存护栏未恢复", self.restore_dropped));
+        }
+        if !notes.is_empty() {
+            self.status = format!("会话恢复完成:{}", notes.join("，"));
+        }
+        self.restore_failed = 0;
+        self.restore_dropped = 0;
+        self.restore_pending = 0;
+    }
+
+    /// 移除第 idx 个恢复占位页，并把队列中大于 idx 的目标下标整体前移
+    /// （页面移除后，后续排队页的下标随之左移）。仅当该页仍是空净无名
+    /// 占位页才动手——防误删恢复期间用户产生的内容。
+    pub(crate) fn drop_restore_placeholder(&mut self, idx: usize) {
+        let placeholder_ok = self.tabs.get(idx).is_some_and(|t| {
+            t.path.is_none()
+                && !t.dirty
+                && t.untitled_num.is_none()
+                && t.encoding_label.is_empty()
+                && t.editor.borrow().doc.is_empty()
+        });
+        if !placeholder_ok {
+            return;
+        }
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
+        }
+        for entry in &mut self.restore_queue {
+            if entry.tab > idx {
+                entry.tab -= 1;
+            }
+        }
+        // active_tab 可能越界：与 tabs 对齐并同步别名
+        self.refresh_cur_handle();
+    }
+
+    /// 目标页是否仍是待填充的恢复占位页（防串写护栏）：恢复期间用户
+    /// 关页/新建页会让队列下标漂移，宁可丢弃结果也不能覆盖用户内容。
+    pub(crate) fn restore_placeholder_ready(&self, idx: usize) -> bool {
+        self.tabs.get(idx).is_some_and(|t| {
+            t.path.is_none()
+                && !t.dirty
+                && t.untitled_num.is_none()
+                && t.encoding_label.is_empty()
+                && t.editor.borrow().doc.is_empty()
+        })
+    }
+
+    /// 崩溃恢复提示条「恢复」：按暂存清单全量重建（含脏页内容）。
+    pub(crate) fn accept_session_recover(&mut self, dir: Option<PathBuf>) -> Task<Message> {
+        let Some(manifest) = self.recover_prompt.take() else {
+            return Task::none();
+        };
+        match dir {
+            Some(dir) => self.restore_from_manifest(&dir, &manifest),
+            // 目录没了：无从恢复；数据仍在磁盘原处，本次空白起步
+            None => Task::none(),
+        }
+    }
+
+    /// 「丢弃」= 连快照一起丢（P29 放弃语义同族）：清场后空白起步，
+    /// 防止下次启动把已放弃的内容再次当会话恢复回来。
+    pub(crate) fn discard_session_recover(&mut self, dir: Option<PathBuf>) -> Task<Message> {
+        self.recover_prompt = None;
+        if let Some(dir) = dir {
+            editpad_core::snapshot::clear_session(&dir);
+        }
+        Task::none()
+    }
+
+    // ---------- 查找 / 替换内部逻辑 ----------
+
+    /// 排队一次后台查找扫描（P10）。查询为空或查找栏已关闭时转为取消。
+    /// UI 线程只做廉价操作：文档快照是 rope 结构共享克隆，全文扫描
+    /// 在防抖 200ms 后的后台线程进行，结果按序号回填。
+    pub(crate) fn schedule_find_scan(&mut self) -> Task<Message> {        if !self.find_visible || self.find_query.is_empty() {
+            self.cancel_find_scan();
+            return Task::none();
+        }
+        // 作废上一代任务（若它还睡在防抖窗口里，醒来即退出）
+        self.find_cancel.store(true, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.find_cancel = cancelled.clone();
+        self.find_seq += 1;
+        let payload = FindScanPayload {
+            seq: self.find_seq,
+            doc: self.cur_handle.borrow().doc.clone(),
+            // P22 补充：查询做转义解析（\n \r \t \\）后再扫描
+            query: unescape_query(&self.find_query),
+            case_sensitive: self.case_sensitive,
+            cancelled,
+            debounce_ms: FIND_DEBOUNCE_MS,
+        };
+        self.find_scan = Some(self.find_seq);
+        Task::perform(drive_find_scan(payload, |doc, q, cs| {
+            editpad_core::find_all_document(doc, q, cs)
+        }), |message| message)
+    }
+
+    /// 取消在途扫描并清空结果（关查找栏/Esc/清空查询共用）。
+    /// 序号递增 + 取消标志置位双保险，保证在途任务的结果回来后必被丢弃。
+    pub(crate) fn cancel_find_scan(&mut self) {
+        self.find_cancel.store(true, Ordering::Relaxed);
+        self.find_seq += 1;
+        self.find_scan = None;
+        self.matches.clear();
+        self.match_idx = None;
+    }
+
+    pub(crate) fn find_scanning(&self) -> bool {
+        self.find_scan.is_some()
+    }
+
+    /// 安排一次后台高亮铺建（P12）。
+    ///
+    /// * 同代已在途 → 幂等跳过（控件每帧 RedrawRequested 都可能喊一次）；
+    /// * 期间发生过编辑（换代）→ 作废旧任务，从当前存活检查点重新出发；
+    /// * UI 线程成本 = rope 结构共享克隆 + 高亮器检查点向量拷贝，零解析。
+    pub(crate) fn schedule_highlight_pave(&mut self) -> Task<Message> {
+        let current_gen = self.cur_handle.borrow().highlight_generation();
+        if let (Some(active), Some(current)) = (self.hl_paving, current_gen) {
+            if active == current {
+                return Task::none();
+            }
+        }
+        let Some((gen, highlighter)) = self.cur_handle.borrow().highlight_pave_snapshot() else {
+            // 无高亮器（纯文本路径）：清掉可能残留的旧任务登记
+            self.hl_paving = None;
+            return Task::none();
+        };
+        let doc = self.cur_handle.borrow().doc.clone();
+        let total_lines = doc.line_count();
+
+        // 作废上一代任务：批间取消标志 + 结果按代次过滤双保险
+        self.hl_pave_cancel.store(true, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.hl_pave_cancel = cancelled.clone();
+
+        self.hl_paving = Some(gen);
+        Task::stream(build_hl_pave_stream(HlPavePayload {
+            gen,
+            doc,
+            highlighter,
+            total_lines,
+            cancelled,
+            batch_strides: HL_PAVE_BATCH_STRIDES,
+        }))
+    }
+
+    pub(crate) fn step_match(&mut self, forward: bool) -> Task<Message> {
+        if self.busy || self.find_query.is_empty() {
+            return Task::none();
+        }
+        // 扫描在途：不基于过期命中表跳转
+        if self.find_scanning() {
+            self.status = "查找中…".to_owned();
+            return Task::none();
+        }
+        if self.matches.is_empty() {
+            // 懒触发：开栏即按 Enter 而扫描还没排队过时，先补一次扫描
+            return self.schedule_find_scan();
+        }
+        if self.matches.is_empty() {
+            self.status = "无匹配".to_owned();
+            return Task::none();
+        }
+
+        let cursor = self.cur_handle.borrow().cursor;
+        let index = if forward {
+            editpad_core::next_from(&self.matches, cursor.line, cursor.col)
+        } else {
+            editpad_core::prev_from(&self.matches, cursor.line, cursor.col)
+        };
+        self.match_idx = index;
+
+        if let (Some(i), Some(pos)) =
+            (index, index.and_then(|i| self.matches.get(i).copied()))
+        {
+            // P26：选区跨度直接用命中自带的 len_chars（扫描器产出的
+            // 「选区显示跨度」口径），不再按当前输入现算查询长度——
+            // 单行命中两者相等，跨行命中的正确性由数据自身保证，
+            // 不依赖「命中表与输入框同步」这条时序假设
+            self.cur_handle
+                .borrow_mut()
+                .select_span(pos.line, pos.col, pos.len_chars);
+            self.status = format!("第 {}/{} 处匹配", i + 1, self.matches.len());
+        }
+        Task::none()
+    }
+
+    pub(crate) fn replace_current(&mut self) -> Task<Message> {
+        if self.busy || self.find_query.is_empty() {
+            return Task::none();
+        }
+        let effective_query = unescape_query(&self.find_query);
+        let effective_replacement = unescape_query(&self.replace_query);
+        let hit_selected = {
+            let editor = self.cur_handle.borrow();
+            let eol = editor.doc.line_ending();
+            editor
+                .selected_text()
+                .is_some_and(|selected| {
+                    // P26：两侧行尾归一后再比（复用 P9 口径）——CRLF 文档上
+                    // 跨行命中的选区文本含 \r\n，而查询是 \n；不归一会让
+                    // 「替换当前」永远判不等、退化为「跳下一个」
+                    strings_equal(
+                        &eol.normalize(&selected),
+                        &eol.normalize(&effective_query),
+                        self.case_sensitive,
+                    )
+                })
+        };
+
+        if hit_selected {
+            self.cur_handle
+                .borrow_mut()
+                .replace_selection(&effective_replacement);
+            self.tab_mut().dirty = true;
+            // P10：替换后命中表已过期，排队后台重扫；「跳到下一个」等重扫完成
+            // 后由用户再按（旧行为是同步重扫后立即跳，会卡大文档 UI）
+            return self.schedule_find_scan();
+        }
+        // 没有可替换的选区：行为不变——跳到下一个匹配
+        self.step_match(true)
+    }
+
+    // ---------- 展示辅助 ----------
+
+    pub(crate) fn title(&self) -> String {
+        let name = self.tab().base_name();
+        if self.tab().dirty {
+            format!("● {name} - Editpad")
+        } else {
+            format!("{name} - Editpad")
+        }
+    }
+
+    pub(crate) fn suggested_name(&self) -> String {
+        match self.file_display_name() {
+            Some(name) => name,
+            // P25：未命名页的另存为建议名带序号并补扩展名
+            None => match self.tab().untitled_num {
+                Some(n) => format!("未命名{n}.txt"),
+                None => "未命名.txt".into(),
+            },
+        }
+    }
+
+    fn file_display_name(&self) -> Option<String> {
+        self.tab()
+            .path
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_owned)
+    }
+
+    /// P28 标签右键菜单面板：固定/保存/另存为(重命名)/关闭/关闭其他/
+    /// 关闭右侧。菜单项按页面状态禁用（busy、干净页的保存、固定页的
+    /// 关闭、无可关目标的批量项）；调用方保证 idx < tabs.len()。
+    fn tab_context_panel(&self, idx: usize) -> Element<'_, Message> {
+        let tab = &self.tabs[idx];
+        let interactive = !self.busy;
+        // P33/P36：UI 与正文同族，字号固定不随正文缩放；P34：族随设置
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+
+        let mut panel = column![
+            row![
+                text(format!("「{}」", tab.base_name()))
+                    .size(uipx)
+                    .font(uifont)
+                    .color([0.5, 0.5, 0.5]),
+                button(text("×").size(uipx).font(uifont))
+                    .padding([2, 8])
+                    .style(chrome_button_style)
+                    .on_press(Message::TabContextMenuClosed),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(2)
+        .padding([4, 10]);
+
+        // 固定 / 取消固定（固定页豁免一切关闭路径）。
+        // P56：菜单项一律中性列表样式（透明底+悬停淡染），不再用 iced
+        // 默认实心蓝（用户截图：菜单项像全选中的高亮条）
+        let pin_label = if tab.pinned { "取消固定" } else { "📌 固定标签页" };
+        panel = panel.push(
+            button(container(text(pin_label).size(uipx).font(uifont)).width(Fill))
+                .width(Fill)
+                .style(chrome_menu_item_style)
+                .on_press_maybe(interactive.then_some(Message::TogglePinTab(idx))),
+        );
+        // 保存：仅置脏可用（与工具栏「保存」同一口径）；
+        // 未命名页在 update 层自动落另存为
+        panel = panel.push(
+            button(container(text("保存").size(uipx).font(uifont)).width(Fill))
+                .width(Fill)
+                .style(chrome_menu_item_style)
+                .on_press_maybe(
+                    (interactive && tab.dirty).then_some(Message::SaveTabFromMenu(idx)),
+                ),
+        );
+        // 另存为 / 重命名（v1 同一动作兜底，§3 P28 第 2 条）
+        let rename_label = if tab.path.is_some() { "重命名…" } else { "另存为…" };
+        panel = panel.push(
+            button(container(text(rename_label).size(uipx).font(uifont)).width(Fill))
+                .width(Fill)
+                .style(chrome_menu_item_style)
+                .on_press_maybe(interactive.then_some(Message::RenameOrSaveAsTab(idx))),
+        );
+
+        panel = panel.push(rule::horizontal(1));
+
+        // 关闭：固定页拒绝（update 层守卫 + 菜单项灰掉双保险）
+        panel = panel.push(
+            button(container(text("关闭").size(uipx).font(uifont)).width(Fill))
+                .width(Fill)
+                .style(chrome_menu_item_style)
+                .on_press_maybe(
+                    (interactive && !tab.pinned).then_some(Message::CloseTabAt(idx)),
+                ),
+        );
+        // 关闭其他 / 关闭右侧：无可关目标（全部是固定页或没有其他页）时禁用
+        let others = batch_close_targets(&self.tabs, BatchCloseScope::Others(idx));
+        let right = batch_close_targets(&self.tabs, BatchCloseScope::RightOf(idx));
+        panel = panel.push(
+            button(
+                container(text(format!("关闭其他标签页({})", others.len()))
+                    .size(uipx)
+                    .font(uifont))
+                    .width(Fill),
+            )
+            .width(Fill)
+            .style(chrome_menu_item_style)
+            .on_press_maybe(
+                (!others.is_empty() && interactive).then_some(Message::CloseOtherTabs(idx)),
+            ),
+        );
+        panel = panel.push(
+            button(
+                container(text(format!("关闭右侧标签页({})", right.len()))
+                    .size(uipx)
+                    .font(uifont))
+                    .width(Fill),
+            )
+            .width(Fill)
+            .style(chrome_menu_item_style)
+            .on_press_maybe(
+                (!right.is_empty() && interactive).then_some(Message::CloseTabsRight(idx)),
+            ),
+        );
+        panel.into()
+    }
+
+    /// P47 设置弹窗面板：两栏布局——顶部标题行（+ 右上角
+    /// 关闭），下方左侧「搜索 + 分类导航」、右侧「标题 + 灰描述 + 右对齐
+    /// 控件」的行式列表（行间 1px 分隔线），内容区内部滚动。设置项与
+    /// P27 完全一致（消息不改，只重排展示），改动即写回的语义不变。
+    ///
+    /// `content_h`：内容滚动区高度（来自 `settings_card_size`，随窗口钳制）。
+    fn settings_panel(&self, content_h: f32) -> Element<'_, Message> {
+        // P33/P36：UI 与正文同族，字号固定不随正文缩放；P34：族随设置
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+
+        // 标题行：「设置」+ 右上角 ×（关闭按钮放在标题栏右侧）
+        let header = container(
+            row![
+                text("设置").size(uipx * 1.25).font(uifont),
+                container(
+                    button(text("×").size(uipx).font(uifont))
+                        .padding([2, 9])
+                        .style(chrome_button_style)
+                        .on_press(Message::SettingsToggled),
+                )
+                .width(Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([10, 14])
+        .width(Fill);
+
+        // 显式统一生命周期：分隔线是 'static 元素，收进本地生命周期的列
+        let header_sep: Element<'_, Message> = settings_separator(sc);
+        let divider: Element<'_, Message> = settings_divider(sc);
+
+        column![
+            header,
+            header_sep,
+            row![
+                self.settings_sidebar(),
+                divider,
+                self.settings_content(content_h),
+            ]
+            .align_y(iced::alignment::Vertical::Top),
+        ]
+        .into()
+    }
+
+    /// 左侧栏（P47）：搜索框 + 「选项」小标 + 分类导航。选中项 = 底色
+    /// + 1px 描边高亮（同款）；搜索进行中不高亮（内容区已是
+    /// 跨分类的命中结果）。
+    fn settings_sidebar(&self) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+        let searching = !self.settings_search.trim().is_empty();
+
+        let mut nav = column![].spacing(2);
+        for page in SettingsPage::ALL {
+            let selected = !searching && self.settings_page == page;
+            nav = nav.push(
+                button(
+                    container(text(page.title()).size(uipx).font(uifont))
+                        .width(Fill)
+                        .align_x(iced::alignment::Horizontal::Left),
+                )
+                .width(Fill)
+                .padding([5, 10])
+                .style(move |theme, status| {
+                    chrome_nav_button_style(theme, status, selected)
+                })
+                .on_press(Message::SettingsPageSelected(page)),
+            );
+        }
+
+        column![
+            text_input("搜索设置…", &self.settings_search)
+                .size(uipx)
+                .font(uifont)
+                .on_input(Message::SettingsSearchChanged)
+                .style(settings_input_style)
+                .width(Fill),
+            text("选项").size(uipx * 0.85).font(uifont).color(sc.desc),
+            nav,
+        ]
+        .spacing(10)
+        .padding(Padding { top: 12.0, right: 10.0, bottom: 12.0, left: 12.0 })
+        .width(170)
+        .into()
+    }
+
+    /// 右侧内容区（P47）：无搜索词 = 当前分类页（页首标题 + 行列表）；
+    /// 有搜索词 = 跨分类的命中行，按分类分组展示（同款），
+    /// 无命中给出提示。整列由外层 scrollable 钳高滚动。
+    fn settings_content(&self, content_h: f32) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+        let query = self.settings_search.trim();
+        let current_page = self.settings_page;
+
+        let mut list = column![].spacing(0);
+        if query.is_empty() {
+            // 分类浏览：页首标题 + 该页全部行
+            list = list.push(
+                container(
+                    text(current_page.title())
+                        .size(uipx * 1.25)
+                        .font(uifont),
+                )
+                .padding(Padding { top: 4.0, right: 4.0, bottom: 8.0, left: 4.0 }),
+            );
+            for r in settings_rows().filter(|r| r.page == current_page) {
+                list = list.push(self.settings_row_widget(r));
+            }
+        } else {
+            // 搜索：按分类顺序分组展示命中行
+            let mut total_hits = 0;
+            for page in SettingsPage::ALL {
+                let hits: Vec<SettingsRow> = settings_rows()
+                    .filter(|r| {
+                        r.page == page && settings_search_hit(query, r.title, r.desc)
+                    })
+                    .collect();
+                if hits.is_empty() {
+                    continue;
+                }
+                total_hits += hits.len();
+                list = list.push(
+                    container(
+                        text(page.title())
+                            .size(uipx * 0.9)
+                            .font(uifont)
+                            .color(sc.desc),
+                    )
+                    .padding(Padding { top: 8.0, right: 4.0, bottom: 2.0, left: 4.0 }),
+                );
+                for r in hits {
+                    list = list.push(self.settings_row_widget(r));
+                }
+            }
+            if total_hits == 0 {
+                list = list.push(
+                    container(
+                        text(format!("没有匹配「{query}」的设置"))
+                            .size(uipx)
+                            .font(uifont)
+                            .color(sc.desc),
+                    )
+                    .padding([12, 4]),
+                );
+            }
+        }
+        scrollable(
+            container(list)
+                .padding(Padding { top: 4.0, right: 16.0, bottom: 16.0, left: 16.0 })
+                .width(Fill),
+        )
+            .width(Fill)
+            .height(content_h)
+            .into()
+    }
+
+    /// 单个设置行（P47）：左「标题 + 灰色描述」、右对齐控件，行下 1px
+    /// 分隔线（行式布局）。「正文字体」行下方附带字体挑选块。
+    fn settings_row_widget(&self, r: SettingsRow) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+
+        let left = column![
+            text(r.title).size(uipx).font(uifont),
+            text(r.desc).size(uipx * 0.85).font(uifont).color(sc.desc),
+        ]
+        .spacing(2)
+        .width(Fill);
+
+        let mut body = row![left].spacing(12).align_y(Alignment::Center);
+        if let Some(control) = self.settings_row_control(r.key) {
+            body = body.push(control);
+        }
+
+        let mut cell = column![container(body).width(Fill).padding([10, 4])];
+        // 正文字体行附带过滤框 + 候选列表（P34 的选择 UI 原样收编）
+        if r.key == FONT_ROW_KEY {
+            cell = cell.push(self.settings_font_picker());
+        }
+        let sep: Element<'_, Message> = settings_separator(sc);
+        cell = cell.push(sep);
+        cell.into()
+    }
+
+    /// 按行键构建右侧控件（P47）；返回 None = 纯展示行（热键速查/关于）。
+    /// 控件消息与 P27 完全一致，写回语义不变。
+    pub(crate) fn settings_row_control(&self, key: &str) -> Option<Element<'_, Message>> {
+        let s = &self.settings;
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+
+        let control: Element<'_, Message> = match key {
+            // ---- 外观 ----
+            "主题" => button(
+                text(if s.is_dark() { "深色" } else { "浅色" })
+                    .size(uipx)
+                    .font(uifont),
+            )
+            .padding([3, 12])
+            .style(chrome_button_style)
+            .on_press(Message::ThemeToggled)
+            .into(),
+            "字号" => self.settings_stepper(
+                format!("{:.0}", self.display_font_size()),
+                (self.display_font_size()
+                    > editpad_core::settings::MIN_FONT_SIZE)
+                    .then_some(Message::FontSizeDelta(-editor::FONT_ZOOM_STEP)),
+                (self.display_font_size()
+                    < editpad_core::settings::MAX_FONT_SIZE)
+                    .then_some(Message::FontSizeDelta(editor::FONT_ZOOM_STEP)),
+            ),
+            // ---- 字体 ----
+            FONT_ROW_KEY => button(text("回退默认").size(uipx).font(uifont))
+                .padding([3, 12])
+                .style(chrome_button_style)
+                .on_press_maybe(
+                    s.font_family.is_some().then_some(Message::SettingsFontReset),
+                )
+                .into(),
+            // ---- 保存 ----
+            "即时保存" => checkbox(s.autosave_enabled)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsAutosaveToggled)
+                .into(),
+            "防抖秒数" => self.settings_stepper(
+                format!("{}s", s.autosave_delay_secs),
+                (s.autosave_delay_secs
+                    > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
+                    .then_some(Message::SettingsAutosaveDelayDelta(-1)),
+                (s.autosave_delay_secs
+                    < editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS)
+                    .then_some(Message::SettingsAutosaveDelayDelta(1)),
+            ),
+            // ---- 会话与隐私 ----
+            "记住最近打开的文件" => checkbox(s.remember_recent_files)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsRememberRecentToggled)
+                .into(),
+            "会话快照" => checkbox(s.enable_snapshots)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsSnapshotsToggled)
+                .into(),
+            "启动时恢复上次界面" => checkbox(s.remember_session)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsRememberSessionToggled)
+                .into(),
+            "关窗行为" => button(
+                text(if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
+                    "快照直退"
+                } else {
+                    "每次询问"
+                })
+                .size(uipx)
+                .font(uifont),
+            )
+            .padding([3, 12])
+            .style(chrome_button_style)
+            .on_press(Message::SettingsExitModeToggled)
+            .into(),
+            "快照心跳间隔（秒）" => self.settings_stepper(
+                format!("{}s", s.snapshot_interval_secs),
+                (s.snapshot_interval_secs
+                    > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
+                    .then_some(Message::SettingsIntervalDelta(-5)),
+                (s.snapshot_interval_secs
+                    < editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS)
+                    .then_some(Message::SettingsIntervalDelta(5)),
+            ),
+            // 热键速查 / 关于：纯展示行（标题+描述已完整表达）
+            _ => return None,
+        };
+        Some(control)
+    }
+
+    /// 「− 值 +」步进器（P47 右对齐控件；越界方向按钮禁用置灰）。
+    fn settings_stepper(
+        &self,
+        value: String,
+        dec: Option<Message>,
+        inc: Option<Message>,
+    ) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let mk = |label: &str, msg: Option<Message>| {
+            button(text(label.to_owned()).size(uipx).font(uifont))
+                .padding([2, 9])
+                .style(chrome_button_style)
+                .on_press_maybe(msg)
+        };
+        // 值列定宽居中（P51 打磨）：数值变宽（如 2s→60s）时 ± 按钮不再
+        // 左右跳动，整列右缘与其他行控件保持对齐
+        row![
+            mk("−", dec),
+            container(text(value).size(uipx).font(uifont))
+                .width(48)
+                .align_x(iced::alignment::Horizontal::Center),
+            mk("+", inc),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// 「正文字体」行的附属块（P47 收编 P34 选择 UI）：当前生效说明 +
+    /// 过滤框 + 候选列表（数据源 = 启动期 fontdb 枚举，名字即选即用）。
+    fn settings_font_picker(&self) -> Element<'_, Message> {
+        let s = &self.settings;
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+
+        let current = text(match (&s.font_family, &self.active_font_family) {
+            (Some(cfg), Some(eff)) if cfg.as_str() == *eff => {
+                format!("当前：{eff}")
+            }
+            (Some(cfg), _) => {
+                format!("当前：默认等宽（配置的「{cfg}」未安装）")
+            }
+            (None, _) => "当前：默认（等宽）".to_owned(),
+        })
+        .size(uipx * 0.85)
+        .font(uifont)
+        .color(sc.desc);
+
+        let filter = text_input("输入关键字过滤字体", &self.font_filter)
+            .size(uipx)
+            .font(uifont)
+            .on_input(Message::FontFilterChanged)
+            .style(settings_input_style)
+            .width(Fill);
+
+        // 显式标注：两个分支的 widget 类型不同，靠 Into 目标统一
+        let picker: Element<'_, Message> = if self.available_fonts.is_empty() {
+            text("无法枚举系统字体（保持默认等宽）")
+                .size(uipx)
+                .font(uifont)
+                .color([0.7, 0.4, 0.1])
+                .into()
+        } else {
+            let needle = editor::normalize_family(&self.font_filter);
+            let matches: Vec<&String> = self
+                .available_fonts
+                .iter()
+                .filter(|f| {
+                    needle.is_empty()
+                        || editor::normalize_family(f).contains(&needle)
+                })
+                .collect();
+            let total = matches.len();
+            let mut list = column![].spacing(2);
+            for name in matches.iter().take(FONT_PICKER_MAX_ROWS) {
+                list = list.push(
+                    button(
+                        container(text(name.as_str()).size(uipx).font(uifont))
+                            .width(Fill)
+                            .align_x(iced::alignment::Horizontal::Left),
+                    )
+                    .width(Fill)
+                    .padding([4, 8])
+                    .style(chrome_menu_item_style)
+                    .on_press(Message::SettingsFontSelected(
+                        (*name).clone(),
+                    )),
+                );
+            }
+            if total > FONT_PICKER_MAX_ROWS {
+                list = list.push(
+                    text(format!(
+                        "…共 {total} 个命中，请继续输入关键字缩小范围"
+                    ))
+                    .size(uipx * 0.85)
+                    .font(uifont)
+                    .color(sc.desc),
+                );
+            }
+            scrollable(list).height(180).width(Fill).into()
+        };
+
+        column![current, filter, picker]
+            .spacing(6)
+            .padding(Padding { top: 0.0, right: 4.0, bottom: 10.0, left: 4.0 })
+            .into()
+    }
+
+    pub(crate) fn view(&self) -> Element<'_, Message> {
+        // P22 第三批：当前页是否为 Markdown（决定预览按钮可用性）
+        let is_markdown = self
+            .cur_handle
+            .borrow()
+            .highlight_syntax_name()
+            .as_deref()
+            == Some("Markdown");
+        // P33/P36：UI 全部控件与正文同族，字号固定不随正文缩放——
+        // Ctrl+滚轮（P48）与设置面板只调节文件内容；P34：族随设置切换
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+
+        // P57：工具栏全部换全局中性按钮（白/深底描边+正文字色+悬停淡染），
+        // 取代 iced 默认实心蓝底白字
+        let toolbar = row![
+            button(text("打开…").size(uipx).font(uifont))
+                .padding([4, 12])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::OpenRequested)),
+            button(text("保存").size(uipx).font(uifont))
+                .padding([4, 12])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy && self.tab().dirty)
+                    .then_some(Message::SaveRequested)),
+            button(text("另存为…").size(uipx).font(uifont))
+                .padding([4, 12])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::SaveAsRequested)),
+            // P22 第三批：Markdown 预览开关（仅 Markdown 语法页可用）
+            button(text(if self.preview_visible {
+                "关闭预览"
+            } else {
+                "MD 预览"
+            })
+            .size(uipx)
+            .font(uifont))
+            .padding([4, 12])
+            .style(chrome_button_style)
+            .on_press_maybe(is_markdown.then_some(Message::PreviewToggled)),
+            button(text("查找/替换").size(uipx).font(uifont))
+                .padding([4, 12])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::FindToggled)),
+            button(text("跳转到行").size(uipx).font(uifont))
+                .padding([4, 12])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::GotoToggled)),
+            button(text("最近文件").size(uipx).font(uifont))
+                .padding([4, 12])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::RecentsToggled)),
+            // P48：主题与字号按钮已随设置弹窗（P47）收编移除——工具栏只留
+            // 高频动作；外观调节入口 = 设置弹窗 + 编辑器内 Ctrl+滚轮缩放。
+            // P27：设置弹窗入口（busy 时禁开，与其余工具栏按钮同一守卫）
+            button(text("设置").size(uipx).font(uifont))
+                .padding([4, 12])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::SettingsToggled)),
+            text(if self.tab().dirty { "● 未保存" } else { "" })
+                .size(uipx)
+                .font(uifont)
+                .color([0.85, 0.55, 0.1]),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .padding([8, 10]);
+
+        // P21 标签条：恒显示（单页也给出「当前文件名」的可见反馈）。
+        // 点击切换；置脏页带 ● 前缀；活动页加 ▸ 指示；固定页加 📌（P28）。
+        // P28：按钮外包 mouse_area 捕获右键弹菜单——MouseArea 先把事件
+        // 交给子组件，左键被 button 捕获后自身跳过，故切换不受影响；
+        // 右键无人捕获，落到 on_right_press。
+        // P39：整条标签条再包一层 mouse_area 跟踪指针位置（浮层菜单
+        // 锚点数据源；只在标签条悬停时产生消息，量级可忽略）。
+        let mut body = column![toolbar, rule::horizontal(1)];
+        {
+            let mut strip = row![].spacing(2).padding([4, 6]);
+            for (i, tab) in self.tabs.iter().enumerate() {
+                // P55：就地重命名——该页的标签按钮替换为输入框 + ✓/× 微型按钮
+                // （Enter 等价 ✓；Esc 走 BarsDismissed 取消）
+                if self.renaming_tab == Some(i) {
+                    strip = strip.push(
+                        row![
+                            text_input("新名称", &self.rename_input)
+                                .size(uipx)
+                                .font(uifont)
+                                .on_input(Message::TabRenameInputChanged)
+                                .on_submit(Message::TabRenameCommitted)
+                                .width(150),
+                            button(text("✓").size(uipx).font(uifont))
+                                .padding([2, 7])
+                                .style(chrome_button_style)
+                                .on_press(Message::TabRenameCommitted),
+                            button(text("×").size(uipx).font(uifont))
+                                .padding([2, 7])
+                                .style(chrome_button_style)
+                                .on_press(Message::TabRenameCancelled),
+                        ]
+                        .spacing(2)
+                        .align_y(Alignment::Center),
+                    );
+                    continue;
+                }
+                let marker = if i == self.active_tab { "▸ " } else { "  " };
+                let pin = if tab.pinned { "📌 " } else { "" };
+                // P57：页签换中性样式——活动页淡底描边、非活动透明悬停淡染
+                let active = i == self.active_tab;
+                strip = strip.push(
+                    mouse_area(
+                        button(text(format!(
+                            "{marker}{pin}{}",
+                            tab.display_name()
+                        ))
+                        .size(uipx)
+                        .font(uifont))
+                        .padding([2, 10])
+                        .style(move |theme, status| {
+                            chrome_nav_button_style(theme, status, active)
+                        })
+                        .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
+                    )
+                    .on_right_press(Message::TabContextMenu(i)),
+                );
+            }
+            body = body.push(
+                mouse_area(strip).on_move(Message::CursorMoved),
+            );
+        }
+
+        // 中间主区域：Markdown 预览面板 或 自绘虚拟化编辑器
+        // P34：两路都按设置的字形族渲染（预览属内容渲染随族切换；
+        // 画布经 view_with_font 每帧传参，无跨帧同步状态）
+        let content_font = self.body_font();
+        if self.preview_visible && is_markdown {
+            let text = self.cur_handle.borrow().doc.to_text();
+            body = body.push(markdown_preview_element(
+                &text,
+                self.display_font_size(),
+                content_font,
+            ));
+        } else {
+            body = body.push(self.cur_handle.view(content_font));
+        }
+
+        if let Some((bytes_read, total_bytes)) = self.progress {
+            body = body.push(
+                row![
+                    text("加载中…").size(uipx).font(uifont),
+                    container(
+                        progress_bar(0.0..=total_bytes.max(1) as f32, bytes_read as f32)
+                    )
+                    .width(Fill),
+                    text(format!(
+                        "{} / {} KB",
+                        bytes_read / 1024,
+                        total_bytes.max(1) / 1024
+                    ))
+                    .size(uipx)
+                    .font(uifont),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        if self.recents_visible {
+            let mut panel = column![].spacing(2).padding([4, 10]);
+            if self.settings.recent_files.is_empty() {
+                panel = panel.push(
+                    text("（暂无最近文件）")
+                        .size(uipx)
+                        .font(uifont)
+                        .color([0.5, 0.5, 0.5]),
+                );
+            }
+            for entry in &self.settings.recent_files {
+                panel = panel.push(
+                    button(container(text(entry).size(uipx).font(uifont)).width(Fill))
+                        .width(Fill)
+                        .style(chrome_menu_item_style)
+                        .on_press_maybe(
+                            (!self.busy).then_some(Message::RecentSelected(entry.clone())),
+                        ),
+                );
+            }
+            // P20 隐私出口：一键抹掉 config.toml 里的全部历史路径
+            if !self.settings.recent_files.is_empty() {
+                panel = panel.push(
+                    row![
+                        button(text("清空记录").size(uipx).font(uifont))
+                            .padding([2, 8])
+                            .style(chrome_button_style)
+                            .on_press_maybe((!self.busy).then_some(Message::RecentsCleared)),
+                        text("从 config.toml 移除全部路径")
+                            .size(uipx)
+                            .font(uifont)
+                            .color([0.5, 0.5, 0.5]),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+            body = body.push(rule::horizontal(1)).push(panel);
+        }
+
+        if self.find_visible {
+            let total = self.matches.len();
+            // P10：扫描在途时明确显示状态，按钮基于过期结果禁用
+            let scanning = self.find_scanning();
+            let position_label = if scanning {
+                "查找中…".to_owned()
+            } else if total == 0 {
+                "无匹配".to_owned()
+            } else {
+                match self.match_idx {
+                    Some(i) => format!("第 {}/{} 处", i + 1, total),
+                    None => format!("{total} 处"),
+                }
+            };
+            let has_matches = !scanning && !self.matches.is_empty();
+
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text_input("查找内容", &self.find_query)
+                        .size(uipx)
+                        .font(uifont)
+                        .on_input(Message::FindQueryChanged)
+                        .on_submit(Message::FindNext)
+                        .width(200),
+                    text(position_label).size(uipx).font(uifont),
+                    button(text("↑ 上一个").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press_maybe(has_matches.then_some(Message::FindPrev)),
+                    button(text("↓ 下一个").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press_maybe(has_matches.then_some(Message::FindNext)),
+                    checkbox(self.case_sensitive)
+                        .label("区分大小写")
+                        .text_size(uipx)
+                        .font(uifont)
+                        .on_toggle(Message::CaseToggled),
+                    button(text("×").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press(Message::FindToggled),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+
+            body = body.push(
+                row![
+                    text_input("替换为", &self.replace_query)
+                        .size(uipx)
+                        .font(uifont)
+                        .on_input(Message::ReplaceQueryChanged)
+                        .width(200),
+                    button(text("替换当前").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press_maybe(has_matches.then_some(Message::ReplaceCurrent)),
+                    // 扫描在途时禁用：此刻的全文快照可能是过期的
+                    button(text("全部替换").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press_maybe(
+                            (!scanning).then_some(Message::ReplaceAll),
+                        ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        if self.goto_visible {
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text("跳转到行:").size(uipx).font(uifont),
+                    text_input("行号", &self.goto_input)
+                        .size(uipx)
+                        .font(uifont)
+                        .on_input(Message::GotoInputChanged)
+                        .on_submit(Message::GotoSubmit)
+                        .width(140),
+                    button(text("跳转").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press(Message::GotoSubmit),
+                    button(text("×").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press(Message::GotoToggled),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        // P27 设置弹窗：P40 起为居中浮层模态（见 view 尾部 Stack 组装），
+        // 不再内嵌推进 body 列。
+
+        // 未保存关闭确认条：置于状态区域上方
+        if self.confirm_visible {
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text("文档有未保存的更改，确定要关闭吗？")
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("保存并关闭").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press_maybe(
+                            (!self.busy).then_some(Message::ConfirmSaveAndClose)
+                        ),
+                    button(text("放弃更改").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::DiscardAndClose),
+                    button(text("取消").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::CancelClose),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        // P21 标签页关闭确认：骨架版仅提供「放弃更改并关闭」出口，
+        // 想保留改动请先 Ctrl+S（完整保存后关闭随 P21 完整版补齐）
+        if let Some(idx) = self.close_tab_confirm {
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text(format!(
+                        "第 {} 个标签页有未保存的更改",
+                        idx.saturating_add(1)
+                    ))
+                    .size(uipx)
+                    .font(uifont),
+                    button(text("放弃更改并关闭").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::ConfirmCloseTabDiscard(idx)),
+                    // P21 完整版：已命名的页可直接「保存并关闭」
+                    button(text("保存并关闭").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press_maybe(
+                            (!self.busy && self.tabs[idx].path.is_some())
+                                .then_some(Message::CloseTabSave(idx)),
+                        ),
+                    button(text("取消").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::CancelCloseTab),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        // P28 批量关闭确认条：关闭其他/右侧的目标中有置脏页时弹一次，
+        // 确认后统一放弃并移除（固定页本就不在目标列表内）
+        if let Some(targets) = &self.batch_close_confirm {
+            let total = targets.len();
+            let dirty = targets
+                .iter()
+                .filter(|&&i| self.tabs.get(i).is_some_and(|t| t.dirty))
+                .count();
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text(format!(
+                        "要关闭的 {total} 个标签页中 {dirty} 个有未保存的更改，全部放弃并关闭？"
+                    ))
+                    .size(uipx)
+                    .font(uifont),
+                    button(text("放弃更改并关闭").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::ConfirmBatchCloseDiscard),
+                    button(text("取消").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::CancelBatchCloseTabs),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        // 未保存时打开新文件的确认条（样式沿用关闭确认条）
+        if let Some(path) = &self.open_confirm {
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text(format!("{} 有未保存的更改，放弃并打开？", path.display()))
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("放弃更改并打开").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::ConfirmOpenDiscard),
+                    button(text("取消").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::ConfirmOpenCancel),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        // P50/P52 外部修改提示条：队列首页展示，聚合时带总数与「全部忽略」。
+        // 下标失效（页已关）时跳过，等下次聚焦重算。
+        if let Some(queue) = self.external_change.as_ref() {
+            if let Some(first) = queue.first().copied() {
+                if let Some(tab) = self.tabs.get(first) {
+                    if tab.path.is_some() {
+                        let total = queue.len();
+                        let mut bar = row![
+                            text(if total > 1 {
+                                format!(
+                                    "「{}」已被外部修改（共 {total} 个文件），是否重新加载？",
+                                    tab.display_name()
+                                )
+                            } else {
+                                format!(
+                                    "「{}」已被外部修改，是否重新加载？",
+                                    tab.display_name()
+                                )
+                            })
+                            .size(uipx)
+                            .font(uifont),
+                            button(text("重新加载").size(uipx).font(uifont))
+                                .padding([4, 12])
+                                .style(chrome_button_style)
+                                .on_press(Message::ConfirmExternalReload(first)),
+                            button(text("忽略").size(uipx).font(uifont))
+                                .padding([4, 12])
+                                .style(chrome_button_style)
+                                .on_press(Message::IgnoreExternalChange(first)),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .padding([6, 10]);
+                        if total > 1 {
+                            bar = bar.push(
+                                button(text("全部忽略").size(uipx).font(uifont))
+                                    .padding([4, 12])
+                                    .style(chrome_button_style)
+                                    .on_press(Message::IgnoreAllExternalChanges),
+                            );
+                        }
+                        body = body.push(rule::horizontal(1)).push(bar);
+                    }
+                }
+            }
+        }
+
+        // P30 崩溃恢复一次性提示条：上次未正常收尾（崩溃/P31 心跳中间态）。
+        // 「恢复」按快照全量重建；「丢弃」连快照一起丢。数据原封留在磁盘，
+        // 不裁决就一直挂着——与「未保存确认条」同级的强提醒语义。
+        if self.recover_prompt.is_some() {
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text("检测到上次未正常退出的未保存工作区")
+                        .size(uipx)
+                        .font(uifont),
+                    button(text("恢复").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::SessionRecoverAccepted),
+                    button(text("丢弃").size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::SessionRecoverDiscarded),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        if !self.status.is_empty() {
+            body = body.push(
+                container(
+                    text(format!("⚠ {}", self.status))
+                        .size(uipx)
+                        .font(uifont)
+                        .color([0.9, 0.25, 0.25]),
+                )
+                .padding([4, 10]),
+            );
+        }
+
+        let cursor = self.cur_handle.borrow().cursor;
+        let status_bar = row![
+            text(
+                self.tab()
+                    .path
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| format!("({})", self.tab().base_name()))
+            )
+            .size(uipx)
+            .font(uifont)
+            .width(Fill),
+            text(if self.tab().encoding_label.is_empty() {
+                "—".to_owned()
+            } else {
+                self.tab().encoding_label.clone()
+            })
+            .size(uipx)
+            .font(uifont),
+            text(format!("{} 行", self.cur_handle.borrow().doc.line_count()))
+                .size(uipx)
+                .font(uifont),
+            text(format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1))
+                .size(uipx)
+                .font(uifont),
+        ]
+        .spacing(24)
+        .align_y(Alignment::Center)
+        .padding([6, 10]);
+
+        body = body.push(rule::horizontal(1)).push(status_bar);
+
+        // P39/P40：浮层经 Stack 叠加——首层（正文）定尺寸，顶层浮在
+        // 其上、不占布局空间（iced_widget-0.14.2 Stack 语义），正文可用
+        // 面积不再被菜单/设置弹窗挤占。opaque 背板捕获层内点击，
+        // 防止点菜单外的落穿透到正文。
+        let base: Element<'_, Message> = container(body).width(Fill).height(Fill).into();
+        let mut layered = Stack::new().push(base);
+        if let Some(idx) = self.tab_context_menu {
+            if idx < self.tabs.len() {
+                layered = layered.push(self.context_menu_overlay(idx));
+            }
+        }
+        if self.settings_visible {
+            layered = layered.push(self.settings_overlay());
+        }
+        layered.into()
+    }
+
+    // ---------- 浮层弹窗（P39/P40） ----------
+
+    /// P39：标签右键菜单浮层——整窗透明背板（点击即收起）+ 锚在指针
+    /// 位置、贴边钳制后的菜单卡片。opaque 双层防穿透：背板捕获菜单外
+    /// 点击不落到正文，卡片捕获卡片内空白处点击不触发背板关闭。
+    /// P43：卡片高度按窗口钳制（小窗口不溢出、不盖满全屏），内容超高
+    /// 时内部滚动——与设置弹窗同款适配策略。
+    fn context_menu_overlay(&self, idx: usize) -> Element<'_, Message> {
+        let vh = self.viewport_size.1;
+        let card_h = ctx_menu_card_h(vh);
+        let (ax, ay) = clamp_menu_anchor(
+            self.menu_anchor,
+            self.viewport_size,
+            CTX_MENU_W,
+            card_h,
+        );
+        let card = opaque(
+            // P56：宽度必须定宽 CTX_MENU_W——P46 的 Shrink 修法在 iced
+            // 布局下不成立（Fill 子控件在 Shrink 测量中会撑到窗口宽，
+            // 用户截图实测卡片 ~970px）；定宽与贴边钳制共用同一常量，
+            // 估宽即实宽，不再有漂移
+            container(
+                scrollable(self.tab_context_panel(idx))
+                    .height(card_h)
+                    .width(CTX_MENU_W),
+            )
+            .padding(4)
+            .style(popup_card_style),
+        );
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
+        )
+        .on_press(Message::TabContextMenuClosed)
+        .on_right_press(Message::TabContextMenuClosed)
+        .into()
+    }
+
+    /// P40：设置弹窗浮层——整窗背板（点击关闭）+ 居中卡片。P47 起卡片
+    /// 为 两栏布局：侧栏固定、内容区内部滚动，宽 720、
+    /// 高按窗口钳制（`settings_card_size`）。opaque 卡片让点击卡片
+    /// 空白处（padding/标题行旁）不误触背板关闭。
+    fn settings_overlay(&self) -> Element<'_, Message> {
+        let (card_w, content_h) =
+            settings_card_size(self.viewport_size.0, self.viewport_size.1);
+        let card = opaque(
+            container(self.settings_panel(content_h))
+                .width(card_w)
+                .style(settings_card_style),
+        );
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(Alignment::Center)
+                .padding(16),
+        )
+        .on_press(Message::SettingsToggled)
+        .into()
+    }
+}

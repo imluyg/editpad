@@ -1,0 +1,1683 @@
+use super::*;
+use super::settings_ui::SettingsPage;
+
+impl Editpad {
+    // ---------- 多标签访问器（P21） ----------
+
+    /// 新建标签页的唯一出口：`Tab::empty()` + 套用全局字号设置。
+    ///
+    /// 历史教训（P43）：曾有多处直接用 `Tab::empty()` 建页——`EditorCore`
+    /// 默认字号恒为 16，恢复会话/新建页/关光补页全部脱离设置里的字号，
+    /// 表现为「调到 24 生效、重启后字体回到原大小，但设置面板仍显示 24」
+    /// （恢复路径整体替换 tabs，boot 仅对首个默认页应用过字号）。
+    /// 今后凡「新建页」一律走这里；boot 首帧仍显式 set_font_size 兜底
+    /// （fresh_tab 幂等，重复应用无害）。
+    pub(crate) fn fresh_tab(&mut self) -> Tab {
+        let tab = Tab::empty();
+        // 设置里的字号可能未归一（旧配置/手改），与 boot 同一 clamp 规则
+        tab.editor
+            .borrow_mut()
+            .set_font_size(editor::normalize_font_size(self.settings.font_size));
+        tab
+    }
+
+    /// 进入 busy（对话框/IO 互斥）。P39 浮层化后的新约束：同时收起
+    /// 右键菜单浮层——它的透明背板会挡住整窗点击，busy 期间不能留它挡道
+    /// （旧内嵌面板无此问题，故此前各 busy 置位点都无需理会菜单态）。
+    pub(crate) fn enter_busy(&mut self) {
+        self.busy = true;
+        self.tab_context_menu = None;
+    }
+
+    /// 当前激活标签页。
+    pub(crate) fn tab(&self) -> &Tab {
+        &self.tabs[self.active_tab]
+    }
+
+    /// 当前激活标签页（可变）。
+    pub(crate) fn tab_mut(&mut self) -> &mut Tab {
+        let i = self.active_tab;
+        &mut self.tabs[i]
+    }
+
+    /// 活动页句柄的长期引用（跨语句借用走 `cur_handle` 字段；
+    /// 单表达式内的临时借用也可用 [`Self::cur`]）。
+    fn cur(&self) -> EditorHandle {
+        self.cur_handle.clone()
+    }
+
+    /// 为第 `idx` 页分配下一个未命名序号（P25）：全局单调、不复用
+    /// 已关闭页的号码——杜绝两个同名未命名页。
+    fn assign_untitled_num(&mut self, idx: usize) {
+        let n = self.untitled_next;
+        self.untitled_next += 1;
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.untitled_num = Some(n);
+        }
+    }
+
+    /// 切换活动页并同步长期别名（所有 active_tab 变更必须经此或
+    /// [`Self::refresh_cur_handle`])。
+    pub(crate) fn set_active_tab(&mut self, idx: usize) {
+        self.active_tab = idx.min(self.tabs.len() - 1);
+        self.cur_handle = self.tabs[self.active_tab].editor.clone();
+    }
+
+    /// 与 tabs 对齐刷新别名（增删页后调用）。
+    pub(crate) fn refresh_cur_handle(&mut self) {
+        self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        self.cur_handle = self.tabs[self.active_tab].editor.clone();
+    }
+
+    /// 任一标签页有未保存改动（窗口关闭确认的聚合口径）。
+    pub(crate) fn any_dirty(&self) -> bool {
+        self.tabs.iter().any(|t| t.dirty)
+    }
+
+    /// 第 `idx` 页的路径（存在该页时）。
+    fn path_of_tab(&self, idx: usize) -> Option<PathBuf> {
+        self.tabs.get(idx).and_then(|t| t.path.clone())
+    }
+
+    /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页
+    /// （新页分配下一个未命名序号）。返回是否真的移除了页面。
+    fn close_tab_now(&mut self, idx: usize) -> bool {
+        if idx >= self.tabs.len() {
+            return false;
+        }
+        // P32：移除前把该页光标/滚动回写最近文件记忆
+        self.remember_tab_views(&[idx]);
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
+            let last = self.tabs.len() - 1;
+            self.assign_untitled_num(last);
+        }
+        // P31：页集合结构已变——下一拍重写清单，防崩溃恢复复活已关的页
+        self.session_manifest_stale = true;
+        // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名
+        self.refresh_cur_handle();
+        true
+    }
+
+    /// 批量移除多个标签页（P28）：按下标从大到小逐个 remove，
+    /// 保证剩余下标始终有效；全部移光时重置一个新的空标签页
+    /// （tabs 恒非空不变式，同 [`Self::close_tab_now`]）。
+    /// 返回实际移除的页数。越界/重复下标安全跳过。
+    pub(crate) fn close_tabs_now(&mut self, indices: &[usize]) -> usize {
+        // P32：移除前按原下标批量回写光标/滚动记忆
+        self.remember_tab_views(indices);
+        let mut idxs = indices.to_vec();
+        idxs.sort_unstable();
+        idxs.dedup();
+        let mut removed = 0usize;
+        for &idx in idxs.iter().rev() {
+            if idx < self.tabs.len() {
+                self.tabs.remove(idx);
+                removed += 1;
+            }
+        }
+        if removed == 0 {
+            return 0;
+        }
+        if self.tabs.is_empty() {
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
+            let last = self.tabs.len() - 1;
+            self.assign_untitled_num(last);
+        }
+        self.session_manifest_stale = true;
+        self.refresh_cur_handle();
+        removed
+    }
+
+    /// 开启批量关闭流程（P28）：目标列表非空且任一置脏 → 弹一次聚合
+    /// 确认条（确认后统一放弃，§3 P28 第 3 条）；全部干净 → 直接移除。
+    /// 无可关目标时静默 no-op。同一时刻只保留一条确认条。
+    fn begin_batch_close(&mut self, scope: BatchCloseScope) {
+        // 菜单项无论走向如何都算「已选中」，右键菜单随之收起
+        self.tab_context_menu = None;
+        if self.busy {
+            return;
+        }
+        let targets = batch_close_targets(&self.tabs, scope);
+        if targets.is_empty() {
+            return;
+        }
+        if targets.iter().any(|&i| self.tabs[i].dirty) {
+            self.close_tab_confirm = None;
+            self.batch_close_confirm = Some(targets);
+        } else if self.close_tabs_now(&targets) > 0 {
+            self.cancel_find_scan();
+        }
+    }
+
+    /// 打开文件应落入的标签下标：当前页「未命名且干净且为空」→
+    /// 就地打开；否则新开一页。
+    fn target_tab_for_open(&self) -> usize {
+        let t = self.tab();
+        let fresh = t.path.is_none() && !t.dirty && t.editor.borrow().doc.is_empty();
+        if fresh {
+            self.active_tab
+        } else {
+            self.tabs.len()
+        }
+    }
+
+    pub(crate) fn new() -> (Self, Task<Message>) {
+        // P33：先把 Family::Monospace 的解析目标钉到 CJK 等宽候选（幂等、
+        // 进程内一次）——必须发生在首帧排版之前，否则排版缓存里已固化的
+        // 逐字回退不会重排
+        apply_default_cjk_mono_pin();
+        let settings = editpad_core::Settings::load();
+        // P34：枚举系统字体清单（P33 钉字之后，同一 fontdb 全局），并解析
+        // 配置的字体——未安装时只回退本次渲染并提示一次，**不抹掉配置**
+        // （重装字体后自动恢复用户意图）。
+        let available_fonts = enumerate_available_families();
+        let (active_font_family, configured_font_missing) =
+            resolve_startup_font(settings.font_family.as_deref(), &available_fonts);
+        // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
+        // （对齐 P20「记住最近文件」先例）
+        if !settings.enable_snapshots {
+            if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
+                editpad_core::snapshot::clear_session(&dir);
+            }
+        }
+        let dark_mode = settings.is_dark();
+        // 设置里的字号可能未归一（旧配置/手改），boot 时按同一规则 clamp
+        let font_size = editor::normalize_font_size(settings.font_size);
+        // P51：分类页记忆随配置恢复（非法/缺省键归一为默认页）。
+        // 先取键再移动 settings 进结构体。
+        let settings_page = SettingsPage::from_key(&settings.settings_page);
+        let mut state = Self {
+            settings,
+            dark_mode,
+            available_fonts,
+            active_font_family: active_font_family.map(leak_font_family),
+            settings_page,
+            ..Self::default()
+        };
+        state.cur().borrow_mut().set_font_size(font_size);
+        if configured_font_missing {
+            if let Some(name) = state.settings.font_family.as_deref() {
+                state.status = format!("配置的字体「{name}」未安装，本次启动回退默认等宽");
+            }
+        }
+        // P18 打磨：启动光标闪烁心跳链（自我续期，占用一个睡眠节拍）
+        let caret_chain = Task::perform(
+            async {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    editor::CARET_BLINK_MS,
+                ));
+            },
+            |_| Message::CaretTick,
+        );
+        // P31 周期快照心跳链：同一自我续期模式——运行中每隔
+        // snapshot_interval_secs 巡检置脏页增量写快照（崩溃至多丢一个
+        // 间隔的输入）；随窗口关闭/进程退出自然销毁。
+        let heartbeat_chain = Task::perform(
+            async move {
+                std::thread::sleep(std::time::Duration::from_secs(u64::from(
+                    state.settings.snapshot_interval_secs,
+                )));
+            },
+            |_| Message::SnapshotHeartbeatTick,
+        );
+        // P30：启动会话恢复——读清单重建标签；命名干净页经加载管线回填。
+        // 开关判定在 boot_restore 内部（关闭 = 空白启动 + 存量清场）。
+        let restore_task = state.boot_restore();
+        (
+            state,
+            Task::batch([caret_chain, heartbeat_chain, restore_task]),
+        )
+    }
+
+    pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            // ---------- 编辑器 ----------
+            Message::Edit(op) => {
+                let changed = self.apply_edit(op);
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+                if changed {
+                    // P10：编辑后不再同步重扫（每键全文扫描会卡 UI），排队后台防抖扫描
+                    if self.find_visible {
+                        tasks.push(self.schedule_find_scan());
+                    }
+                    // P18：编辑置脏后排队一次防抖自动保存（inflight 去重）
+                    tasks.push(self.maybe_schedule_autosave());
+                }
+                if tasks.is_empty() {
+                    Task::none()
+                } else {
+                    Task::batch(tasks)
+                }
+            }
+            Message::EditorNavChanged => Task::none(), // 视图重建即可刷新状态栏
+
+            // ---------- 剪贴板（P4） ----------
+            Message::CopyRequested => {
+                let Some(text) = self.cur_handle.borrow().selected_text() else {
+                    return Task::none();
+                };
+                iced::clipboard::write(text)
+            }
+            Message::CutRequested => {
+                let Some(text) = self.cur_handle.borrow().selected_text() else {
+                    return Task::none();
+                };
+                // 先写剪贴板，再走统一编辑入口删除选区（Delete 在有选区时只删选区）。
+                // clipboard::write 是泛型 Task<T>，直接以 Message 实例化后 chain。
+                let write: Task<Message> = iced::clipboard::write(text);
+                write.chain(Task::done(Message::Edit(EditOp::Delete)))
+            }
+            Message::PasteRequested => {
+                // clipboard::read 返回 Task<Option<String>>
+                iced::clipboard::read()
+                    .map(|content| Message::Pasted(content.unwrap_or_default()))
+            }
+            Message::Pasted(text) => {
+                if text.is_empty() {
+                    Task::none()
+                } else {
+                    self.update(Message::Edit(EditOp::InsertText(text)))
+                }
+            }
+
+            // ---------- 打开 ----------
+            Message::OpenRequested => {
+                if self.busy {
+                    return Task::none();
+                }
+                self.enter_busy();
+                self.status.clear();
+                Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("所有文件", &["*"])
+                            .pick_file()
+                            .await
+                    },
+                    |handle| Message::FileChosen(handle.map(|f| f.path().to_path_buf())),
+                )
+            }
+            Message::FileChosen(None) => {
+                self.busy = false;
+                Task::none()
+            }
+            Message::FileChosen(Some(path)) => {
+                // 对话框阶段结束：busy 若不清零，会撞上后续守卫导致卡死
+                self.busy = false;
+                self.request_open(path)
+            }
+            // 拖拽文件进窗口 = 打开；同一路径重复拖拽也允许重新加载
+            // （每次 job_seq 递增，无路径去重；dirty/busy 保护在 request_open 内）
+            Message::FileDropped(path) => self.request_open(path),
+
+            Message::LoadProgress(job_id, bytes_read, total_bytes) => {
+                if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {
+                    self.progress = Some((bytes_read, total_bytes));
+                }
+                Task::none()
+            }
+            Message::Loaded(job_id, result) => {
+                // 过期任务的迟到消息直接丢弃
+                let Some(job) = self.active_load.clone() else {
+                    return Task::none();
+                };
+                if job.id != job_id {
+                    return Task::none();
+                }
+                self.active_load = None;
+                self.progress = None;
+                // P21：结果路由回发起加载的标签页——期间切走也不串页
+                let target = job.tab;
+                // P30：恢复任务的待还原视图随任务号取出；None = 普通打开
+                let pending_view = self.restore_views.remove(&job_id);
+                let is_restore = pending_view.is_some();
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+                match result {
+                    // P30 防串写护栏（第二半在 Ok(_) 分支）：普通打开照旧；
+                    // 恢复任务要求目标仍是空净无名占位页，否则走丢弃分支
+                    Ok((doc, sample, encoding))
+                        if !is_restore || self.restore_placeholder_ready(target) =>
+                    {
+                        // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
+                        // 内容嗅探（shebang/XML/JSON/YAML/约定文件名）
+                        let language =
+                            editpad_core::resolve_language(Some(job.path.as_path()), &sample);
+                        let tab = &mut self.tabs[target];
+                        {
+                            let mut ed = tab.editor.borrow_mut();
+                            // P19：rope 直入，不再有 from_str 的二次全文拷贝
+                            ed.reset_document(doc);
+                            ed.set_language_by_name(language.as_deref());
+                            // P30：恢复任务的视图回填——光标与滚动回到
+                            // 上次退出时的位置（无副作用定位入口）
+                            if let Some((line, col, scroll_top, scroll_left)) = pending_view {
+                                ed.restore_view(line, col, scroll_top, scroll_left);
+                            }
+                            // P32：普通打开命中最近文件记忆 → 光标/滚动就位。
+                            // 恢复任务以会话清单视图为准（上方已应用），不覆盖。
+                            if !is_restore {
+                                if let Some(view) = self.settings.recent_view(&job.path) {
+                                    ed.restore_view(view.line, view.col, view.scroll_top, 0.0);
+                                }
+                            }
+                        }
+                        tab.path = Some(job.path.clone());
+                        tab.encoding_label = encoding;
+                        tab.dirty = false;
+                        // P50：载入成功即记外部修改比对戳
+                        tab.file_stamp = file_stamp(&job.path);
+                        // P25：真实文件已就位，未命名序号使命完成
+                        tab.untitled_num = None;
+                        // P31：页内容整体换血（打开/恢复回填）——已提交清单
+                        // 对本页的描述过期，下一拍重写
+                        self.session_manifest_stale = true;
+                        if let Some(path) = self.path_of_tab(target) {
+                            self.record_recent(&path);
+                        }
+                        self.busy = false;
+                        // 新文档已就位：旧文档的关闭确认语义过期
+                        self.confirm_visible = false;
+                        self.pending_close = false;
+                        self.status.clear();
+                        if self.find_visible && target == self.active_tab {
+                            tasks.push(self.schedule_find_scan());
+                        }
+                    }
+                    Ok(_) => {
+                        // P30：占位页已被用户动过（关页/新页导致下标漂移）——
+                        // 宁可丢弃结果也不能覆盖用户内容；计入失败汇总
+                        self.busy = false;
+                        self.restore_failed += 1;
+                    }
+                    Err(error) => {
+                        if is_restore {
+                            // P30：恢复页加载失败（文件被删等）——移除占位页
+                            // 继续恢复其余页，不阻断（§3 P30 第 6 条）
+                            self.drop_restore_placeholder(target);
+                            self.restore_failed += 1;
+                            self.busy = false;
+                        } else {
+                            self.busy = false;
+                            self.status = format!("打开失败:{error}");
+                        }
+                    }
+                }
+                // P30 恢复链推进：本步收尾后队列非空则续排下一页。
+                // 注意这里必须**同步调用**而非塞进 Task 延后——方法调用
+                // 本身就完成「弹出下一页 + 登记任务」的全部状态变更，
+                // 加载流由 subscription 依据 active_load 重建自然接管；
+                // 返回的 Task 恒为 none，无需借道批处理。
+                if is_restore && self.settle_restore_step() {
+                    let _ = self.begin_restore_load();
+                }
+                if tasks.is_empty() {
+                    Task::none()
+                } else {
+                    Task::batch(tasks)
+                }
+            }
+
+            // ---------- 保存 ----------
+            Message::SaveRequested => match self.tab().path.clone() {
+                Some(_) => self.save(),
+                None => self.save_as_dialog(),
+            },
+            Message::SaveAsRequested => self.save_as_dialog(),
+            Message::SaveTargetChosen(None) => {
+                self.busy = false;
+                // 另存为被取消：若它属于「保存并关闭」，一并放弃关闭
+                self.pending_close = false;
+                Task::none()
+            }
+            Message::SaveTargetChosen(Some(path)) => {
+                let tab = self.tab_mut();
+                tab.path = Some(path);
+                // P25：另存为转正后未命名序号使命完成
+                tab.untitled_num = None;
+                // 对话框阶段结束再交给 save() 的 busy 守卫（原实现在此卡死 busy）
+                self.busy = false;
+                self.save()
+            }
+            Message::Saved(version, Ok(())) => {
+                // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
+                self.tab_mut().dirty = self.tab().version != version;
+                self.busy = false;
+                if !self.tab().dirty {
+                    // P38：落盘成功且期间无新编辑——当前内容即磁盘内容，
+                    // 刷新撤销回基线的判定基准（版本不符时不得动基线：
+                    // 那时磁盘上是旧快照）
+                    self.cur_handle.borrow_mut().mark_saved();
+                    // P31：内存态比已提交清单「更干净」——下一拍重写清单，
+                    // 防崩溃恢复把已落盘内容按旧快照复活成置脏页
+                    self.session_manifest_stale = true;
+                }
+                if let Some(path) = self.tab().path.clone() {
+                    self.record_recent(&path);
+                }
+                // P6 编码知情权：发生转码/BOM 丢失时明确告知，而不是静默落盘
+                if let Some(notice) = transcode_notice(&self.tab().encoding_label) {
+                    self.status = notice;
+                } else {
+                    self.status.clear();
+                }
+                // 落盘后文件已是纯 UTF-8，标签同步归一（避免后续保存重复提示）
+                self.tab_mut().encoding_label = "UTF-8".to_owned();
+                // P50：落盘成功即刷新外部修改比对戳（磁盘内容 = 刚写的内容）
+                if let Some(path) = self.tab().path.clone() {
+                    self.tab_mut().file_stamp = file_stamp(&path);
+                }
+                if self.pending_close {
+                    // 落盘确认后才真正关窗。P29：保存的是活动页，
+                    // 其余置脏页走快照直退（不再二次弹窗），快照失败才降级
+                    self.pending_close = false;
+                    if session_restore_allowed(
+                        self.settings.enable_snapshots,
+                        self.settings.remember_session,
+                    ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT
+                    {
+                        if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
+                            return self.exit_via_snapshot(&dir);
+                        }
+                    }
+                    return self.close_window();
+                }
+                Task::none()
+            }
+            Message::Saved(_, Err(error)) => {
+                self.busy = false;
+                // 保存失败不关窗：留在应用里让用户处理
+                self.pending_close = false;
+                self.status = format!("保存失败:{error}");
+                Task::none()
+            }
+
+            // ---------- 即时保存（P18，按页路由） ----------
+            Message::TabAutosaved(idx, version, result) => {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.autosave_inflight = false;
+                    match result {
+                        Ok(()) => {
+                            // 版本一致 = 快照之后没有新编辑：可以安全清脏
+                            if tab.version == version {
+                                tab.dirty = false;
+                                // P38：当前内容即磁盘内容，刷新落盘基线
+                                tab.editor.borrow_mut().mark_saved();
+                                // P50：自动保存落盘成功，同步刷新比对戳
+                                tab.file_stamp =
+                                    tab.path.as_deref().and_then(file_stamp);
+                                // P31：auto-save 成功清脏 = 内存比清单干净，
+                                // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
+                                self.session_manifest_stale = true;
+                            }
+                        }
+                        Err(error) => {
+                            // 失败必须留痕（不能无声吞掉），但不打断编辑；
+                            // 清掉 inflight 后，下一次编辑会重新排队
+                            self.status = format!("自动保存失败:{error}");
+                        }
+                    }
+                }
+                Task::none()
+            }
+
+            // ---------- 关闭确认 ----------
+            Message::CloseRequested(id) => {
+                self.handle_close_request(id, editpad_core::snapshot::snapshot_dir())
+            }
+
+            // ---------- 外部修改检测（P50） ----------
+            Message::WindowFocused => {
+                self.check_external_changes();
+                Task::none()
+            }
+            Message::ConfirmExternalReload(idx) => {
+                // 出队后重载；Loaded 归页时重记戳（失败则下次聚焦再报）
+                if let Some(queue) = self.external_change.as_mut() {
+                    queue.retain(|i| *i != idx);
+                    if queue.is_empty() {
+                        self.external_change = None;
+                    }
+                }
+                match self.tabs.get(idx).and_then(|t| t.path.clone()) {
+                    Some(path) => self.start_loading(path, idx),
+                    None => Task::none(),
+                }
+            }
+            Message::IgnoreExternalChange(idx) => {
+                // 以当前磁盘状态重记戳：此后直到文件再次变化都不再提示；
+                // 队列还有剩余则条上自动切到下一页（P52 聚合语义）
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
+                }
+                if let Some(queue) = self.external_change.as_mut() {
+                    queue.retain(|i| *i != idx);
+                    if queue.is_empty() {
+                        self.external_change = None;
+                    }
+                }
+                Task::none()
+            }
+            Message::IgnoreAllExternalChanges => {
+                // P52 聚合态：队列内所有页一律按磁盘现状重记戳并收条
+                if let Some(queue) = self.external_change.take() {
+                    for idx in queue {
+                        if let Some(tab) = self.tabs.get_mut(idx) {
+                            tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::ConfirmSaveAndClose => {
+                self.confirm_visible = false;
+                self.pending_close = true;
+                match self.tab().path.clone() {
+                    Some(_) => self.save(),
+                    // 未命名文档：先走另存为，落盘成功后自动关窗
+                    None => self.save_as_dialog(),
+                }
+            }
+            Message::DiscardAndClose => {
+                self.discard_all_and_close(editpad_core::snapshot::snapshot_dir())
+            }
+            Message::CancelClose => {
+                self.confirm_visible = false;
+                self.pending_close = false;
+                Task::none()
+            }
+
+            // ---------- 启动会话恢复（P30） ----------
+            Message::SessionRecoverAccepted => {
+                self.accept_session_recover(editpad_core::snapshot::snapshot_dir())
+            }
+            Message::SessionRecoverDiscarded => {
+                self.discard_session_recover(editpad_core::snapshot::snapshot_dir())
+            }
+
+            // ---------- 打开确认 ----------
+            Message::ConfirmOpenDiscard => {
+                let Some(path) = self.open_confirm.take() else {
+                    return Task::none();
+                };
+                // 明确放弃：不再触发下一次确认；若关闭确认条还开着，其前提已消失
+                self.tab_mut().dirty = false;
+                self.confirm_visible = false;
+                self.pending_close = false;
+                let tab = self.target_tab_for_open();
+                self.start_loading(path, tab)
+            }
+            Message::ConfirmOpenCancel => {
+                self.open_confirm = None;
+                Task::none()
+            }
+
+            // ---------- 查找 / 替换 ----------
+            Message::FindToggled => {
+                self.find_visible = !self.find_visible;
+                if self.find_visible {
+                    self.goto_visible = false;
+                    return self.schedule_find_scan();
+                } else {
+                    // 关栏即取消在途扫描并清结果（旧实现只清结果）
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::FindQueryChanged(query) => {
+                self.find_query = query;
+                // P10：查询变化只排队后台扫描（防抖），UI 线程零全文拷贝；
+                // 查询为空时内部转为取消 + 清结果
+                self.schedule_find_scan()
+            }
+            Message::FindNext => self.step_match(true),
+            Message::FindPrev => self.step_match(false),
+            Message::CaseToggled(value) => {
+                self.case_sensitive = value;
+                self.schedule_find_scan()
+            }
+            Message::ReplaceQueryChanged(query) => {
+                self.replace_query = query;
+                Task::none()
+            }
+            Message::ReplaceCurrent => self.replace_current(),
+            Message::ReplaceAll => {
+                if self.busy || self.find_query.is_empty() || self.find_scanning() {
+                    // 扫描在途时禁止全部替换：此刻的全文快照可能是过期的
+                    return Task::none();
+                }
+                // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
+                // P22 补充：查询与替换文本先做转义解析（\n \r \t \\）
+                let (new_contents, count) = {
+                    let editor = self.cur_handle.borrow();
+                    editpad_core::replace_all_document(
+                        &editor.doc,
+                        &unescape_query(&self.find_query),
+                        &unescape_query(&self.replace_query),
+                        self.case_sensitive,
+                    )
+                };
+                if count > 0 {
+                    self.cur()
+                        .borrow_mut()
+                        .replace_whole_document(editpad_core::Document::from_str(&new_contents));
+                    self.tab_mut().dirty = true;
+                    // P18：内容版本与防抖起点同步推进
+                    self.tab_mut().note_mutation();
+                }
+                // P10：替换后的重扫走后台防抖，不再同步刷
+                let mut tasks = vec![self.schedule_find_scan()];
+                if count > 0 {
+                    // P18：内容变了 → 排队一次防抖自动保存
+                    tasks.push(self.maybe_schedule_autosave());
+                }
+                self.status = format!("已替换 {count} 处");
+                return Task::batch(tasks);
+            }
+            Message::FindScanDone(seq, found) => {
+                // 过期结果丢弃：只认当前排队中的那次扫描（P10 的 job 序号过滤，
+                // 与 Loaded 按 job_id 过滤同构）
+                if self.find_scan == Some(seq) {
+                    self.find_scan = None;
+                    self.matches = found;
+                    self.match_idx = None;
+                }
+                Task::none()
+            }
+
+            // ---------- 高亮后台分批补建（P12） ----------
+            Message::HighlightPaveNeeded => self.schedule_highlight_pave(),
+            Message::FormatJson => {
+                const FORMAT_JSON_MAX_CHARS: usize = 4_000_000;
+                // 仅当前语法为 JSON 时生效（P22 第二批：按当前语法判断）
+                if self.cur_handle.borrow().highlight_syntax_name().as_deref() != Some("JSON") {
+                    self.status = "格式化 JSON 仅对 JSON 文件可用（Ctrl+Shift+F）".to_owned();
+                    return Task::none();
+                }
+                let (text, chars) = {
+                    let ed = self.cur_handle.borrow();
+                    (ed.doc.to_text(), ed.doc.text_len())
+                };
+                if chars > FORMAT_JSON_MAX_CHARS {
+                    // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
+                    self.status =
+                        format!("文档过大（{chars} 字符），暂不支持格式化（上限 {FORMAT_JSON_MAX_CHARS}）");
+                    return Task::none();
+                }
+                match editpad_core::format_json(&text) {
+                    Ok(pretty) => {
+                        // replace_whole_document 内部快照 → 可撤销；光标复位到文首
+                        self.cur()
+                            .borrow_mut()
+                            .replace_whole_document(editpad_core::Document::from_str(&pretty));
+                        self.tab_mut().dirty = true;
+                        // P18：内容版本与防抖起点同步推进
+                        self.tab_mut().note_mutation();
+                        self.status = "已格式化 JSON".to_owned();
+                        if self.find_visible {
+                            // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
+                            let find_task = self.schedule_find_scan();
+                            return Task::batch([
+                                find_task,
+                                self.maybe_schedule_autosave(),
+                            ]);
+                        }
+                        return self.maybe_schedule_autosave();
+                    }
+                    Err(error) => {
+                        self.status = format!("JSON 格式化失败：{error}");
+                        Task::none()
+                    }
+                }
+            }
+            Message::HlPaveProgress(gen, strides_done) => {
+                // 双重代次检查：任务登记一致且高亮器未换代（换文件后
+                // 旧任务的迟到进度不得污染新会话的状态栏）
+                if self.hl_paving == Some(gen)
+                    && self.cur_handle.borrow().highlight_generation() == Some(gen)
+                {
+                    let total_strides = (self.cur_handle.borrow().doc.line_count()
+                        / editpad_core::highlight::STRIDE)
+                        .max(1);
+                    let pct = (strides_done as usize).min(total_strides) * 100 / total_strides;
+                    self.status = format!("语法分析中…{pct}%（后台）");
+                }
+                Task::none()
+            }
+            Message::HlPaved(gen, paved) => {
+                if self.hl_paving == Some(gen) {
+                    self.hl_paving = None;
+                    // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
+                    // needs_paving 重新评估并续排（从存活检查点出发，代价小）
+                    let installed = self
+                        .cur_handle
+                        .borrow_mut()
+                        .install_highlighter_if_current(gen, paved);
+                    let _ = installed;
+                    if self.status.starts_with("语法分析") {
+                        self.status.clear();
+                    }
+                }
+                Task::none()
+            }
+
+            // ---------- 跳转 ----------
+            Message::GotoToggled => {
+                self.goto_visible = !self.goto_visible;
+                if self.goto_visible {
+                    self.find_visible = false;
+                }
+                Task::none()
+            }
+            Message::GotoInputChanged(value) => {
+                self.goto_input = value;
+                Task::none()
+            }
+            Message::GotoSubmit => match self.goto_input.trim().parse::<usize>() {
+                Ok(n) if n >= 1 => {
+                    self.cur_handle.borrow_mut().jump_to_line(n);
+                    self.goto_visible = false;
+                    self.status.clear();
+                    Task::none()
+                }
+                _ => {
+                    self.status = "请输入有效行号（从 1 开始）".to_owned();
+                    Task::none()
+                }
+            },
+
+            // ---------- 最近文件 ----------
+            Message::RecentsToggled => {
+                self.recents_visible = !self.recents_visible;
+                Task::none()
+            }
+            Message::RecentSelected(entry) => self.request_open(PathBuf::from(entry)),
+            Message::RecentsCleared => {
+                // P20 隐私：立即写回空列表，config.toml 不再含历史路径
+                self.settings.clear_recent_files();
+                self.persist_settings();
+                self.status = "已清空最近文件记录".to_owned();
+                Task::none()
+            }
+
+            Message::BarsDismissed => {
+                self.find_visible = false;
+                self.goto_visible = false;
+                self.recents_visible = false;
+                // P27：Esc 一并关闭设置弹窗
+                self.settings_visible = false;
+                // Esc 同时视作放弃关闭/打开确认
+                self.confirm_visible = false;
+                self.pending_close = false;
+                self.open_confirm = None;
+                // P21：Esc 也取消标签页关闭确认
+                self.close_tab_confirm = None;
+                // P28：Esc 同时收起右键菜单与批量关闭确认
+                self.tab_context_menu = None;
+                self.batch_close_confirm = None;
+                // P50：Esc 一并收起外部修改提示条
+                self.external_change = None;
+                // P55：Esc 一并取消就地重命名（一切保持原状）
+                self.renaming_tab = None;
+                self.rename_input.clear();
+                // P10：取消在途扫描 + 清结果（含序号失效）
+                self.cancel_find_scan();
+                Task::none()
+            }
+
+            // ---------- 多标签（P21） ----------
+            Message::NewTab => {
+                let tab = self.fresh_tab();
+                self.tabs.push(tab);
+                let last = self.tabs.len() - 1;
+                self.assign_untitled_num(last);
+                self.set_active_tab(last);
+                // 查找态全局：切页即作废旧命中，防串页
+                self.cancel_find_scan();
+                // P28：页集合已变，右键菜单随之下收
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            Message::SwitchTabNext => {
+                let next = (self.active_tab + 1) % self.tabs.len();
+                self.set_active_tab(next);
+                self.cancel_find_scan();
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            Message::SwitchTab(i) => {
+                if i < self.tabs.len() && i != self.active_tab {
+                    self.set_active_tab(i);
+                    self.cancel_find_scan();
+                    self.tab_context_menu = None;
+                }
+                Task::none()
+            }
+            Message::CloseTabRequest => {
+                let idx = self.active_tab;
+                // P28：固定页对键盘路径（Ctrl+W）同样豁免，与右键菜单一致
+                if self.tabs[idx].pinned {
+                    self.status = "固定标签页需先取消固定再关闭".to_owned();
+                } else if self.tabs[idx].dirty {
+                    // 置脏页先确认（骨架版仅提供「放弃更改」出口）
+                    self.close_tab_confirm = Some(idx);
+                } else if self.close_tab_now(idx) {
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::ConfirmCloseTabDiscard(idx) => {
+                self.close_tab_confirm = None;
+                if idx < self.tabs.len() {
+                    // 关最后一页时槽位会被复用：先清空内容与路径
+                    let tab = &mut self.tabs[idx];
+                    tab.dirty = false;
+                    tab.path = None;
+                    tab.editor
+                        .borrow_mut()
+                        .reset_document(editpad_core::Document::new());
+                }
+                if self.close_tab_now(idx) {
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::CancelCloseTab => {
+                self.close_tab_confirm = None;
+                Task::none()
+            }
+            Message::CaretTick => {
+                // 打磨项：翻转闪烁相位（update 本身会触发重绘）。
+                // 心跳链在 new() 启动后自我续期，占用一个常驻睡眠节拍。
+                // P53：一条链两用——竖直滚动条淡出动画期间切换 33ms 快拍
+                // 驱动渐变（相位翻转由 tick_blink 按真实间隔门控，不受影响），
+                // 其余时间维持 ~530ms 常规节拍。
+                self.cur_handle.borrow_mut().tick_blink();
+                let next_ms = if self.cur_handle.borrow().scrollbar_fading() {
+                    editor::SCROLLBAR_FADE_TICK_MS
+                } else {
+                    editor::CARET_BLINK_MS
+                };
+                Task::perform(
+                    async move {
+                        std::thread::sleep(std::time::Duration::from_millis(next_ms));
+                    },
+                    |_| Message::CaretTick,
+                )
+            }
+            Message::SnapshotHeartbeatTick => {
+                // P31 自我续期：无论本轮是否干活，下一拍恒排队（与光标
+                // 闪烁同一模式；进程退出即销毁，无残留计时器）。间隔取
+                // 加载时已归一的设置值，运行期视为不变。
+                let interval = std::time::Duration::from_secs(u64::from(
+                    self.settings.snapshot_interval_secs,
+                ));
+                let rearm = Task::perform(
+                    async move { std::thread::sleep(interval) },
+                    |_| Message::SnapshotHeartbeatTick,
+                );
+                // 快照底座任一开关关闭 / ask 模式 = 心跳整体停摆：
+                // 清单不写，退出流与启动恢复同样不依赖它（P29/P30 语义）
+                if !session_restore_allowed(
+                    self.settings.enable_snapshots,
+                    self.settings.remember_session,
+                ) || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
+                {
+                    return rearm;
+                }
+                // 至多一个提交在途：本轮巡检跳过（页级账目不受影响）
+                if self.heartbeat_inflight {
+                    return rearm;
+                }
+                // 目录解析走注入点（生产为 None → 系统配置目录）
+                let dir = self
+                    .snapshot_dir_override
+                    .clone()
+                    .or_else(editpad_core::snapshot::snapshot_dir);
+                let Some(dir) = dir else {
+                    return rearm;
+                };
+                match self.prepare_heartbeat_commit(&dir) {
+                    // 无变化且清单不过期：什么都不写（防无谓 IO）
+                    None => rearm,
+                    Some(payload) => {
+                        self.heartbeat_inflight = true;
+                        Task::batch([
+                            rearm,
+                            Task::perform(
+                                async move { drive_heartbeat(payload).await },
+                                |message| message,
+                            ),
+                        ])
+                    }
+                }
+            }
+            Message::HeartbeatDone(outcome) => {
+                self.heartbeat_apply(outcome);
+                Task::none()
+            }
+            Message::PreviewToggled => {
+                // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
+                if self.cur_handle.borrow().highlight_syntax_name().as_deref()
+                    == Some("Markdown")
+                {
+                    self.preview_visible = !self.preview_visible;
+                } else {
+                    self.status = "预览仅支持 Markdown 文件".to_owned();
+                }
+                Task::none()
+            }
+            Message::CloseTabSave(idx) => {
+                // 「保存并关闭」：已命名的置脏页先落盘，
+                // TabSaved 成功且清脏后再真正移除页面
+                if idx >= self.tabs.len() || self.busy {
+                    return Task::none();
+                }
+                if self.tabs[idx].path.is_none() {
+                    self.status = "未命名标签页请先另存为再关闭".to_owned();
+                    return Task::none();
+                }
+                self.enter_busy();
+                let path = self.tabs[idx].path.clone().expect("上方已确认非空");
+                let doc = self.tabs[idx].editor.borrow().doc.clone();
+                let version = self.tabs[idx].version;
+                self.pending_close_tab = Some(idx);
+                Task::perform(
+                    async move {
+                        let saved = editpad_core::save_document_atomic(&path, &doc)
+                            .map_err(|e| e.to_string());
+                        (version, saved)
+                    },
+                    move |(version, result)| Message::TabSaved(idx, version, result),
+                )
+            }
+            Message::TabSaved(idx, version, result) => {
+                self.busy = false;
+                if idx >= self.tabs.len() {
+                    return Task::none();
+                }
+                match result {
+                    Ok(()) => {
+                        // 版本守卫同款：期间又有编辑则保持置脏、不关闭
+                        let clean = self.tabs[idx].version == version;
+                        if clean {
+                            self.tabs[idx].dirty = false;
+                            // P38：落盘成功且版本守卫通过——内容即磁盘内容。
+                            // 本页通常随即被移除，此处是 close_tab_now 失败
+                            // 等幸存路径的基线兜底
+                            self.tabs[idx].editor.borrow_mut().mark_saved();
+                            if self.pending_close_tab == Some(idx)
+                                && self.close_tab_now(idx)
+                            {
+                                self.cancel_find_scan();
+                            }
+                            self.pending_close_tab = None;
+                        } else {
+                            self.status = "保存后又有新改动，已取消自动关闭".to_owned();
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("保存失败:{error}");
+                        self.pending_close_tab = None;
+                    }
+                }
+                Task::none()
+            }
+
+            // ---------- 标签右键菜单（P28；P39 起为浮层） ----------
+            Message::TabContextMenu(i) => {
+                // busy（对话框/IO 中）不开菜单；越界下标（页刚被关掉）忽略
+                if !self.busy && i < self.tabs.len() {
+                    // P39：浮层锚点 = 打开那一刻的指针位置（标签条 mouse_area 跟踪）
+                    self.menu_anchor = self.cursor_pos;
+                    self.tab_context_menu = Some(i);
+                }
+                Task::none()
+            }
+            // ---------- 浮层弹窗定位（P39/P40） ----------
+            Message::CursorMoved(p) => {
+                self.cursor_pos = (p.x, p.y);
+                Task::none()
+            }
+            Message::ViewportResized(w, h) => {
+                self.viewport_size = (w, h);
+                Task::none()
+            }
+            Message::TabContextMenuClosed => {
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            Message::TogglePinTab(i) => {
+                self.tab_context_menu = None;
+                if let Some(tab) = self.tabs.get_mut(i) {
+                    tab.pinned = !tab.pinned;
+                }
+                Task::none()
+            }
+            Message::SaveTabFromMenu(i) => {
+                self.tab_context_menu = None;
+                // v1 决策：右键保存 = 先切到目标页再走既有活动页保存流——
+                // Saved 回报、最近文件记录、转码提示全部复用活动页语义，
+                // 不为后台页另铺一条带 idx 的回报管线。未命名置脏页自动
+                // 落另存为对话框（与 Ctrl+S 同语义）。
+                if !self.busy && i < self.tabs.len() && self.tabs[i].dirty {
+                    self.set_active_tab(i);
+                    return match self.tab().path.clone() {
+                        Some(_) => self.save(),
+                        None => self.save_as_dialog(),
+                    };
+                }
+                Task::none()
+            }
+            Message::RenameOrSaveAsTab(i) => {
+                self.tab_context_menu = None;
+                if !self.busy && i < self.tabs.len() {
+                    self.set_active_tab(i);
+                    // P55：命名页 → 就地重命名输入框（预填当前文件名）；
+                    // 未命名页保留「另存为」对话框兜底（§3 P28 第 2 条）
+                    if let Some(path) = self.tabs[i].path.clone() {
+                        self.renaming_tab = Some(i);
+                        self.rename_input = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        return Task::none();
+                    }
+                    return self.save_as_dialog();
+                }
+                Task::none()
+            }
+            Message::TabRenameInputChanged(value) => {
+                self.rename_input = value;
+                Task::none()
+            }
+            Message::TabRenameCommitted => self.commit_tab_rename(),
+            Message::TabRenameCancelled => {
+                self.renaming_tab = None;
+                self.rename_input.clear();
+                Task::none()
+            }
+            Message::CloseTabAt(idx) => {
+                self.tab_context_menu = None;
+                if !self.busy && idx < self.tabs.len() {
+                    if self.tabs[idx].pinned {
+                        self.status = "固定标签页需先取消固定再关闭".to_owned();
+                    } else if self.tabs[idx].dirty {
+                        // 置脏走既有单页确认条（含「保存并关闭」出口）
+                        self.batch_close_confirm = None;
+                        self.close_tab_confirm = Some(idx);
+                    } else if self.close_tab_now(idx) {
+                        self.cancel_find_scan();
+                    }
+                }
+                Task::none()
+            }
+            Message::CloseOtherTabs(keep) => {
+                self.begin_batch_close(BatchCloseScope::Others(keep));
+                Task::none()
+            }
+            Message::CloseTabsRight(from) => {
+                self.begin_batch_close(BatchCloseScope::RightOf(from));
+                Task::none()
+            }
+            Message::ConfirmBatchCloseDiscard => {
+                if let Some(targets) = self.batch_close_confirm.take() {
+                    // 统一放弃：先清各页置脏与内容（与 ConfirmCloseTabDiscard
+                    // 同款，防「已移除页的 rope 仍被别名引用」的错觉），再移除。
+                    for &idx in &targets {
+                        if let Some(tab) = self.tabs.get_mut(idx) {
+                            tab.dirty = false;
+                            tab.path = None;
+                            tab.editor
+                                .borrow_mut()
+                                .reset_document(editpad_core::Document::new());
+                        }
+                    }
+                    if self.close_tabs_now(&targets) > 0 {
+                        self.cancel_find_scan();
+                    }
+                }
+                Task::none()
+            }
+            Message::CancelBatchCloseTabs => {
+                self.batch_close_confirm = None;
+                Task::none()
+            }
+
+            // ---------- 外观 ----------
+            Message::ThemeToggled => {
+                self.dark_mode = !self.dark_mode;
+                self.settings.set_theme(self.dark_mode);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::FontSizeDelta(delta) => {
+                let next = editor::normalize_font_size(self.display_font_size() + delta);
+                self.settings.font_size = next;
+                self.persist_settings();
+                self.cur_handle.borrow_mut().set_font_size(next);
+                Task::none()
+            }
+
+            // ---------- 设置弹窗（P27） ----------
+            Message::SettingsToggled => {
+                // busy（加载/保存中）禁开，与工具栏其余按钮同一守卫语义
+                if !self.busy {
+                    self.settings_visible = !self.settings_visible;
+                    // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
+                    if !self.settings_visible {
+                        self.settings_search.clear();
+                    }
+                }
+                Task::none()
+            }
+            // P47：侧栏分类导航——点分类即离开搜索态（同款语义）
+            Message::SettingsPageSelected(page) => {
+                self.settings_page = page;
+                self.settings_search.clear();
+                // P51：分类位置即时落盘，重启后回到上次浏览的页
+                self.settings.settings_page = page.key().to_owned();
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsSearchChanged(query) => {
+                self.settings_search = query;
+                Task::none()
+            }
+            Message::SettingsAutosaveToggled(value) => {
+                self.settings.autosave_enabled = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsAutosaveDelayDelta(delta) => {
+                let next = (self.settings.autosave_delay_secs as i64 + delta as i64)
+                    .clamp(
+                        editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS as i64,
+                        editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS as i64,
+                    ) as u32;
+                self.settings.autosave_delay_secs = next;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsRememberRecentToggled(value) => {
+                self.settings.remember_recent_files = value;
+                // P20：关闭开关即清空存量列表（只关开关不清数据等于没关）
+                if !value {
+                    self.settings.clear_recent_files();
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsSnapshotsToggled(value) => {
+                self.settings.enable_snapshots = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsRememberSessionToggled(value) => {
+                self.settings.remember_session = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsExitModeToggled => {
+                use editpad_core::settings::{EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
+                self.settings.exit_mode = if self.settings.exit_mode == EXIT_MODE_SNAPSHOT {
+                    EXIT_MODE_ASK
+                } else {
+                    EXIT_MODE_SNAPSHOT
+                }
+                .to_string();
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsIntervalDelta(delta) => {
+                let next = (self.settings.snapshot_interval_secs as i64 + delta as i64)
+                    .clamp(
+                        editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS as i64,
+                        editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS as i64,
+                    ) as u32;
+                self.settings.snapshot_interval_secs = next;
+                self.persist_settings();
+                Task::none()
+            }
+
+            // ---------- 字体选择（P34） ----------
+            Message::SettingsFontSelected(name) => {
+                // 名字来自启动期枚举清单，必然可解析；仍走统一解析保持
+                // 「设置值 ↔ 生效值」同源（清单为空的异常环境会回退默认）
+                self.settings.set_font_family(Some(name));
+                self.active_font_family = effective_font_family(
+                    self.settings.font_family.as_deref(),
+                    &self.available_fonts,
+                )
+                .map(leak_font_family);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsFontReset => {
+                self.settings.set_font_family(None);
+                self.active_font_family = None;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::FontFilterChanged(filter) => {
+                self.font_filter = filter;
+                Task::none()
+            }
+        }
+    }
+
+    // ---------- 编辑分发 ----------
+
+    /// 执行一次按键编辑；返回是否真的改动了文本。
+    fn apply_edit(&mut self, op: EditOp) -> bool {
+        // 加载进行中不接收编辑，避免打到即将被替换的旧文档上
+        if self.active_load.is_some() {
+            return false;
+        }
+
+        use EditOp as E;
+        let mut hint: Option<&'static str> = None;
+        // P38：撤销/重做后内容是否恰好回到落盘基线（打字/删除路径不查询，
+        // 维持保守置脏，避免大文档每键全量比对）
+        let mut back_to_saved = false;
+
+        let mut editor = self.cur_handle.borrow_mut();
+        let changed = match op {
+            E::Motion(motion, extend) => {
+                editor.apply_motion(motion, extend);
+                false
+            }
+            E::SelectAll => {
+                editor.select_all();
+                false
+            }
+            E::Undo => {
+                let changed = editor.undo();
+                if !changed {
+                    hint = Some("没有更多撤销历史");
+                } else {
+                    back_to_saved = editor.is_at_saved_content();
+                }
+                changed
+            }
+            E::Redo => {
+                let changed = editor.redo();
+                if !changed {
+                    hint = Some("已在最新状态");
+                } else {
+                    back_to_saved = editor.is_at_saved_content();
+                }
+                changed
+            }
+            E::InsertText(text) => {
+                editor.insert_str(&text);
+                true
+            }
+            E::Backspace => {
+                editor.backspace();
+                true
+            }
+            E::Delete => {
+                editor.delete_forward();
+                true
+            }
+        };
+        drop(editor);
+
+        if changed {
+            {
+                let tab = self.tab_mut();
+                // P38：撤销/重做按「内容是否回到最近落盘版本」重算置脏——
+                // 退净到基线即与磁盘一致，● 消失、关窗不再无谓拦截；
+                // 其余编辑路径 back_to_saved 恒 false，行为不变
+                tab.dirty = !back_to_saved;
+                // P18：内容版本 +1 并刷新防抖起点（自动保存的触发依据）
+                tab.note_mutation();
+            }
+            if back_to_saved {
+                // P31：内存态变得比已提交清单更干净（清单还记着置脏页），
+                // 下一拍心跳重写清单，防崩溃恢复把已回清的内容按旧快照复活
+                self.session_manifest_stale = true;
+            }
+            self.status.clear();
+        } else if let Some(hint) = hint {
+            self.status = hint.to_owned();
+        }
+        changed
+    }
+
+    // ---------- 加载管线 ----------
+
+    /// 启动一次后台加载：登记任务后由 [`Editpad::subscription`] 的流接管。
+    ///
+    /// P21：`tab` 指明结果应落入的标签页（可能等于 `tabs.len()`，
+    /// 表示「新开一页」——此处先占位创建，保证路由目标恒存在）；
+    /// 期间用户切走标签也不影响结果归页。
+    pub(crate) fn start_loading(&mut self, path: PathBuf, tab: usize) -> Task<Message> {
+        if self.busy {
+            return Task::none();
+        }
+        // P21 内存护栏（§3 P19 总则第 2 条的骨架实现）：全部页字符量
+        // 按 3 字节/字符保守估算，加上待载文件大小，超上限即拒开并提示
+        let incoming = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let existing: usize = self
+            .tabs
+            .iter()
+            .map(|t| t.editor.borrow().doc.text_len())
+            .sum();
+        if !mem_guard_allows(existing, incoming, MULTI_TAB_MEM_CAP_BYTES) {
+            self.status =
+                "内存保护：合计内容超过上限，请先关闭部分大文档再打开".to_owned();
+            return Task::none();
+        }
+        if tab >= self.tabs.len() {
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
+        }
+        self.register_load_job(path, tab);
+        // P21：加载落在新页时直接切过去（符合「打开即聚焦」直觉）。
+        // ⚠️ 必须经 set_active_tab 同步 cur_handle 长期别名——直接赋值
+        // active_tab 会造成「下标指向新页、别名仍指旧页」的失步：
+        // 输入与渲染都走别名，表现为打开文件后敲字打进上一个文档
+        // （P32 本轮发现并修复；既有测试均在断言前显式切换而未暴露）。
+        self.set_active_tab(tab);
+        self.status.clear();
+        Task::none()
+    }
+
+    /// 登记一个后台加载任务（任务号分配 + busy 置位 + 进度条复位）。
+    /// 内存守卫、占位页创建与焦点切换由调用方决定：用户打开要切过去
+    /// （[`Self::start_loading`]），恢复链绝不抢焦点（P30）。
+    pub(crate) fn register_load_job(&mut self, path: PathBuf, tab: usize) -> u64 {
+        self.job_seq += 1;
+        let id = self.job_seq;
+        self.active_load = Some(LoadJob { id, path, tab });
+        self.progress = Some((0, 0));
+        self.enter_busy();
+        id
+    }
+
+    /// 统一的换文档入口（打开对话框/拖拽/最近文件共用）：
+    /// 当前页 dirty 时绝不静默丢弃修改（含撤销链），先弹打开确认条。
+    /// P21：落点 = [`Self::target_tab_for_open`]（空净当前页就地打开，否则新页）。
+    fn request_open(&mut self, path: PathBuf) -> Task<Message> {
+        if self.busy {
+            return Task::none();
+        }
+        if self.tab().dirty {
+            self.open_confirm = Some(path);
+            return Task::none();
+        }
+        let tab = self.target_tab_for_open();
+        self.start_loading(path, tab)
+    }
+
+    /// P50：窗口聚焦时的外部修改巡检。
+    ///
+    /// * busy / 加载中跳过（在途任务的结果马上会刷新戳，此时比对无意义）；
+    /// * 干净的**活动页**被外部修改 → 静默重载（无未保存工作可丢，内容
+    ///   以磁盘为准；走既有加载管线，Loaded 归页时重记戳）；
+    /// * 其余被改页（置脏页 / 后台页）→ 进入提示条队列由用户逐个裁决
+    ///   （置脏页绝不能静默重载——那等于丢弃用户未保存的工作）；
+    ///   P52 起队列聚合多页，条上显示总数，可逐个处理或全部忽略。
+    /// * 一次聚焦至多发起一个重载（防批量加载风暴）；聚焦即全量重算
+    ///   队列——已忽略的页（重记戳）自然不再命中。
+    fn check_external_changes(&mut self) {
+        if self.busy || self.active_load.is_some() {
+            return;
+        }
+        let mut queue: Vec<usize> = Vec::new();
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let Some(path) = tab.path.as_deref() else {
+                continue;
+            };
+            let Some(recorded) = tab.file_stamp else {
+                continue; // 从未记录（会话恢复占位等），无从比对
+            };
+            if !file_changed_externally(Some(recorded), file_stamp(path)) {
+                continue;
+            }
+            if idx == self.active_tab && !tab.dirty {
+                let path = tab.path.clone().expect("上方已判 Some");
+                // 加载流由 subscription 依据 active_load 重建接管，返回的
+                // Task 恒为 none——显式弃置（加载管线语义见 start_loading）
+                let _ = self.start_loading(path, idx);
+                return;
+            }
+            queue.push(idx);
+        }
+        self.external_change = if queue.is_empty() { None } else { Some(queue) };
+    }
+
+    /// P55：就地重命名提交——校验名称 → 磁盘改名 → 页路径/比对戳/
+    /// 最近文件与光标记忆随路径迁移。失败保持输入态让用户改（状态栏
+    /// 留原因）；busy/加载中拒绝提交（在途 Loaded 会用旧路径覆写页路径）。
+    fn commit_tab_rename(&mut self) -> Task<Message> {
+        let Some(idx) = self.renaming_tab else {
+            return Task::none();
+        };
+        let Some(old) = self.tabs.get(idx).and_then(|t| t.path.clone()) else {
+            // 页已关/未命名：输入态自然失效
+            self.renaming_tab = None;
+            self.rename_input.clear();
+            return Task::none();
+        };
+        if self.busy || self.active_load.is_some() {
+            self.status = "加载/保存进行中，请稍后再重命名".to_owned();
+            return Task::none();
+        }
+        let Some(target) = rename_target_path(&old, &self.rename_input) else {
+            self.status = "名称不能为空或含 \\/:*?\"<>| 等字符".to_owned();
+            return Task::none(); // 保持输入态
+        };
+        if target == old {
+            // 名字没变：静默收摊
+            self.renaming_tab = None;
+            self.rename_input.clear();
+            self.status.clear();
+            return Task::none();
+        }
+        if target.exists() {
+            self.status = format!("重命名失败:目标已存在「{}」", target.display());
+            return Task::none(); // 保持输入态
+        }
+        match fs::rename(&old, &target) {
+            Ok(()) => {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.path = Some(target.clone());
+                    // P50：路径变了旧戳作废，按新路径重记
+                    tab.file_stamp = file_stamp(&target);
+                }
+                // P20/P32：最近文件与光标记忆随路径迁移（旧路径条目失效）
+                let old_key = old.display().to_string();
+                let new_key = target.display().to_string();
+                if let Some(view) = self.settings.recent_views.remove(&old_key) {
+                    self.settings.recent_views.insert(new_key.clone(), view);
+                }
+                if let Some(pos) =
+                    self.settings.recent_files.iter().position(|p| *p == old_key)
+                {
+                    self.settings.recent_files[pos] = new_key.clone();
+                }
+                self.persist_settings();
+                // 会话清单里记的是旧路径，下一拍重写
+                self.session_manifest_stale = true;
+                self.renaming_tab = None;
+                self.rename_input.clear();
+                self.status = format!("已重命名为「{new_key}」");
+            }
+            Err(error) => {
+                self.status = format!("重命名失败:{error}");
+            }
+        }
+        Task::none()
+    }
+
+    pub(crate) fn subscription(&self) -> Subscription<Message> {
+        let load = match &self.active_load {
+            Some(job) => Subscription::run_with(job.clone(), build_load_stream),
+            None => Subscription::none(),
+        };
+        // P10 的查找扫描走 Task::perform（见 schedule_find_scan），不经订阅
+        // 0.14 没有 keyboard::on_key_press 了，用 listen_with 手动过滤按键；
+        // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）
+        let events =
+            iced::event::listen_with(|event, status, _window| match (event, status) {
+                (
+                    iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key, modifiers, ..
+                    }),
+                    iced::event::Status::Ignored,
+                ) => handle_key(key, modifiers),
+                (
+                    iced::Event::Window(window::Event::FileDropped(path)),
+                    _,
+                ) => Some(Message::FileDropped(path)),
+                // P50：窗口重新聚焦 = 外部修改巡检时机（编辑器无常驻轮询，
+                // 焦点回归是最自然的检查点——用户刚从外部工具切回来）
+                (iced::Event::Window(window::Event::Focused), _) => {
+                    Some(Message::WindowFocused)
+                }
+                // P39/P40：窗口逻辑尺寸（浮层贴边钳制依据；iced_winit 已
+                // 换算成逻辑坐标，与 mouse_area 光标坐标同空间）
+                (iced::Event::Window(window::Event::Resized(size)), _) => {
+                    Some(Message::ViewportResized(size.width, size.height))
+                }
+                _ => None,
+            });
+        // 窗口关闭请求：exit_on_close_request(false) 后以订阅事件流转
+        let close_requests = window::close_requests().map(Message::CloseRequested);
+        // P18 即时保存不走订阅：编辑后由 maybe_schedule_autosave 直接派发
+        // 「睡眠防抖→落盘」的专用线程（inflight 去重，至多一个挂起）
+        Subscription::batch([load, events, close_requests])
+    }
+
+    // ---------- 保存 ----------
+
+    fn save_as_dialog(&mut self) -> Task<Message> {
+        if self.busy {
+            return Task::none();
+        }
+        self.enter_busy();
+        let suggested = self.suggested_name();
+        Task::perform(
+            async move {
+                rfd::AsyncFileDialog::new()
+                    .set_file_name(&suggested)
+                    .save_file()
+                    .await
+            },
+            |handle| Message::SaveTargetChosen(handle.map(|f| f.path().to_path_buf())),
+        )
+    }
+
+    fn save(&mut self) -> Task<Message> {
+        if self.busy || self.tab().path.is_none() {
+            return Task::none();
+        }
+        self.enter_busy();
+        let path = self.tab().path.clone().expect("上方已确认非空");
+        // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
+        // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
+        let doc = self.cur_handle.borrow().doc.clone();
+        // P18 版本守卫：记录本次落盘对应的内容版本
+        let version = self.tab().version;
+        Task::perform(
+            async move {
+                let saved = editpad_core::save_document_atomic(&path, &doc)
+                    .map_err(|e| e.to_string());
+                (version, saved)
+            },
+            move |(version, result)| Message::Saved(version, result),
+        )
+    }
+
+    // ---------- 即时保存（P18，按页独立） ----------
+
+    /// 单个标签页的自动保存是否就绪：已命名、有未存改动、
+    /// 无在途 IO、不与手动保存互斥、本页没有挂起任务。
+    fn tab_autosave_ready(&self, idx: usize) -> bool {
+        self.settings.autosave_enabled
+            && self.tabs[idx].dirty
+            && self.tabs[idx].path.is_some()
+            && self.active_load.is_none()
+            && !self.busy
+            && !self.tabs[idx].autosave_inflight
+    }
+
+    /// 编辑后调用：遍历全部标签页，把所有就绪页各排一个「睡满防抖窗 →
+    /// 落盘 → 回报版本」的专用任务（P5/P10 同构的 OS 线程桥接）。
+    ///
+    /// 至多每页一个挂起（autosave_inflight 去重）；任务醒来落盘的是
+    /// **调度时刻**的快照——若期间又有编辑，版本守卫会保持置脏，
+    /// 本次编辑结束后由新任务覆盖最新内容（最终一致）。
+    fn maybe_schedule_autosave(&mut self) -> Task<Message> {
+        if !self.settings.autosave_enabled || self.busy || self.active_load.is_some() {
+            return Task::none();
+        }
+        let mut tasks = Vec::new();
+        for idx in 0..self.tabs.len() {
+            if !self.tab_autosave_ready(idx) {
+                continue;
+            }
+            let Some(path) = self.tabs[idx].path.clone() else {
+                continue;
+            };
+            let doc = self.tabs[idx].editor.borrow().doc.clone();
+            let version = self.tabs[idx].version;
+            let delay =
+                std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs));
+            self.tabs[idx].autosave_inflight = true;
+            tasks.push(Task::perform(
+                async move { drive_autosave_once(idx, path, doc, version, delay).await },
+                |message| message,
+            ));
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
+    fn record_recent(&mut self, path: &Path) {
+        self.settings.push_recent(path);
+        self.persist_settings();
+    }
+
+    /// P32：把指定页的当前光标/滚动写进最近文件记忆（未命名页无路径跳过），
+    /// 任一页有实际变化才落盘一次 config.toml。
+    pub(crate) fn remember_tab_views(&mut self, indices: &[usize]) {
+        let mut changed = false;
+        for &idx in indices {
+            let Some(path) = self.path_of_tab(idx) else {
+                continue;
+            };
+            let ed = self.tabs[idx].editor.borrow();
+            let view = editpad_core::RecentView {
+                line: ed.cursor.line,
+                col: ed.cursor.col,
+                scroll_top: ed.scroll_top,
+            };
+            drop(ed);
+            changed |= self.settings.set_recent_view(&path, view);
+        }
+        if changed {
+            self.persist_settings();
+        }
+    }
+
+    /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到
+    /// 临时目录，绝不动真实 %APPDATA%；否则走系统配置目录（尽力而为）。
+    fn persist_settings(&self) {
+        if let Some(path) = &self.settings_path_override {
+            let _ = self.settings.save_to(path);
+        } else {
+            self.settings.save();
+        }
+    }
+
+}
