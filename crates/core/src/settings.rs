@@ -54,6 +54,10 @@ pub struct Settings {
     /// 非法值在加载时归一为快照直退。
     #[serde(default = "default_exit_mode")]
     pub exit_mode: String,
+    /// 启动会话恢复开关（P30）。默认开启：「再次打开还是上次的界面」；
+    /// 关闭 = 启动恒空白页、退出不写会话清单（存量快照区在启动时清空）。
+    #[serde(default = "default_true")]
+    pub remember_session: bool,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -69,6 +73,7 @@ impl Default for Settings {
             autosave_delay_secs: DEFAULT_AUTOSAVE_DELAY_SECS,
             enable_snapshots: true,
             exit_mode: EXIT_MODE_SNAPSHOT.to_string(),
+            remember_session: true,
         }
     }
 }
@@ -521,6 +526,36 @@ mod tests {
         let path = dir.join("config.toml");
         s.save_to(&path).expect("保存应成功");
         assert_eq!(Settings::load_from(&path), s, "P29 字段必须参与 roundtrip");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P30 启动会话恢复设置 ----------
+
+    #[test]
+    fn remember_session_defaults_on_and_legacy_config_compatible() {
+        let s = Settings::default();
+        assert!(s.remember_session, "会话恢复默认开启（「重开还是上次的界面」）");
+
+        // 旧 config.toml 缺 P30 字段 → 默认 true，行为与升级前一致
+        let dir = scratch_dir("p30-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "theme = \"dark\"\n").unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(loaded.remember_session, "缺字段必须回默认 true");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remember_session_roundtrips_to_disk() {
+        let mut s = Settings::default();
+        s.remember_session = false;
+
+        let dir = scratch_dir("p30-roundtrip");
+        let path = dir.join("config.toml");
+        s.save_to(&path).expect("保存应成功");
+        assert_eq!(Settings::load_from(&path), s, "P30 字段必须参与 roundtrip");
 
         fs::remove_dir_all(&dir).ok();
     }

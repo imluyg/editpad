@@ -747,6 +747,25 @@ impl EditorCore {
         self.ensure_visible();
     }
 
+    /// 会话恢复的无副作用定位入口（P30）：把光标与滚动放回上次退出时的位置。
+    ///
+    /// 与编辑/移动入口的区别：不产生撤销快照、不触发置脏、不唤醒光标闪烁；
+    /// 行列越界夹紧到文档范围，滚动值先消毒（非有限归零）再按行程钳制。
+    /// 视口尺寸在首次布局前未知——此处只做行数域的宽松钳制，
+    /// 像素级精钳制由布局后的 [`Self::set_viewport_height`] 收口。
+    pub fn restore_view(&mut self, line: usize, col: usize, scroll_top: f32, scroll_left: f32) {
+        let last = self.doc.line_count().saturating_sub(1);
+        let line = line.min(last);
+        // 列按显示口径夹紧（行尾 \r 不计，与光标移动语义一致）
+        let col = col.min(self.line_display_len(line));
+        self.anchor = None;
+        self.cursor = CursorPos { line, col };
+        self.scroll_top = if scroll_top.is_finite() { scroll_top } else { 0.0 };
+        self.scroll_left = if scroll_left.is_finite() { scroll_left } else { 0.0 };
+        self.clamp_scroll();
+        self.clamp_scroll_horizontal();
+    }
+
     pub fn scroll_by_lines(&mut self, lines: f32) {
         self.scroll_top = (self.scroll_top - lines).max(0.0);
         self.clamp_scroll();
@@ -2532,6 +2551,44 @@ mod tests {
         let mut trailing = core_with("l1\nl2\n");
         trailing.jump_to_line(usize::MAX);
         assert_eq!(trailing.cursor.line, 2);
+    }
+
+    #[test]
+    fn restore_view_places_cursor_and_scroll_without_side_effects() {
+        // P30：会话恢复定位入口——越界夹紧、非有限滚动消毒、无撤销副作用
+        let mut c = core_with("第一行\r\nsecond\r\n第三行");
+        c.restore_view(usize::MAX, usize::MAX, f32::NAN, f32::INFINITY);
+        assert_eq!(
+            c.cursor,
+            CursorPos { line: 2, col: 3 },
+            "越界行列必须夹紧到文档末行末列（显示口径不计 \\r）"
+        );
+        assert_eq!(c.scroll_top, 0.0, "NaN/inf 滚动值消毒归零");
+        assert_eq!(c.scroll_left, 0.0);
+
+        // 负值被钳回左上角
+        c.restore_view(1, 3, -5.0, -5.0);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 3 });
+        assert_eq!(c.scroll_top, 0.0);
+        assert_eq!(c.scroll_left, 0.0);
+
+        // 无副作用：不进撤销栈、不置脏（undo/redo 栈保持为空）
+        assert!(c.undo_stack.is_empty() && c.redo_stack.is_empty());
+
+        // 空文档同样不得 panic（恢复一个空页的光标位置）
+        let mut empty = core_with("");
+        empty.restore_view(9, 9, 100.0, 100.0);
+        assert_eq!(empty.cursor, CursorPos { line: 0, col: 0 });
+
+        // 视口内有余量时合法值原样落位（31 行 + 120 列长行提供双向行程；
+        // 视口压到 5 行高让纵向行程覆盖 20px；第 10 行是 3 字符的 "row"，
+        // 超出列宽的请求同样按显示口径夹紧）
+        let mut wide = core_with(&format!("{}\n{}", "x".repeat(120), "row\n".repeat(30)));
+        wide.set_viewport_height(wide.line_height() * 5.0);
+        wide.restore_view(10, 2, 20.0, 40.0);
+        assert_eq!(wide.cursor, CursorPos { line: 10, col: 2 });
+        assert!((wide.scroll_top - 20.0).abs() < 1e-4, "行程内的纵向滚动应原样保留，实际 {}", wide.scroll_top);
+        assert!((wide.scroll_left - 40.0).abs() < 1e-4, "行程内的横向滚动应原样保留，实际 {}", wide.scroll_left);
     }
 
     #[test]

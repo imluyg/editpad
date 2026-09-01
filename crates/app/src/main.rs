@@ -12,6 +12,7 @@
 
 mod editor;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,6 +129,12 @@ enum Message {
     RecentsCleared,
     /// Esc 关闭全部浮动栏
     BarsDismissed,
+
+    // ---------- 启动会话恢复（P30） ----------
+    /// 崩溃恢复提示条「恢复」：按清单重建上次的标签页集合（含脏页内容）
+    SessionRecoverAccepted,
+    /// 崩溃恢复提示条「丢弃」：连快照一起丢（P29 放弃语义同族），空白起步
+    SessionRecoverDiscarded,
 
     /// 窗口关闭请求（X 按钮/Alt+F4）：dirty 时转确认条，否则直接关窗
     CloseRequested(window::Id),
@@ -621,6 +628,86 @@ fn mem_guard_allows(existing_chars: usize, incoming_bytes: u64, cap_bytes: u64) 
     estimate.saturating_add(incoming_bytes) <= cap_bytes
 }
 
+// ---------- 启动会话恢复（P30） ----------
+
+/// 启动会话恢复的总开关判定（纯函数便于测试）：
+/// 快照底座与「记住会话」两个开关都开启才允许恢复/写清单。
+fn session_restore_allowed(enable_snapshots: bool, remember_session: bool) -> bool {
+    enable_snapshots && remember_session
+}
+
+/// 恢复链中一个待载入的命名干净页：路径、目标占位页下标与待还原视图。
+#[derive(Debug, Clone)]
+struct RestoreLoad {
+    path: PathBuf,
+    tab: usize,
+    cursor_line: usize,
+    cursor_col: usize,
+    scroll_top: f32,
+    scroll_left: f32,
+}
+
+/// 恢复截断规划（纯函数便于测试）：估算各页字节量——置脏页按其快照
+/// 文件、干净命名页按磁盘文件、干净未命名页为 0——先保激活页再按下标
+/// 顺序装填，累计超上限的页放弃恢复（§3 P30 第 5 条）。
+/// 返回 (保留下标升序, 被截断页数)。
+fn plan_restore_order(
+    manifest: &editpad_core::snapshot::SessionManifest,
+    snapshot_dir: &Path,
+    cap_bytes: u64,
+) -> (Vec<usize>, usize) {
+    fn page_estimate(
+        tab: &editpad_core::snapshot::SessionTab,
+        snapshot_dir: &Path,
+    ) -> u64 {
+        if let Some(file) = &tab.file {
+            fs::metadata(snapshot_dir.join(file))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else if let Some(path) = &tab.path {
+            fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+        } else {
+            0 // 干净未命名页 = 空文档
+        }
+    }
+
+    let count = manifest.tabs.len();
+    let active = manifest.active.min(count.saturating_sub(1));
+    // 装填顺序：激活页优先（「先保激活页」），其余按下标升序
+    let mut order = vec![active];
+    order.extend((0..count).filter(|&i| i != active));
+
+    let mut kept = Vec::new();
+    let mut total = 0u64;
+    for i in order {
+        let size = page_estimate(&manifest.tabs[i], snapshot_dir);
+        if total.saturating_add(size) > cap_bytes {
+            continue; // 截断：该页放弃恢复，不阻断其余页
+        }
+        total += size;
+        kept.push(i);
+    }
+    kept.sort_unstable();
+    let dropped = count - kept.len();
+    (kept, dropped)
+}
+
+/// 取文档头部样本（≤4096 字符）供语言嗅探：迭代 rope 存储块拼接，
+/// 不产生全文拷贝（P19 内存口径）。
+fn head_sample(doc: &editpad_core::Document) -> String {
+    const LIMIT: usize = 4096;
+    let mut sample = String::new();
+    'outer: for chunk in doc.chunks() {
+        for ch in chunk.chars() {
+            sample.push(ch);
+            if sample.chars().count() >= LIMIT {
+                break 'outer;
+            }
+        }
+    }
+    sample
+}
+
 /// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 分块原子落盘」，
 /// 结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待结果，
 /// 且按页 inflight 去重保证同一页至多一个这样的线程）。
@@ -791,6 +878,24 @@ struct Editpad {
     /// 下一个未命名页序号（全局单调，不复用已关闭页的号码）
     untitled_next: u64,
 
+    // ---------- 启动会话恢复（P30） ----------
+    /// 待载入的命名干净页队列：占位页已在 tabs 中就位，
+    /// 逐个经既有加载管线回填内容与视图。
+    restore_queue: Vec<RestoreLoad>,
+    /// 恢复加载任务的待还原视图：(job id → (行, 列, 垂直滚动, 水平滚动))。
+    /// LoadJob 参与 Hash/Eq 不能携带 f32，故挂在应用状态侧按任务号取用；
+    /// 取出即视为恢复任务（普通打开不在此表）。
+    restore_views: HashMap<u64, (usize, usize, f32, f32)>,
+    /// 一次性崩溃恢复提示条（clean_exit=false 的异常退出清单）；
+    /// Some = 提示中，等用户裁决恢复或丢弃，数据原封留在磁盘。
+    recover_prompt: Option<editpad_core::snapshot::SessionManifest>,
+    /// 本轮恢复中未能还原原内容的页数（快照缺失/加载失败；汇总提示口径）
+    restore_failed: usize,
+    /// 因内存护栏被放弃恢复的页数（§3 P30 第 5 条的截断提示口径）
+    restore_dropped: usize,
+    /// 尚未落地的恢复加载页数（归零时出汇总状态）
+    restore_pending: usize,
+
     // ---------- 外观 ----------
     dark_mode: bool,
     /// Markdown 预览面板可见（P22 第三批；仅 Markdown 语法页渲染）
@@ -839,6 +944,13 @@ impl Default for Editpad {
             preview_visible: false,
             // P25：初始页即「未命名1」，下一个新页为「未命名2」
             untitled_next: 2,
+            // P30：启动会话恢复状态（boot_restore 按清单填充）
+            restore_queue: Vec::new(),
+            restore_views: HashMap::new(),
+            recover_prompt: None,
+            restore_failed: 0,
+            restore_dropped: 0,
+            restore_pending: 0,
         }
     }
 }
@@ -937,7 +1049,7 @@ impl Editpad {
         let dark_mode = settings.is_dark();
         // 设置里的字号可能未归一（旧配置/手改），boot 时按同一规则 clamp
         let font_size = editor::normalize_font_size(settings.font_size);
-        let state = Self {
+        let mut state = Self {
             settings,
             dark_mode,
             ..Self::default()
@@ -952,7 +1064,10 @@ impl Editpad {
             },
             |_| Message::CaretTick,
         );
-        (state, caret_chain)
+        // P30：启动会话恢复——读清单重建标签；命名干净页经加载管线回填。
+        // 开关判定在 boot_restore 内部（关闭 = 空白启动 + 存量清场）。
+        let restore_task = state.boot_restore();
+        (state, Task::batch([caret_chain, restore_task]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1054,8 +1169,16 @@ impl Editpad {
                 self.progress = None;
                 // P21：结果路由回发起加载的标签页——期间切走也不串页
                 let target = job.tab;
+                // P30：恢复任务的待还原视图随任务号取出；None = 普通打开
+                let pending_view = self.restore_views.remove(&job_id);
+                let is_restore = pending_view.is_some();
+                let mut tasks: Vec<Task<Message>> = Vec::new();
                 match result {
-                    Ok((doc, sample, encoding)) => {
+                    // P30 防串写护栏（第二半在 Ok(_) 分支）：普通打开照旧；
+                    // 恢复任务要求目标仍是空净无名占位页，否则走丢弃分支
+                    Ok((doc, sample, encoding))
+                        if !is_restore || self.restore_placeholder_ready(target) =>
+                    {
                         // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
                         // 内容嗅探（shebang/XML/JSON/YAML/约定文件名）
                         let language =
@@ -1066,6 +1189,11 @@ impl Editpad {
                             // P19：rope 直入，不再有 from_str 的二次全文拷贝
                             ed.reset_document(doc);
                             ed.set_language_by_name(language.as_deref());
+                            // P30：恢复任务的视图回填——光标与滚动回到
+                            // 上次退出时的位置（无副作用定位入口）
+                            if let Some((line, col, scroll_top, scroll_left)) = pending_view {
+                                ed.restore_view(line, col, scroll_top, scroll_left);
+                            }
                         }
                         tab.path = Some(job.path.clone());
                         tab.encoding_label = encoding;
@@ -1081,15 +1209,41 @@ impl Editpad {
                         self.pending_close = false;
                         self.status.clear();
                         if self.find_visible && target == self.active_tab {
-                            return self.schedule_find_scan();
+                            tasks.push(self.schedule_find_scan());
                         }
                     }
-                    Err(error) => {
+                    Ok(_) => {
+                        // P30：占位页已被用户动过（关页/新页导致下标漂移）——
+                        // 宁可丢弃结果也不能覆盖用户内容；计入失败汇总
                         self.busy = false;
-                        self.status = format!("打开失败:{error}");
+                        self.restore_failed += 1;
+                    }
+                    Err(error) => {
+                        if is_restore {
+                            // P30：恢复页加载失败（文件被删等）——移除占位页
+                            // 继续恢复其余页，不阻断（§3 P30 第 6 条）
+                            self.drop_restore_placeholder(target);
+                            self.restore_failed += 1;
+                            self.busy = false;
+                        } else {
+                            self.busy = false;
+                            self.status = format!("打开失败:{error}");
+                        }
                     }
                 }
-                Task::none()
+                // P30 恢复链推进：本步收尾后队列非空则续排下一页。
+                // 注意这里必须**同步调用**而非塞进 Task 延后——方法调用
+                // 本身就完成「弹出下一页 + 登记任务」的全部状态变更，
+                // 加载流由 subscription 依据 active_load 重建自然接管；
+                // 返回的 Task 恒为 none，无需借道批处理。
+                if is_restore && self.settle_restore_step() {
+                    let _ = self.begin_restore_load();
+                }
+                if tasks.is_empty() {
+                    Task::none()
+                } else {
+                    Task::batch(tasks)
+                }
             }
 
             // ---------- 保存 ----------
@@ -1132,8 +1286,10 @@ impl Editpad {
                     // 落盘确认后才真正关窗。P29：保存的是活动页，
                     // 其余置脏页走快照直退（不再二次弹窗），快照失败才降级
                     self.pending_close = false;
-                    if self.settings.enable_snapshots
-                        && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT
+                    if session_restore_allowed(
+                        self.settings.enable_snapshots,
+                        self.settings.remember_session,
+                    ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT
                     {
                         if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
                             return self.exit_via_snapshot(&dir);
@@ -1192,6 +1348,14 @@ impl Editpad {
                 self.confirm_visible = false;
                 self.pending_close = false;
                 Task::none()
+            }
+
+            // ---------- 启动会话恢复（P30） ----------
+            Message::SessionRecoverAccepted => {
+                self.accept_session_recover(editpad_core::snapshot::snapshot_dir())
+            }
+            Message::SessionRecoverDiscarded => {
+                self.discard_session_recover(editpad_core::snapshot::snapshot_dir())
             }
 
             // ---------- 打开确认 ----------
@@ -1647,22 +1811,26 @@ impl Editpad {
                 "内存保护：合计内容超过上限，请先关闭部分大文档再打开".to_owned();
             return Task::none();
         }
-        self.job_seq += 1;
-        let job = LoadJob {
-            id: self.job_seq,
-            path: path.clone(),
-            tab,
-        };
         if tab >= self.tabs.len() {
             self.tabs.push(Tab::empty());
         }
-        self.active_load = Some(job);
-        self.progress = Some((0, 0));
-        self.busy = true;
+        self.register_load_job(path, tab);
         // P21：加载落在新页时直接切过去（符合「打开即聚焦」直觉）
         self.active_tab = tab;
         self.status.clear();
         Task::none()
+    }
+
+    /// 登记一个后台加载任务（任务号分配 + busy 置位 + 进度条复位）。
+    /// 内存守卫、占位页创建与焦点切换由调用方决定：用户打开要切过去
+    /// （[`Self::start_loading`]），恢复链绝不抢焦点（P30）。
+    fn register_load_job(&mut self, path: PathBuf, tab: usize) -> u64 {
+        self.job_seq += 1;
+        let id = self.job_seq;
+        self.active_load = Some(LoadJob { id, path, tab });
+        self.progress = Some((0, 0));
+        self.busy = true;
+        id
     }
 
     /// 统一的换文档入口（打开对话框/拖拽/最近文件共用）：
@@ -1843,8 +2011,11 @@ impl Editpad {
     fn handle_close_request(&mut self, id: window::Id, snapshot_dir: Option<PathBuf>) -> Task<Message> {
         // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
         self.main_window = Some(id);
-        if !self.settings.enable_snapshots
-            || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
+        // P30：remember_session 关闭 = 退出不写会话清单，回退旧确认条
+        if !session_restore_allowed(
+            self.settings.enable_snapshots,
+            self.settings.remember_session,
+        ) || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
         {
             return self.confirm_or_close();
         }
@@ -1914,6 +2085,293 @@ impl Editpad {
             Some(id) => window::close(id),
             None => Task::none(),
         }
+    }
+
+    // ---------- 启动会话恢复（P30） ----------
+
+    /// 启动时会话恢复入口：开关任一关闭 = 空白启动（存量会话清场，
+    /// 「只关开关不清数据等于没关」沿用 P20 先例）；清单缺失/损坏/空页
+    /// = 无会话；clean_exit=false（上次异常退出，P31 心跳的中间态即此
+    /// 形态）= 弹一次性恢复提示等用户裁决；否则静默全量还原。
+    fn boot_restore(&mut self) -> Task<Message> {
+        if !session_restore_allowed(
+            self.settings.enable_snapshots,
+            self.settings.remember_session,
+        ) {
+            // enable_snapshots=false 的清场已在 new() 做过；这里补上
+            // remember_session=false 的清场
+            if !self.settings.remember_session {
+                if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
+                    editpad_core::snapshot::clear_session(&dir);
+                }
+            }
+            return Task::none();
+        }
+        match editpad_core::snapshot::snapshot_dir() {
+            Some(dir) => self.restore_from_dir(&dir),
+            None => Task::none(),
+        }
+    }
+
+    /// 从注入的快照目录执行恢复决策。生产路径经 [`Self::boot_restore`]；
+    /// 测试注入项目内目录，避免触碰真实 %APPDATA%（同 P29 先例）。
+    fn restore_from_dir(&mut self, dir: &Path) -> Task<Message> {
+        let Some(manifest) = editpad_core::snapshot::read_manifest(dir) else {
+            return Task::none(); // 无会话/损坏清单一律按空白启动，绝不 panic
+        };
+        if manifest.tabs.is_empty() {
+            return Task::none();
+        }
+        if !manifest.clean_exit {
+            // 孤儿检测 = 崩溃恢复入口（§3 P30 第 2 条）：弹一次性提示，
+            // 数据原封留在磁盘，等用户选择恢复或丢弃
+            self.recover_prompt = Some(manifest);
+            return Task::none();
+        }
+        self.restore_from_manifest(dir, &manifest)
+    }
+
+    /// 按清单重建标签页（P30 主路径）：
+    /// * 未命名页与置脏命名页从快照**同步**还原内容——v1 一律信快照
+    ///   （§3 P30 第 3 条，主流编辑器「所见即所得」），不从磁盘重载覆盖；
+    /// * 干净命名页建占位页排队，逐个经既有加载管线回填（失败跳过不阻断）；
+    /// * 未命名编号延续单调性；激活页最后切换；
+    /// * 内存护栏在规划期整体截断（先保激活页）。
+    fn restore_from_manifest(
+        &mut self,
+        dir: &Path,
+        manifest: &editpad_core::snapshot::SessionManifest,
+    ) -> Task<Message> {
+        let (kept, dropped) =
+            plan_restore_order(manifest, dir, MULTI_TAB_MEM_CAP_BYTES);
+        self.restore_dropped = dropped;
+        self.restore_failed = 0;
+
+        let mut tabs: Vec<Tab> = Vec::with_capacity(kept.len());
+        let mut queue: Vec<RestoreLoad> = Vec::new();
+        let mut next_untitled = 2u64;
+
+        for &i in &kept {
+            let meta = &manifest.tabs[i];
+            let mut tab = Tab::empty();
+            match (&meta.path, meta.file.as_deref()) {
+                // ---- 未命名页：内容只可能来自快照 ----
+                (None, _) => {
+                    tab.untitled_num = meta.untitled_num;
+                    if let Some(n) = meta.untitled_num {
+                        next_untitled = next_untitled.max(n.saturating_add(1));
+                    }
+                    if meta.dirty {
+                        match editpad_core::snapshot::read_page(dir, meta) {
+                            Some(doc) => {
+                                {
+                                    let mut ed = tab.editor.borrow_mut();
+                                    ed.reset_document(doc);
+                                    ed.restore_view(
+                                        meta.cursor_line,
+                                        meta.cursor_col,
+                                        meta.scroll_top,
+                                        meta.scroll_left,
+                                    );
+                                    // 内容嗅探让未命名草稿同样享受配色
+                                    let sample = head_sample(&ed.doc);
+                                    ed.set_language_by_name(
+                                        editpad_core::resolve_language(None, &sample)
+                                            .as_deref(),
+                                    );
+                                }
+                                tab.dirty = true;
+                            }
+                            None => {
+                                // 快照缺失/损坏：内容已不可得——留空页继续，
+                                // 计入失败汇总（单页失败不阻断，§3 P30 第 6 条）
+                                self.restore_failed += 1;
+                            }
+                        }
+                    }
+                }
+                // ---- 置脏命名页：信快照（所见即所得） ----
+                (Some(path), Some(_)) => {
+                    match editpad_core::snapshot::read_page(dir, meta) {
+                        Some(doc) => {
+                            {
+                                let mut ed = tab.editor.borrow_mut();
+                                ed.reset_document(doc);
+                                ed.restore_view(
+                                    meta.cursor_line,
+                                    meta.cursor_col,
+                                    meta.scroll_top,
+                                    meta.scroll_left,
+                                );
+                                let sample = head_sample(&ed.doc);
+                                ed.set_language_by_name(
+                                    editpad_core::resolve_language(
+                                        Some(Path::new(path)),
+                                        &sample,
+                                    )
+                                    .as_deref(),
+                                );
+                            }
+                            tab.path = Some(PathBuf::from(path));
+                            // 快照恒为 UTF-8 落盘；原文件编码知情权随下次保存归一
+                            tab.encoding_label = "UTF-8".to_owned();
+                            tab.dirty = true;
+                        }
+                        None => {
+                            // 快照读不出（半截写盘等）：退化为按干净命名页
+                            // 从磁盘加载——内容退回上次保存态的现实兜底，
+                            // 但未存改动确实丢了，计入失败汇总如实告知
+                            self.restore_failed += 1;
+                            queue.push(RestoreLoad {
+                                path: PathBuf::from(path),
+                                tab: tabs.len(),
+                                cursor_line: meta.cursor_line,
+                                cursor_col: meta.cursor_col,
+                                scroll_top: meta.scroll_top,
+                                scroll_left: meta.scroll_left,
+                            });
+                        }
+                    }
+                }
+                // ---- 干净命名页：占位 + 排队走既有加载管线 ----
+                (Some(path), None) => {
+                    queue.push(RestoreLoad {
+                        path: PathBuf::from(path),
+                        tab: tabs.len(),
+                        cursor_line: meta.cursor_line,
+                        cursor_col: meta.cursor_col,
+                        scroll_top: meta.scroll_top,
+                        scroll_left: meta.scroll_left,
+                    });
+                }
+            }
+            tabs.push(tab);
+        }
+
+        self.tabs = tabs;
+        // 激活页最后还原；编号计数取「清单值」与「实际用号+1」的较大者
+        self.active_tab = manifest.active.min(self.tabs.len().saturating_sub(1));
+        self.cur_handle = self.tabs[self.active_tab].editor.clone();
+        next_untitled = next_untitled.max(manifest.next_untitled);
+        self.untitled_next = next_untitled;
+
+        self.restore_queue = queue;
+        self.restore_pending = self.restore_queue.len();
+        self.begin_restore_load()
+    }
+
+    /// 恢复链：载入队列中的下一个命名页（队列空则收尾出汇总）。
+    /// 与用户打开的区别：绝不切焦点、不做逐次内存守卫（规划期已整体
+    /// 截断）、登记待还原视图供 Loaded 回填光标滚动。
+    fn begin_restore_load(&mut self) -> Task<Message> {
+        // 队列语义必须 FIFO（remove(0) 而非 pop()）：加载顺序 = 清单下标
+        // 顺序，占位页与排队项的下标对应关系才不会错位（LIFO 会让
+        // 「失败移除」作用在错误的页上——回归测试现场抓过）
+        if self.restore_queue.is_empty() {
+            self.finish_restore_summary();
+            return Task::none();
+        }
+        let entry = self.restore_queue.remove(0);
+        if self.busy || self.active_load.is_some() {
+            // 载入通道被占用（理论不可达：恢复链独占调度）：塞回队首等下轮
+            self.restore_queue.insert(0, entry);
+            return Task::none();
+        }
+        let id = self.register_load_job(entry.path, entry.tab);
+        self.restore_views
+            .insert(id, (entry.cursor_line, entry.cursor_col, entry.scroll_top, entry.scroll_left));
+        Task::none()
+    }
+
+    /// 恢复链的一步收尾：待载数递减；队列排空时出汇总状态。
+    /// 返回是否需要续排下一页（Loaded 处理器据此链接任务）。
+    fn settle_restore_step(&mut self) -> bool {
+        self.restore_pending = self.restore_pending.saturating_sub(1);
+        if self.restore_queue.is_empty() {
+            self.finish_restore_summary();
+            false
+        } else {
+            true
+        }
+    }
+
+    /// 恢复收尾汇总：只有出现值得告知的情况才打扰状态栏
+    /// （失败页/截断页）；全部成功则保持安静，界面本身即是恢复事实。
+    fn finish_restore_summary(&mut self) {
+        let mut notes: Vec<String> = Vec::new();
+        if self.restore_failed > 0 {
+            notes.push(format!("{} 页未能恢复原内容", self.restore_failed));
+        }
+        if self.restore_dropped > 0 {
+            notes.push(format!("{} 页超出内存护栏未恢复", self.restore_dropped));
+        }
+        if !notes.is_empty() {
+            self.status = format!("会话恢复完成:{}", notes.join("，"));
+        }
+        self.restore_failed = 0;
+        self.restore_dropped = 0;
+        self.restore_pending = 0;
+    }
+
+    /// 移除第 idx 个恢复占位页，并把队列中大于 idx 的目标下标整体前移
+    /// （页面移除后，后续排队页的下标随之左移）。仅当该页仍是空净无名
+    /// 占位页才动手——防误删恢复期间用户产生的内容。
+    fn drop_restore_placeholder(&mut self, idx: usize) {
+        let placeholder_ok = self.tabs.get(idx).is_some_and(|t| {
+            t.path.is_none()
+                && !t.dirty
+                && t.untitled_num.is_none()
+                && t.encoding_label.is_empty()
+                && t.editor.borrow().doc.is_empty()
+        });
+        if !placeholder_ok {
+            return;
+        }
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            self.tabs.push(Tab::empty());
+        }
+        for entry in &mut self.restore_queue {
+            if entry.tab > idx {
+                entry.tab -= 1;
+            }
+        }
+        // active_tab 可能越界：与 tabs 对齐并同步别名
+        self.refresh_cur_handle();
+    }
+
+    /// 目标页是否仍是待填充的恢复占位页（防串写护栏）：恢复期间用户
+    /// 关页/新建页会让队列下标漂移，宁可丢弃结果也不能覆盖用户内容。
+    fn restore_placeholder_ready(&self, idx: usize) -> bool {
+        self.tabs.get(idx).is_some_and(|t| {
+            t.path.is_none()
+                && !t.dirty
+                && t.untitled_num.is_none()
+                && t.encoding_label.is_empty()
+                && t.editor.borrow().doc.is_empty()
+        })
+    }
+
+    /// 崩溃恢复提示条「恢复」：按暂存清单全量重建（含脏页内容）。
+    fn accept_session_recover(&mut self, dir: Option<PathBuf>) -> Task<Message> {
+        let Some(manifest) = self.recover_prompt.take() else {
+            return Task::none();
+        };
+        match dir {
+            Some(dir) => self.restore_from_manifest(&dir, &manifest),
+            // 目录没了：无从恢复；数据仍在磁盘原处，本次空白起步
+            None => Task::none(),
+        }
+    }
+
+    /// 「丢弃」= 连快照一起丢（P29 放弃语义同族）：清场后空白起步，
+    /// 防止下次启动把已放弃的内容再次当会话恢复回来。
+    fn discard_session_recover(&mut self, dir: Option<PathBuf>) -> Task<Message> {
+        self.recover_prompt = None;
+        if let Some(dir) = dir {
+            editpad_core::snapshot::clear_session(&dir);
+        }
+        Task::none()
     }
 
     // ---------- 查找 / 替换内部逻辑 ----------
@@ -2367,6 +2825,26 @@ impl Editpad {
                     button(text("取消"))
                         .padding([4, 12])
                         .on_press(Message::ConfirmOpenCancel),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .padding([6, 10]),
+            );
+        }
+
+        // P30 崩溃恢复一次性提示条：上次未正常收尾（崩溃/P31 心跳中间态）。
+        // 「恢复」按快照全量重建；「丢弃」连快照一起丢。数据原封留在磁盘，
+        // 不裁决就一直挂着——与「未保存确认条」同级的强提醒语义。
+        if self.recover_prompt.is_some() {
+            body = body.push(rule::horizontal(1)).push(
+                row![
+                    text("检测到上次未正常退出的未保存工作区"),
+                    button(text("恢复"))
+                        .padding([4, 12])
+                        .on_press(Message::SessionRecoverAccepted),
+                    button(text("丢弃"))
+                        .padding([4, 12])
+                        .on_press(Message::SessionRecoverDiscarded),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -3039,6 +3517,346 @@ mod tests {
         let mut off = Editpad::default();
         off.settings.enable_snapshots = false;
         let _ = off.discard_all_and_close(Some(dir.clone()));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P30 启动会话恢复 ----------
+
+    /// 构造一个干净命名页的清单元数据（测试辅助）。
+    fn clean_named_tab(path: &str) -> editpad_core::snapshot::SessionTab {
+        editpad_core::snapshot::SessionTab {
+            path: Some(path.to_owned()),
+            untitled_num: None,
+            dirty: false,
+            file: None,
+            cursor_line: 0,
+            cursor_col: 0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+        }
+    }
+
+    #[test]
+    fn session_restore_rebuilds_tabs_content_active_and_pending_loads() {
+        let dir = snapshot_scratch_dir("p30-restore");
+
+        // 准备上一轮正常退出留下的会话：置脏未命名页（内容+光标）+ 干净命名页
+        let untitled = editpad_core::snapshot::SessionTab {
+            path: None,
+            untitled_num: Some(4),
+            dirty: true,
+            file: None,
+            cursor_line: 1,
+            cursor_col: 2,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+        };
+        let named = editpad_core::snapshot::SessionTab {
+            path: Some("C:/w/notes.md".to_owned()),
+            untitled_num: None,
+            dirty: false,
+            file: None,
+            cursor_line: 10,
+            cursor_col: 3,
+            scroll_top: 50.0,
+            scroll_left: 0.0,
+        };
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[
+                editpad_core::snapshot::SessionPage {
+                    tab: untitled,
+                    doc: editpad_core::Document::from_str("第一行\r\n草稿内容"),
+                },
+                editpad_core::snapshot::SessionPage {
+                    tab: named,
+                    doc: editpad_core::Document::new(),
+                },
+            ],
+            0,
+            7,
+        )
+        .expect("写会话应成功");
+        assert!(manifest.clean_exit);
+
+        let mut app = Editpad::default();
+        let _ = app.restore_from_manifest(&dir, &manifest);
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 0, "激活页按清单还原");
+        assert!(app.recover_prompt.is_none(), "clean_exit=true 静默恢复，不弹提示条");
+
+        // 置脏未命名页：内容逐字还原 + 光标就位 + 编号延续
+        assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "第一行\r\n草稿内容");
+        assert!(app.tabs[0].dirty);
+        assert_eq!(app.tabs[0].untitled_num, Some(4));
+        let ed0 = app.tabs[0].editor.borrow();
+        assert_eq!((ed0.cursor.line, ed0.cursor.col), (1, 2), "光标回到退出时位置");
+        drop(ed0);
+        assert_eq!(app.untitled_next, 7, "未命名编号从清单延续单调性");
+
+        // 干净命名页：占位页已建、加载任务已自动开跑（不抢焦点）
+        assert!(app.restore_placeholder_ready(1));
+        let job = app.active_load.as_ref().expect("命名页应立即开载").clone();
+        assert_eq!(job.tab, 1);
+        assert!(app.busy);
+        assert_eq!(app.active_tab, 0, "恢复链绝不把用户拽到加载页");
+
+        // 加载完成：内容回填 + 视图回填 + 收尾
+        let body = editpad_core::Document::from_str(&"line\n".repeat(30));
+        dispatch(
+            &mut app,
+            Message::Loaded(job.id, Ok((body, String::new(), "UTF-8".to_owned()))),
+        );
+        assert_eq!(app.tabs[1].path.as_deref(), Some(Path::new("C:/w/notes.md")));
+        assert!(!app.tabs[1].dirty);
+        let ed1 = app.tabs[1].editor.borrow();
+        assert_eq!(
+            (ed1.cursor.line, ed1.cursor.col),
+            (10, 3),
+            "加载完成的命名页同样回填光标"
+        );
+        assert!(
+            ed1.scroll_top > 0.0 && ed1.scroll_top <= 50.0,
+            "滚动值被应用且经行程钳制，实际 {}",
+            ed1.scroll_top
+        );
+        drop(ed1);
+        assert!(app.active_load.is_none());
+        assert_eq!(app.restore_pending, 0, "恢复链排空");
+        assert!(app.status.is_empty(), "全部成功的恢复不打扰状态栏");
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn dirty_named_tab_restores_snapshot_instead_of_disk_reload() {
+        let dir = snapshot_scratch_dir("p30-dirty-named");
+        let tab = editpad_core::snapshot::SessionTab {
+            path: Some("C:/w/doc.txt".to_owned()),
+            untitled_num: None,
+            dirty: true,
+            file: None,
+            cursor_line: 0,
+            cursor_col: 4,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+        };
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[editpad_core::snapshot::SessionPage {
+                tab,
+                doc: editpad_core::Document::from_str("磁盘上没有的未保存内容"),
+            }],
+            0,
+            2,
+        )
+        .unwrap();
+
+        let mut app = Editpad::default();
+        let _ = app.restore_from_manifest(&dir, &manifest);
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            app.tabs[0].editor.borrow().doc.to_text(),
+            "磁盘上没有的未保存内容",
+            "v1 一律信快照（所见即所得），绝不从磁盘重载覆盖未存改动"
+        );
+        assert!(app.tabs[0].dirty, "恢复出的置脏页保持置脏");
+        assert_eq!(app.tabs[0].encoding_label, "UTF-8", "快照恒为 UTF-8 落盘");
+        assert!(app.active_load.is_none(), "快照同步还原，无需排队加载");
+        assert!(app.status.is_empty());
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    /// 在指定目录种一个「异常退出中间态」会话（clean_exit=false，
+    /// 即 P31 心跳写的清单形态）：手工落一份可解析 TOML + 真实页文件。
+    fn plant_orphan_session(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("s7-t0.snap"), "崩溃前的未保存草稿").unwrap();
+        fs::write(
+            dir.join(editpad_core::snapshot::MANIFEST_NAME),
+            concat!(
+                "generation = 7\n",
+                "active = 0\n",
+                "next_untitled = 3\n",
+                "clean_exit = false\n",
+                "\n",
+                "[[tabs]]\n",
+                "untitled_num = 2\n",
+                "dirty = true\n",
+                "file = \"s7-t0.snap\"\n",
+                "cursor_line = 0\n",
+                "cursor_col = 3\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn crash_orphan_manifest_prompts_then_restores_or_discards() {
+        // 「恢复」路径：弹一次性提示条 → 接受后全量重建（含置脏内容）
+        let dir_a = snapshot_scratch_dir("p30-orphan-a");
+        plant_orphan_session(&dir_a);
+        let manifest = editpad_core::snapshot::read_manifest(&dir_a).unwrap();
+        assert!(!manifest.clean_exit);
+
+        let mut app = Editpad::default();
+        let _ = app.restore_from_dir(&dir_a);
+        assert!(app.recover_prompt.is_some(), "异常退出必须弹一次性恢复条");
+        assert_eq!(app.tabs.len(), 1, "未裁决前不得动当前标签");
+
+        let _ = app.accept_session_recover(Some(dir_a.clone()));
+        assert!(app.recover_prompt.is_none());
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "崩溃前的未保存草稿");
+        assert!(app.tabs[0].dirty);
+        assert_eq!(app.tabs[0].untitled_num, Some(2), "编号延续");
+        assert_eq!(app.untitled_next, 3, "计数器取清单的 next_untitled");
+        editpad_core::snapshot::clear_session(&dir_a);
+
+        // 「丢弃」路径：连快照一起丢（P29 放弃语义同族），空白起步
+        let dir_b = snapshot_scratch_dir("p30-orphan-b");
+        plant_orphan_session(&dir_b);
+        let mut app2 = Editpad::default();
+        let _ = app2.restore_from_dir(&dir_b);
+        assert!(app2.recover_prompt.is_some());
+        let _ = app2.discard_session_recover(Some(dir_b.clone()));
+        assert!(app2.recover_prompt.is_none());
+        assert!(
+            editpad_core::snapshot::read_manifest(&dir_b).is_none(),
+            "丢弃语义必须清场，防下次启动复活已弃内容"
+        );
+        fs::remove_dir_all(&dir_b).ok();
+    }
+
+    #[test]
+    fn remember_session_disabled_means_blank_start_and_ask_style_close() {
+        // 总开关判定纯函数：两个开关都开才允许
+        assert!(session_restore_allowed(true, true));
+        assert!(!session_restore_allowed(false, true), "快照总开关是前提");
+        assert!(!session_restore_allowed(true, false), "关闭会话记忆 = 不恢复也不写清单");
+
+        // 退出侧：remember_session 关闭时关窗回退旧确认条，不写任何会话数据
+        let dir = snapshot_scratch_dir("p30-gate");
+        let mut app = Editpad::default();
+        app.settings.remember_session = false;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("keep me".into())));
+        let _ = app.handle_close_request(iced::window::Id::unique(), Some(dir.clone()));
+        assert!(app.confirm_visible, "回退旧确认条而不是静默丢改动");
+        assert!(
+            editpad_core::snapshot::read_manifest(&dir).is_none(),
+            "记住会话关闭后退出不写清单（§3 P30 第 4 条）"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_skips_unloadable_page_and_keeps_chain_going() {
+        let dir = snapshot_scratch_dir("p30-fail");
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[
+                editpad_core::snapshot::SessionPage {
+                    tab: clean_named_tab("C:/w/gone.txt"),
+                    doc: editpad_core::Document::new(),
+                },
+                editpad_core::snapshot::SessionPage {
+                    tab: clean_named_tab("C:/w/stays.txt"),
+                    doc: editpad_core::Document::new(),
+                },
+            ],
+            0,
+            2,
+        )
+        .unwrap();
+
+        let mut app = Editpad::default();
+        let _ = app.restore_from_manifest(&dir, &manifest);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.restore_pending, 2);
+        let seq_a = app.active_load.as_ref().unwrap().id;
+
+        // 第一页加载失败（文件已被删等）：占位移除、失败计数、
+        // 续排同步完成——B 已顶上载通道，队列排空
+        dispatch(&mut app, Message::Loaded(seq_a, Err("文件不存在".to_owned())));
+        assert_eq!(app.tabs.len(), 1, "失败占位页应被移除（单页失败不阻断）");
+        assert_eq!(app.restore_failed, 1);
+        assert!(
+            app.restore_queue.is_empty(),
+            "续排是同步的：下一页应已登记为在途任务"
+        );
+
+        // 第二页自动续排并成功落地
+        let job_b = app.active_load.as_ref().expect("失败后必须续排下一页").clone();
+        assert_eq!(job_b.tab, 0, "队列下标必须随页面移除整体左移");
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                job_b.id,
+                Ok((
+                    editpad_core::Document::from_str("b body"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "b body");
+        assert_eq!(app.tabs[0].path.as_deref(), Some(Path::new("C:/w/stays.txt")));
+        assert!(app.active_load.is_none());
+        assert_eq!(app.restore_pending, 0);
+        assert!(
+            app.status.contains("会话恢复完成") && app.status.contains("1 页未能恢复"),
+            "失败页要有状态栏汇总:{:?}",
+            app.status
+        );
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn restore_plan_prioritizes_active_page_and_truncates_over_cap() {
+        let dir = snapshot_scratch_dir("p30-plan");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("f100.snap"), vec![0u8; 100]).unwrap();
+        fs::write(dir.join("f200.snap"), vec![0u8; 200]).unwrap();
+
+        // t0 = 干净命名页（估算读其磁盘文件 100B）；t1 = 置脏页（快照 200B）；
+        // t2 = 干净未命名页（空文档，0B）
+        let manifest = |active: usize| editpad_core::snapshot::SessionManifest {
+            generation: 1,
+            tabs: vec![
+                clean_named_tab(&dir.join("f100.snap").display().to_string()),
+                editpad_core::snapshot::SessionTab {
+                    file: Some("f200.snap".to_owned()),
+                    dirty: true,
+                    ..clean_named_tab("")
+                },
+                editpad_core::snapshot::SessionTab {
+                    untitled_num: Some(5),
+                    ..clean_named_tab("")
+                },
+            ],
+            active,
+            next_untitled: 6,
+            clean_exit: true,
+        };
+
+        // 宽松上限：全保
+        let (kept, dropped) = plan_restore_order(&manifest(0), &dir, u64::MAX);
+        assert_eq!((kept, dropped), (vec![0, 1, 2], 0));
+
+        // 250B 上限、激活页是 200B 快照页：先保激活页 → 100B 页出局
+        let (kept, dropped) = plan_restore_order(&manifest(1), &dir, 250);
+        assert_eq!((kept, dropped), (vec![1, 2], 1));
+
+        // 150B 上限、激活页是 200B 快照页：激活页自身超限同样出局
+        // （「先保激活页」是装填优先级，不是护栏豁免权），
+        // 随后 100B 页与空页照常装填
+        let (kept, dropped) = plan_restore_order(&manifest(1), &dir, 150);
+        assert_eq!((kept, dropped), (vec![0, 2], 1));
+
         fs::remove_dir_all(&dir).ok();
     }
 
