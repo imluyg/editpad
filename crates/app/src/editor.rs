@@ -2399,6 +2399,70 @@ mod tests {
         );
     }
 
+    // ---------- 健壮性边界用例批 ----------
+
+    #[test]
+    fn oversized_line_number_jump_clamps_to_last_line() {
+        // 「跳转到行」输入 usize::MAX / 手改配置等极端值不得 panic，
+        // 必须夹紧到文档末行（ropey 越界是 panic 不是错误）
+        let mut c = core_with("l1\nl2\nl3");
+        c.jump_to_line(usize::MAX);
+        assert_eq!(c.cursor.line, 2, "超大行号应落到末行");
+        c.jump_to_line(0); // 0 与 1 等价（1 起）
+        assert_eq!(c.cursor.line, 0);
+        c.jump_to_line(2);
+        assert_eq!(c.cursor.line, 1);
+
+        // 带尾换行的文档：末行是换行后的空行，同样不得越界
+        let mut trailing = core_with("l1\nl2\n");
+        trailing.jump_to_line(usize::MAX);
+        assert_eq!(trailing.cursor.line, 2);
+    }
+
+    #[test]
+    fn single_line_document_edges_are_noops_not_panics() {
+        let mut c = core_with("only");
+        assert_eq!(c.doc.line_count(), 1);
+
+        // 文档首退格 / 文档尾 Delete：无变化不崩溃
+        c.backspace();
+        assert_eq!(c.doc.to_text(), "only");
+        c.cursor = CursorPos { line: 0, col: 4 };
+        c.delete_forward();
+        assert_eq!(c.doc.to_text(), "only");
+
+        // 行内移动到边界后继续同向移动被吸收
+        c.apply_motion(Motion::DocEnd, false);
+        c.apply_motion(Motion::Right, false);
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 4 });
+        c.apply_motion(Motion::DocStart, false);
+        c.apply_motion(Motion::Left, false);
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 0 });
+    }
+
+    #[test]
+    fn four_byte_emoji_survives_edit_roundtrip() {
+        // 4 字节字符（U+1F680）在插入/撤销/保存口径下都是普通标量
+        let mut c = core_with("");
+        c.insert_str("发射🚀!");
+        assert_eq!(c.doc.to_text(), "发射🚀!");
+        assert_eq!(c.doc.text_len(), 4, "emoji 按 1 个 Unicode 标量计");
+
+        c.insert_str("\n更多🛰内容\n");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "发射🚀!", "撤销必须完整还原含 emoji 的状态");
+
+        // 分块原子保存往返（P19 路径对非 ASCII 同样透明）
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("emoji-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("emoji.txt");
+        editpad_core::save_document_atomic(&target, &c.doc).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "发射🚀!");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ---------- 垂直滚动条 ----------
 
     #[test]
