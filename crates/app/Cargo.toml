@@ -1,0 +1,15 @@
+[package]
+name = "editpad"
+description = "Editpad 极简记事本 GUI 壳（iced）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "editpad"
+path = "src/main.rs"
+
+[dependencies]
+iced.workspace = true
+rfd.workspace = true
+editpad-core.workspace = true

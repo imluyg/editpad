@@ -1,0 +1,15 @@
+[package]
+name = "editpad-core"
+description = "Editpad 纯逻辑核心：rope 文档模型、编码识别加载、原子保存"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ropey.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true
+syntect.workspace = true
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true

@@ -1,0 +1,1370 @@
+//! 自绘虚拟化编辑器 —— Editpad M2 的技术核心。
+//!
+//! 设计要点：
+//! * [`EditorCore`] 持有 ropey [`Document`]，是唯一数据源；光标/选区/滚动/撤销全在这层。
+//! * 渲染只处理**可见行**（视口虚拟化）：50MB 与 5KB 的每帧排版成本相同。
+//! * 状态放在 `Rc<RefCell<_>>`（[`EditorHandle`]）里跨帧共享——iced 每帧重建控件实例，
+//!   官方 text_editor 的 Content 也是同样的手法。
+//! * 实现真正的 `Widget` trait：只有控件层的 `Shell` 能开启输入法
+//!   （`request_input_method`）并接收中文上屏事件（`InputMethod::Commit`）。
+//!
+//! 已知取舍（v1）：等宽字体假设（CJK 列映射近似）；预编辑串由系统浮窗显示；
+//! 语法高亮留待 M2b 以逐行状态缓存接入。
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use iced::advanced::{
+    input_method,
+    layout::{self, Layout},
+    renderer::{self, Renderer as _},
+    text::{self as core_text, Renderer as _},
+    widget::Tree,
+    Clipboard, Shell, Widget,
+};
+use iced::{alignment, mouse, window, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
+
+use editpad_core::{Document, LazyHighlighter, StyledRun};
+
+// ---------- 视觉常量 ----------
+//
+// 行高/列宽不再写死：由 `font_size` 驱动
+// （line_height = 字号×1.375，char_width = 字号×0.5625），随设置实时变化。
+
+const GUTTER_MIN: f32 = 12.0;
+/// 默认字号（与 core 设置层的规范默认一致）。
+const FONT_SIZE_DEFAULT: f32 = 16.0;
+/// 行号栏字号相对正文的比例（16px 正文时即原来的 13px）。
+const GUTTER_FONT_SCALE: f32 = 13.0 / 16.0;
+const CARET_WIDTH: f32 = 2.0;
+const MAX_UNDO: usize = 128;
+const SCROLL_LINES_PER_NOTCH: f32 = 3.0;
+
+/// 把任意来源的字号归一成合法值：非有限值回退默认，其余 clamp 到设置层允许区间。
+pub fn normalize_font_size(size: f32) -> f32 {
+    use editpad_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
+    if size.is_finite() {
+        size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    } else {
+        FONT_SIZE_DEFAULT
+    }
+}
+
+/// 感知亮度的颜色工具：判断主题深浅、把背景提亮。
+fn luminance(c: Color) -> f32 {
+    0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+}
+
+fn lighten(c: Color, amount: f32) -> Color {
+    Color {
+        r: c.r + (1.0 - c.r) * amount,
+        g: c.g + (1.0 - c.g) * amount,
+        b: c.b + (1.0 - c.b) * amount,
+        a: c.a,
+    }
+}
+
+/// 编辑器光标位置（逻辑行 / 行内字符列，均从 0 计）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CursorPos {
+    pub line: usize,
+    pub col: usize,
+}
+
+/// 光标移动语义（与逻辑行对齐——本编辑器不软换行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    DocStart,
+    DocEnd,
+}
+
+/// 应用层按键编辑操作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditOp {
+    /// 插入文本（可多行；输入法上屏与普通字符共用）
+    InsertText(String),
+    Backspace,
+    Delete,
+    SelectAll,
+    Undo,
+    Redo,
+    /// 光标移动；bool = 是否按住 Shift 形成选区
+    Motion(Motion, bool),
+}
+
+/// 输入法上屏事件的裁决结果（P2 焦点过滤）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImeCommit {
+    /// 未持有焦点：不消费，放行给其他控件（如查找框）。
+    Ignored,
+    /// 已消费；Some 为需要插入正文的文本（空提交仅清除预编辑）。
+    Consumed(Option<String>),
+}
+
+#[derive(Clone)]
+struct Snapshot {
+    doc: Document,
+    cursor: CursorPos,
+    anchor: Option<CursorPos>,
+}
+
+// ---------- 核心状态 ----------
+
+pub struct EditorCore {
+    pub doc: Document,
+    pub cursor: CursorPos,
+    /// 选区锚点；Some 时选区为 anchor..cursor（无序，取用时归一）
+    pub anchor: Option<CursorPos>,
+    /// 视口顶部的行号（浮点支持像素级平滑滚动）
+    pub scroll_top: f32,
+    viewport_h: f32,
+    dragging: bool,
+    undo_stack: Vec<Snapshot>,
+    redo_stack: Vec<Snapshot>,
+    /// 语法高亮器；None = 纯文本快速路径。RefCell 让只读的 draw 也能推进状态。
+    highlight: Option<RefCell<LazyHighlighter>>,
+    /// 输入法预编辑串（组字过程中的拼音/候选串），提交前显示在光标处。
+    preedit: Option<String>,
+    /// 正文字号（驱动行高与列宽）；默认 16，合法区间见 core 设置层。
+    font_size: f32,
+    /// 编辑器是否持有键盘焦点（点击编辑区置真，点击其他控件置假）。
+    /// 输入法事件会广播给所有控件，必须靠它过滤——否则在查找框打字会进正文。
+    pub focused: bool,
+}
+
+impl Default for EditorCore {
+    fn default() -> Self {
+        Self {
+            doc: Document::new(),
+            cursor: CursorPos::default(),
+            anchor: None,
+            scroll_top: 0.0,
+            viewport_h: 400.0,
+            dragging: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            highlight: None,
+            preedit: None,
+            font_size: FONT_SIZE_DEFAULT,
+            focused: true,
+        }
+    }
+}
+
+// ---------- CJK 双宽字符的列宽换算 ----------
+//
+// 等宽假设下：普通字符占 1 列，CJK/全角占 2 列。
+// 覆盖常用区间（CJK 统一表意、扩展A、兼容、假名、谚文、全角符号）。
+
+fn is_wide(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x20000..=0x2FFFD
+            | 0x30000..=0x3FFFD
+    )
+}
+
+/// 文本的显示列数（1 列 = [`EditorCore::char_width`] 像素）。
+fn display_cols(text: &str) -> f32 {
+    text.chars().map(|c| if is_wide(c) { 2.0 } else { 1.0 }).sum()
+}
+
+/// 第 `col` 列之前的字符所占显示宽度（像素）。
+fn prefix_width(text: &str, col: usize) -> f32 {
+    display_cols(&text.chars().take(col).collect::<String>())
+}
+
+impl EditorCore {
+    // ---------- 字号与几何度量 ----------
+
+    /// 当前正文字号。
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// 行高（像素）= 字号 × 1.375。
+    pub fn line_height(&self) -> f32 {
+        self.font_size * 1.375
+    }
+
+    /// 单列字符宽（像素，等宽假设）= 字号 × 0.5625。
+    pub fn char_width(&self) -> f32 {
+        self.font_size * 0.5625
+    }
+
+    /// 设置字号：clamp 到合法区间后让滚动/可见性按新度量重新收敛
+    /// （字号变大时可见行变少，光标必须仍落在视口内）。
+    pub fn set_font_size(&mut self, size: f32) {
+        self.font_size = normalize_font_size(size);
+        self.ensure_visible();
+    }
+
+    /// 用新文档整体替换（加载文件时用），清空历史。
+    pub fn reset_document(&mut self, doc: Document) {
+        self.doc = doc;
+        self.cursor = CursorPos::default();
+        self.anchor = None;
+        self.scroll_top = 0.0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        if let Some(hl) = &self.highlight {
+            hl.borrow_mut().invalidate_from(0);
+        }
+        self.preedit = None;
+    }
+
+    /// 按文件扩展名启用语法高亮；None 关闭（纯文本快速路径）。
+    pub fn set_language(&mut self, extension: Option<&str>) {
+        self.highlight = extension.and_then(LazyHighlighter::new).map(RefCell::new);
+    }
+
+    /// 第 `offset` 字符偏移之后的高亮状态失效。
+    fn invalidate_highlight_from(&mut self, offset: usize) {
+        if let Some(hl) = &self.highlight {
+            let line = self.doc.char_to_line(offset.min(self.doc.text_len()));
+            hl.borrow_mut().invalidate_from(line);
+        }
+    }
+
+    /// 计算第 `line_idx` 行的着色片段；未启用高亮时返回空表。
+    fn highlight_runs(&self, line_idx: usize, target_text: &str) -> Vec<StyledRun> {
+        let Some(hl) = &self.highlight else {
+            return Vec::new();
+        };
+        let doc = &self.doc;
+        hl.borrow_mut().styled_line(line_idx, target_text, &mut |i| {
+            doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned()
+        })
+    }
+
+    /// 用新文档整体替换（全部替换时用），保留撤销链以便反悔。
+    pub fn replace_whole_document(&mut self, doc: Document) {
+        self.snapshot();
+        self.doc = doc;
+        self.cursor = CursorPos::default();
+        self.anchor = None;
+        self.scroll_top = 0.0;
+        if let Some(hl) = &self.highlight {
+            hl.borrow_mut().invalidate_from(0);
+        }
+    }
+
+    fn snapshot(&mut self) {
+        self.undo_stack.push(Snapshot {
+            doc: self.doc.clone(), // rope 克隆是结构共享，廉价
+            cursor: self.cursor,
+            anchor: self.anchor,
+        });
+        if self.undo_stack.len() > MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) -> bool {
+        let Some(snap) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.redo_stack.push(Snapshot {
+            doc: std::mem::replace(&mut self.doc, snap.doc),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        });
+        self.cursor = snap.cursor;
+        self.anchor = snap.anchor;
+        // 文档被整体替换，高亮状态全量失效
+        if let Some(hl) = &self.highlight {
+            hl.borrow_mut().invalidate_from(0);
+        }
+        self.ensure_visible();
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(snap) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.undo_stack.push(Snapshot {
+            doc: std::mem::replace(&mut self.doc, snap.doc),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        });
+        self.cursor = snap.cursor;
+        self.anchor = snap.anchor;
+        if let Some(hl) = &self.highlight {
+            hl.borrow_mut().invalidate_from(0);
+        }
+        self.ensure_visible();
+        true
+    }
+
+    pub fn select_all(&mut self) {
+        let last = self.doc.line_count().saturating_sub(1);
+        self.anchor = Some(CursorPos::default());
+        self.cursor = CursorPos {
+            line: last,
+            col: self.line_display_len(last),
+        };
+        self.ensure_visible();
+    }
+
+    /// 当前选区文本（无选区或零宽返回 None）。
+    pub fn selected_text(&self) -> Option<String> {
+        let (start_off, end_off) = self.selection_offsets()?;
+        if start_off >= end_off {
+            return None;
+        }
+        Some(self.doc.slice_text(start_off, end_off))
+    }
+
+    /// 选区的字符偏移区间（有序）。
+    fn selection_offsets(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        let (a, b) = if (anchor.line, anchor.col) <= (self.cursor.line, self.cursor.col) {
+            (anchor, self.cursor)
+        } else {
+            (self.cursor, anchor)
+        };
+        let start = self.doc.line_to_char(a.line) + a.col.min(self.line_display_len(a.line));
+        let end = self.doc.line_to_char(b.line) + b.col.min(self.line_display_len(b.line));
+        Some((start.min(end), end.max(start)))
+    }
+
+    /// 在光标处插入文本（先吃掉当前选区）。支持多行文本。
+    pub fn insert_str(&mut self, text: &str) {
+        self.snapshot();
+
+        let start_offset = match self.selection_offsets() {
+            Some((start, end)) => {
+                if end > start {
+                    self.doc.remove_range(start, end);
+                }
+                let line = self.doc.char_to_line(start);
+                let col = start - self.doc.line_to_char(line);
+                self.cursor = CursorPos { line, col };
+                start
+            }
+            None => self.doc.line_to_char(self.cursor.line) + self.cursor.col,
+        };
+        self.anchor = None;
+
+        self.doc.insert(start_offset, text);
+        self.invalidate_highlight_from(start_offset);
+
+        // 推进光标到插入文本的末尾
+        let new_lines = text.split('\n').count();
+        let tail_cols = text.rsplit('\n').next().unwrap_or("").chars().count();
+        if new_lines > 1 {
+            self.cursor.line += new_lines - 1;
+            self.cursor.col = tail_cols;
+        } else {
+            self.cursor.col += tail_cols;
+        }
+        self.ensure_visible();
+    }
+
+    /// 用给定文本替换当前选区；无选区时退化为插入。
+    pub fn replace_selection(&mut self, text: &str) {
+        self.insert_str(text);
+    }
+
+    /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
+    pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
+        let start = CursorPos { line, col };
+        let mut cur = start;
+        let mut remain = len_chars;
+        while remain > 0 {
+            let line_len = self.line_display_len(cur.line);
+            let room = line_len.saturating_sub(cur.col);
+            if room >= remain {
+                cur.col += remain;
+                remain = 0;
+            } else if cur.line + 1 < self.doc.line_count() {
+                remain -= room + 1; // 吃掉换行符
+                cur.line += 1;
+                cur.col = 0;
+            } else {
+                cur.col = line_len;
+                break;
+            }
+        }
+        self.anchor = Some(start);
+        self.cursor = cur;
+        self.ensure_visible();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        if self.cursor == CursorPos::default() {
+            return;
+        }
+        self.snapshot();
+        self.move_local(Motion::Left);
+        let offset = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
+        self.doc.remove_range(offset, offset + 1);
+        self.invalidate_highlight_from(offset);
+        self.ensure_visible();
+    }
+
+    pub fn delete_forward(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        let offset = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
+        if offset >= self.doc.text_len() {
+            return;
+        }
+        self.snapshot();
+        self.doc.remove_range(offset, offset + 1);
+        self.invalidate_highlight_from(offset);
+        self.ensure_visible();
+    }
+
+    /// 有选区时删除之（含快照）；返回是否发生了删除。零宽选区仅清除标记。
+    fn delete_selection(&mut self) -> bool {
+        if self.selected_text().is_some() {
+            self.snapshot();
+            if let Some((start, end)) = self.selection_offsets() {
+                self.doc.remove_range(start, end);
+                let line = self.doc.char_to_line(start);
+                let col = start - self.doc.line_to_char(line);
+                self.cursor = CursorPos { line, col };
+                self.invalidate_highlight_from(start);
+            }
+            self.anchor = None;
+            self.ensure_visible();
+            true
+        } else {
+            self.anchor = None;
+            false
+        }
+    }
+
+    /// 应用光标移动；`extend` 为 true 时保持锚点形成选区。
+    pub fn apply_motion(&mut self, motion: Motion, extend: bool) {
+        if extend && self.anchor.is_none() {
+            self.anchor = Some(self.cursor);
+        }
+        if !extend {
+            self.anchor = None;
+        }
+        self.move_local(motion);
+        self.ensure_visible();
+    }
+
+    fn move_local(&mut self, motion: Motion) {
+        let page_rows = ((self.viewport_h / self.line_height()) as usize).max(1);
+        let last_line = self.doc.line_count().saturating_sub(1);
+
+        match motion {
+            Motion::Left => {
+                if self.cursor.col > 0 {
+                    self.cursor.col -= 1;
+                } else if self.cursor.line > 0 {
+                    self.cursor.line -= 1;
+                    self.cursor.col = self.line_display_len(self.cursor.line);
+                }
+            }
+            Motion::Right => {
+                if self.cursor.col < self.line_display_len(self.cursor.line) {
+                    self.cursor.col += 1;
+                } else if self.cursor.line < last_line {
+                    self.cursor.line += 1;
+                    self.cursor.col = 0;
+                }
+            }
+            Motion::Up => {
+                if self.cursor.line > 0 {
+                    self.cursor.line -= 1;
+                    self.cursor.col =
+                        self.cursor.col.min(self.line_display_len(self.cursor.line));
+                }
+            }
+            Motion::Down => {
+                if self.cursor.line < last_line {
+                    self.cursor.line += 1;
+                    self.cursor.col =
+                        self.cursor.col.min(self.line_display_len(self.cursor.line));
+                }
+            }
+            Motion::Home => self.cursor.col = 0,
+            Motion::End => self.cursor.col = self.line_display_len(self.cursor.line),
+            Motion::PageUp => {
+                self.cursor.line = self.cursor.line.saturating_sub(page_rows);
+                self.cursor.col =
+                    self.cursor.col.min(self.line_display_len(self.cursor.line));
+            }
+            Motion::PageDown => {
+                self.cursor.line = (self.cursor.line + page_rows).min(last_line);
+                self.cursor.col =
+                    self.cursor.col.min(self.line_display_len(self.cursor.line));
+            }
+            Motion::DocStart => self.cursor = CursorPos::default(),
+            Motion::DocEnd => {
+                self.cursor = CursorPos {
+                    line: last_line,
+                    col: self.line_display_len(last_line),
+                };
+            }
+        }
+    }
+
+    /// 跳转到第 `line_1based` 行行首（1 起）。
+    pub fn jump_to_line(&mut self, line_1based: usize) {
+        let target =
+            (line_1based.saturating_sub(1)).min(self.doc.line_count().saturating_sub(1));
+        self.anchor = None;
+        self.cursor = CursorPos {
+            line: target,
+            col: 0,
+        };
+        self.ensure_visible();
+    }
+
+    pub fn scroll_by_lines(&mut self, lines: f32) {
+        self.scroll_top = (self.scroll_top - lines).max(0.0);
+        self.clamp_scroll();
+    }
+
+    pub fn clamp_scroll(&mut self) {
+        self.scroll_top = self.scroll_top.max(0.0);
+        let max = (self.doc.line_count() as f32 - self.viewport_h / self.line_height()).max(0.0);
+        self.scroll_top = self.scroll_top.min(max + 1.0);
+    }
+
+    fn ensure_visible(&mut self) {
+        let first = self.scroll_top;
+        let last = self.scroll_top + self.viewport_h / self.line_height() - 1.0;
+        let line = self.cursor.line as f32;
+        if line < first {
+            self.scroll_top = line;
+        } else if line > last {
+            self.scroll_top = line - self.viewport_h / self.line_height() + 1.0;
+        }
+        self.clamp_scroll();
+    }
+
+    /// 可见的行号闭区间 [first, last]（已夹紧到文档范围）。
+    pub fn visible_range(&self) -> (usize, usize) {
+        let count = self.doc.line_count();
+        let first = (self.scroll_top.floor() as i64).max(0) as usize;
+        let rows = (self.viewport_h / self.line_height()).ceil() as usize + 1;
+        let last = (first + rows).min(count.saturating_sub(1));
+        (first, last)
+    }
+
+    /// 第 `line` 行的可见长度（不含换行符）。
+    pub fn line_display_len(&self, line: usize) -> usize {
+        if line >= self.doc.line_count() {
+            return 0;
+        }
+        self.doc
+            .line_str(line)
+            .trim_end_matches(['\n', '\r'])
+            .chars()
+            .count()
+    }
+
+    /// 命中测试：控件内坐标 -> 光标位置（CJK 双宽感知）。
+    pub fn hit_test(&self, x: f32, y: f32) -> CursorPos {
+        let gutter = self.gutter_width();
+        let char_w = self.char_width();
+        let line_f = self.scroll_top + (y.max(0.0) / self.line_height());
+        let line = ((line_f.floor() as i64).clamp(0, self.doc.line_count() as i64 - 1)) as usize;
+        let text = self.line_text(line);
+        let rel = (x - gutter).max(0.0);
+
+        let mut col = text.chars().count();
+        let mut acc = 0.0f32;
+        for (i, ch) in text.chars().enumerate() {
+            let w = if is_wide(ch) { 2.0 } else { 1.0 };
+            // 落在字符左半边选前位，右半边选后位
+            if rel < acc + w * char_w * 0.5 {
+                col = i;
+                break;
+            }
+            acc += w * char_w;
+        }
+        CursorPos { line, col }
+    }
+
+    /// 第 `line` 行的不含换行文本。
+    fn line_text(&self, line: usize) -> String {
+        if line >= self.doc.line_count() {
+            return String::new();
+        }
+        self.doc
+            .line_str(line)
+            .trim_end_matches(['\n', '\r'])
+            .to_owned()
+    }
+
+    /// 行号栏宽度。
+    pub fn gutter_width(&self) -> f32 {
+        let digits = self.doc.line_count().to_string().len().max(3);
+        GUTTER_MIN + digits as f32 * self.char_width() * 0.7
+    }
+
+    /// 相对控件的光标矩形（供输入法定位候选框，双宽感知）。
+    pub fn caret_rect_relative(&self) -> Rectangle {
+        let text = self.line_text(self.cursor.line);
+        Rectangle {
+            x: self.gutter_width()
+                + prefix_width(&text, self.cursor.col.min(text.chars().count()))
+                    * self.char_width(),
+            y: (self.cursor.line as f32 - self.scroll_top) * self.line_height(),
+            width: CARET_WIDTH,
+            height: self.line_height(),
+        }
+    }
+
+    pub fn set_viewport_height(&mut self, h: f32) {
+        self.viewport_h = h.max(self.line_height());
+        self.clamp_scroll();
+    }
+
+    /// 视口高度（像素）。应用层暂未消费，供测试与后续里程碑（如状态栏显示）使用。
+    #[allow(dead_code)]
+    pub fn viewport_height(&self) -> f32 {
+        self.viewport_h
+    }
+
+    /// 控件层专用的可见性保证入口。
+    pub(crate) fn ensure_visible_pub(&mut self) {
+        self.ensure_visible();
+    }
+
+    // ---------- 输入法事件的焦点裁决（P2） ----------
+
+    /// 鼠标按下决定焦点归属：落点在编辑区内 → 接管焦点；
+    /// 落点在区外（查找框、工具栏……） → 交出焦点并清掉残留组字串。
+    pub fn pointer_focus(&mut self, inside: bool) {
+        self.focused = inside;
+        if !inside {
+            // 焦点离开时组字中断，内联预编辑串不能悬在正文里
+            self.preedit = None;
+        }
+    }
+
+    /// 输入法预编辑事件：仅持有焦点时消费（存串并返回 true 供控件捕获），
+    /// 否则放行给真正持有焦点的控件（如查找框）。
+    pub fn ime_preedit(&mut self, content: String) -> bool {
+        if !self.focused {
+            return false;
+        }
+        self.preedit = if content.is_empty() { None } else { Some(content) };
+        true
+    }
+
+    /// 输入法上屏事件：仅持有焦点时消费。文本的真正插入由应用层
+    /// [`Message::Edit`] 统一分发（获得加载期守卫与撤销/置脏语义）。
+    pub fn ime_commit(&mut self, text: &str) -> ImeCommit {
+        if !self.focused {
+            return ImeCommit::Ignored;
+        }
+        self.preedit = None;
+        ImeCommit::Consumed((!text.is_empty()).then(|| text.to_owned()))
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// 归一化选区（起点<=终点）；无锚点返回 None。
+    pub fn ordered_selection(&self) -> Option<(CursorPos, CursorPos)> {
+        let anchor = self.anchor?;
+        if (anchor.line, anchor.col) <= (self.cursor.line, self.cursor.col) {
+            Some((anchor, self.cursor))
+        } else {
+            Some((self.cursor, anchor))
+        }
+    }
+}
+
+// ---------- 共享句柄 ----------
+
+/// 跨帧共享的编辑器状态句柄（Clone 廉价）。
+#[derive(Clone, Default)]
+pub struct EditorHandle(Rc<RefCell<EditorCore>>);
+
+impl EditorHandle {
+    pub fn borrow(&self) -> std::cell::Ref<'_, EditorCore> {
+        self.0.borrow()
+    }
+
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, EditorCore> {
+        self.0.borrow_mut()
+    }
+
+    /// 构造可加入视图树的自绘控件。
+    pub fn view(&self) -> Element<'_, super::Message> {
+        Element::new(EditorView { core: self.clone() })
+    }
+}
+
+// ---------- 控件实现 ----------
+
+struct EditorView {
+    core: EditorHandle,
+}
+
+/// 浅色主题的固定配色（保持 v1 观感）；深色主题在 draw 时由 palette 派生。
+const SELECTION_COLOR: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.25);
+const CARET_COLOR: Color = Color::from_rgb8(0x11, 0x11, 0x11);
+const GUTTER_BG: Color = Color::from_rgb8(0xF2, 0xF2, 0xF2);
+const GUTTER_TEXT: Color = Color::from_rgb8(0x99, 0x99, 0x99);
+const PREEDIT_TEXT: Color = Color::from_rgb8(0x33, 0x66, 0xCC);
+const PREEDIT_UNDERLINE: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.6);
+
+/// 一次 draw 用到的全部颜色（按当前主题解析）。
+struct EditorColors {
+    selection: Color,
+    caret: Color,
+    gutter_bg: Color,
+    gutter_text: Color,
+    preedit_text: Color,
+    preedit_underline: Color,
+}
+
+impl EditorColors {
+    /// 浅色：沿用固定值；深色：从 palette 派生
+    /// （行号栏背景=背景提亮、行号/正文/光标/预编辑统一用 palette.text）。
+    fn resolve(theme: &Theme) -> Self {
+        let palette = theme.palette();
+        // 前景比背景亮 → 视为深色主题（不依赖具体主题枚举，Custom 也适用）
+        let dark = luminance(palette.text) > luminance(palette.background);
+        if !dark {
+            return Self {
+                selection: SELECTION_COLOR,
+                caret: CARET_COLOR,
+                gutter_bg: GUTTER_BG,
+                gutter_text: GUTTER_TEXT,
+                preedit_text: PREEDIT_TEXT,
+                preedit_underline: PREEDIT_UNDERLINE,
+            };
+        }
+        let text = palette.text;
+        Self {
+            selection: Color { a: 0.25, ..text },
+            caret: text,
+            gutter_bg: lighten(palette.background, 0.12),
+            gutter_text: Color { a: 0.55, ..text },
+            preedit_text: text,
+            preedit_underline: Color { a: 0.6, ..text },
+        }
+    }
+}
+
+impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(limits.resolve(Length::Fill, Length::Fill, Size::INFINITE))
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        _style: &iced::advanced::renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        let core = self.core.borrow();
+        let palette = theme.palette();
+        let colors = EditorColors::resolve(theme);
+        let lh = core.line_height();
+        let char_w = core.char_width();
+
+        // 背景与行号栏
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds,
+                ..renderer::Quad::default()
+            },
+            palette.background,
+        );
+        let gutter_w = core.gutter_width();
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle {
+                    width: gutter_w,
+                    ..bounds
+                },
+                ..renderer::Quad::default()
+            },
+            colors.gutter_bg,
+        );
+
+        // 选区高亮：只画与视口相交的行（双宽感知）
+        if let Some((sel_start, sel_end)) = core.ordered_selection() {
+            let last_line = core.doc.line_count().saturating_sub(1);
+            for line in sel_start.line..=sel_end.line.min(last_line) {
+                let row = line as f32;
+                if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
+                    continue;
+                }
+                let text = core.line_text(line);
+                let start_col = if line == sel_start.line { sel_start.col } else { 0 };
+                let end_col = if line == sel_end.line {
+                    sel_end.col
+                } else {
+                    text.chars().count()
+                };
+                if end_col <= start_col {
+                    continue;
+                }
+                let x0 = prefix_width(&text, start_col.min(text.chars().count())) * char_w;
+                let x1 =
+                    prefix_width(&text, end_col.min(text.chars().count())) * char_w;
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + gutter_w + x0,
+                            y: bounds.y + (row - core.scroll_top) * lh,
+                            width: (x1 - x0).max(char_w),
+                            height: lh,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.selection,
+                );
+            }
+        }
+
+        // 文本与行号：只为可见行调用排版（虚拟化的核心）；启用高亮时按语法分色
+        let (first, last) = core.visible_range();
+        for line in first..=last {
+            let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+
+            renderer.fill_text(
+                core_text::Text {
+                    content: (line + 1).to_string(),
+                    bounds: Size::new(gutter_w - GUTTER_MIN, lh),
+                    size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
+                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                    font: Font::MONOSPACE,
+                    align_x: core_text::Alignment::Right,
+                    align_y: alignment::Vertical::Top,
+                    shaping: core_text::Shaping::Basic,
+                    wrapping: core_text::Wrapping::None,
+                },
+                Point::new(bounds.x, y),
+                colors.gutter_text,
+                bounds,
+            );
+
+            let text = core.line_text(line);
+            if text.is_empty() {
+                continue;
+            }
+            let runs = core.highlight_runs(line, &text);
+
+            if runs.is_empty() {
+                renderer.fill_text(
+                    core_text::Text {
+                        content: text,
+                        bounds: Size::new((bounds.width - gutter_w).max(0.0), lh),
+                        size: Pixels(core.font_size()),
+                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                        font: Font::MONOSPACE,
+                        align_x: core_text::Alignment::Default,
+                        align_y: alignment::Vertical::Top,
+                        shaping: core_text::Shaping::Advanced,
+                        wrapping: core_text::Wrapping::None,
+                    },
+                    Point::new(bounds.x + gutter_w, y),
+                    palette.text,
+                    bounds,
+                );
+            } else {
+                for run in &runs {
+                    let segment: String = text
+                        .chars()
+                        .skip(run.start_col)
+                        .take(run.end_col.saturating_sub(run.start_col))
+                        .collect();
+                    if segment.is_empty() {
+                        continue;
+                    }
+                    let offset_px =
+                        prefix_width(&text, run.start_col) * char_w;
+                    let [r, g, b, a] = run.color;
+                    renderer.fill_text(
+                        core_text::Text {
+                            content: segment,
+                            bounds: Size::new(
+                                (bounds.width - gutter_w).max(0.0),
+                                lh,
+                            ),
+                            size: Pixels(core.font_size()),
+                            line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                            font: Font::MONOSPACE,
+                            align_x: core_text::Alignment::Default,
+                            align_y: alignment::Vertical::Top,
+                            shaping: core_text::Shaping::Advanced,
+                            wrapping: core_text::Wrapping::None,
+                        },
+                        Point::new(bounds.x + gutter_w + offset_px, y),
+                        Color::from_rgba8(
+                            (r * 255.0).round() as u8,
+                            (g * 255.0).round() as u8,
+                            (b * 255.0).round() as u8,
+                            a,
+                        ),
+                        bounds,
+                    );
+                }
+            }
+        }
+
+        // 输入法预编辑串（组字中）：内联显示在光标处，带下划线
+        if let Some(preedit) = core.preedit.clone() {
+            if !preedit.is_empty() {
+                let caret = core.caret_rect_relative();
+                let width = (display_cols(&preedit) * char_w).max(24.0);
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + caret.x,
+                            y: bounds.y + caret.y + lh - 3.0,
+                            width,
+                            height: 2.0,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.preedit_underline,
+                );
+                renderer.fill_text(
+                    core_text::Text {
+                        content: preedit,
+                        bounds: Size::new(width + 60.0, lh),
+                        size: Pixels(core.font_size()),
+                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                        font: Font::MONOSPACE,
+                        align_x: core_text::Alignment::Default,
+                        align_y: alignment::Vertical::Top,
+                        shaping: core_text::Shaping::Advanced,
+                        wrapping: core_text::Wrapping::None,
+                    },
+                    Point::new(bounds.x + caret.x, bounds.y + caret.y),
+                    colors.preedit_text,
+                    bounds,
+                );
+            }
+        }
+
+        // 光标竖线
+        let caret = core.caret_rect_relative();
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle {
+                    x: bounds.x + caret.x,
+                    y: bounds.y + caret.y,
+                    ..caret
+                },
+                ..renderer::Quad::default()
+            },
+            colors.caret,
+        );
+    }
+
+    fn update(
+        &mut self,
+        _tree: &mut Tree,
+        event: &iced::Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, super::Message>,
+        _viewport: &Rectangle,
+    ) {
+        let bounds = layout.bounds();
+
+        // 输入法常开：winit 在 Windows 上默认禁用 IME。
+        // 每次事件都续约请求（运行时在下一帧 RedrawRequested 时消费），
+        // 候选框始终跟随光标；预编辑串由本控件内联绘制，故不传给系统浮窗。
+        {
+            let core = self.core.borrow();
+            let caret = core.caret_rect_relative();
+            let ime: input_method::InputMethod = input_method::InputMethod::Enabled {
+                cursor: Rectangle {
+                    x: bounds.x + caret.x,
+                    y: bounds.y + caret.y,
+                    ..caret
+                },
+                purpose: input_method::Purpose::Normal,
+                preedit: None,
+            };
+            shell.request_input_method(&ime);
+        }
+
+        match event {
+            // 每帧把真实视口高度同步给核心（可见行数/滚动夹紧依赖它）
+            iced::Event::Window(window::Event::RedrawRequested(_)) => {
+                self.core.borrow_mut().set_viewport_height(bounds.height);
+            }
+
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                // P2 焦点裁决：点在编辑区内=接管焦点；点在区外（查找框/工具栏）
+                // =交出焦点。必须在越界 early-return 之前完成，否则收不到区外点击。
+                let inside = cursor.position_over(bounds).is_some();
+                self.core.borrow_mut().pointer_focus(inside);
+                let Some(pos) = cursor.position_over(bounds) else {
+                    return;
+                };
+                {
+                    let mut core = self.core.borrow_mut();
+                    let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                    core.dragging = true;
+                    core.anchor = None;
+                    core.cursor = hit;
+                }
+                shell.publish(super::Message::EditorNavChanged);
+                shell.request_redraw();
+                shell.capture_event();
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let Some(pos) = cursor.position_over(bounds) else {
+                    return;
+                };
+                let mut core = self.core.borrow_mut();
+                if !core.is_dragging() {
+                    return;
+                }
+                let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                if core.cursor != hit {
+                    // 拖选：锚点固定在按下时的位置（即移动前的光标）
+                    if core.anchor.is_none() {
+                        core.anchor = Some(core.cursor);
+                    }
+                    core.cursor = hit;
+                    core.ensure_visible_pub();
+                    drop(core);
+                    shell.publish(super::Message::EditorNavChanged);
+                    shell.request_redraw();
+                }
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                self.core.borrow_mut().dragging = false;
+            }
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                if !cursor.is_over(bounds) {
+                    return;
+                }
+                let lines = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y * SCROLL_LINES_PER_NOTCH,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / self.core.borrow().line_height(),
+                };
+                // P3：winit 0.30 Windows 上滚轮上推上报 LineDelta(y=+1)，其 changelog
+                // 明确「positive Y means moving the content down」（视口向文档头走）；
+                // scroll_by_lines 内部已是 scroll_top -= lines，这里再取负就会方向反转。
+                self.core.borrow_mut().scroll_by_lines(lines);
+                shell.request_redraw();
+                shell.capture_event();
+            }
+
+            // 输入法：组字过程（预编辑串内联显示）与上屏。
+            // P2：事件会被广播给所有控件，只有本控件持有焦点时才消费并捕获；
+            // 否则原样放行，让真正持有焦点的控件（查找框等）处理。
+            iced::Event::InputMethod(input_method::Event::Preedit(content, _range)) => {
+                if self.core.borrow_mut().ime_preedit(content.clone()) {
+                    shell.request_redraw();
+                    shell.capture_event();
+                }
+            }
+            iced::Event::InputMethod(input_method::Event::Commit(text)) => {
+                match self.core.borrow_mut().ime_commit(text) {
+                    ImeCommit::Ignored => {} // 焦点在别处：不捕获
+                    ImeCommit::Consumed(inserted) => {
+                        // 统一走应用层编辑入口：获得加载期守卫（active_load）
+                        // 与置脏/撤销语义；不再直接 insert_str 绕过 apply_edit
+                        if let Some(text) = inserted {
+                            shell.publish(super::Message::Edit(EditOp::InsertText(text)));
+                        }
+                        shell.request_redraw();
+                        shell.capture_event();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        _tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        if cursor.is_over(layout.bounds()) {
+            mouse::Interaction::Text
+        } else {
+            mouse::Interaction::None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn core_with(text: &str) -> EditorCore {
+        let mut c = EditorCore::default();
+        c.reset_document(Document::from_str(text));
+        c
+    }
+
+    #[test]
+    fn insert_advances_cursor_and_updates_lines() {
+        let mut c = core_with("hello\nworld\n");
+        c.cursor = CursorPos { line: 0, col: 5 };
+        c.insert_str(",\neditpad");
+        assert_eq!(c.doc.to_text(), "hello,\neditpad\nworld\n");
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 7 });
+    }
+
+    #[test]
+    fn backspace_joins_lines_and_deletes_selection() {
+        let mut c = core_with("ab\ncd\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.backspace(); // 吃掉换行符
+        assert_eq!(c.doc.to_text(), "abcd\n");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+
+        c.reset_document(Document::from_str("abcd"));
+        c.anchor = Some(CursorPos { line: 0, col: 1 });
+        c.cursor = CursorPos { line: 0, col: 3 };
+        c.backspace(); // 删除选区 "bc"
+        assert_eq!(c.doc.to_text(), "ad");
+        assert_eq!(c.anchor, None);
+    }
+
+    #[test]
+    fn delete_forward_removes_next_char() {
+        let mut c = core_with("abc");
+        c.delete_forward();
+        assert_eq!(c.doc.to_text(), "bc");
+    }
+
+    #[test]
+    fn motions_respect_logical_lines() {
+        let mut c = core_with("abc\nx\nlonger\n");
+        c.cursor = CursorPos { line: 0, col: 3 };
+        c.apply_motion(Motion::Right, false); // 折到下一行行首
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 0 });
+
+        c.apply_motion(Motion::End, false);
+        assert_eq!(c.cursor.col, 1);
+
+        c.apply_motion(Motion::Down, false); // 到 "longer"，列被夹紧
+        assert_eq!(c.cursor, CursorPos { line: 2, col: 1 });
+
+        c.apply_motion(Motion::DocEnd, false);
+        // 与主流编辑器一致：文档以换行结尾时，末尾停在最后的空行上
+        assert_eq!(c.cursor, CursorPos { line: 3, col: 0 });
+    }
+
+    #[test]
+    fn undo_redo_roundtrip() {
+        let mut c = core_with("");
+        c.insert_str("第一版");
+        c.insert_str("+第二版");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "第一版");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "");
+        assert!(c.redo());
+        assert_eq!(c.doc.to_text(), "第一版");
+        assert!(c.redo());
+        assert_eq!(c.doc.to_text(), "第一版+第二版");
+        assert!(!c.redo()); // 到底了
+    }
+
+    #[test]
+    fn select_span_and_replace_selection() {
+        let mut c = core_with("你好世界");
+        c.select_span(0, 1, 2); // 选中 “好世”
+        assert_eq!(c.selected_text().as_deref(), Some("好世"));
+        c.replace_selection("-");
+        assert_eq!(c.doc.to_text(), "你-界");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+    }
+
+    #[test]
+    fn hit_test_maps_to_visible_columns() {
+        let mut c = core_with("abcdef\nxy\n");
+        c.set_viewport_height(200.0);
+        let gutter = c.gutter_width();
+
+        let hit = c.hit_test(gutter + 1.0, 1.0 * c.line_height());
+        assert_eq!(hit, CursorPos { line: 1, col: 0 });
+
+        // 超出该行尾的点击被夹紧到行尾
+        let hit = c.hit_test(gutter + 100.0 * c.char_width(), 0.0);
+        assert_eq!(hit, CursorPos { line: 0, col: 6 });
+    }
+
+    #[test]
+    fn ensure_visible_follows_cursor_jump() {
+        let mut c = core_with(&(0..500).map(|i| format!("line{i}\n")).collect::<String>());
+        c.jump_to_line(480);
+        let (first, _) = c.visible_range();
+        let cursor_row = 479.0;
+        assert!(
+            (cursor_row >= first as f32)
+                && (cursor_row <= first as f32 + c.viewport_height() / c.line_height())
+        );
+    }
+
+    #[test]
+    fn default_metrics_match_legacy_constants() {
+        let c = core_with("");
+        assert_eq!(c.font_size(), 16.0);
+        // 与旧 LINE_HEIGHT/CHAR_WIDTH 常量完全一致，保证默认观感不变
+        assert_eq!(c.line_height(), 22.0);
+        assert_eq!(c.char_width(), 9.0);
+    }
+
+    #[test]
+    fn set_font_size_clamps_and_rescales_metrics() {
+        use editpad_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
+
+        let mut c = core_with("hello\nworld\n");
+        c.set_font_size(40.0); // 越上界被夹紧
+        assert_eq!(c.font_size(), MAX_FONT_SIZE);
+        c.set_font_size(1.0); // 越下界被夹紧
+        assert_eq!(c.font_size(), MIN_FONT_SIZE);
+        c.set_font_size(f32::NAN); // 非有限值回退默认
+        assert_eq!(c.font_size(), 16.0);
+
+        c.set_font_size(20.0);
+        // 断言具体值：20 × 1.375 与 20 × 0.5625 均为二进制精确值
+        assert_eq!(c.line_height(), 27.5);
+        assert_eq!(c.char_width(), 11.25);
+
+        // 字号变大后同样视口可见行数变少（用长文档避免被文档末尾夹平）
+        let mut long = core_with(&(0..200).map(|i| format!("l{i}\n")).collect::<String>());
+        long.set_viewport_height(220.0);
+        long.set_font_size(16.0);
+        let (_, last_16) = long.visible_range();
+        long.set_font_size(MAX_FONT_SIZE);
+        let (_, last_big) = long.visible_range();
+        assert!(last_big < last_16, "字号变大后可见行应变少");
+    }
+
+    #[test]
+    fn set_font_size_keeps_cursor_visible() {
+        let mut c = core_with(&(0..500).map(|i| format!("line{i}\n")).collect::<String>());
+        c.set_viewport_height(400.0);
+        c.set_font_size(24.0);
+        c.jump_to_line(480);
+        // 字号再调大也不得把光标挤出视口（ensure_visible 的不变量以浮点 scroll_top 表述）
+        c.set_font_size(28.0);
+        let cursor_row = 479.0;
+        let rows_in_view = c.viewport_height() / c.line_height();
+        assert!(c.scroll_top <= cursor_row, "光标行应在视口顶之下");
+        assert!(
+            cursor_row <= c.scroll_top + rows_in_view - 1.0 + 1e-3,
+            "光标行应在视口底之上"
+        );
+    }
+
+    // ---------- P3 滚轮方向契约 ----------
+
+    #[test]
+    fn scroll_by_lines_sign_contract_matches_winit() {
+        // winit 约定：滚轮上推上报 LineDelta(y=+1)（"positive Y means moving the
+        // content down"，即视口向文档头方向走）。控件层把 y×3 直接传给本方法，
+        // 因此契约是：正数 → scroll_top 减小（看到更早的内容）；负数反之。
+        let mut c = core_with(&(0..200).map(|i| format!("l{i}\n")).collect::<String>());
+        c.set_viewport_height(220.0);
+        c.scroll_top = 50.0;
+        c.clamp_scroll();
+
+        c.scroll_by_lines(3.0); // 滚轮上推一格
+        assert!((c.scroll_top - 47.0).abs() < 1e-4, "上推应向文档头滚动，实际 {}", c.scroll_top);
+
+        c.scroll_by_lines(-6.0); // 滚轮下推两格
+        assert!((c.scroll_top - 53.0).abs() < 1e-4, "下推应向文档尾滚动，实际 {}", c.scroll_top);
+
+        // 头部钳制：继续上推不得变负
+        c.scroll_by_lines(100.0);
+        assert_eq!(c.scroll_top, 0.0);
+    }
+
+    // ---------- P2 输入法焦点过滤 ----------
+    #[test]
+    fn ime_events_are_gated_by_focus() {
+        let mut c = core_with("");
+        assert!(c.focused, "默认持有焦点（正文是初始焦点控件）");
+
+        // 有焦点：组字串进入正文显示，上屏文本交由应用层插入
+        assert!(c.ime_preedit("nihao".to_owned()));
+        assert_eq!(c.preedit.as_deref(), Some("nihao"));
+        assert_eq!(c.ime_commit("你好"), ImeCommit::Consumed(Some("你好".into())));
+        assert_eq!(c.preedit, None, "上屏后预编辑串必须清掉");
+
+        // 点击查找框（区外）→ 交出焦点；此后 IME 事件一律放行不消费
+        c.pointer_focus(false);
+        assert!(!c.focused);
+        assert!(!c.ime_preedit("pinyin".to_owned()), "未聚焦不得消费预编辑");
+        assert_eq!(c.preedit, None);
+        assert_eq!(c.ime_commit("字"), ImeCommit::Ignored, "未聚焦时上屏不得进正文");
+
+        // 点回编辑区 → 重新接管焦点，IME 恢复消费
+        c.pointer_focus(true);
+        assert!(c.ime_preedit("z".to_owned()));
+    }
+
+    #[test]
+    fn focus_loss_discards_stale_preedit_and_empty_commit_only_clears() {
+        let mut c = core_with("");
+        c.ime_preedit("wei".to_owned());
+
+        // 组字中途点去别的控件：残留预编辑串不能悬在正文里
+        c.pointer_focus(false);
+        assert_eq!(c.preedit, None);
+
+        // 空提交（如输入法取消）：只清预编辑、无文本插入，但事件算已消费
+        c.pointer_focus(true);
+        c.ime_preedit("x".to_owned());
+        assert_eq!(c.ime_commit(""), ImeCommit::Consumed(None));
+        assert_eq!(c.preedit, None);
+        assert_eq!(c.doc.to_text(), "", "空提交不得改动文档");
+    }
+}

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+editpad-core = { path = "crates/core" }
+ropey = "1.6"
+encoding_rs = "0.8"
+thiserror = "2"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+iced = { version = "0.14", features = ["advanced"] }
+rfd = "0.15"
+
+[profile.release]
+lto = "thin"
