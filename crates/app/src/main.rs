@@ -8,6 +8,7 @@
 
 mod editor;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
@@ -64,8 +65,10 @@ enum Message {
     SaveTargetChosen(Option<PathBuf>),
     /// 保存完成：(落盘内容的内容版本号, 结果)（P18 版本守卫）
     Saved(u64, Result<(), String>),
-    /// 自动保存完成：(快照版本, 结果)。版本不符=期间又有编辑，不清脏
-    Autosaved(u64, Result<(), String>),
+    /// 标签页保存完成（「保存并关闭」流程用）：(页, 快照版本, 结果)
+    TabSaved(usize, u64, Result<(), String>),
+    /// 自动保存完成：(标签页, 快照版本, 结果)。版本不符=期间又有编辑，不清脏
+    TabAutosaved(usize, u64, Result<(), String>),
 
     FindToggled,
     FindQueryChanged(String),
@@ -96,6 +99,8 @@ enum Message {
     ConfirmCloseTabDiscard(usize),
     /// 取消标签页关闭确认
     CancelCloseTab,
+    /// 保存第 `idx` 页并在成功后关闭（P21 完整版；未命名页不支持）
+    CloseTabSave(usize),
     /// 格式化 JSON（Ctrl+Shift+F，仅当前语法为 JSON 时生效；P22 第二批）
     FormatJson,
     /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
@@ -441,12 +446,24 @@ fn transcode_notice(original_encoding: &str) -> Option<String> {
     }
 }
 
-// ---------- 即时保存（P18） ----------
+// ---------- 即时保存（P18，按页独立） ----------
+
+/// 多开内存护栏上限（字节）：全部页内容 + 待载文件的保守估算。
+/// 约 2.56 亿字符 ≈ 数个 50MB 级大文档同时驻留的量级。
+const MULTI_TAB_MEM_CAP_BYTES: u64 = 256 * 1024 * 1024;
+
+/// 内存护栏判定（纯函数便于测试）：现有页字符按 3 字节/字符保守
+/// 估算 UTF-8 上界，加上待载文件实际字节数后与上限比较。
+fn mem_guard_allows(existing_chars: usize, incoming_bytes: u64, cap_bytes: u64) -> bool {
+    let estimate = (existing_chars as u64).saturating_mul(3);
+    estimate.saturating_add(incoming_bytes) <= cap_bytes
+}
 
 /// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 分块原子落盘」，
 /// 结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待结果，
-/// 且 inflight 去重保证同一时刻至多一个这样的线程）。
+/// 且按页 inflight 去重保证同一页至多一个这样的线程）。
 async fn drive_autosave_once(
+    tab: usize,
     path: PathBuf,
     doc: editpad_core::Document,
     version: u64,
@@ -462,20 +479,26 @@ async fn drive_autosave_once(
     let result = rx
         .recv()
         .unwrap_or_else(|_| Err("自动保存线程意外终止".to_owned()));
-    Message::Autosaved(version, result)
+    Message::TabAutosaved(tab, version, result)
 }
 
 /// 单个标签页的完整状态（P21）。
 ///
 /// [`EditorHandle`] 内聚文档/光标/选区/撤销/高亮/滚动；标签页另持
-/// 路径、置脏标记与编码标签。多标签下「干净页可驱逐」等内存硬约束
-/// 在骨架阶段暂不启用（每页本就只多一份 rope 结构）。
+/// 路径、置脏标记与编码标签。P18 版本守卫所需的版本号/防抖起点/
+/// 自动保存在途标记也**按页独立**——后台页同样参与自动保存。
 #[derive(Debug, Clone)]
 struct Tab {
     editor: EditorHandle,
     path: Option<PathBuf>,
     dirty: bool,
     encoding_label: String,
+    /// 内容版本号：本页每次真实改动 +1（保存回报据此判断是否清脏）
+    version: u64,
+    /// 本页自动保存任务在途标记
+    autosave_inflight: bool,
+    /// 本页最后一次内容改动的时刻（防抖窗口计时起点）
+    last_edit_at: Option<std::time::Instant>,
 }
 
 impl Tab {
@@ -485,6 +508,9 @@ impl Tab {
             path: None,
             dirty: false,
             encoding_label: String::new(),
+            version: 0,
+            autosave_inflight: false,
+            last_edit_at: None,
         }
     }
 
@@ -502,6 +528,12 @@ impl Tab {
         } else {
             name
         }
+    }
+
+    /// 记一次真实改动（版本推进 + 防抖起点刷新）。
+    fn note_mutation(&mut self) {
+        self.version += 1;
+        self.last_edit_at = Some(std::time::Instant::now());
     }
 }
 
@@ -522,13 +554,9 @@ struct Editpad {
     busy: bool,
     status: String,
 
-    // ---------- 即时保存（P18） ----------
-    /// 内容版本号：每次真实改动 +1（含撤销/重做/整体替换）
-    content_version: u64,
-    /// 自动保存防抖任务在途：至多一个挂起，编辑重排由版本守卫兜底
-    autosave_inflight: bool,
-    /// 最后一次内容改动的时刻：防抖窗口的计时起点
-    last_edit_at: Option<std::time::Instant>,
+    // ---------- 即时保存（P18，版本号已下沉 Tab） ----------
+    /// 「保存后关闭标签」的目标页；Saved/TabSaved 完成后据此关页
+    pending_close_tab: Option<usize>,
 
     // ---------- 设置 ----------
     settings: editpad_core::Settings,
@@ -597,9 +625,6 @@ impl Default for Editpad {
             cur_handle,
             busy: false,
             status: String::new(),
-            content_version: 0,
-            autosave_inflight: false,
-            last_edit_at: None,
             settings: editpad_core::Settings::default(),
             job_seq: 0,
             active_load: None,
@@ -623,6 +648,7 @@ impl Default for Editpad {
             main_window: None,
             open_confirm: None,
             close_tab_confirm: None,
+            pending_close_tab: None,
             dark_mode: false,
         }
     }
@@ -867,7 +893,7 @@ impl Editpad {
             }
             Message::Saved(version, Ok(())) => {
                 // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
-                self.tab_mut().dirty = self.content_version != version;
+                self.tab_mut().dirty = self.tab().version != version;
                 self.busy = false;
                 if let Some(path) = self.tab().path.clone() {
                     self.record_recent(&path);
@@ -895,21 +921,22 @@ impl Editpad {
                 Task::none()
             }
 
-            // ---------- 即时保存（P18） ----------
-            Message::Autosaved(version, result) => {
-                self.autosave_inflight = false;
-                match result {
-                    Ok(()) => {
-                        // 版本一致 = 快照之后没有新编辑：可以安全清脏；
-                        // 不一致则保持置脏，由新一轮防抖任务覆盖最新内容
-                        if self.content_version == version {
-                            self.tab_mut().dirty = false;
+            // ---------- 即时保存（P18，按页路由） ----------
+            Message::TabAutosaved(idx, version, result) => {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.autosave_inflight = false;
+                    match result {
+                        Ok(()) => {
+                            // 版本一致 = 快照之后没有新编辑：可以安全清脏
+                            if tab.version == version {
+                                tab.dirty = false;
+                            }
                         }
-                    }
-                    Err(error) => {
-                        // 失败必须留痕（不能无声吞掉），但不打断编辑；
-                        // 清掉 inflight 后，下一次编辑会重新排队
-                        self.status = format!("自动保存失败:{error}");
+                        Err(error) => {
+                            // 失败必须留痕（不能无声吞掉），但不打断编辑；
+                            // 清掉 inflight 后，下一次编辑会重新排队
+                            self.status = format!("自动保存失败:{error}");
+                        }
                     }
                 }
                 Task::none()
@@ -1017,8 +1044,7 @@ impl Editpad {
                         .replace_whole_document(editpad_core::Document::from_str(&new_contents));
                     self.tab_mut().dirty = true;
                     // P18：内容版本与防抖起点同步推进
-                    self.content_version += 1;
-                    self.last_edit_at = Some(std::time::Instant::now());
+                    self.tab_mut().note_mutation();
                 }
                 // P10：替换后的重扫走后台防抖，不再同步刷
                 let mut tasks = vec![self.schedule_find_scan()];
@@ -1067,8 +1093,7 @@ impl Editpad {
                             .replace_whole_document(editpad_core::Document::from_str(&pretty));
                         self.tab_mut().dirty = true;
                         // P18：内容版本与防抖起点同步推进
-                        self.content_version += 1;
-                        self.last_edit_at = Some(std::time::Instant::now());
+                        self.tab_mut().note_mutation();
                         self.status = "已格式化 JSON".to_owned();
                         if self.find_visible {
                             // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
@@ -1222,6 +1247,58 @@ impl Editpad {
                 self.close_tab_confirm = None;
                 Task::none()
             }
+            Message::CloseTabSave(idx) => {
+                // 「保存并关闭」：已命名的置脏页先落盘，
+                // TabSaved 成功且清脏后再真正移除页面
+                if idx >= self.tabs.len() || self.busy {
+                    return Task::none();
+                }
+                if self.tabs[idx].path.is_none() {
+                    self.status = "未命名标签页请先另存为再关闭".to_owned();
+                    return Task::none();
+                }
+                self.busy = true;
+                let path = self.tabs[idx].path.clone().expect("上方已确认非空");
+                let doc = self.tabs[idx].editor.borrow().doc.clone();
+                let version = self.tabs[idx].version;
+                self.pending_close_tab = Some(idx);
+                Task::perform(
+                    async move {
+                        let saved = editpad_core::save_document_atomic(&path, &doc)
+                            .map_err(|e| e.to_string());
+                        (version, saved)
+                    },
+                    move |(version, result)| Message::TabSaved(idx, version, result),
+                )
+            }
+            Message::TabSaved(idx, version, result) => {
+                self.busy = false;
+                if idx >= self.tabs.len() {
+                    return Task::none();
+                }
+                match result {
+                    Ok(()) => {
+                        // 版本守卫同款：期间又有编辑则保持置脏、不关闭
+                        let clean = self.tabs[idx].version == version;
+                        if clean {
+                            self.tabs[idx].dirty = false;
+                            if self.pending_close_tab == Some(idx)
+                                && self.close_tab_now(idx)
+                            {
+                                self.cancel_find_scan();
+                            }
+                            self.pending_close_tab = None;
+                        } else {
+                            self.status = "保存后又有新改动，已取消自动关闭".to_owned();
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("保存失败:{error}");
+                        self.pending_close_tab = None;
+                    }
+                }
+                Task::none()
+            }
 
             // ---------- 外观 ----------
             Message::ThemeToggled => {
@@ -1294,8 +1371,7 @@ impl Editpad {
         if changed {
             self.tab_mut().dirty = true;
             // P18：内容版本 +1 并刷新防抖起点（自动保存的触发依据）
-            self.content_version += 1;
-            self.last_edit_at = Some(std::time::Instant::now());
+            self.tab_mut().note_mutation();
             self.status.clear();
         } else if let Some(hint) = hint {
             self.status = hint.to_owned();
@@ -1312,6 +1388,19 @@ impl Editpad {
     /// 期间用户切走标签也不影响结果归页。
     fn start_loading(&mut self, path: PathBuf, tab: usize) -> Task<Message> {
         if self.busy {
+            return Task::none();
+        }
+        // P21 内存护栏（§3 P19 总则第 2 条的骨架实现）：全部页字符量
+        // 按 3 字节/字符保守估算，加上待载文件大小，超上限即拒开并提示
+        let incoming = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let existing: usize = self
+            .tabs
+            .iter()
+            .map(|t| t.editor.borrow().doc.text_len())
+            .sum();
+        if !mem_guard_allows(existing, incoming, MULTI_TAB_MEM_CAP_BYTES) {
+            self.status =
+                "内存保护：合计内容超过上限，请先关闭部分大文档再打开".to_owned();
             return Task::none();
         }
         self.job_seq += 1;
@@ -1405,7 +1494,7 @@ impl Editpad {
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
         let doc = self.cur_handle.borrow().doc.clone();
         // P18 版本守卫：记录本次落盘对应的内容版本
-        let version = self.content_version;
+        let version = self.tab().version;
         Task::perform(
             async move {
                 let saved = editpad_core::save_document_atomic(&path, &doc)
@@ -1416,44 +1505,52 @@ impl Editpad {
         )
     }
 
-    // ---------- 即时保存（P18） ----------
+    // ---------- 即时保存（P18，按页独立） ----------
 
-    /// 自动保存条件是否就绪（不含防抖时间判断）：
-    /// 当前页已命名、有未存改动、无在途 IO、不与手动保存互斥、
-    /// 当前没有挂起任务。（骨架阶段仅覆盖活动标签页；后台页的
-    /// 自动保存随 P21 完整版补齐。）
-    fn autosave_ready(&self) -> bool {
+    /// 单个标签页的自动保存是否就绪：已命名、有未存改动、
+    /// 无在途 IO、不与手动保存互斥、本页没有挂起任务。
+    fn tab_autosave_ready(&self, idx: usize) -> bool {
         self.settings.autosave_enabled
-            && self.tab().dirty
-            && self.tab().path.is_some()
+            && self.tabs[idx].dirty
+            && self.tabs[idx].path.is_some()
             && self.active_load.is_none()
             && !self.busy
-            && !self.autosave_inflight
+            && !self.tabs[idx].autosave_inflight
     }
 
-    /// 编辑后调用：条件就绪且无挂起任务时，派发一个「睡满防抖窗 →
+    /// 编辑后调用：遍历全部标签页，把所有就绪页各排一个「睡满防抖窗 →
     /// 落盘 → 回报版本」的专用任务（P5/P10 同构的 OS 线程桥接）。
     ///
-    /// 至多一个挂起：打字连击期间不重复排队；任务醒来落盘的是
+    /// 至多每页一个挂起（autosave_inflight 去重）；任务醒来落盘的是
     /// **调度时刻**的快照——若期间又有编辑，版本守卫会保持置脏，
     /// 本次编辑结束后由新任务覆盖最新内容（最终一致）。
     fn maybe_schedule_autosave(&mut self) -> Task<Message> {
-        if !self.autosave_ready() {
+        if !self.settings.autosave_enabled || self.busy || self.active_load.is_some() {
             return Task::none();
         }
-        let Some(path) = self.tab().path.clone() else {
-            return Task::none();
-        };
-        let doc = self.cur_handle.borrow().doc.clone();
-        let version = self.content_version;
-        let delay = std::time::Duration::from_secs(
-            u64::from(self.settings.autosave_delay_secs),
-        );
-        self.autosave_inflight = true;
-        Task::perform(
-            async move { drive_autosave_once(path, doc, version, delay).await },
-            |message| message,
-        )
+        let mut tasks = Vec::new();
+        for idx in 0..self.tabs.len() {
+            if !self.tab_autosave_ready(idx) {
+                continue;
+            }
+            let Some(path) = self.tabs[idx].path.clone() else {
+                continue;
+            };
+            let doc = self.tabs[idx].editor.borrow().doc.clone();
+            let version = self.tabs[idx].version;
+            let delay =
+                std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs));
+            self.tabs[idx].autosave_inflight = true;
+            tasks.push(Task::perform(
+                async move { drive_autosave_once(idx, path, doc, version, delay).await },
+                |message| message,
+            ));
+        }
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
     }
 
     fn record_recent(&mut self, path: &Path) {
@@ -1875,6 +1972,13 @@ impl Editpad {
                     button(text("放弃更改并关闭"))
                         .padding([4, 12])
                         .on_press(Message::ConfirmCloseTabDiscard(idx)),
+                    // P21 完整版：已命名的页可直接「保存并关闭」
+                    button(text("保存并关闭"))
+                        .padding([4, 12])
+                        .on_press_maybe(
+                            (!self.busy && self.tabs[idx].path.is_some())
+                                .then_some(Message::CloseTabSave(idx)),
+                        ),
                     button(text("取消"))
                         .padding([4, 12])
                         .on_press(Message::CancelCloseTab),
@@ -2450,24 +2554,27 @@ mod tests {
         let mut app = loaded_txt_app();
         assert!(app.settings.autosave_enabled);
 
-        // 编辑置脏并派发防抖任务
+        // 编辑置脏并派发防抖任务（版本号在页上推进）
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         assert!(app.tab().dirty);
-        assert!(app.autosave_inflight, "首次编辑应排队防抖任务");
-        let scheduled_version = app.content_version;
+        assert!(
+            app.tabs[0].autosave_inflight,
+            "首次编辑应排队本页防抖任务"
+        );
+        let scheduled_version = app.tab().version;
 
         // 连续再编辑：inflight 去重不重复排队；版本继续推进
         dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
-        assert!(app.autosave_inflight);
-        assert_eq!(app.content_version, scheduled_version + 1);
+        assert!(app.tabs[0].autosave_inflight);
+        assert_eq!(app.tab().version, scheduled_version + 1);
 
         // 任务回报且版本一致 → 清脏解除挂起
         dispatch(
             &mut app,
-            Message::Autosaved(scheduled_version + 1, Ok(())),
+            Message::TabAutosaved(0, scheduled_version + 1, Ok(())),
         );
         assert!(!app.tab().dirty, "版本一致时落盘应清脏");
-        assert!(!app.autosave_inflight);
+        assert!(!app.tabs[0].autosave_inflight);
     }
 
     #[test]
@@ -2475,13 +2582,13 @@ mod tests {
         // 快照之后又有编辑：迟到的「保存成功」不得清脏（否则丢改动标记）
         let mut app = loaded_txt_app();
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        let stale = app.content_version;
+        let stale = app.tab().version;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
 
-        dispatch(&mut app, Message::Autosaved(stale, Ok(())));
+        dispatch(&mut app, Message::TabAutosaved(0, stale, Ok(())));
 
         assert!(
-            app.tab().dirty && !app.autosave_inflight,
+            app.tab().dirty && !app.tabs[0].autosave_inflight,
             "版本不符应保持置脏并解除挂起"
         );
     }
@@ -2490,15 +2597,15 @@ mod tests {
     fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
         let mut app = loaded_txt_app();
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.autosave_inflight);
+        assert!(app.tabs[0].autosave_inflight);
 
-        let version = app.content_version;
+        let version = app.tab().version;
         dispatch(
             &mut app,
-            Message::Autosaved(version, Err("disk full".into())),
+            Message::TabAutosaved(0, version, Err("disk full".into())),
         );
 
-        assert!(!app.autosave_inflight, "失败也要解除挂起");
+        assert!(!app.tabs[0].autosave_inflight, "失败也要解除挂起");
         assert!(app.tab().dirty, "失败必须保持置脏");
         assert!(
             app.status.contains("自动保存失败") && app.status.contains("disk full"),
@@ -2508,7 +2615,7 @@ mod tests {
 
         // 失败解除挂起后，下一次编辑仍可重新排队
         dispatch(&mut app, Message::Edit(EditOp::InsertText("z".into())));
-        assert!(app.autosave_inflight, "新编辑应重新排队");
+        assert!(app.tabs[0].autosave_inflight, "新编辑应重新排队");
     }
 
     #[test]
@@ -2518,7 +2625,7 @@ mod tests {
         dispatch(&mut untitled, Message::Edit(EditOp::InsertText("x".into())));
         assert!(untitled.tab().dirty);
         assert!(
-            !untitled.autosave_inflight,
+            !untitled.tabs[0].autosave_inflight,
             "未命名文档不参与自动保存"
         );
 
@@ -2527,13 +2634,13 @@ mod tests {
         app.settings.autosave_enabled = false;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         assert!(app.tab().dirty);
-        assert!(!app.autosave_inflight, "开关关闭时不排队");
+        assert!(!app.tabs[0].autosave_inflight, "开关关闭时不排队");
 
         // busy（手动 IO 进行中）时也跳过
         let mut busy_app = loaded_txt_app();
         busy_app.busy = true;
         dispatch(&mut busy_app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(!busy_app.autosave_inflight, "busy 时不得排队自动保存");
+        assert!(!busy_app.tabs[0].autosave_inflight, "busy 时不得排队自动保存");
     }
 
     #[test]
@@ -3118,5 +3225,38 @@ mod tests {
             .reset_document(editpad_core::Document::from_str("plain text only\n"));
         dispatch(&mut plain, Message::HighlightPaveNeeded);
         assert_eq!(plain.hl_paving, None);
+    }
+
+    // ---------- P21 内存护栏 ----------
+
+    #[test]
+    fn mem_guard_rejects_when_estimate_exceeds_cap() {
+        let cap = 1_000u64;
+        // 现有 100 字符 ×3 字节估算 = 300；再开 500 字节文件 → 800 ≤ 1000 允许
+        assert!(mem_guard_allows(100, 500, cap));
+        // 再大一点就超
+        assert!(!mem_guard_allows(100, 900, cap));
+        // 极端值不 panic（饱和运算）
+        assert!(mem_guard_allows(usize::MAX, u64::MAX, u64::MAX));
+        assert!(!mem_guard_allows(usize::MAX, u64::MAX, 0));
+    }
+
+    #[test]
+    fn start_loading_enforces_mem_guard() {
+        let mut app = Editpad::default();
+        // 预置一个超大字符量的当前页（直接改 doc 以绕过真实大文件）
+        let huge = editpad_core::Document::from_str(&"x".repeat(200_000_000));
+        app.cur_handle.borrow_mut().reset_document(huge);
+        // 当前页非空 → 打开会走新页，但护栏按全页合计判定
+        let big_path = PathBuf::from("C:/definitely/too/big.bin");
+        let task = app.start_loading(big_path.clone(), app.tabs.len());
+        let _ = task;
+        assert!(
+            app.status.contains("内存保护"),
+            "超限打开应被拒绝并提示，实际 {:?}",
+            app.status
+        );
+        assert!(app.active_load.is_none(), "被拒的打开不得登记任务");
+        assert_eq!(app.tabs.len(), 1, "拒绝时不得占位新页");
     }
 }
