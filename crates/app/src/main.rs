@@ -160,6 +160,24 @@ enum Message {
     ThemeToggled,
     /// 字号增减（±2.0，clamp 后写回设置并即时生效）
     FontSizeDelta(f32),
+
+    // ---------- 设置弹窗（P27） ----------
+    /// 打开/关闭设置弹窗（busy 时禁开；Esc 与关闭按钮退出）
+    SettingsToggled,
+    /// 自动保存开关（P18）翻转，写回设置
+    SettingsAutosaveToggled(bool),
+    /// 自动保存防抖秒数增减（±1，clamp 后写回）
+    SettingsAutosaveDelayDelta(i32),
+    /// 「记住最近文件」开关（P20）翻转，写回设置
+    SettingsRememberRecentToggled(bool),
+    /// 会话快照总开关（P29）翻转，写回设置
+    SettingsSnapshotsToggled(bool),
+    /// 启动会话恢复开关（P30）翻转，写回设置
+    SettingsRememberSessionToggled(bool),
+    /// 关窗行为切换：快照直退 ↔ 每次询问（P29），写回设置
+    SettingsExitModeToggled,
+    /// 周期快照心跳间隔秒数增减（±5，clamp 后写回；P31）
+    SettingsIntervalDelta(i32),
 }
 
 /// 后台加载线程 → 订阅流的事件。
@@ -881,6 +899,11 @@ struct Editpad {
 
     // ---------- 设置 ----------
     settings: editpad_core::Settings,
+    /// 配置文件注入点（测试用）；None = 系统配置目录。
+    /// 所有 `persist_settings` 都走这里，保证单测绝不碰真实 %APPDATA%。
+    settings_path_override: Option<PathBuf>,
+    /// 设置弹窗是否可见（P27）：工具栏「设置」按钮开、Esc/关闭按钮关。
+    settings_visible: bool,
 
     // ---------- 后台加载 ----------
     job_seq: u64,
@@ -984,6 +1007,8 @@ impl Default for Editpad {
             busy: false,
             status: String::new(),
             settings: editpad_core::Settings::default(),
+            settings_path_override: None,
+            settings_visible: false,
             job_seq: 0,
             active_load: None,
             progress: None,
@@ -1656,7 +1681,7 @@ impl Editpad {
             Message::RecentsCleared => {
                 // P20 隐私：立即写回空列表，config.toml 不再含历史路径
                 self.settings.clear_recent_files();
-                self.settings.save();
+                self.persist_settings();
                 self.status = "已清空最近文件记录".to_owned();
                 Task::none()
             }
@@ -1665,6 +1690,8 @@ impl Editpad {
                 self.find_visible = false;
                 self.goto_visible = false;
                 self.recents_visible = false;
+                // P27：Esc 一并关闭设置弹窗
+                self.settings_visible = false;
                 // Esc 同时视作放弃关闭/打开确认
                 self.confirm_visible = false;
                 self.pending_close = false;
@@ -1861,14 +1888,78 @@ impl Editpad {
             Message::ThemeToggled => {
                 self.dark_mode = !self.dark_mode;
                 self.settings.set_theme(self.dark_mode);
-                self.settings.save();
+                self.persist_settings();
                 Task::none()
             }
             Message::FontSizeDelta(delta) => {
                 let next = editor::normalize_font_size(self.display_font_size() + delta);
                 self.settings.font_size = next;
-                self.settings.save();
+                self.persist_settings();
                 self.cur_handle.borrow_mut().set_font_size(next);
+                Task::none()
+            }
+
+            // ---------- 设置弹窗（P27） ----------
+            Message::SettingsToggled => {
+                // busy（加载/保存中）禁开，与工具栏其余按钮同一守卫语义
+                if !self.busy {
+                    self.settings_visible = !self.settings_visible;
+                }
+                Task::none()
+            }
+            Message::SettingsAutosaveToggled(value) => {
+                self.settings.autosave_enabled = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsAutosaveDelayDelta(delta) => {
+                let next = (self.settings.autosave_delay_secs as i64 + delta as i64)
+                    .clamp(
+                        editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS as i64,
+                        editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS as i64,
+                    ) as u32;
+                self.settings.autosave_delay_secs = next;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsRememberRecentToggled(value) => {
+                self.settings.remember_recent_files = value;
+                // P20：关闭开关即清空存量列表（只关开关不清数据等于没关）
+                if !value {
+                    self.settings.clear_recent_files();
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsSnapshotsToggled(value) => {
+                self.settings.enable_snapshots = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsRememberSessionToggled(value) => {
+                self.settings.remember_session = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsExitModeToggled => {
+                use editpad_core::settings::{EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
+                self.settings.exit_mode = if self.settings.exit_mode == EXIT_MODE_SNAPSHOT {
+                    EXIT_MODE_ASK
+                } else {
+                    EXIT_MODE_SNAPSHOT
+                }
+                .to_string();
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsIntervalDelta(delta) => {
+                let next = (self.settings.snapshot_interval_secs as i64 + delta as i64)
+                    .clamp(
+                        editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS as i64,
+                        editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS as i64,
+                    ) as u32;
+                self.settings.snapshot_interval_secs = next;
+                self.persist_settings();
                 Task::none()
             }
         }
@@ -2116,7 +2207,17 @@ impl Editpad {
 
     fn record_recent(&mut self, path: &Path) {
         self.settings.push_recent(path);
-        self.settings.save();
+        self.persist_settings();
+    }
+
+    /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到
+    /// 临时目录，绝不动真实 %APPDATA%；否则走系统配置目录（尽力而为）。
+    fn persist_settings(&self) {
+        if let Some(path) = &self.settings_path_override {
+            let _ = self.settings.save_to(path);
+        } else {
+            self.settings.save();
+        }
     }
 
     /// 应用主题（boot 从设置读入，工具栏可切换）。
@@ -2845,6 +2946,146 @@ impl Editpad {
             .map(str::to_owned)
     }
 
+    /// P27 设置弹窗面板：收编原本只能手改 config.toml 的散落设置
+    /// （主题/字号/即时保存/隐私/会话）+ 只读热键速查表。改动即写回。
+    fn settings_panel(&self) -> Element<'_, Message> {
+        let s = &self.settings;
+
+        // 热键速查表（只读）：数据源 = HOTKEYS，与 README「快捷键」段同源
+        let mut hotkey_col = column![text("热键（速查）").size(16)].spacing(2);
+        for (combo, desc) in HOTKEYS {
+            hotkey_col = hotkey_col.push(
+                row![
+                    text(*combo).width(150),
+                    text(*desc).color([0.5, 0.5, 0.5]),
+                ]
+                .spacing(8),
+            );
+        }
+
+        container(
+            column![
+                row![
+                    text("设置").size(20),
+                    button(text("×"))
+                        .padding([2, 8])
+                        .on_press(Message::SettingsToggled),
+                ]
+                .align_y(Alignment::Center)
+                .spacing(8),
+                rule::horizontal(1),
+
+                // ---- 外观 ----
+                text("外观").size(16),
+                row![
+                    text("主题"),
+                    button(text(if s.is_dark() { "深色" } else { "浅色" }))
+                        .padding([2, 8])
+                        .on_press(Message::ThemeToggled),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                row![
+                    text("字号"),
+                    button(text("A-"))
+                        .padding([2, 8])
+                        .on_press_maybe(
+                            (self.display_font_size()
+                                > editpad_core::settings::MIN_FONT_SIZE)
+                                .then_some(Message::FontSizeDelta(-2.0))
+                        ),
+                    text(format!("{:.0}", self.display_font_size())),
+                    button(text("A+"))
+                        .padding([2, 8])
+                        .on_press_maybe(
+                            (self.display_font_size()
+                                < editpad_core::settings::MAX_FONT_SIZE)
+                                .then_some(Message::FontSizeDelta(2.0))
+                        ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+
+                // ---- 即时保存（P18） ----
+                text("即时保存").size(16),
+                checkbox(s.autosave_enabled)
+                    .label("停手后自动落盘")
+                    .on_toggle(Message::SettingsAutosaveToggled),
+                row![
+                    text("防抖秒数"),
+                    button(text("-"))
+                        .padding([2, 8])
+                        .on_press_maybe(
+                            (s.autosave_delay_secs
+                                > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
+                                .then_some(Message::SettingsAutosaveDelayDelta(-1))
+                        ),
+                    text(format!("{}", s.autosave_delay_secs)),
+                    button(text("+"))
+                        .padding([2, 8])
+                        .on_press_maybe(
+                            (s.autosave_delay_secs
+                                < editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS)
+                                .then_some(Message::SettingsAutosaveDelayDelta(1))
+                        ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+
+                // ---- 隐私与会话（P20/P29/P30/P31） ----
+                text("隐私与会话").size(16),
+                checkbox(s.remember_recent_files)
+                    .label("记住最近打开的文件")
+                    .on_toggle(Message::SettingsRememberRecentToggled),
+                checkbox(s.enable_snapshots)
+                    .label("会话快照（关窗自动保存未存内容）")
+                    .on_toggle(Message::SettingsSnapshotsToggled),
+                checkbox(s.remember_session)
+                    .label("启动时恢复上次界面")
+                    .on_toggle(Message::SettingsRememberSessionToggled),
+                row![
+                    text("关窗行为"),
+                    button(text(if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
+                        "快照直退"
+                    } else {
+                        "每次询问"
+                    }))
+                    .padding([2, 8])
+                    .on_press(Message::SettingsExitModeToggled),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                row![
+                    text("心跳间隔秒数"),
+                    button(text("-"))
+                        .padding([2, 8])
+                        .on_press_maybe(
+                            (s.snapshot_interval_secs
+                                > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
+                                .then_some(Message::SettingsIntervalDelta(-5))
+                        ),
+                    text(format!("{}", s.snapshot_interval_secs)),
+                    button(text("+"))
+                        .padding([2, 8])
+                        .on_press_maybe(
+                            (s.snapshot_interval_secs
+                                < editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS)
+                                .then_some(Message::SettingsIntervalDelta(5))
+                        ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+
+                rule::horizontal(1),
+                hotkey_col,
+            ]
+            .spacing(6)
+            .padding(12),
+        )
+        .width(460)
+        .into()
+    }
+
     fn view(&self) -> Element<'_, Message> {
         // P22 第三批：当前页是否为 Markdown（决定预览按钮可用性）
         let is_markdown = self
@@ -2904,6 +3145,10 @@ impl Editpad {
             ]
             .spacing(4)
             .align_y(Alignment::Center),
+            // P27：设置弹窗入口（busy 时禁开，与其余工具栏按钮同一守卫）
+            button(text("设置"))
+                .padding([4, 12])
+                .on_press_maybe((!self.busy).then_some(Message::SettingsToggled)),
             text(if self.tab().dirty { "● 未保存" } else { "" }).color([0.85, 0.55, 0.1]),
         ]
         .spacing(8)
@@ -3059,6 +3304,11 @@ impl Editpad {
             );
         }
 
+        // P27 设置弹窗：置于其余面板之后（覆盖式语义，关闭入口见标题行 ×）
+        if self.settings_visible {
+            body = body.push(rule::horizontal(1)).push(self.settings_panel());
+        }
+
         // 未保存关闭确认条：置于状态区域上方
         if self.confirm_visible {
             body = body.push(rule::horizontal(1)).push(
@@ -3182,6 +3432,33 @@ impl Editpad {
         container(body).width(Fill).height(Fill).into()
     }
 }
+
+/// 全局快捷键速查表（P27 v1 只读速查）。
+///
+/// 这是快捷键的**唯一展示数据源**：设置弹窗的热键表与 README「快捷键」
+/// 段都从这里派生（`(组合键, 功能)`）。新增/修改快捷键时必须同步
+/// [`handle_key`] 与 README，避免三处漂移——改动后跑
+/// `hotkey_table_is_well_formed` 与 `hotkey_table_matches_handle_key`
+/// 两个测试即可当场暴露漏改。
+const HOTKEYS: &[(&str, &str)] = &[
+    ("Ctrl+O", "打开文件"),
+    ("Ctrl+S", "保存"),
+    ("Ctrl+A", "全选"),
+    ("Ctrl+F / Ctrl+H", "查找/替换栏"),
+    ("Ctrl+G", "跳转到行"),
+    ("Ctrl+Z", "撤销"),
+    ("Ctrl+Y", "重做"),
+    ("Ctrl+C", "复制选区"),
+    ("Ctrl+X", "剪切选区"),
+    ("Ctrl+V", "粘贴"),
+    ("Ctrl+T", "新建标签页"),
+    ("Ctrl+W", "关闭当前标签页"),
+    ("Ctrl+Tab", "循环切换标签页"),
+    ("Ctrl+Shift+F", "格式化 JSON（仅 JSON 文件）"),
+    ("Ctrl+Home", "跳到文档首"),
+    ("Ctrl+End", "跳到文档尾"),
+    ("Shift+滚轮", "横向滚动"),
+];
 
 /// 全局按键分发：Ctrl 组合快捷键优先，其次编辑键与光标移动。
 fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> {
@@ -5343,5 +5620,154 @@ mod tests {
         assert!(!app.heartbeat_inflight);
 
         editpad_core::snapshot::clear_session(&dir);
+    }
+
+    // ---------- P27 设置按钮 + 设置弹窗 + 热键速查表 ----------
+
+    #[test]
+    fn hotkey_table_is_well_formed() {
+        assert!(!HOTKEYS.is_empty(), "热键速查表不得为空");
+        for (combo, desc) in HOTKEYS {
+            assert!(!combo.trim().is_empty(), "组合键列不得为空");
+            assert!(!desc.trim().is_empty(), "功能说明不得为空：{combo}");
+        }
+        // 条目唯一：重复条目意味着展示数据已经漂移
+        let mut combos: Vec<_> = HOTKEYS.iter().map(|(c, _)| *c).collect();
+        let total = combos.len();
+        combos.sort_unstable();
+        combos.dedup();
+        assert_eq!(combos.len(), total, "热键表存在重复条目");
+    }
+
+    #[test]
+    fn hotkey_table_entries_all_dispatch_through_handle_key() {
+        use iced::keyboard::{self, key::Named};
+        // 速查表的每个组合键都必须在 handle_key 里有真实分支——
+        // 表格与分发器任何一侧改动漏同步，本测试当场暴露（防漂移的兑现）
+        for (combo, _) in HOTKEYS {
+            if combo.contains("滚轮") {
+                continue; // 鼠标事件不经 handle_key 分发，无法在此验证
+            }
+            // 单元格可能聚合多个组合（「Ctrl+F / Ctrl+H」），逐个验证；
+            // 单个组合形如 Ctrl+Shift+F——按 + 切分，末段=键名，其余=修饰键
+            for part in combo.split('/') {
+                let part = part.trim();
+                let mut mods = keyboard::Modifiers::empty();
+                let mut tokens = part.split('+').map(str::trim).rev();
+                let key_name = tokens.next().unwrap_or_else(|| panic!("空组合键 {part:?}"));
+                for tok in tokens {
+                    mods |= match tok {
+                        "Ctrl" => keyboard::Modifiers::CTRL,
+                        "Shift" => keyboard::Modifiers::SHIFT,
+                        "Alt" => keyboard::Modifiers::ALT,
+                        other => panic!("速查表出现未知修饰键 {other:?}"),
+                    };
+                }
+                let key = match key_name {
+                    "Tab" => keyboard::Key::Named(Named::Tab),
+                    "Home" => keyboard::Key::Named(Named::Home),
+                    "End" => keyboard::Key::Named(Named::End),
+                    single if single.chars().count() == 1 => {
+                        keyboard::Key::Character(single.to_ascii_lowercase().into())
+                    }
+                    other => panic!("速查表出现未支持的键名 {other:?}"),
+                };
+                let dispatched = handle_key(key, mods);
+                assert!(
+                    dispatched.is_some(),
+                    "速查表条目 {part:?} 在 handle_key 中无对应分支——快捷键与展示数据已漂移"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_modal_open_close_and_busy_guard() {
+        let mut app = Editpad::default();
+        assert!(!app.settings_visible);
+
+        // 工具栏「设置」开 ↔ 再点关
+        dispatch(&mut app, Message::SettingsToggled);
+        assert!(app.settings_visible);
+        dispatch(&mut app, Message::SettingsToggled);
+        assert!(!app.settings_visible);
+
+        // busy（加载/保存中）禁开——update 层守卫，与工具栏按钮禁用双保险
+        app.busy = true;
+        dispatch(&mut app, Message::SettingsToggled);
+        assert!(!app.settings_visible, "busy 时不得打开设置弹窗");
+        app.busy = false;
+
+        // Esc 统一收口所有面板：设置弹窗一并关闭
+        dispatch(&mut app, Message::SettingsToggled);
+        assert!(app.settings_visible);
+        dispatch(&mut app, Message::BarsDismissed);
+        assert!(!app.settings_visible, "Esc 必须关闭设置弹窗");
+    }
+
+    #[test]
+    fn settings_modal_actions_write_back_and_persist_to_injected_path() {
+        use editpad_core::settings::{
+            EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT, MAX_AUTOSAVE_DELAY_SECS,
+            MAX_SNAPSHOT_INTERVAL_SECS, MIN_AUTOSAVE_DELAY_SECS, MIN_SNAPSHOT_INTERVAL_SECS,
+        };
+        let dir = scratch_dir("p27-settings");
+        let config = dir.join("config.toml");
+        let mut app = Editpad::default();
+        // 注入配置路径：弹窗的每次改动都落到这里，绝不碰真实 %APPDATA%
+        app.settings_path_override = Some(config.clone());
+
+        // 即时保存开关写回
+        dispatch(&mut app, Message::SettingsAutosaveToggled(false));
+        assert!(!app.settings.autosave_enabled);
+
+        // 防抖秒数 ±1 步进，clamp [1,60]
+        dispatch(&mut app, Message::SettingsAutosaveDelayDelta(-1));
+        assert_eq!(app.settings.autosave_delay_secs, 1, "默认 2s 减 1 → 1s");
+        dispatch(&mut app, Message::SettingsAutosaveDelayDelta(-10));
+        assert_eq!(app.settings.autosave_delay_secs, MIN_AUTOSAVE_DELAY_SECS);
+        dispatch(&mut app, Message::SettingsAutosaveDelayDelta(500));
+        assert_eq!(app.settings.autosave_delay_secs, MAX_AUTOSAVE_DELAY_SECS);
+
+        // P20 口径随开关收编：关闭「记住最近文件」→ 存量列表一并清空
+        app.settings.recent_files.push("C:/old.txt".to_owned());
+        dispatch(&mut app, Message::SettingsRememberRecentToggled(false));
+        assert!(
+            app.settings.recent_files.is_empty(),
+            "只关开关不清数据等于没关"
+        );
+
+        // 快照与会话两个开关
+        dispatch(&mut app, Message::SettingsSnapshotsToggled(false));
+        assert!(!app.settings.enable_snapshots);
+        dispatch(&mut app, Message::SettingsRememberSessionToggled(false));
+        assert!(!app.settings.remember_session);
+
+        // 关窗行为快照直退 ↔ 每次询问往返切换
+        dispatch(&mut app, Message::SettingsExitModeToggled);
+        assert_eq!(app.settings.exit_mode, EXIT_MODE_ASK);
+        dispatch(&mut app, Message::SettingsExitModeToggled);
+        assert_eq!(app.settings.exit_mode, EXIT_MODE_SNAPSHOT);
+
+        // 心跳间隔 ±5 步进，clamp [5,120]：越界方向被夹在边界上
+        dispatch(&mut app, Message::SettingsIntervalDelta(-50));
+        assert_eq!(
+            app.settings.snapshot_interval_secs,
+            MIN_SNAPSHOT_INTERVAL_SECS
+        );
+        dispatch(&mut app, Message::SettingsIntervalDelta(500));
+        assert_eq!(
+            app.settings.snapshot_interval_secs,
+            MAX_SNAPSHOT_INTERVAL_SECS
+        );
+
+        // 汇总断言：以上每次改动都已即时持久化到注入路径
+        assert_eq!(
+            editpad_core::Settings::load_from(&config),
+            app.settings,
+            "弹窗改动必须即时写回 config.toml"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
