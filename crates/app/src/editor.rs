@@ -107,7 +107,10 @@ pub fn pick_cjk_mono_family(available: &[String]) -> Option<&'static str> {
     })
 }
 const CARET_WIDTH: f32 = 2.0;
-const MAX_UNDO: usize = 128;
+/// 撤销组上限（P37 打字成组后，一组 ≈ 一次连续输入；快照是 rope 结构
+/// 共享克隆，每组只钉住差异分块，512 组的最坏常驻增量仍在 MB 量级——
+/// 内存入账见 HANDOFF §6 本轮）。
+const MAX_UNDO: usize = 512;
 const SCROLL_LINES_PER_NOTCH: f32 = 3.0;
 
 /// 把任意来源的字号归一成合法值：非有限值回退默认，其余 clamp 到设置层允许区间。
@@ -216,6 +219,11 @@ pub struct EditorCore {
     max_line_cols: usize,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
+    /// P37 打字成组撤销：Some(组内上次插入的结束字符偏移) = 当前处于
+    /// 连续单字符输入组中。任何其他操作（光标移动、选区变更、删除类
+    /// 编辑、撤销/重做、换文档、焦点离开）都会置 None 打断；
+    /// 合并条件见 [`EditorCore::insert_str`]。
+    typing_run: Option<usize>,
     /// 语法高亮器；None = 纯文本快速路径。RefCell 让只读的 draw 也能推进状态。
     highlight: Option<RefCell<LazyHighlighter>>,
     /// 输入法预编辑串（组字过程中的拼音/候选串），提交前显示在光标处。
@@ -253,6 +261,7 @@ impl Default for EditorCore {
             max_line_cols: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            typing_run: None,
             highlight: None,
             preedit: None,
             font_size: FONT_SIZE_DEFAULT,
@@ -387,6 +396,7 @@ impl EditorCore {
         self.scroll_left = 0.0;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.typing_run = None; // P37：换文档即一切成组状态作废
         self.recompute_max_line_cols();
         if let Some(hl) = &self.highlight {
             hl.borrow_mut().invalidate_from(0);
@@ -511,7 +521,17 @@ impl EditorCore {
         }
     }
 
+    /// P37：打断当前打字组。凡不经过 [`Self::snapshot`] 的状态变更
+    /// （光标移动、选区变更、撤销/重做、焦点离开、点击落点）都必须调用，
+    /// 保证组内只有真正连续的单字符输入。
+    fn break_typing(&mut self) {
+        self.typing_run = None;
+    }
+
     fn snapshot(&mut self) {
+        // P37：开新快照 = 上一组就此终结（删除类编辑/整体替换/非合并
+        // 插入都经此处打断成组；合并插入走的是跳过本函数的路径）
+        self.typing_run = None;
         self.undo_stack.push(Snapshot {
             doc: self.doc.clone(), // rope 克隆是结构共享，廉价
             cursor: self.cursor,
@@ -524,6 +544,7 @@ impl EditorCore {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.break_typing(); // P37：撤销本身打断组，防后续输入混入历史组
         let Some(snap) = self.undo_stack.pop() else {
             return false;
         };
@@ -543,6 +564,7 @@ impl EditorCore {
     }
 
     pub fn redo(&mut self) -> bool {
+        self.break_typing(); // P37 同上
         let Some(snap) = self.redo_stack.pop() else {
             return false;
         };
@@ -561,6 +583,7 @@ impl EditorCore {
     }
 
     pub fn select_all(&mut self) {
+        self.break_typing(); // P37：选区变更打断组
         let last = self.doc.line_count().saturating_sub(1);
         self.anchor = Some(CursorPos::default());
         self.cursor = CursorPos {
@@ -595,9 +618,36 @@ impl EditorCore {
     /// 在光标处插入文本（先吃掉当前选区）。支持多行文本。
     /// P9：入文前把 `\r\n` / `\n` / 孤立 `\r` 统一归一为文档主导行尾，
     /// 回车（插 `\n`）、输入法上屏、剪贴板粘贴共用本入口，不再产生混合行尾。
+    /// P37 打字成组：仅当「上一操作就是本组内的一次合格插入、本次也是
+    /// 单个非换行字符、无选区、插入点恰好接在上次结束处」才并入当前组
+    /// （跳过快照，一次撤销撤掉整段连续输入）；换行、粘贴（多字符）、
+    /// 选区替换一律开新组。
     pub fn insert_str(&mut self, text: &str) {
         let text = self.doc.line_ending().normalize(text);
-        self.snapshot();
+        let single = {
+            let mut it = text.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None) => Some(c),
+                _ => None,
+            }
+        };
+        let at = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
+        let merges = match (self.typing_run, single) {
+            (Some(run_end), Some(c)) => {
+                c != '\n'
+                    && c != '\r'
+                    && self.selection_offsets().is_none()
+                    && at == run_end
+            }
+            _ => false,
+        };
+        // 本次插入是否合格为「组内一员」——决定下一字符能否继续并入
+        let eligible =
+            matches!(single, Some(c) if c != '\n' && c != '\r') && self.selection_offsets().is_none();
+        if !merges {
+            self.snapshot();
+        }
+        self.typing_run = None; // 插入成功且合格后在本函数末尾重立
 
         let start_offset = match self.selection_offsets() {
             Some((start, end)) => {
@@ -627,6 +677,9 @@ impl EditorCore {
         }
         // P13：受影响行（插入跨行时含沿途各行）宽度只上调高水位
         self.raise_max_line_cols(first_line..=self.cursor.line);
+        // P37：合格单字符插入把组延伸到新的结束偏移；换行/粘贴/选区替换
+        // 保持 None——下一字符开新组
+        self.typing_run = if eligible { Some(start_offset + 1) } else { None };
         self.ensure_visible();
     }
 
@@ -637,6 +690,7 @@ impl EditorCore {
 
     /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
     pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
+        self.break_typing(); // P37：选区变更打断组（查找跳转/替换当前都经此）
         let start = CursorPos { line, col };
         let mut cur = start;
         let mut remain = len_chars;
@@ -738,6 +792,7 @@ impl EditorCore {
 
     /// 应用光标移动；`extend` 为 true 时保持锚点形成选区。
     pub fn apply_motion(&mut self, motion: Motion, extend: bool) {
+        self.break_typing(); // P37：光标移动打断组
         if extend && self.anchor.is_none() {
             self.anchor = Some(self.cursor);
         }
@@ -807,6 +862,7 @@ impl EditorCore {
 
     /// 跳转到第 `line_1based` 行行首（1 起）。
     pub fn jump_to_line(&mut self, line_1based: usize) {
+        self.break_typing(); // P37：跳转打断组
         let target =
             (line_1based.saturating_sub(1)).min(self.doc.line_count().saturating_sub(1));
         self.anchor = None;
@@ -824,6 +880,7 @@ impl EditorCore {
     /// 视口尺寸在首次布局前未知——此处只做行数域的宽松钳制，
     /// 像素级精钳制由布局后的 [`Self::set_viewport_height`] 收口。
     pub fn restore_view(&mut self, line: usize, col: usize, scroll_top: f32, scroll_left: f32) {
+        self.break_typing(); // P37：定位打断组（会话恢复/最近文件定位路径）
         let last = self.doc.line_count().saturating_sub(1);
         let line = line.min(last);
         // 列按显示口径夹紧（行尾 \r 不计，与光标移动语义一致）
@@ -1112,6 +1169,8 @@ impl EditorCore {
         if !inside {
             // 焦点离开时组字中断，内联预编辑串不能悬在正文里
             self.preedit = None;
+            // P37：失焦打断打字组（去查找框搜一圈再回来，输入不该并组）
+            self.break_typing();
         }
     }
 
@@ -1843,6 +1902,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         core.dragging = true;
                         core.anchor = None;
                         core.cursor = hit;
+                        core.break_typing(); // P37：点击落点打断组
                     }
                     shell.publish(super::Message::EditorNavChanged);
                     shell.request_redraw();
@@ -1912,6 +1972,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         core.anchor = Some(core.cursor);
                     }
                     core.cursor = hit;
+                    core.break_typing(); // P37：拖选延伸打断组
                     core.ensure_visible_pub();
                     drop(core);
                     shell.publish(super::Message::EditorNavChanged);
@@ -2159,6 +2220,130 @@ mod tests {
         assert!(c.redo());
         assert_eq!(c.doc.to_text(), "第一版+第二版");
         assert!(!c.redo()); // 到底了
+    }
+
+    // ---------- P37 打字成组撤销 ----------
+
+    #[test]
+    fn typing_run_merges_consecutive_single_chars_into_one_undo() {
+        let mut c = core_with("");
+        for ch in ["a", "b", "c"] {
+            c.insert_str(ch);
+        }
+        assert_eq!(c.doc.to_text(), "abc");
+        // 三次连续单字符输入 = 一个撤销组：一步退回输入前
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "");
+        assert!(!c.undo(), "组内只有一份快照，一步即到输入前");
+        assert!(c.redo());
+        assert_eq!(c.doc.to_text(), "abc", "重做整体恢复该组");
+    }
+
+    #[test]
+    fn typing_run_breaks_on_cursor_motion() {
+        let mut c = core_with("");
+        c.insert_str("a");
+        c.insert_str("b");
+        c.apply_motion(Motion::Left, false); // 光标移动打断成组
+        c.insert_str("c");
+        assert_eq!(c.doc.to_text(), "acb");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "ab", "移动后的输入独立成组");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "", "移动前的连续输入是另一组");
+    }
+
+    #[test]
+    fn typing_run_breaks_on_newline_paste_and_selection_replace() {
+        // 换行：归一后即使只有 \n 也不并入组
+        let mut c = core_with("");
+        c.insert_str("a");
+        c.insert_str("\n");
+        c.insert_str("b");
+        assert_eq!(c.doc.to_text(), "a\nb");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "a\n", "b 独立成组");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "a");
+
+        // 粘贴（多字符）不参与成组；其后紧邻的单字符输入开新组
+        let mut c = core_with("");
+        c.insert_str("hello");
+        c.insert_str("!");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "hello", "! 是独立组");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "");
+
+        // 选区替换：消费选区的插入永远开新组。
+        // 状态序列 xyz → x-z → x-!z：撤一次只撤掉 !（独立成组），
+        // 再撤才回到原始 xyz
+        let mut c = core_with("xyz");
+        c.select_span(0, 1, 1); // 选中 y —— 选区变更本身打断组
+        c.replace_selection("-");
+        c.insert_str("!");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "x-z", "! 独立成组");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "xyz");
+    }
+
+    #[test]
+    fn typing_run_survives_scrolling_but_not_focus_loss_or_undo() {
+        let mut c = core_with("seed\n");
+        c.cursor = CursorPos { line: 0, col: 4 }; // 行尾起打
+        c.insert_str("a");
+        c.scroll_by_lines(2.0); // 滚动不动光标与文档，不打断
+        c.insert_str("b");
+        assert_eq!(c.doc.to_text(), "seedab\n");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "seed\n", "滚动不打断成组：ab 一起撤销");
+
+        // 失焦打断
+        c.insert_str("c");
+        c.pointer_focus(false);
+        c.insert_str("d");
+        assert_eq!(c.doc.to_text(), "seedcd\n");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "seedc\n", "失焦后的输入独立成组");
+
+        // 撤销本身打断：ef 连续输入并作一组，一步退净且不混入更早历史；
+        // undo 之后的新输入是全新一组——重做链被新快照清空，再退只撤掉自己
+        c.insert_str("e");
+        c.insert_str("f");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "seedc\n", "ef 同组一起撤销");
+        c.insert_str("g");
+        assert_eq!(c.doc.to_text(), "seedcg\n", "undo 后的输入开新组");
+        assert!(
+            c.redo_stack.is_empty(),
+            "undo 后的新编辑必须作废被撤销的重做链"
+        );
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "seedc\n", "只撤掉 g 本身");
+    }
+
+    #[test]
+    fn undo_stack_capacity_bumps_to_512_groups() {
+        let mut c = core_with("");
+        for i in 0..600 {
+            c.insert_str(&format!("{}", i % 10));
+            // 每次移动打断成组 → 每个字符各自成组，撑爆容量上限
+            c.apply_motion(Motion::Left, false);
+            c.apply_motion(Motion::Right, false);
+        }
+        assert_eq!(c.undo_stack.len(), 512, "容量上限提升到 512 组");
+        for _ in 0..512 {
+            assert!(c.undo());
+        }
+        // 容量淘汰的已知取舍：最旧的 88 组（第 1~88 次插入）已被挤出，
+        // 能退到的最早状态 = 第 89 次插入前的快照（88 字符），不是初始空文档
+        assert_eq!(
+            c.doc.to_text(),
+            "0123456789".repeat(8) + "01234567",
+            "淘汰后最早退到第 89 组快照，而非空文档"
+        );
+        assert!(!c.undo(), "栈已耗尽");
     }
 
     #[test]
