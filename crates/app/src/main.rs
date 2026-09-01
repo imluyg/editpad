@@ -1481,6 +1481,9 @@ fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> 
         Key::Named(Named::Delete) => edit(EditOp::Delete),
         // P9：统一插 \n，由 insert_str 归一为文档主导行尾（CRLF 文档得 \r\n）
         Key::Named(Named::Enter) => edit(EditOp::InsertText("\n".into())),
+        // P14：Tab 插入真实制表符；显示层由 editor::char_cols 展开到制表位，
+        // 文档字节保持原样（保存往返不失真）
+        Key::Named(Named::Tab) => edit(EditOp::InsertText("\t".into())),
         Key::Named(Named::Escape) => Some(Message::BarsDismissed),
 
         Key::Named(Named::ArrowLeft) => edit(EditOp::Motion(Motion::Left, mods.shift())),
@@ -1600,6 +1603,19 @@ mod tests {
         let mut lf = editor::EditorCore::default();
         lf.insert_str(&"x\r\ny\rz");
         assert_eq!(lf.doc.to_text(), "x\ny\nz");
+    }
+
+    #[test]
+    fn tab_key_inserts_literal_tab() {
+        // P14：Tab 不再被吞——插入真实制表符（显示层展开，见 editor.rs）
+        use iced::keyboard::{self, key::Named};
+        let message =
+            handle_key(keyboard::Key::Named(Named::Tab), keyboard::Modifiers::empty())
+                .expect("Tab 应产生编辑消息");
+        assert!(matches!(
+            message,
+            Message::Edit(EditOp::InsertText(ref t)) if t == "\t"
+        ));
     }
 
     // ---------- P6 编码知情权 ----------

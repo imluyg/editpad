@@ -184,8 +184,12 @@ impl Default for EditorCore {
 
 // ---------- CJK 双宽字符的列宽换算 ----------
 //
-// 等宽假设下：普通字符占 1 列，CJK/全角占 2 列。
+// 等宽假设下：普通字符占 1 列，CJK/全角占 2 列，Tab 展开到下一个
+// 制表位（P14，仅显示层——文档里存的仍是真实 `\t` 字符）。
 // 覆盖常用区间（CJK 统一表意、扩展A、兼容、假名、谚文、全角符号）。
+
+/// 制表位间距（显示列）。
+const TAB_STOP_COLS: usize = 4;
 
 fn is_wide(c: char) -> bool {
     matches!(
@@ -206,14 +210,40 @@ fn is_wide(c: char) -> bool {
     )
 }
 
-/// 文本的显示列数（1 列 = [`EditorCore::char_width`] 像素）。
-fn display_cols(text: &str) -> f32 {
-    text.chars().map(|c| if is_wide(c) { 2.0 } else { 1.0 }).sum()
+/// 字符 `c` 位于显示列 `col` 时占据的宽度（列数）。
+/// Tab 推进到下一个 [`TAB_STOP_COLS`] 制表位，至少占 1 列。
+fn char_cols(c: char, col: usize) -> f32 {
+    match c {
+        '\t' => (TAB_STOP_COLS - (col % TAB_STOP_COLS)).max(1) as f32,
+        _ => {
+            if is_wide(c) {
+                2.0
+            } else {
+                1.0
+            }
+        }
+    }
 }
 
-/// 第 `col` 列之前的字符所占显示宽度（像素）。
+/// 文本的显示列数（1 列 = [`EditorCore::char_width`] 像素）。
+fn display_cols(text: &str) -> f32 {
+    let mut col = 0usize;
+    for c in text.chars() {
+        col += char_cols(c, col) as usize;
+    }
+    col as f32
+}
+
+/// 第 `col` 个字符之前的字符所占显示宽度（像素）；`col` 为字符索引。
 fn prefix_width(text: &str, col: usize) -> f32 {
-    display_cols(&text.chars().take(col).collect::<String>())
+    let mut width = 0f32;
+    for (i, c) in text.chars().enumerate() {
+        if i >= col {
+            break;
+        }
+        width += char_cols(c, width as usize);
+    }
+    width
 }
 
 /// 统计待插入文本的「换行单元数」与末行列数（P9）：
@@ -825,15 +855,15 @@ impl EditorCore {
         let rel = (x - gutter + self.scroll_left).max(0.0);
 
         let mut col = text.chars().count();
-        let mut acc = 0.0f32;
+        let mut acc = 0.0f32; // 累计显示列（含 Tab 制表位推进）
         for (i, ch) in text.chars().enumerate() {
-            let w = if is_wide(ch) { 2.0 } else { 1.0 };
+            let w = char_cols(ch, acc as usize);
             // 落在字符左半边选前位，右半边选后位
-            if rel < acc + w * char_w * 0.5 {
+            if rel < (acc + w * 0.5) * char_w {
                 col = i;
                 break;
             }
-            acc += w * char_w;
+            acc += w;
         }
         CursorPos { line, col }
     }
@@ -2162,6 +2192,65 @@ mod tests {
         assert!(
             !c.install_highlighter_if_current(stale_gen, worker),
             "换代后的迟到成果不得覆盖当前高亮器"
+        );
+    }
+
+    // ---------- P14 Tab 输入与制表位列宽 ----------
+
+    #[test]
+    fn tab_widths_advance_to_next_tab_stop() {
+        // 'a'=1 列；Tab 在第 1 列推进到第 4 列（占 3）；'b'=1 → 共 5
+        assert_eq!(display_cols("a\tb"), 5.0);
+        // Tab 恰在制表位上：至少仍占 1 列（"abc\t" = 3+1）
+        assert_eq!(display_cols("abc\td"), 5.0);
+        assert_eq!(display_cols("\t"), TAB_STOP_COLS as f32);
+
+        // prefix_width 按字符索引取前缀宽：过 Tab 处发生跳跃
+        assert_eq!(prefix_width("a\tb", 1), 1.0, "只有 'a'");
+        assert_eq!(prefix_width("a\tb", 2), 4.0, "'a'+Tab 应到第 4 制表位");
+        assert_eq!(prefix_width("a\tb", 3), 5.0, "再加 'b'");
+
+        // 与像素换算单调一致（caret/选区/着色段共用此路径）
+        let cw = EditorCore::default().char_width();
+        for i in 0..=4 {
+            let a = prefix_width("a\tb", i) * cw;
+            let b = prefix_width("a\tb", (i + 1).min(3)) * cw;
+            assert!(b >= a, "前缀宽必须随索引单调不减");
+        }
+    }
+
+    #[test]
+    fn tab_inserts_as_literal_char_with_tab_aware_caret() {
+        // Tab 是真实字符进文档：保存往返不失真，光标按字符推进 1
+        let mut c = core_with("");
+        c.insert_str("\t");
+        assert_eq!(c.doc.to_text(), "\t", "文档存真实 \\t 字符");
+        assert_eq!(c.cursor.col, 1);
+
+        // 光标矩形按制表位宽度落位（第 1 个字符之后 = 第 4 显示列）
+        let expect_x = c.gutter_width() + prefix_width("\t", 1) * c.char_width();
+        assert!((c.caret_rect_relative().x - expect_x).abs() < 1e-4);
+
+        // 行首 Tab 后再打字：后续列宽从制表位起算（hit_test 往返验证）
+        c.cursor = CursorPos { line: 0, col: 1 };
+        c.insert_str("xy");
+        assert_eq!(c.doc.to_text(), "\txy");
+        let hit = c.hit_test(
+            c.gutter_width() + prefix_width("\txy", 3) * c.char_width() + 1.0,
+            0.0,
+        );
+        assert_eq!(hit.col, 3, "像素位置反查字符索引必须与正向宽度一致");
+    }
+
+    #[test]
+    fn wide_line_cols_count_tab_expansion_for_hscroll_range() {
+        // 含 Tab 的行：水平行程按展开后的显示列计（P13×P14 协同）
+        let mut c = core_with(&format!("\t{}\n", "x".repeat(100)));
+        c.set_viewport_width(400.0);
+        assert_eq!(
+            c.max_line_display_cols(),
+            TAB_STOP_COLS + 100,
+            "行首 Tab 占 4 列，高水位应按展开后计"
         );
     }
 
