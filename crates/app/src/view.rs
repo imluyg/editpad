@@ -1158,11 +1158,11 @@ impl Editpad {
                 )
                 .into(),
             // ---- 保存 ----
-            "即时保存" => checkbox(s.autosave_enabled)
+            settings_ui::AUTOSAVE_ROW_KEY => checkbox(s.autosave_enabled)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsAutosaveToggled)
                 .into(),
-            "防抖秒数" => self.settings_stepper(
+            "自动写盘延迟（秒）" => self.settings_stepper(
                 format!("{}s", s.autosave_delay_secs),
                 (s.autosave_delay_secs
                     > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)

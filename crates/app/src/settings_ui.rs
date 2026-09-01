@@ -10,7 +10,7 @@ pub(crate) enum SettingsPage {
     Appearance,
     /// 字体：正文字体族（含过滤候选列表）
     Font,
-    /// 保存：即时保存与防抖
+    /// 保存：自动写盘开关与延迟
     Save,
     /// 会话与隐私：最近文件 / 快照 / 恢复 / 关窗行为
     Session,
@@ -73,6 +73,10 @@ impl SettingsPage {
 /// 防止文案改动后两处漂移。
 pub(crate) const FONT_ROW_KEY: &str = "正文字体";
 
+/// 「编辑后自动写盘」行的行键（P63 改名，原「即时保存」）：控件匹配
+/// 与元数据声明共用同一常量，防止文案改动后两处漂移。
+pub(crate) const AUTOSAVE_ROW_KEY: &str = "编辑后自动写盘";
+
 /// 设置行的统一视图：静态元数据（SETTINGS_ROWS）+ 热键行动态展开，
 /// 渲染与搜索共用同一清单（防「展示一套、过滤另一套」的数据漂移）。
 /// P62：字段改 String——热键行的描述是当前生效组合（随重映射变化，
@@ -117,15 +121,15 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
     },
     StaticRow {
         page: SettingsPage::Save,
-        key: "即时保存",
-        title: "即时保存",
-        desc: "停手后自动落盘，不必手动 Ctrl+S。",
+        key: AUTOSAVE_ROW_KEY,
+        title: AUTOSAVE_ROW_KEY,
+        desc: "默认关闭（主流编辑器口径）：修改留在窗口内，Ctrl+S 才写原文件；崩溃防护由会话快照兜底。开启后若文件被外部改动会先拒写并提示。",
     },
     StaticRow {
         page: SettingsPage::Save,
-        key: "防抖秒数",
-        title: "防抖秒数",
-        desc: "停手多少秒后执行自动保存。",
+        key: "自动写盘延迟（秒）",
+        title: "自动写盘延迟（秒）",
+        desc: "停手多少秒后执行自动写盘；仅在上面的开关开启时生效。",
     },
     StaticRow {
         page: SettingsPage::Session,

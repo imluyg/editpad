@@ -438,9 +438,12 @@ impl Editpad {
             }
             Message::SaveTargetChosen(Some(path)) => {
                 let tab = self.tab_mut();
-                tab.path = Some(path);
+                tab.path = Some(path.clone());
                 // P25：另存为转正后未命名序号使命完成
                 tab.untitled_num = None;
+                // P63：按目标磁盘现状重记戳（新文件 = None）——用户在
+                // 对话框里显式选中的覆盖目标，不该被自家外部修改守卫拦下
+                tab.file_stamp = file_stamp(&path);
                 // 对话框阶段结束再交给 save() 的 busy 守卫（原实现在此卡死 busy）
                 self.busy = false;
                 self.save()
@@ -498,30 +501,49 @@ impl Editpad {
                 Task::none()
             }
 
-            // ---------- 即时保存（P18，按页路由） ----------
-            Message::TabAutosaved(idx, version, result) => {
-                if let Some(tab) = self.tabs.get_mut(idx) {
-                    tab.autosave_inflight = false;
-                    match result {
-                        Ok(()) => {
-                            // 版本一致 = 快照之后没有新编辑：可以安全清脏
-                            if tab.version == version {
-                                tab.dirty = false;
-                                // P38：当前内容即磁盘内容，刷新落盘基线
-                                tab.editor.borrow_mut().mark_saved();
-                                // P50：自动保存落盘成功，同步刷新比对戳
-                                tab.file_stamp =
-                                    tab.path.as_deref().and_then(file_stamp);
-                                // P31：auto-save 成功清脏 = 内存比清单干净，
-                                // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
-                                self.session_manifest_stale = true;
-                            }
+            // ---------- 即时保存（P18，按页路由；P63 结局三分+路径守卫） ----------
+            Message::TabAutosaved(idx, version, path, outcome) => {
+                // P63 路由守卫：回报按「下标 + 路径」双重核对。防抖睡眠
+                // 期间关掉前面的页会让下标漂移——路径不符说明这批账目属于
+                // 已不存在的旧页（或页已换血），整条丢弃。磁盘写入本身用
+                // 的是调度时刻克隆的路径，无损害；只是不能让错误的页记账。
+                if self.tabs.get(idx).and_then(|t| t.path.as_deref())
+                    != Some(path.as_path())
+                {
+                    return Task::none();
+                }
+                let tab = &mut self.tabs[idx];
+                tab.autosave_inflight = false;
+                match outcome {
+                    AutosaveOutcome::Written => {
+                        // 版本一致 = 快照之后没有新编辑：可以安全清脏
+                        if tab.version == version {
+                            tab.dirty = false;
+                            // P38：当前内容即磁盘内容，刷新落盘基线
+                            tab.editor.borrow_mut().mark_saved();
+                            // P50：自动保存落盘成功，同步刷新比对戳
+                            tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
+                            // P31：auto-save 成功清脏 = 内存比清单干净，
+                            // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
+                            self.session_manifest_stale = true;
                         }
-                        Err(error) => {
-                            // 失败必须留痕（不能无声吞掉），但不打断编辑；
-                            // 清掉 inflight 后，下一次编辑会重新排队
-                            self.status = format!("自动保存失败:{error}");
+                    }
+                    AutosaveOutcome::SkippedExternalChange => {
+                        // P63：拒写不是失败——保持置脏与挂起解除，把裁决权
+                        // 交给 P52 外部修改提示条队列（〔重新加载〕放弃本地
+                        // 改动 / 〔忽略〕按磁盘现状记戳）。不重记戳：磁盘
+                        // 现状还没被用户裁决过。
+                        let queue = self.external_change.get_or_insert_with(Vec::new);
+                        if !queue.contains(&idx) {
+                            queue.push(idx);
                         }
+                        self.status =
+                            "文件已被外部修改，已跳过自动写盘".to_owned();
+                    }
+                    AutosaveOutcome::Failed(error) => {
+                        // 失败必须留痕（不能无声吞掉），但不打断编辑；
+                        // 清掉 inflight 后，下一次编辑会重新排队
+                        self.status = format!("自动保存失败:{error}");
                     }
                 }
                 Task::none()
@@ -1672,8 +1694,26 @@ impl Editpad {
         if self.busy || self.tab().path.is_none() {
             return Task::none();
         }
-        self.enter_busy();
+        // P63 外部修改守卫：磁盘现状 ≠ 记录戳 → 不落盘。场景是页置脏且
+        // 应用持续聚焦期间文件被外部改动（无焦点切换事件，P50 巡检不触
+        // 发），此时 Ctrl+S 会无声覆盖。拦截后把裁决交给 P52 提示条：
+        // 〔忽略〕按磁盘现状重记戳，再按一次 Ctrl+S = 两步的有意覆盖；
+        // 〔重新加载〕放弃本地改动。干净页同样适用（写 = 无差别覆盖）。
         let path = self.tab().path.clone().expect("上方已确认非空");
+        if let Some(recorded) = self.tab().file_stamp {
+            if file_changed_externally(Some(recorded), file_stamp(&path)) {
+                let idx = self.active_tab;
+                let queue = self.external_change.get_or_insert_with(Vec::new);
+                if !queue.contains(&idx) {
+                    queue.push(idx);
+                }
+                self.status =
+                    "检测到外部修改，已暂停保存：请先在提示条选择「重新加载」或「忽略」"
+                        .to_owned();
+                return Task::none();
+            }
+        }
+        self.enter_busy();
         // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
         let doc = self.cur_handle.borrow().doc.clone();
@@ -1722,11 +1762,17 @@ impl Editpad {
             };
             let doc = self.tabs[idx].editor.borrow().doc.clone();
             let version = self.tabs[idx].version;
+            // P63：调度时刻的外部修改比对戳随任务下发——防抖线程醒来先
+            // 校验再写（见 drive_autosave_once），绝不盲写覆盖外部改动
+            let expected_stamp = self.tabs[idx].file_stamp;
             let delay =
                 std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs));
             self.tabs[idx].autosave_inflight = true;
             tasks.push(Task::perform(
-                async move { drive_autosave_once(idx, path, doc, version, delay).await },
+                async move {
+                    drive_autosave_once(idx, path, doc, version, expected_stamp, delay)
+                        .await
+                },
                 |message| message,
             ));
         }

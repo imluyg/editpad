@@ -60,8 +60,12 @@ pub struct Settings {
     /// config.toml 不再留任何文件路径痕迹。
     #[serde(default = "default_true")]
     pub remember_recent_files: bool,
-    /// 即时保存开关（P18）。用户点名要此功能，默认开启；
-    /// 编辑停手超过 [`Self::autosave_delay_secs`] 秒自动落盘。
+    /// 编辑后自动写盘开关（P18 引入；P63 策略反转，对标主流编辑器）。
+    /// **默认关闭**：修改只留在内存（标签页 ● 标记），直到显式 Ctrl+S——
+    /// 原文件只在用户显式动作时被写；崩溃防护由会话快照（P31 心跳）
+    /// 兜底，不动原文件。显式开启的用户选择照常持久化与尊重；
+    /// 历史上默认开启时期持久化下来的 `true` 由 [`Self::settings_version`]
+    /// 迁移一次性重置（见 [`SETTINGS_VERSION`]）。
     #[serde(default = "default_true")]
     pub autosave_enabled: bool,
     /// 自动保存防抖秒数：加载时收敛到 `[1, 60]`。
@@ -100,7 +104,19 @@ pub struct Settings {
     /// 条目删除；动作 id 的合法性由 app 层过滤（core 不掌握动作清单）。
     #[serde(default)]
     pub hotkeys: HashMap<String, String>,
+    /// 设置策略版本（P63）：旧配置缺字段 = 0，加载归一时逐级执行
+    /// 策略迁移后推进到 [`SETTINGS_VERSION`]。只承载「默认值语义变更」
+    /// 的一次性迁移；普通新增字段一律走 serde default 零迁移。
+    #[serde(default)]
+    pub settings_version: u32,
 }
+
+/// 当前设置策略版本（P63）。历史：
+/// - v0→v1：即时保存默认反转——`autosave_enabled` 强制重置为 `false`
+///   （对标主流编辑器：已有文件的修改不自动写盘）。老配置在默认开启
+///   时期持久化下来的 `true` 若不迁移，翻代码默认值对它们无效；
+///   升级后在设置里重新勾选的用户（version 已是 1）不受影响。
+pub const SETTINGS_VERSION: u32 = 1;
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
 // 必须落到规范默认值（"light" / 16.0）。
@@ -112,7 +128,8 @@ impl Default for Settings {
             theme: THEME_LIGHT.to_string(),
             font_size: DEFAULT_FONT_SIZE,
             remember_recent_files: true,
-            autosave_enabled: true,
+            // P63 策略反转：对标主流编辑器，默认不自动写盘（显式 Ctrl+S 才落盘）
+            autosave_enabled: false,
             autosave_delay_secs: DEFAULT_AUTOSAVE_DELAY_SECS,
             enable_snapshots: true,
             exit_mode: EXIT_MODE_SNAPSHOT.to_string(),
@@ -121,6 +138,8 @@ impl Default for Settings {
             font_family: None,
             settings_page: SETTINGS_PAGE_APPEARANCE.to_string(),
             hotkeys: HashMap::new(),
+            // 新装用户直接落在当前策略版本：不经历迁移（迁移只面向旧文件）
+            settings_version: SETTINGS_VERSION,
         }
     }
 }
@@ -289,6 +308,13 @@ impl Settings {
     /// 把可能来自旧文件或手改文件的字段值收敛到合法域。
     /// 在 `load_from` 读完后统一调用，而不是手写反序列化器。
     fn normalize(&mut self) {
+        // P63 策略迁移梯子：v0 → 当前版本逐级执行，幂等（重复调用无害）。
+        // v0→v1：即时保存默认反转。只重置「旧策略时代持久化下来的 true」，
+        // 用户升级后显式勾选的 true（version 已是 1）不再被动。
+        if self.settings_version < 1 {
+            self.autosave_enabled = false;
+            self.settings_version = 1;
+        }
         if self.theme != THEME_LIGHT && self.theme != THEME_DARK {
             self.theme = THEME_LIGHT.to_string();
         }
@@ -694,22 +720,76 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    // ---------- P18 即时保存设置 ----------
+    // ---------- P18 即时保存设置 / P63 策略反转 ----------
 
     #[test]
-    fn autosave_defaults_on_with_two_second_delay() {
+    fn autosave_defaults_off_and_delay_still_two_seconds() {
+        // P63：默认反转——对标主流编辑器，已有文件的修改不自动写盘；
+        // 防抖秒数默认值不变（重新开启的用户沿用 2s）。
         let s = Settings::default();
-        assert!(s.autosave_enabled, "用户点名要即时保存，默认必须开启");
+        assert!(!s.autosave_enabled, "P63 起默认关闭：原文件只在显式保存时被写");
+        assert_eq!(s.settings_version, SETTINGS_VERSION, "新装用户直接落在当前策略版本");
         assert_eq!(s.autosave_delay_secs, 2);
 
-        // 旧配置缺 P18 字段 → 同样得到默认值
+        // 旧配置缺字段 → 同样得到默认关 + 当前版本号
         let dir = scratch_dir("p18-legacy");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         fs::write(&path, "theme = \"dark\"\n").unwrap();
         let loaded = Settings::load_from(&path);
-        assert!(loaded.autosave_enabled);
+        assert!(!loaded.autosave_enabled);
         assert_eq!(loaded.autosave_delay_secs, 2);
+        assert_eq!(loaded.settings_version, SETTINGS_VERSION);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn p63_migration_resets_persisted_autosave_true_exactly_once() {
+        // 核心迁移场景：默认开启时代写下的 autosave_enabled = true，
+        // 只翻代码默认值对它无效——version 迁移必须把它一次性重置。
+        let dir = scratch_dir("p63-migrate");
+        fs::create_dir_all(&dir).unwrap();
+
+        let legacy = dir.join("v0.toml");
+        fs::write(&legacy, "autosave_enabled = true\nautosave_delay_secs = 5\n").unwrap();
+        let migrated = Settings::load_from(&legacy);
+        assert!(!migrated.autosave_enabled, "v0 持久化的 true 必须被一次性重置");
+        assert_eq!(migrated.autosave_delay_secs, 5, "非策略字段不受迁移影响");
+        assert_eq!(migrated.settings_version, SETTINGS_VERSION);
+
+        // 重置结果落盘后（version=1），用户在设置里重新勾选的 true 必须被尊重
+        let mut reenabled = migrated;
+        reenabled.autosave_enabled = true;
+        let current = dir.join("v1.toml");
+        reenabled.save_to(&current).unwrap();
+        let loaded = Settings::load_from(&current);
+        assert!(
+            loaded.autosave_enabled,
+            "升级后用户的显式选择不得被二次重置"
+        );
+        assert_eq!(loaded.settings_version, SETTINGS_VERSION);
+
+        // version=1 的文件无论开关真假都不再触发迁移
+        let off = dir.join("v1-off.toml");
+        fs::write(
+            &off,
+            format!("settings_version = {SETTINGS_VERSION}\nautosave_enabled = false\n"),
+        )
+        .unwrap();
+        let loaded_off = Settings::load_from(&off);
+        assert!(!loaded_off.autosave_enabled && loaded_off.settings_version == SETTINGS_VERSION);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn settings_version_roundtrips_to_disk() {
+        // 版本号参与 roundtrip：落盘再读回不漂移
+        let dir = scratch_dir("p63-roundtrip");
+        let path = dir.join("config.toml");
+        let s = Settings::default();
+        s.save_to(&path).expect("保存应成功");
+        assert_eq!(Settings::load_from(&path).settings_version, SETTINGS_VERSION);
         fs::remove_dir_all(&dir).ok();
     }
 

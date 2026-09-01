@@ -1410,7 +1410,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
         // 真正落盘一次后基线重建，撤销回清能力恢复正常语义
         let v = app.tabs[1].version;
-        dispatch(&mut app, Message::TabAutosaved(1, v, Ok(())));
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(
+                1,
+                v,
+                PathBuf::from("C:/w/report.txt"),
+                AutosaveOutcome::Written,
+            ),
+        );
         assert!(!app.tabs[1].dirty);
         dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
         dispatch(&mut app, Message::Edit(EditOp::Undo));
@@ -1802,7 +1810,9 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     #[test]
     fn edit_schedules_single_inflight_autosave_and_success_clears_dirty() {
         let mut app = loaded_txt_app();
-        assert!(app.settings.autosave_enabled);
+        // P63：即时保存改为显式选择——本测试验证的是开启后的机制
+        assert!(!app.settings.autosave_enabled);
+        app.settings.autosave_enabled = true;
 
         // 编辑置脏并派发防抖任务（版本号在页上推进）
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
@@ -1821,7 +1831,12 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 任务回报且版本一致 → 清脏解除挂起
         dispatch(
             &mut app,
-            Message::TabAutosaved(0, scheduled_version + 1, Ok(())),
+            Message::TabAutosaved(
+                0,
+                scheduled_version + 1,
+                PathBuf::from("C:/doc/note.txt"),
+                AutosaveOutcome::Written,
+            ),
         );
         assert!(!app.tab().dirty, "版本一致时落盘应清脏");
         assert!(!app.tabs[0].autosave_inflight);
@@ -1831,11 +1846,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     fn autosave_stale_version_keeps_dirty() {
         // 快照之后又有编辑：迟到的「保存成功」不得清脏（否则丢改动标记）
         let mut app = loaded_txt_app();
+        app.settings.autosave_enabled = true;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         let stale = app.tab().version;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
 
-        dispatch(&mut app, Message::TabAutosaved(0, stale, Ok(())));
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(0, stale, PathBuf::from("C:/doc/note.txt"), AutosaveOutcome::Written),
+        );
 
         assert!(
             app.tab().dirty && !app.tabs[0].autosave_inflight,
@@ -1846,13 +1865,19 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     #[test]
     fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
         let mut app = loaded_txt_app();
+        app.settings.autosave_enabled = true;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         assert!(app.tabs[0].autosave_inflight);
 
         let version = app.tab().version;
         dispatch(
             &mut app,
-            Message::TabAutosaved(0, version, Err("disk full".into())),
+            Message::TabAutosaved(
+                0,
+                version,
+                PathBuf::from("C:/doc/note.txt"),
+                AutosaveOutcome::Failed("disk full".into()),
+            ),
         );
 
         assert!(!app.tabs[0].autosave_inflight, "失败也要解除挂起");
@@ -1879,18 +1904,193 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             "未命名文档不参与自动保存"
         );
 
-        // 设置关闭：同样跳过
+        // 开关关闭（P63 起即默认状态）：已命名页同样不排队
         let mut app = loaded_txt_app();
-        app.settings.autosave_enabled = false;
+        assert!(!app.settings.autosave_enabled, "P63：默认关闭");
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         assert!(app.tab().dirty);
         assert!(!app.tabs[0].autosave_inflight, "开关关闭时不排队");
 
-        // busy（手动 IO 进行中）时也跳过
+        // busy（手动 IO 进行中）时也跳过——显式开启后守卫仍生效
         let mut busy_app = loaded_txt_app();
+        busy_app.settings.autosave_enabled = true;
         busy_app.busy = true;
         dispatch(&mut busy_app, Message::Edit(EditOp::InsertText("x".into())));
         assert!(!busy_app.tabs[0].autosave_inflight, "busy 时不得排队自动保存");
+    }
+
+    // ---------- P63 保存策略对标主流编辑器 ----------
+
+    /// 构造「真实落盘文件 + 已按该文件加载完成」的应用：
+    /// `file_stamp` 为真实磁盘戳，供外部修改守卫测试使用。
+    fn loaded_real_file_app(tag: &str) -> (Editpad, PathBuf) {
+        let path = scratch_dir(tag).join("note.txt");
+        std::fs::write(&path, "base").unwrap();
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(path.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("base"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        (app, path)
+    }
+
+    #[test]
+    fn p63_default_settings_never_autowrite_existing_files() {
+        // 用户点名（对标主流编辑器）：默认设置下编辑已有文件只置脏，
+        // 绝不悄悄排队写盘；● 标记与关窗确认照旧兜底
+        let (mut app, path) = loaded_real_file_app("p63-default-off");
+
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.tab().dirty);
+        assert!(
+            !app.tabs[0].autosave_inflight,
+            "默认关闭时编辑不得触发写盘任务"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "base",
+            "默认设置下磁盘必须原封不动"
+        );
+    }
+
+    #[test]
+    fn p63_autosave_skip_on_external_change_queues_prompt_and_keeps_dirty() {
+        // 防抖睡眠期间文件被外部改动 → 写前校验拒写：保持置脏、送入
+        // P52 提示条队列、留痕状态栏，未裁决前不重记戳
+        let (mut app, path) = loaded_real_file_app("p63-skip-ext");
+        app.settings.autosave_enabled = true;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.tabs[0].autosave_inflight);
+        let old_stamp = app.tabs[0].file_stamp;
+        let version = app.tab().version;
+
+        fs::write(&path, "external edit made this longer").unwrap();
+
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(
+                0,
+                version,
+                path.clone(),
+                AutosaveOutcome::SkippedExternalChange,
+            ),
+        );
+        assert!(app.tab().dirty, "拒写必须保持置脏");
+        assert!(!app.tabs[0].autosave_inflight, "挂起照常解除，可重新排队");
+        assert_eq!(
+            app.external_change,
+            Some(vec![0]),
+            "拒写应把页送进 P52 提示条队列"
+        );
+        assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
+        assert_eq!(
+            app.tabs[0].file_stamp, old_stamp,
+            "用户裁决前不得按磁盘现状重记戳"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "external edit made this longer",
+            "拒写后磁盘内容必须还是外部版本"
+        );
+    }
+
+    #[test]
+    fn p63_written_outcome_clears_dirty_and_mismatched_path_report_is_dropped() {
+        // 正常路径：路径匹配 + 版本一致 → 清脏（新载荷下的既有语义）
+        let (mut app, path) = loaded_real_file_app("p63-written");
+        app.settings.autosave_enabled = true;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let v = app.tab().version;
+
+        // 先来一条路径不符的回报（下标漂移竞态）——必须整条丢弃，
+        // 不得清脏/解除挂起；随后正确路径的同版本回报照常生效
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(
+                0,
+                v,
+                PathBuf::from("C:/other/renamed.txt"),
+                AutosaveOutcome::Written,
+            ),
+        );
+        assert!(
+            app.tab().dirty && app.tabs[0].autosave_inflight,
+            "路径不符的回报必须整条丢弃"
+        );
+
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(0, v, path, AutosaveOutcome::Written),
+        );
+        assert!(!app.tab().dirty && !app.tabs[0].autosave_inflight);
+    }
+
+    #[test]
+    fn p63_manual_save_blocked_on_external_change_until_acknowledged() {
+        // 应用聚焦期间文件被外部改（无焦点事件 → P50 巡检不触发），
+        // Ctrl+S 必须拦截而不是无声覆盖；〔忽略〕重记戳后再存 = 有意覆盖
+        let (mut app, path) = loaded_real_file_app("p63-manual-guard");
+        std::fs::write(&path, "externally replaced").unwrap();
+
+        dispatch(&mut app, Message::SaveRequested);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "externally replaced",
+            "拦截期间原文件绝不能被覆盖"
+        );
+        assert!(!app.busy, "拦截不是进入保存流程");
+        assert_eq!(app.external_change, Some(vec![0]), "应弹 P52 提示条交裁决");
+        assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
+
+        // 〔忽略〕= 按磁盘现状重记戳并收条；随后 Ctrl+S 守卫放行进入保存管线
+        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        assert!(app.external_change.is_none());
+        dispatch(&mut app, Message::SaveRequested);
+        assert!(app.busy, "有意覆盖的第二步应正常走保存");
+    }
+
+    #[test]
+    fn p63_save_as_target_is_restamped_not_blocked() {
+        // 另存为：对话框里显式选中的目标（可能已存在且内容不同）不该被
+        // 自家外部修改守卫拦下——选定目标即按其磁盘现状记戳
+        let target = scratch_dir("p63-saveas").join("existing-target.txt");
+        std::fs::write(&target, "old content on disk").unwrap();
+
+        let mut app = Editpad::default(); // 未命名页，file_stamp = None
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("draft".into())));
+        dispatch(&mut app, Message::SaveTargetChosen(Some(target.clone())));
+
+        assert_eq!(app.tabs[0].path, Some(target.clone()));
+        assert_eq!(
+            app.tabs[0].file_stamp,
+            file_stamp(&target),
+            "选定目标即按其磁盘现状重记戳"
+        );
+        assert!(app.busy, "另存为应直接进入保存管线而不被拦");
+    }
+
+    #[test]
+    fn p63_autosave_must_skip_contract() {
+        // 写前判定纯函数契约：期望戳缺失不拦截；期望已知时以差异为准
+        let t0 = std::time::SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        assert!(!autosave_must_skip(None, Some((t1, 5))), "从未记录无从比对");
+        assert!(!autosave_must_skip(Some((t0, 5)), Some((t0, 5))), "一致放行");
+        assert!(autosave_must_skip(Some((t0, 5)), Some((t1, 5))), "mtime 变化拒写");
+        assert!(autosave_must_skip(Some((t0, 5)), Some((t0, 6))), "size 变化拒写");
+        assert!(
+            autosave_must_skip(Some((t0, 5)), None),
+            "文件被外部删除同样拒写（提示条会给出明确失败提示）"
+        );
     }
 
     // ---------- P38 撤销回基线清脏 ----------
@@ -1904,7 +2104,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
         assert!(app.tab().dirty);
         let v = app.tab().version;
-        dispatch(&mut app, Message::TabAutosaved(0, v, Ok(())));
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(
+                0,
+                v,
+                PathBuf::from("C:/doc/note.txt"),
+                AutosaveOutcome::Written,
+            ),
+        );
         assert!(!app.tab().dirty);
 
         // 再编辑后撤销：内容恰好回到磁盘版本 → dirty 如实回清。
@@ -2721,7 +2929,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
         // 模拟 auto-save 成功清脏：内存比已提交清单「更干净」→ 过期标记
         let version = app.tabs[0].version;
-        dispatch(&mut app, Message::TabAutosaved(0, version, Ok(())));
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(
+                0,
+                version,
+                PathBuf::from("C:/doc/note.txt"),
+                AutosaveOutcome::Written,
+            ),
+        );
         assert!(!app.tab().dirty);
         assert!(app.session_manifest_stale, "清脏后下一拍必须重写清单");
 

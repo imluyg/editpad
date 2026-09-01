@@ -74,8 +74,10 @@ enum Message {
     Saved(u64, Result<(), String>),
     /// 标签页保存完成（「保存并关闭」流程用）：(页, 快照版本, 结果)
     TabSaved(usize, u64, Result<(), String>),
-    /// 自动保存完成：(标签页, 快照版本, 结果)。版本不符=期间又有编辑，不清脏
-    TabAutosaved(usize, u64, Result<(), String>),
+    /// 自动保存完成（P63 载荷扩展）：(标签页, 快照版本, 调度时页路径,
+    /// 结局)。版本不符 = 期间又有编辑，不清脏；路径不符 = 页集合在防抖
+    /// 睡眠期间变动导致下标漂移，整条丢弃；结局三分见 [`AutosaveOutcome`]。
+    TabAutosaved(usize, u64, PathBuf, AutosaveOutcome),
 
     FindToggled,
     FindQueryChanged(String),
@@ -963,27 +965,63 @@ fn head_sample(doc: &editpad_core::Document) -> String {
     sample
 }
 
-/// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 分块原子落盘」，
-/// 结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待结果，
-/// 且按页 inflight 去重保证同一页至多一个这样的线程）。
+/// 一次自动保存的结局（P63）：写盘成功 / 撞上外部修改被拒写 / 写盘失败。
+/// 拒写不是失败——磁盘上发生了别人（其他编辑器/同步工具）的改动，
+/// 盲写会覆盖它；裁决权交给 P52 外部修改提示条。
+#[derive(Debug, Clone)]
+enum AutosaveOutcome {
+    Written,
+    SkippedExternalChange,
+    Failed(String),
+}
+
+/// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 写前校验 → 分块原子
+/// 落盘」，结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待
+/// 结果，且按页 inflight 去重保证同一页至多一个这样的线程）。
+///
+/// P63 写前校验：防抖睡眠期间磁盘可能被外部修改（焦点巡检只在窗口
+/// 重聚焦时跑，救不了后台线程）。调度时刻的 `(mtime, size)` 戳随任务
+/// 下发，醒来先比对，不一致即拒写并回报 [`AutosaveOutcome::
+/// SkippedExternalChange`]——原文件绝不盲写覆盖外部内容。期望戳为
+/// None（从未记录，如测试注入的不存在路径）时保持旧语义直接写。
 async fn drive_autosave_once(
     tab: usize,
     path: PathBuf,
     doc: editpad_core::Document,
     version: u64,
+    expected_stamp: Option<(std::time::SystemTime, u64)>,
     delay: std::time::Duration,
 ) -> Message {
-    let (tx, rx) = std_mpsc::channel::<Result<(), String>>();
+    let (tx, rx) = std_mpsc::channel::<AutosaveOutcome>();
+    let thread_path = path.clone();
     std::thread::spawn(move || {
         std::thread::sleep(delay);
-        let result =
-            editpad_core::save_document_atomic(&path, &doc).map_err(|e| e.to_string());
-        let _ = tx.send(result);
+        let outcome = if autosave_must_skip(expected_stamp, file_stamp(&path)) {
+            AutosaveOutcome::SkippedExternalChange
+        } else {
+            match editpad_core::save_document_atomic(&path, &doc) {
+                Ok(()) => AutosaveOutcome::Written,
+                Err(e) => AutosaveOutcome::Failed(e.to_string()),
+            }
+        };
+        let _ = tx.send(outcome);
     });
-    let result = rx
+    let outcome = rx
         .recv()
-        .unwrap_or_else(|_| Err("自动保存线程意外终止".to_owned()));
-    Message::TabAutosaved(tab, version, result)
+        .unwrap_or_else(|_| AutosaveOutcome::Failed("自动保存线程意外终止".to_owned()));
+    // 路径本体已随闭包移入写盘线程；回报携带同内容的克隆
+    Message::TabAutosaved(tab, version, thread_path, outcome)
+}
+
+/// 自动保存写前判定（纯函数可单测，P63）：期望戳已知（Some）且与当前
+/// 磁盘戳不一致 = 有外部修改（含文件被删），必须拒写。期望戳 None =
+/// 从未记录（无从比对），不拦截——与 [`file_changed_externally`] 的
+/// 「记录缺失不判定」口径一致，但这里反过来以期望戳为主语。
+fn autosave_must_skip(
+    expected: Option<(std::time::SystemTime, u64)>,
+    current: Option<(std::time::SystemTime, u64)>,
+) -> bool {
+    expected.is_some() && current != expected
 }
 
 // ---------- 周期快照心跳（P31） ----------
