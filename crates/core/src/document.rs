@@ -80,7 +80,76 @@ impl LineEnding {
     }
 }
 
-#[derive(Clone)]
+/// 跨块的主导行尾计数器（P19 流式加载用）。
+///
+/// 语义与 [`LineEnding::detect`] 完全一致（三种换行计数、多者胜、
+/// 平票回退 LF），但允许文本按任意块多次推送——块边界可能恰好落在
+/// `\r\n` 中间，此时 `\r` 悬置到下一块首字符到达后再裁决。
+#[derive(Debug, Default)]
+pub struct EolCounter {
+    crlf: usize,
+    lf: usize,
+    cr: usize,
+    /// 上一块以 `\r` 结尾且尚未裁决
+    pending_cr: bool,
+}
+
+impl EolCounter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 推送一段解码后的文本（块大小任意、次数任意）。
+    pub fn push(&mut self, text: &str) {
+        let mut chars = text.chars().peekable();
+        // 先裁决上一块悬置的 `\r`
+        if self.pending_cr {
+            match chars.peek() {
+                Some('\n') => {
+                    chars.next();
+                    self.crlf += 1;
+                    self.pending_cr = false;
+                }
+                Some(_) => {
+                    // 孤立 `\r` 定案；当前字符留给下方常规循环处理
+                    self.cr += 1;
+                    self.pending_cr = false;
+                }
+                None => return, // 空块：继续悬置
+            }
+        }
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' => match chars.peek() {
+                    Some('\n') => {
+                        chars.next();
+                        self.crlf += 1;
+                    }
+                    Some(_) => self.cr += 1,
+                    None => self.pending_cr = true, // 块尾：悬置待下块裁决
+                },
+                '\n' => self.lf += 1,
+                _ => {}
+            }
+        }
+    }
+
+    /// 文本推送完毕，取主导行尾（多数判定与 `detect` 逐字一致）。
+    pub fn finish(mut self) -> LineEnding {
+        if self.pending_cr {
+            self.cr += 1;
+        }
+        if self.crlf > self.lf && self.crlf > self.cr {
+            LineEnding::CrLf
+        } else if self.cr > self.lf {
+            LineEnding::Cr
+        } else {
+            LineEnding::Lf
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Document {
     rope: Rope,
     /// 主导行尾（P9）：`from_str` 时自动检测；编辑层用它统一换行语义。
@@ -100,6 +169,15 @@ impl Document {
             rope: Rope::from_str(text),
             eol: LineEnding::detect(text),
         }
+    }
+
+    /// 用已建好的 rope 与行尾组装文档。
+    ///
+    /// crate 内流式加载（P19）专用：rope 由 `RopeBuilder` 增量构建
+    /// （全程只有 rope 一份正文），行尾由 [`EolCounter`] 跨块统计后传入。
+    #[allow(dead_code)]
+    pub(crate) fn from_parts(rope: Rope, eol: LineEnding) -> Self {
+        Self { rope, eol }
     }
 
     /// 文档的主导行尾（编辑层据此归一插入文本、按 EOL 单元删除）。

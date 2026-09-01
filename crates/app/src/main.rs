@@ -52,8 +52,12 @@ enum Message {
     FileChosen(Option<PathBuf>),
     /// 后台加载进度：(任务 id, 已读字节, 总字节)
     LoadProgress(u64, u64, u64),
-    /// 加载完成：(任务 id, (全文, 编码标签))
-    Loaded(u64, Result<(String, String), String>),
+    /// 后台加载完成：(任务 id, (rope 直入的文档, 编码标签))。
+    /// P19 起携带 Document，不再有全量 String 中转
+    Loaded(
+        u64,
+        Result<(editpad_core::Document, String), String>,
+    ),
     SaveRequested,
     SaveAsRequested,
     SaveTargetChosen(Option<PathBuf>),
@@ -114,7 +118,7 @@ enum Message {
 /// 后台加载线程 → 订阅流的事件。
 enum LoadEvent {
     Progress(editpad_core::LoadProgress),
-    Done(Result<editpad_core::LoadedText, String>),
+    Done(Result<editpad_core::LoadedDocument, String>),
 }
 
 /// 后台加载任务：订阅标识 + 目标路径。
@@ -133,7 +137,7 @@ fn build_load_stream(job: &LoadJob) -> impl iced::futures::Stream<Item = Message
             drive_load(
                 job.id,
                 job.path,
-                |path, on_progress| editpad_core::load_file_streaming(path, on_progress),
+                |path, on_progress| editpad_core::load_document_streaming(path, on_progress),
                 &mut output,
             )
             .await;
@@ -141,6 +145,13 @@ fn build_load_stream(job: &LoadJob) -> impl iced::futures::Stream<Item = Message
     )
 }
 
+/// 加载任务的事件驱动（P5 重构：loader 可注入以便测试）。
+///
+/// 保证语义：无论加载函数成功、失败还是 **panic**，UI 都必然收到恰好一条
+/// `Message::Loaded`——否则 `busy` 会永久卡死，除主题/字号外全部按钮禁用。
+/// * 第一道兜底：线程体包 `catch_unwind`，崩溃也发送 `Done(Err(..))`；
+/// * 第二道兜底：接收端通道关闭仍未收到 Done（线程被强杀等极端情形），
+///   补发一条失败消息。
 /// 加载任务的事件驱动（P5 重构：loader 可注入以便测试）。
 ///
 /// 保证语义：无论加载函数成功、失败还是 **panic**，UI 都必然收到恰好一条
@@ -157,7 +168,7 @@ async fn drive_load<L>(
     L: FnOnce(
         &Path,
         &mut dyn FnMut(editpad_core::LoadProgress),
-    ) -> Result<editpad_core::LoadedText, editpad_core::CoreError>
+    ) -> Result<editpad_core::LoadedDocument, editpad_core::CoreError>
         + Send
         + 'static,
 {
@@ -194,7 +205,7 @@ async fn drive_load<L>(
             LoadEvent::Progress(p) => Message::LoadProgress(job_id, p.bytes_read, p.total_bytes),
             LoadEvent::Done(result) => Message::Loaded(
                 job_id,
-                result.map(|loaded| (loaded.text, loaded.encoding.to_string())),
+                result.map(|loaded| (loaded.doc, loaded.encoding.to_string())),
             ),
         };
         if output.send(message).await.is_err() {
@@ -571,7 +582,7 @@ impl Editpad {
                 self.active_load = None;
                 self.progress = None;
                 match result {
-                    Ok((contents, encoding)) => {
+                    Ok((doc, encoding)) => {
                         // 按扩展名启用语法高亮（未知类型自动退回纯文本）
                         let extension = self
                             .pending_path
@@ -581,7 +592,8 @@ impl Editpad {
                             .map(str::to_owned);
                         {
                             let mut ed = self.editor.borrow_mut();
-                            ed.reset_document(editpad_core::Document::from_str(&contents));
+                            // P19：rope 直入，不再有 from_str 的二次全文拷贝
+                            ed.reset_document(doc);
                             ed.set_language(extension.as_deref());
                         }
                         if let Some(path) = self.pending_path.take() {
@@ -1673,7 +1685,7 @@ mod tests {
             drive_load(
                 7,
                 path.clone(),
-                |p, cb| editpad_core::load_file_streaming(p, cb),
+                |p, cb| editpad_core::load_document_streaming(p, cb),
                 &mut tx,
             )
             .await;
@@ -1699,11 +1711,12 @@ mod tests {
             })
             .collect();
         assert_eq!(dones.len(), 1, "恰好一条 Loaded");
-        let (id, Ok((text, encoding))) = dones[0] else {
+        let (id, Ok((doc, encoding))) = dones[0] else {
             panic!("应为成功加载，实际 {:?}", dones[0]);
         };
         assert_eq!(id, 7);
-        assert_eq!(text.as_str(), content.as_str());
+        // P19：消息携带的是 rope 文档本体
+        assert_eq!(doc.to_text(), content);
         assert_eq!(encoding.as_str(), "UTF-8");
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1721,7 +1734,7 @@ mod tests {
             drive_load(
                 9,
                 path.clone(),
-                |_p, _cb| -> Result<editpad_core::LoadedText, editpad_core::CoreError> {
+                |_p, _cb| -> Result<editpad_core::LoadedDocument, editpad_core::CoreError> {
                     panic!("模拟加载线程崩溃");
                 },
                 &mut tx,

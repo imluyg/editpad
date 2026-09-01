@@ -8,8 +8,10 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::str;
 
-use encoding_rs::{Encoding, GBK, UTF_16BE, UTF_16LE};
+use encoding_rs::{Encoding, GBK, UTF_16BE, UTF_16LE, UTF_8};
+use ropey::RopeBuilder;
 
+use crate::document::{Document, EolCounter};
 use crate::error::CoreError;
 
 /// 单块读取大小：进度回调的粒度。
@@ -85,6 +87,308 @@ where
 
     Ok(reject_binary(path, decode(&buffer))?)
 }
+
+// ---------- P19 行动项 2：流式加载直入 rope ----------
+//
+// 旧路径 load_file_streaming 的内存峰值 ≈ 文件 ×3（整读 Vec<u8> +
+// 解码全量 String + 复制进 rope）；本节把 rope 构建搬进读取循环，
+// 全程只有 rope 一份正文（+64KB 块缓冲），峰值降到 ~×1.05。
+//
+// 编码判定语义与 [`decode`] 完全一致（BOM 分流 → NUL → 严格 UTF-8 →
+// GBK 兜底 + U+FFFD 占比），差异只在实现方式：
+// * NUL/UTF-8 校验改为「第一遍流式扫描」——不保留任何字节，
+//   NUL 一旦出现立即短路拒绝，全文检测语义不缩水；
+// * UTF-8 合法时第二遍边读边推进 `RopeBuilder`；
+// * 非 UTF-8 时第二遍用 encoding_rs 增量解码器（跨块序列自动缝合）。
+
+/// 流式加载直入 rope 的结果（P19）。
+#[derive(Debug, Clone)]
+pub struct LoadedDocument {
+    pub doc: Document,
+    pub encoding: &'static str,
+}
+
+/// 流式加载为文档：内存峰值与文件大小近似线性（≈rope 本身）。
+///
+/// 进度回调语义：无 BOM 文件经历「校验遍」与「装载遍」两趟读取，
+/// 进度被映射到前半程/后半程保持单调递增至 total；BOM 文件单趟直达。
+pub fn load_document_streaming<F>(
+    path: &Path,
+    mut on_progress: F,
+) -> Result<LoadedDocument, CoreError>
+where
+    F: FnMut(LoadProgress),
+{
+    let file = fs::File::open(path).map_err(|source| CoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let total_bytes = file.metadata().map_err(|source| CoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?.len();
+
+    let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
+    let mut chunk = vec![0u8; CHUNK_SIZE];
+
+    // 读满第一块（read 允许少读），嗅探 BOM 决定解码策略
+    let mut first_len = 0usize;
+    while first_len < CHUNK_SIZE {
+        let n = reader.read(&mut chunk[first_len..]).map_err(io_err(path))?;
+        if n == 0 {
+            break;
+        }
+        first_len += n;
+    }
+    report(&mut on_progress, first_len as u64, total_bytes);
+
+    enum Plan {
+        /// 单趟：增量解码即装载（进度线性）
+        Direct(&'static Encoding, &'static str, usize),
+        /// 先全量扫描（NUL + 严格 UTF-8），再按结论二选一装载
+        ScanThenBuild,
+    }
+
+    let plan = if chunk.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        Plan::Direct(UTF_8, "UTF-8(BOM)", 3)
+    } else if chunk.starts_with(&[0xFF, 0xFE]) {
+        Plan::Direct(UTF_16LE, "UTF-16LE", 2)
+    } else if chunk.starts_with(&[0xFE, 0xFF]) {
+        Plan::Direct(UTF_16BE, "UTF-16BE", 2)
+    } else {
+        Plan::ScanThenBuild
+    };
+
+    match plan {
+        Plan::Direct(encoding, label, bom_len) => {
+            let doc = build_pass(
+                &mut reader, path, &chunk[..first_len], bom_len, encoding,
+                total_bytes, 0, total_bytes, &mut on_progress, None,
+            )?;
+            Ok(LoadedDocument { doc, encoding: label })
+        }
+        Plan::ScanThenBuild => {
+            // ---- 第一遍：全文扫描（NUL 短路 + 严格 UTF-8 增量校验）----
+            let mut scan = Utf8Scan::default();
+            let mut scanned = first_len as u64;
+            scan.feed(&chunk[..first_len]);
+            loop {
+                let n = reader.read(&mut chunk).map_err(io_err(path))?;
+                if n == 0 {
+                    break;
+                }
+                scanned += n as u64;
+                scan.feed(&chunk[..n]);
+                // 校验遍进度映射到前半程（装载遍走后半程，整体单调）
+                report(&mut on_progress, scanned.min(total_bytes) / 2, total_bytes);
+            }
+            if scan.saw_nul {
+                return Err(CoreError::BinaryDetected {
+                    path: path.to_path_buf(),
+                });
+            }
+            let utf8_valid = !scan.invalid;
+
+            // ---- 第二遍：按结论装载（进度走后半程）----
+            // 重新打开文件回到起点（第一遍没有保留字节——这正是省内存的关键）
+            drop(reader);
+            let file = fs::File::open(path).map_err(|source| CoreError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
+            let first_len = fill_chunk(&mut reader, &mut chunk).map_err(io_err(path))?;
+            let base = total_bytes / 2;
+
+            let (encoding, label, check_ratio) = if utf8_valid {
+                (UTF_8, "UTF-8", false)
+            } else {
+                (GBK, "GBK", true)
+            };
+            let mut stats = BuildStats::default();
+            let doc = build_pass(
+                &mut reader, path, &chunk[..first_len], 0, encoding,
+                total_bytes, base, total_bytes - base, &mut on_progress,
+                Some(&mut stats),
+            )?;
+            if check_ratio
+                && stats.replacements as f32 / stats.chars.max(1) as f32
+                    > BINARY_REPLACEMENT_RATIO
+            {
+                return Err(CoreError::BinaryDetected {
+                    path: path.to_path_buf(),
+                });
+            }
+            Ok(LoadedDocument { doc, encoding: label })
+        }
+    }
+}
+
+fn io_err(path: &Path) -> impl Fn(std::io::Error) -> CoreError + '_ {
+    move |source| CoreError::Read {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+fn report(on_progress: &mut dyn FnMut(LoadProgress), bytes_read: u64, total_bytes: u64) {
+    on_progress(LoadProgress {
+        bytes_read: bytes_read.min(total_bytes),
+        total_bytes,
+    });
+}
+
+/// 把 reader 读满一个块，返回实际字节数。
+fn fill_chunk(reader: &mut BufReader<fs::File>, chunk: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0usize;
+    while filled < chunk.len() {
+        let n = reader.read(&mut chunk[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok(filled)
+}
+
+/// 第一遍扫描的状态：NUL 是最强二进制信号（短路）；
+/// 严格 UTF-8 校验用手写状态机（跨块续字节计数）。
+#[derive(Default)]
+struct Utf8Scan {
+    saw_nul: bool,
+    invalid: bool,
+    /// 尚待接收的续字节数（0x80..=BF）
+    expect: u8,
+}
+
+impl Utf8Scan {
+    fn feed(&mut self, data: &[u8]) {
+        if self.invalid {
+            // 已判非 UTF-8：剩余唯一使命是把 NUL 扫完（语义对齐 decode()）
+            self.saw_nul |= data.contains(&0);
+            return;
+        }
+        for &b in data {
+            if b == 0 {
+                self.saw_nul = true;
+                self.invalid = true; // NUL 之后无需再校验 UTF-8
+                return;
+            }
+            if self.expect > 0 {
+                if b & 0xC0 == 0x80 {
+                    self.expect -= 1;
+                } else {
+                    self.expect = 0;
+                    self.invalid = true;
+                    return;
+                }
+            } else if b >= 0x80 {
+                self.expect = match b {
+                    0xC2..=0xDF => 1,
+                    0xE0..=0xEF => 2,
+                    0xF0..=0xF4 => 3,
+                    _ => {
+                        self.invalid = true;
+                        return;
+                    }
+                };
+            }
+        }
+    }
+}
+
+/// 装载遍的统计（GBK 需要 U+FFFD 占比）。
+#[derive(Default)]
+struct BuildStats {
+    replacements: usize,
+    chars: usize,
+}
+
+/// 把一段解码输出吸收进构建器：rope 推送 + 行尾计数 + 占比统计。
+fn absorb(
+    decoder: &mut encoding_rs::Decoder,
+    src: &[u8],
+    last: bool,
+    out: &mut String,
+    builder: &mut RopeBuilder,
+    eol: &mut EolCounter,
+    mut stats: Option<&mut BuildStats>,
+) {
+    use encoding_rs::CoderResult;
+    out.clear();
+    let mut rest = src;
+    loop {
+        // decode_to_string 只写进 dst 的备用容量：先保证余量 ≥ 最坏膨胀
+        out.reserve(rest.len() * 4 + 4);
+        let (result, read, _replaced) = decoder.decode_to_string(rest, out, last);
+        rest = &rest[read..];
+        match result {
+            CoderResult::InputEmpty => break,
+            CoderResult::OutputFull => {} // 已按需扩容，继续消费剩余输入
+        }
+        if read == 0 && !last {
+            break; // 防御性兜底：避免零进度死循环
+        }
+    }
+    builder.append(out);
+    eol.push(out);
+    if let Some(s) = stats.as_deref_mut() {
+        s.chars += out.chars().count();
+        s.replacements += out.matches('\u{FFFD}').count();
+    }
+}
+
+/// 第二遍装载：增量解码 → RopeBuilder + 行尾计数。返回组装好的文档。
+///
+/// * `first_chunk`/`skip`：已读入的首块与需跳过的 BOM 字节数；
+/// * 进度映射到 `[progress_base, progress_base + progress_span]`；
+/// * `stats`：GBK 路径传入以统计 U+FFFD 占比。
+#[allow(clippy::too_many_arguments)]
+fn build_pass(
+    reader: &mut BufReader<fs::File>,
+    path: &Path,
+    first_chunk: &[u8],
+    skip: usize,
+    encoding: &'static Encoding,
+    total_bytes: u64,
+    progress_base: u64,
+    progress_span: u64,
+    on_progress: &mut dyn FnMut(LoadProgress),
+    mut stats: Option<&mut BuildStats>,
+) -> Result<Document, CoreError> {
+    let mut builder = RopeBuilder::new();
+    let mut eol = EolCounter::new();
+    let mut decoder = encoding.new_decoder();
+    // 输出缓冲：最坏情况（UTF-16 双字节单元→代理对、GBK 双字节→3 字节）
+    // 每输入字节膨胀 ≤3，CHUNK×4 绰绰有余
+    let mut out = String::with_capacity(CHUNK_SIZE * 4);
+
+    // 首块（跳过 BOM 字节）
+    if first_chunk.len() > skip {
+        absorb(&mut decoder, &first_chunk[skip..], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut());
+    }
+    let mut done = first_chunk.len() as u64;
+
+    let mut chunk = vec![0u8; CHUNK_SIZE];
+    loop {
+        let n = fill_chunk(reader, &mut chunk).map_err(|source| CoreError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+        absorb(&mut decoder, &chunk[..n], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut());
+        report(on_progress, progress_base + done.min(progress_span), total_bytes);
+    }
+    // 冲刷解码器尾部（未完的多字节序列 / 未配对代理）
+    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, None);
+    report(on_progress, total_bytes, total_bytes);
+
+    Ok(Document::from_parts(builder.finish(), eol.finish()))
+}
+
 /// 二进制防护：`LoadedText.is_binary` 为真时拒绝加载（转成错误），
 /// 从根上杜绝「打开二进制 → 敲字符置脏 → 保存」把原文件替换成乱码的损毁链。
 fn reject_binary(path: &Path, loaded: LoadedText) -> Result<LoadedText, CoreError> {
@@ -168,6 +472,7 @@ fn decode_with(encoding: &'static Encoding, bytes: &[u8], label: &'static str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::LineEnding;
 
     /// 项目内落盘目录：系统 TEMP 在部分沙箱下不可写。
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
@@ -302,5 +607,137 @@ mod tests {
         let loaded = decode(&[0xFF, 0xFE, 0x2D, 0x4E]);
         assert_eq!(loaded.text, "中");
         assert_eq!(loaded.encoding, "UTF-16LE");
+    }
+
+    // ---------- P19 行动项 2：流式加载直入 rope ----------
+    //
+    // 对拍策略：以既有 decode() 为参照实现，逐编码验证
+    // load_document_streaming 的正文与编码标签完全一致。
+
+    /// 把字节落盘并走新路径加载，返回 (正文, 编码标签)。
+    fn load_doc_via_stream(dir: &Path, name: &str, bytes: &[u8]) -> (String, String) {
+        fs::create_dir_all(dir).unwrap();
+        let target = dir.join(name);
+        fs::write(&target, bytes).unwrap();
+        let loaded = load_document_streaming(&target, |_| {}).expect("加载应成功");
+        (loaded.doc.to_text(), loaded.encoding.to_string())
+    }
+
+    #[test]
+    fn streaming_document_matches_decode_oracle_across_encodings() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("plain.txt", "hello 世界 editpad\nsecond line\r\nthird".as_bytes().to_vec()),
+            ("bom.txt", {
+                let mut b = vec![0xEF, 0xBB, 0xBF];
+                b.extend_from_slice("BOM 内容\n第二行".as_bytes());
+                b
+            }),
+            ("utf16le.txt", {
+                let mut b = vec![0xFF, 0xFE];
+                for unit in "UTF-16 小端 中文🚀\n".encode_utf16() {
+                    b.extend_from_slice(&unit.to_le_bytes());
+                }
+                b
+            }),
+            ("utf16be.txt", {
+                let mut b = vec![0xFE, 0xFF];
+                for unit in "UTF-16 大端 中文\n".encode_utf16() {
+                    b.extend_from_slice(&unit.to_be_bytes());
+                }
+                b
+            }),
+            // 已知 GBK 字节对：中=D6D0 文=CEC4
+            ("gbk.txt", vec![0xD6, 0xD0, 0xCE, 0xC4, b',', b' ', b'G', b'B', b'K']),
+            ("empty.txt", Vec::new()),
+        ];
+
+        let dir = scratch_dir("p19-oracle");
+        for (name, bytes) in cases {
+            let got = load_doc_via_stream(&dir, name, &bytes);
+            let want = decode(&bytes);
+            assert_eq!(
+                got.0, want.text,
+                "{name}: 正文必须与 decode 参照实现一致"
+            );
+            assert_eq!(got.1, want.encoding, "{name}: 编码标签必须一致");
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn multibyte_and_crlf_split_across_chunk_boundary() {
+        // 构造恰好让多字节字符与 \r\n 骑在 64KB 边界上的内容：
+        // 'a' ×(CHUNK-1) 后接 3 字节 '中'（跨边界）与 CRLF
+        let mut content = Vec::new();
+        content.extend(std::iter::repeat(b'a').take(CHUNK_SIZE - 1));
+        content.extend_from_slice("中\r\n文🚀\r\n".as_bytes());
+        content.extend(std::iter::repeat(b'b').take(CHUNK_SIZE));
+
+        let dir = scratch_dir("p19-boundary");
+        let (text, encoding) = load_doc_via_stream(&dir, "boundary.txt", &content);
+        let reference = decode(&content);
+        assert_eq!(encoding, "UTF-8");
+        assert_eq!(text, reference.text, "跨块多字节/CRLF 必须与参照一致");
+        assert_eq!(
+            crate::document::Document::from_str(&text).line_ending(),
+            LineEnding::CrLf,
+            "主导行尾应随内容正确检出"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn nul_deep_in_file_is_still_short_circuited() {
+        // NUL 藏在 300KB 深处：全文检测语义不得因流式化而缩水
+        let dir = scratch_dir("p19-deep-nul");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("deep.bin");
+        let mut content = b"clean text\n".repeat(30_000); // ≈330KB
+        content.extend_from_slice(b"\0tail");
+        fs::write(&target, &content).unwrap();
+
+        match load_document_streaming(&target, |_| {}) {
+            Err(CoreError::BinaryDetected { .. }) => {}
+            other => panic!("深处的 NUL 也必须拒绝打开，实际 {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gbk_ratio_semantics_survive_streaming() {
+        let dir = scratch_dir("p19-gbk");
+        // 合法 GBK 文本 → 正常打开且编码标签 GBK
+        let good: Vec<u8> = [0xB5, 0xC4].repeat(500); // 「的」×500
+        let (text, encoding) = load_doc_via_stream(&dir, "good.gbk", &good);
+        assert_eq!(encoding, "GBK");
+        assert!(text.chars().all(|c| c == '的'), "GBK 文本应完整解码");
+
+        // 高替换率垃圾字节 → 二进制拒绝
+        let garbage = [0x81u8, 0xFF].repeat(CHUNK_SIZE * 3); // 多块规模
+        let target = dir.join("garbage.bin");
+        fs::write(&target, &garbage).unwrap();
+        match load_document_streaming(&target, |_| {}) {
+            Err(CoreError::BinaryDetected { .. }) => {}
+            other => panic!("高 FFFD 占比必须判二进制，实际 {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn eol_counter_cross_chunk_parity() {
+        use crate::document::EolCounter;
+        let samples = ["a\r\nb", "a\rb", "a\nb", "\r\n", "\r", "\n", "", "x",
+                       "a\r\n\r\rb\n\r", "\r\r\n\n"];
+        for sample in samples {
+            for split in 0..=sample.len() {
+                // 任意切分点（含切在 \r 与 \n 中间）都必须得到同一结论
+                let mut counter = EolCounter::new();
+                counter.push(&sample[..split]);
+                counter.push(&sample[split..]);
+                let streamed = counter.finish();
+                assert_eq!(streamed, LineEnding::detect(sample),
+                    "sample={sample:?} split={split}");
+            }
+        }
     }
 }

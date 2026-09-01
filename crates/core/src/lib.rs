@@ -14,7 +14,8 @@ pub mod settings;
 pub use document::{Document, LineEnding};
 pub use error::CoreError;
 pub use highlight::{LazyHighlighter, StyledRun};
-pub use loader::{load_file, load_file_streaming, decode, LoadProgress, LoadedText};
+pub use loader::{load_file, load_file_streaming, load_document_streaming, decode, LoadProgress,
+    LoadedText, LoadedDocument};
 pub use saver::save_atomic;
 pub use search::{
     find_all, find_all_document, next_from, prev_from, replace_all, replace_all_document,

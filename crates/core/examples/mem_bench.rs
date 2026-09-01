@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use editpad_core::{load_file_streaming, Document};
+use editpad_core::{load_document_streaming, Document};
 
 fn main() {
     let path: PathBuf = std::env::args()
@@ -34,23 +34,19 @@ fn main() {
     println!("[phase] sleeping");
     std::thread::sleep(Duration::from_secs(1));
 
-    // 阶段 1：流式加载大文件（P19 行动项 2 的现状基线：内部仍是
-    // 整读 Vec<u8> + decode 全量 String + 复制进 rope ≈ ×3 峰值）
+    // 阶段 1：流式直入 rope（P19 行动项 2 落地后的测量口径）
     println!("[phase] loading {}", path.display());
     let started = std::time::Instant::now();
-    let loaded = load_file_streaming(&path, &mut |_progress| {}).expect("加载基准文件失败");
-    let doc = Document::from_str(&loaded.text);
+    let loaded = load_document_streaming(&path, &mut |_progress| {}).expect("加载基准文件失败");
+    let doc = loaded.doc;
     println!(
-        "[phase] loaded {:?} chars={} bytes={} encoding={}",
+        "[phase] loaded {:?} chars={} encoding={}",
         started.elapsed(),
-        doc.text_len(),
         doc.text_len(),
         loaded.encoding
     );
 
-    // 阶段 2：稳态保持（只有 rope 活着，临时 String 已释放）
-    // 显式丢弃加载产物引用之外的中间量，确保稳态干净
-    drop(loaded);
+    // 阶段 2：稳态保持（只有 rope 活着）
     println!("[phase] steady");
     std::thread::sleep(Duration::from_secs(5));
     println!("[phase] done chars={}", doc.text_len());
