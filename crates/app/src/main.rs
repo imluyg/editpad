@@ -2482,9 +2482,13 @@ impl Editpad {
         if let (Some(i), Some(pos)) =
             (index, index.and_then(|i| self.matches.get(i).copied()))
         {
-            // P22 补充：长度按转义解析后的查询计（含 \n 等不可见字符）
-            let query_len = unescape_query(&self.find_query).chars().count();
-            self.cur_handle.borrow_mut().select_span(pos.line, pos.col, query_len);
+            // P26：选区跨度直接用命中自带的 len_chars（扫描器产出的
+            // 「选区显示跨度」口径），不再按当前输入现算查询长度——
+            // 单行命中两者相等，跨行命中的正确性由数据自身保证，
+            // 不依赖「命中表与输入框同步」这条时序假设
+            self.cur_handle
+                .borrow_mut()
+                .select_span(pos.line, pos.col, pos.len_chars);
             self.status = format!("第 {}/{} 处匹配", i + 1, self.matches.len());
         }
         Task::none()
@@ -2498,10 +2502,18 @@ impl Editpad {
         let effective_replacement = unescape_query(&self.replace_query);
         let hit_selected = {
             let editor = self.cur_handle.borrow();
+            let eol = editor.doc.line_ending();
             editor
                 .selected_text()
                 .is_some_and(|selected| {
-                    strings_equal(&selected, &effective_query, self.case_sensitive)
+                    // P26：两侧行尾归一后再比（复用 P9 口径）——CRLF 文档上
+                    // 跨行命中的选区文本含 \r\n，而查询是 \n；不归一会让
+                    // 「替换当前」永远判不等、退化为「跳下一个」
+                    strings_equal(
+                        &eol.normalize(&selected),
+                        &eol.normalize(&effective_query),
+                        self.case_sensitive,
+                    )
                 })
         };
 
@@ -4289,8 +4301,8 @@ mod tests {
                 assert_eq!(
                     hits,
                     &vec![
-                        editpad_core::MatchPos { line: 0, col: 0 },
-                        editpad_core::MatchPos { line: 1, col: 4 },
+                        editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
+                        editpad_core::MatchPos { line: 1, col: 4, len_chars: 3 },
                     ]
                 );
             }
@@ -4352,8 +4364,8 @@ mod tests {
     fn find_scan_results_are_filtered_by_sequence_number() {
         let mut app = Editpad::default();
         // 两份可区分的命中表：过期投递不得覆盖已采纳/待采纳的状态
-        let hit_a = || vec![editpad_core::MatchPos { line: 0, col: 0 }];
-        let hit_b = || vec![editpad_core::MatchPos { line: 1, col: 4 }];
+        let hit_a = || vec![editpad_core::MatchPos { line: 0, col: 0, len_chars: 1 }];
+        let hit_b = || vec![editpad_core::MatchPos { line: 1, col: 4, len_chars: 1 }];
         /// 测试内派发：显式丢弃 Task（update 的返回值仅运行时消费）
         fn dispatch(app: &mut Editpad, message: Message) {
             let _ = app.update(message);
@@ -4427,7 +4439,7 @@ mod tests {
 
         // 有结果在途：不基于过期命中表跳转
         app.find_scan = Some(9);
-        app.matches = vec![editpad_core::MatchPos { line: 0, col: 0 }];
+        app.matches = vec![editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 }];
         let _ = app.update(Message::FindNext);
         assert_eq!(app.status, "查找中…", "扫描在途时 Enter 应提示进度");
 
@@ -4437,6 +4449,84 @@ mod tests {
         fresh.find_query = "zzz".into();
         let _ = fresh.update(Message::FindNext);
         assert!(fresh.find_scan.is_some(), "Enter 应懒触发一次后台扫描");
+    }
+
+    // ---------- P26 跨行查询（CRLF 文档上的选区还原与替换当前） ----------
+
+    /// 构造一个已加载 CRLF 文档的应用，返回 (应用, 文档快照)。
+    fn crlf_find_app() -> (Editpad, editpad_core::Document) {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/t/crlf.txt")));
+        let seq = app.job_seq;
+        let doc = editpad_core::Document::from_str("first\r\nsecond\r\nthird");
+        dispatch(
+            &mut app,
+            Message::Loaded(seq, Ok((doc.clone(), String::new(), "UTF-8".to_owned()))),
+        );
+        (app, doc)
+    }
+
+    #[test]
+    fn multiline_match_selects_across_lines_on_crlf_document() {
+        let (mut app, doc) = crlf_find_app();
+        app.find_visible = true;
+        // 用户输入转义序列：\n 解析为真实换行 → 查询含换行、跨行匹配
+        dispatch(&mut app, Message::FindQueryChanged("st\\nse".into()));
+        assert!(app.find_scan.is_some(), "查询变化应排队后台扫描");
+
+        // 用与后台线程相同的核心函数产出命中表，再按协议回填
+        let query = unescape_query("st\\nse");
+        let hits = editpad_core::find_all_document(&doc, &query, true);
+        assert_eq!(
+            hits,
+            vec![editpad_core::MatchPos { line: 0, col: 3, len_chars: 5 }],
+            "命中跨度应为显示口径 5（2 字符 + 1 次跨行 + 2 字符），不是原始字符数 6"
+        );
+        let seq = app.find_scan.unwrap();
+        dispatch(&mut app, Message::FindScanDone(seq, hits));
+        assert!(app.matches.len() == 1);
+
+        // 跳到该命中：选区必须跨行且恰好覆盖「st\r\nse」（\r\n 只算一格）
+        dispatch(&mut app, Message::FindNext);
+        assert_eq!(app.status, "第 1/1 处匹配");
+        let selected = app.cur_handle.borrow().selected_text();
+        assert_eq!(
+            selected.as_deref(),
+            Some("st\r\nse"),
+            "跨行选区应包含文档真实的 \\r\\n，而不是多走/少走一格"
+        );
+    }
+
+    #[test]
+    fn replace_current_replaces_multiline_match_in_crlf_document() {
+        let (mut app, doc) = crlf_find_app();
+        app.find_visible = true;
+        dispatch(&mut app, Message::FindQueryChanged("st\\nse".into()));
+        let query = unescape_query("st\\nse");
+        let seq = {
+            let hits = editpad_core::find_all_document(&doc, &query, true);
+            let s = app.find_scan.unwrap();
+            dispatch(&mut app, Message::FindScanDone(s, hits));
+            s
+        };
+        let _ = seq;
+        dispatch(&mut app, Message::FindNext);
+        dispatch(&mut app, Message::ReplaceQueryChanged("-".into()));
+
+        // 替换当前：选区文本 st\r\nse 与查询 st\nse 行尾归一后判等才可替换。
+        // （P26 前的行为：字面比较判不等 → 误跳下一个、文档不动。）
+        dispatch(&mut app, Message::ReplaceCurrent);
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            // "second" 被吃掉开头 "se" 后剩 "cond"，不是 "ond"
+            "fir-cond\r\nthird",
+            "跨行命中应被整体替换为替换文本"
+        );
+        assert!(app.tab().dirty);
+
+        // 可撤销：替换走 insert_str 快照链
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "first\r\nsecond\r\nthird");
     }
 
     // ---------- P11 全部替换（rope 流式路径） ----------

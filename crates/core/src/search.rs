@@ -8,10 +8,18 @@
 //! 计数都不会受 Unicode 折叠改变字符数的影响。
 
 /// 一个匹配的位置：行号、行内字符列（均从 0 计）。
+///
+/// **API 变更（P26）**：新增 `len_chars` 字段——命中的「选区显示字符跨度」，
+/// 与编辑器 `select_span` / `line_display_len` 同一坐标口径：
+/// 行尾 `\r` 不计、每跨一行计 1。单行命中它恒等于查询字符数；
+/// 跨行命中在 CRLF 文档上小于原始字符数（`\r\n` 整体只计 1），
+/// 因此可以直接喂给 `select_span` 还原选区，不会多走一格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchPos {
     pub line: usize,
     pub col: usize,
+    /// 命中的选区显示跨度（见结构体文档），单位与光标列一致。
+    pub len_chars: usize,
 }
 
 use crate::document::Document;
@@ -33,12 +41,20 @@ fn char_eq(a: char, b: char, case_sensitive: bool) -> bool {
 }
 
 /// 找出全部匹配（按文档顺序）。查询串为空时返回空表。
+///
+/// P26：查询含 `\n` 时走 [`MultiLineScanner`] 跨行归一分支——
+/// 文本侧 `\r\n` / 孤立 `\r` / `\n` 都算一个换行单元与查询的 `\n`
+/// 判等；不含 `\n` 的查询维持原有单行路径，行为零变化。
 pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> {
     let mut out = Vec::new();
     if query.is_empty() {
         return out;
     }
     let q: Vec<char> = query.chars().collect();
+    if q.contains(&'\n') {
+        scan_multiline_str(text, &q, case_sensitive, &mut out);
+        return out;
+    }
     for (line_idx, line) in text.split('\n').enumerate() {
         scan_line(line, &q, case_sensitive, line_idx, &mut out);
     }
@@ -57,6 +73,13 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
         return out;
     }
     let q: Vec<char> = query.chars().collect();
+
+    // P26：跨行查询与 find_all 共用同一个扫描器（对拍不发散的结构保证），
+    // rope 按存储块流式喂入，窗口缓冲 O(查询长度)
+    if q.contains(&'\n') {
+        scan_multiline_chunks(doc, &q, case_sensitive, &mut out);
+        return out;
+    }
 
     let mut line = String::new();
     let mut line_idx = 0usize;
@@ -97,8 +120,199 @@ fn scan_line(line: &str, q: &[char], case_sensitive: bool, line_idx: usize, out:
         out.push(MatchPos {
             line: line_idx,
             col: start,
+            // 单行命中无换行跨越，显示跨度 == 查询字符数
+            len_chars: q.len(),
         });
     }
+}
+
+// ---------- P26：跨行查询的归一化扫描 ----------
+
+/// 文本流归一后的扫描 token：普通字符，或一个换行单元。
+///
+/// 文本侧 `\r\n`、孤立 `\r`、`\n` 三种行尾一律折叠成 [`ScanToken::Newline`]
+/// （与 ropey/编辑器的行界口径一致）；查询侧只做字面映射——字面 `\n`
+/// 映射为 [`ScanToken::Newline`]（因此能命中任何形态的文本换行），
+/// 字面 `\r` 保持普通字符（文本侧不再产出 `\r` token，故含 `\r`
+/// 的查询在本分支永不命中——相比旧实现「含 `\n` 恒零命中」无回归，
+/// 纯增量能力）。
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ScanToken {
+    Char(char),
+    Newline,
+}
+
+/// 查询字符 -> 扫描 token 的字面映射（见 [`ScanToken`] 文档）。
+fn query_token(c: char) -> ScanToken {
+    if c == '\n' {
+        ScanToken::Newline
+    } else {
+        ScanToken::Char(c)
+    }
+}
+
+/// token 判等：普通字符走 ASCII 折叠；查询的换行单元恰好对应文本侧
+/// 归一换行单元。查询字面 `\r` 对任何文本 token 都失配。
+fn token_matches(qt: ScanToken, tt: ScanToken, case_sensitive: bool) -> bool {
+    match (qt, tt) {
+        (ScanToken::Char(a), ScanToken::Char(b)) => char_eq(a, b, case_sensitive),
+        (ScanToken::Newline, ScanToken::Newline) => true,
+        _ => false,
+    }
+}
+
+/// 窗口槽位：token + 产生它时的 (line, col) 显示坐标。
+///
+/// 坐标推进规则与编辑器一致：普通字符列 +1；换行单元本身记在当前
+/// 行末列，随后行号 +1、列归零。孤立 `\r` 也算行界（ropey 默认
+/// `unicode_lines` 特性行界含 `\r`，编辑器行号同源），跨行命中在
+/// 此类文档上的 (line, col) 同样可被 `select_span` 正确还原。
+struct WindowSlot {
+    token: ScanToken,
+    line: usize,
+    col: usize,
+}
+
+/// 跨行滑动窗口扫描器——[`find_all`] 与 [`find_all_document`] 共用，
+/// 结构上保证两条路径逐字节对拍不发散。
+///
+/// * 文本按任意片段推送（`push_str` / `finish`），块边界可以落在
+///   包括 `\r\n` 中间在内的任意位置：`\r` 悬置到下一片段裁决；
+/// * 窗口缓冲 O(查询长度)，峰值内存与文档大小无关；
+/// * 行列坐标随推送增量维护，无需回看已消费文本；
+/// * 命中判定沿用单行路径的两条契约：仅 ASCII 折叠、重叠窗口逐一
+///   上报（每个可能补全命中的 token 都触发一次完整比较）。
+struct MultiLineScanner {
+    q: Vec<ScanToken>,
+    case_sensitive: bool,
+    buf: std::collections::VecDeque<WindowSlot>,
+    cur_line: usize,
+    cur_col: usize,
+    /// 上一推送片段以 `\r` 结尾且尚未裁决是否 CRLF
+    pending_cr: bool,
+}
+
+impl MultiLineScanner {
+    fn new(q: &[char], case_sensitive: bool) -> Self {
+        Self {
+            q: q.iter().map(|&c| query_token(c)).collect(),
+            case_sensitive,
+            buf: std::collections::VecDeque::with_capacity(q.len().min(4096)),
+            cur_line: 0,
+            cur_col: 0,
+            pending_cr: false,
+        }
+    }
+
+    /// 推送一段任意长度的文本片段。
+    ///
+    /// 结构与 [`crate::document::EolCounter`] 同构：peekable 单遍扫描，
+    /// `\r` 在片段末尾时悬置到下一片段裁决，孤立 `\r` 当场定案为换行。
+    fn push_str(&mut self, text: &str, out: &mut Vec<MatchPos>) {
+        let mut chars = text.chars().peekable();
+        // 先裁决上一片段悬置的 `\r`（片段边界切在 `\r\n` 中间的情况）
+        if self.pending_cr {
+            match chars.peek() {
+                Some('\n') => {
+                    chars.next();
+                    self.pending_cr = false;
+                    self.push_token(ScanToken::Newline, out);
+                }
+                Some(_) => {
+                    // 孤立 `\r` 定案；当前字符留给下方常规循环处理
+                    self.pending_cr = false;
+                    self.push_token(ScanToken::Newline, out);
+                }
+                None => return, // 空片段：继续悬置
+            }
+        }
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' => match chars.peek() {
+                    Some('\n') => {
+                        chars.next();
+                        self.push_token(ScanToken::Newline, out);
+                    }
+                    Some(_) => self.push_token(ScanToken::Newline, out), // 孤立 `\r`
+                    None => self.pending_cr = true, // 片段末尾：悬置待下片段裁决
+                },
+                '\n' => self.push_token(ScanToken::Newline, out),
+                other => self.push_token(ScanToken::Char(other), out),
+            }
+        }
+    }
+
+    /// 文本推送完毕：悬置的 `\r` 以孤立换行定案并做最后一次窗口检查。
+    fn finish(&mut self, out: &mut Vec<MatchPos>) {
+        if self.pending_cr {
+            self.pending_cr = false;
+            self.push_token(ScanToken::Newline, out);
+        }
+    }
+
+    /// 吞入一个 token：维护坐标与 O(查询长度) 窗口，必要时上报命中。
+    ///
+    /// 命中跨度 = 窗口内 token 数——正是「选区显示跨度」口径：
+    /// 普通字符计 1、每次跨行计 1（`\r\n` 整体计 1）。
+    fn push_token(&mut self, token: ScanToken, out: &mut Vec<MatchPos>) {
+        let qlen = self.q.len();
+        // 尾 token 快速过滤：新进 token 必须等于查询尾 token 才可能补全命中
+        let may_complete = token_matches(self.q[qlen - 1], token, self.case_sensitive);
+
+        let slot = WindowSlot {
+            token,
+            line: self.cur_line,
+            col: self.cur_col,
+        };
+        if slot.token == ScanToken::Newline {
+            self.cur_line += 1;
+            self.cur_col = 0;
+        } else {
+            self.cur_col += 1;
+        }
+
+        if self.buf.len() == qlen {
+            self.buf.pop_front();
+        }
+        self.buf.push_back(slot);
+
+        if may_complete && self.buf.len() == qlen && self.window_matches() {
+            let front = &self.buf[0];
+            out.push(MatchPos {
+                line: front.line,
+                col: front.col,
+                len_chars: qlen,
+            });
+        }
+    }
+
+    fn window_matches(&self) -> bool {
+        self.buf
+            .iter()
+            .zip(self.q.iter())
+            .all(|(slot, &qt)| token_matches(qt, slot.token, self.case_sensitive))
+    }
+}
+
+/// [`find_all`] 的跨行入口：&str 一次喂入。
+fn scan_multiline_str(text: &str, q: &[char], case_sensitive: bool, out: &mut Vec<MatchPos>) {
+    let mut scanner = MultiLineScanner::new(q, case_sensitive);
+    scanner.push_str(text, out);
+    scanner.finish(out);
+}
+
+/// [`find_all_document`] 的跨行入口：rope 存储块零拷贝流式喂入。
+fn scan_multiline_chunks(
+    doc: &Document,
+    q: &[char],
+    case_sensitive: bool,
+    out: &mut Vec<MatchPos>,
+) {
+    let mut scanner = MultiLineScanner::new(q, case_sensitive);
+    for chunk in doc.chunks() {
+        scanner.push_str(chunk, out);
+    }
+    scanner.finish(out);
 }
 
 /// 光标 (line, col) 处（含该位置命中）之后的第一个匹配下标；
@@ -294,16 +508,20 @@ mod tests {
         // 区分大小写："ab" → 第0行 col 0、col 6；第1行 "baba" 中 col 1
         assert_eq!(
             find_all(text, "ab", true),
-            vec![MatchPos{line:0,col:0}, MatchPos{line:0,col:6}, MatchPos{line:1,col:1}]
+            vec![
+                MatchPos { line: 0, col: 0, len_chars: 2 },
+                MatchPos { line: 0, col: 6, len_chars: 2 },
+                MatchPos { line: 1, col: 1, len_chars: 2 },
+            ]
         );
         // 不区分大小写：第0行多出 col 3（"AB"）
         assert_eq!(
             find_all(text, "ab", false),
             vec![
-                MatchPos{line:0,col:0},
-                MatchPos{line:0,col:3},
-                MatchPos{line:0,col:6},
-                MatchPos{line:1,col:1},
+                MatchPos { line: 0, col: 0, len_chars: 2 },
+                MatchPos { line: 0, col: 3, len_chars: 2 },
+                MatchPos { line: 0, col: 6, len_chars: 2 },
+                MatchPos { line: 1, col: 1, len_chars: 2 },
             ]
         );
     }
@@ -313,7 +531,10 @@ mod tests {
         let text = "你好，世界\n你好\n";
         assert_eq!(
             find_all(text, "你好", true),
-            vec![MatchPos{line:0,col:0}, MatchPos{line:1,col:0}]
+            vec![
+                MatchPos { line: 0, col: 0, len_chars: 2 },
+                MatchPos { line: 1, col: 0, len_chars: 2 },
+            ]
         );
         assert!(find_all(text, "", true).is_empty());
         assert!(find_all(text, "不存在", true).is_empty());
@@ -381,7 +602,8 @@ mod tests {
         ];
         for text in fixtures {
             let doc = Document::from_str(text);
-            for query in ["a", "aa", "foo", "中", "🚀x", "\r", "\r\n", "zz"] {
+            // P26：查询清单补入跨行查询（含首尾换行、纯换行、含 \r 的永不命中例）
+            for query in ["a", "aa", "foo", "中", "🚀x", "\r", "\r\n", "zz", "\n", "\nfoo", "foo\nbar", "a\nb", "\n\n", "a\r\nb"] {
                 for cs in [true, false] {
                     assert_eq!(
                         find_all_document(&doc, query, cs),
@@ -398,7 +620,9 @@ mod tests {
         for seed in [1u64, 0xDEAD_BEEF, 12345] {
             let text = pseudo_random_text(seed, 20_000);
             let doc = Document::from_str(&text);
-            for query in ["a", "ab", "c\n", "中", "xx", "a\r"] {
+            // P26：随机文本对拍补跨行查询——字母表自带 \n 与孤立 \r，
+            // 命中会落在各种行尾形态与块相位上
+            for query in ["a", "ab", "c\n", "中", "xx", "a\r", "\n", "a\nb", "\na", "a\na"] {
                 assert_eq!(
                     find_all_document(&doc, query, false),
                     find_all(&text, query, false),
@@ -415,10 +639,156 @@ mod tests {
         let doc = Document::from_str(&long);
         assert_eq!(
             find_all_document(&doc, "needle", true),
-            vec![MatchPos { line: 0, col: 100_000 }]
+            vec![MatchPos { line: 0, col: 100_000, len_chars: 6 }]
         );
         // 空查询约定：返回空表
         assert!(find_all_document(&doc, "", true).is_empty());
+    }
+
+    // ---------- P26：跨行查询 ----------
+
+    #[test]
+    fn multiline_query_hits_on_every_eol_style() {
+        // 同一查询在三种行尾形态的文档上都应命中同一位置：
+        // 查询的字面 \n 与文本侧 \n / \r\n / 孤立 \r 全部判等
+        for text in ["x a\nb y", "x a\r\nb y", "x a\rb y"] {
+            let hits = find_all(text, "a\nb", true);
+            assert_eq!(
+                hits,
+                vec![MatchPos { line: 0, col: 2, len_chars: 3 }],
+                "text={text:?}"
+            );
+            let doc = Document::from_str(text);
+            assert_eq!(find_all_document(&doc, "a\nb", true), hits, "rope 路径同结果");
+        }
+    }
+
+    #[test]
+    fn multiline_match_positions_follow_crossing_semantics() {
+        // 命中起点行号按换行单元推进：跨过孤立 \r 也算一行（与 ropey
+        // 默认 unicode_lines 行界一致，select_span 可直接还原选区）
+        let text = "one\ntwo\rthree\n";
+        assert_eq!(Document::from_str(text).line_count(), 4, "\\r 应计作行界");
+        let hits = find_all(text, "two\nthree", true);
+        assert_eq!(hits, vec![MatchPos { line: 1, col: 0, len_chars: 9 }]);
+        let doc = Document::from_str(text);
+        assert_eq!(find_all_document(&doc, "two\nthree", true), hits);
+    }
+
+    #[test]
+    fn multiline_len_chars_is_display_span() {
+        // CRLF 文档上原始字符跨度是 4（a,\r,\n,b），显示跨度只记 3：
+        // 行尾 \r 不计、每跨一行计 1。用行列换算验证「选区还原」：
+        // 起点 + 显示跨度走线得到的切片恰为匹配文本本身
+        let doc = Document::from_str("xx a\r\nb yy");
+        let hit = find_all_document(&doc, "a\nb", true);
+        assert_eq!(hit, vec![MatchPos { line: 0, col: 3, len_chars: 3 }]);
+
+        // 模拟 select_span 的走线：显示跨度 3 = 行内 1 字符 + 1 次跨行 + 行内 1 字符
+        let start = doc.line_to_char(hit[0].line) + hit[0].col;
+        let end = doc.line_to_char(hit[0].line + 1) + 1;
+        assert_eq!(doc.slice_text(start, end), "a\r\nb");
+    }
+
+    #[test]
+    fn multiline_query_starting_with_newline_covers_line_break() {
+        // 以 \n 开头的查询：命中点挂在上一行行末列，选区恰好覆盖换行符
+        let hits = find_all("x\nb", "\nb", true);
+        assert_eq!(hits, vec![MatchPos { line: 0, col: 1, len_chars: 2 }]);
+        // 查询就是裸 \n：文档里每个行界各得一个命中
+        assert_eq!(
+            find_all("a\nb\n", "\n", true),
+            vec![
+                MatchPos { line: 0, col: 1, len_chars: 1 },
+                MatchPos { line: 1, col: 1, len_chars: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn multiline_query_with_literal_cr_never_matches() {
+        // 含字面 \r 且含 \n 的查询走归一分支：文本侧不再产出 \r token，
+        // 故永不命中（相比旧实现「含 \n 恒零命中」无回归，纯增量）
+        assert!(find_all("a\r\nb", "a\r\nb", true).is_empty());
+        assert!(find_all_document(&Document::from_str("a\r\nb"), "a\r\nb", true).is_empty());
+
+        // 对照：不含 \n 的查询仍走旧单行路径——行内字面 \r 照常命中，
+        // 单行路径行为零变化
+        assert_eq!(
+            find_all("x\ry", "x\ry", true),
+            vec![MatchPos { line: 0, col: 0, len_chars: 3 }]
+        );
+    }
+
+    #[test]
+    fn multiline_overlapping_matches_are_reported_per_position() {
+        // 重叠契约与单行路径一致：每个可能补全命中的窗口终点都独立判定
+        let hits = find_all("a\na\na", "a\na", true);
+        assert_eq!(
+            hits,
+            vec![
+                MatchPos { line: 0, col: 0, len_chars: 3 },
+                MatchPos { line: 1, col: 0, len_chars: 3 },
+            ]
+        );
+        assert_eq!(find_all_document(&Document::from_str("a\na\na"), "a\na", true), hits);
+    }
+
+    #[test]
+    fn multiline_edges_return_no_matches_without_panicking() {
+        // 查询长于文本 / 文本没有任何换行：零命中
+        assert!(find_all("ab", "a\nb", true).is_empty());
+        assert!(find_all("abc", "\n", true).is_empty());
+        assert!(find_all_document(&Document::from_str("abc"), "a\nb", true).is_empty());
+        // 大小写折叠照常作用于普通字符（\n 自身无大小写概念）
+        assert_eq!(
+            find_all("A\r\nB", "a\nb", false),
+            vec![MatchPos { line: 0, col: 0, len_chars: 3 }]
+        );
+    }
+
+    #[test]
+    fn scanner_fragment_boundaries_agree_with_single_push() {
+        // 片段边界穷举对拍：任意切分位置的多次推送必须与一次整段推送、
+        // 以及 find_all 参照实现三者一致。重点覆盖边界落在 \r\n 中间、
+        // 片段以孤立 \r 结尾等悬置裁决路径（ropey 块边界虽保证不切 CRLF，
+        // 本契约让扫描器不依赖该善意）。
+        let texts = [
+            "a\r\nb\rc\n\rd",
+            "x\r\n\r\ny",
+            "end\r",
+            "pre\r\r\npost",
+            "\r\n\r\n\r",
+            "中\n\r🚀\r\n文",
+        ];
+        let queries: Vec<Vec<char>> = ["a\nb", "\n", "b\nc", "a\na", "中\n"]
+            .iter()
+            .map(|q| q.chars().collect())
+            .collect();
+        for text in texts {
+            for q in &queries {
+                // 参照一：一次整段推送
+                let mut whole_out = Vec::new();
+                let mut whole = MultiLineScanner::new(q, false);
+                whole.push_str(text, &mut whole_out);
+                whole.finish(&mut whole_out);
+
+                // 参照二：逐字符碎片化推送（极端块相位）
+                let mut frag_out = Vec::new();
+                let mut frag = MultiLineScanner::new(q, false);
+                for c in text.chars() {
+                    let mut buf = [0u8; 4];
+                    frag.push_str(c.encode_utf8(&mut buf), &mut frag_out);
+                }
+                frag.finish(&mut frag_out);
+
+                // 地面真值：find_all 参照路径
+                let truth = find_all(text, &q.iter().collect::<String>(), false);
+
+                assert_eq!(whole_out, truth, "text={text:?} q={:?} 整段推送偏离参照", String::from_iter(q.iter()));
+                assert_eq!(frag_out, truth, "text={text:?} q={:?} 碎片化推送偏离参照", String::from_iter(q.iter()));
+            }
+        }
     }
 
     // ---------- P11：字节级替换与 rope 流式替换 ----------
