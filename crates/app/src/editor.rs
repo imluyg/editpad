@@ -1302,7 +1302,13 @@ impl EditorCore {
     pub fn clamp_scroll(&mut self) {
         self.scroll_top = self.scroll_top.max(0.0);
         let max = (self.doc.line_count() as f32 - self.viewport_h / self.line_height()).max(0.0);
-        self.scroll_top = self.scroll_top.min(max + 1.0);
+        // P59：滚动位置整行对齐——iced 0.14 tiny-skia 的文本裁剪对 Cached
+        // 文本不生效（headless_fill_text_clip_bounds_contract 实证），小数
+        // scroll_top 的半可见行会画出控件边界：上压标签条、下压状态栏，
+        // 且越界区域不在损伤区内、部分重绘从不清除，缓慢滚动逐帧叠加成
+        // 重影（用户截图三连）。对齐后每行要么完整可见要么完全不可见，
+        // 配合绘制侧的越界行跳过彻底杜绝越界墨迹。
+        self.scroll_top = self.scroll_top.min(max + 1.0).round().max(0.0);
     }
 
     /// 正文区可视宽度（像素）= 视口宽 − 行号栏宽。
@@ -1362,12 +1368,16 @@ impl EditorCore {
     fn ensure_visible(&mut self) {
         self.poke_caret();
         let first = self.scroll_top;
-        let last = self.scroll_top + self.viewport_h / self.line_height() - 1.0;
+        // P59：整行对齐后完整可见行数 = floor(viewport_h / lh)——底缘
+        // 部分行不绘制（见绘制侧跳过），光标必须收敛到完整可见行内，
+        // 否则贴底打字时光标所在行整行不可见
+        let rows_full = (self.viewport_h / self.line_height()).floor().max(1.0);
+        let last = self.scroll_top + rows_full - 1.0;
         let line = self.cursor.line as f32;
         if line < first {
             self.scroll_top = line;
         } else if line > last {
-            self.scroll_top = line - self.viewport_h / self.line_height() + 1.0;
+            self.scroll_top = line - rows_full + 1.0;
         }
         self.clamp_scroll();
         // P53：视口确实随光标移动才点亮滚动条（行内打字不无谓点亮）
@@ -1483,9 +1493,14 @@ impl EditorCore {
     }
 
     /// 行号栏宽度。
+    ///
+    /// P59：系数 0.7→1.0——行号以正文字号×1.0 渲染，数字宽 = char_w，
+    /// 旧系数让右对齐的行号盒比数字窄 ~30%，右对齐向左溢出画出控件左缘
+    /// （iced 文本裁剪对 Cached 文本不生效，无法兜底）。盒宽 ≥ 数字宽后
+    /// 溢出消失；GUTTER_MIN 继续充当行号与正文的间距。
     pub fn gutter_width(&self) -> f32 {
         let digits = self.doc.line_count().to_string().len().max(3);
-        GUTTER_MIN + digits as f32 * self.char_width() * 0.7
+        GUTTER_MIN + digits as f32 * self.char_width()
     }
 
     // ---------- 光标闪烁（打磨项） ----------
@@ -2052,6 +2067,22 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         // P13：横向滚动偏移——正文/选区/光标的文档系坐标统一扣减它，
         // 行号栏固定不动（与主流编辑器一致）
         let scroll_left = core.scroll_left;
+        let gutter_w = core.gutter_width();
+
+        // P59：滚动条测量提前（与绘制共用同一结果）
+        let sb = VScrollbar::measure(
+            core.doc.line_count(),
+            core.viewport_h,
+            lh,
+            bounds.height,
+            core.scroll_top,
+        );
+        let hsb = HScrollbar::measure(
+            core.content_width_px(),
+            (bounds.width - gutter_w).max(0.0),
+            bounds.width,
+            core.scroll_left,
+        );
 
         // 背景与行号栏
         renderer.fill_quad(
@@ -2061,7 +2092,6 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             },
             palette.background,
         );
-        let gutter_w = core.gutter_width();
         renderer.fill_quad(
             renderer::Quad {
                 bounds: Rectangle {
@@ -2095,14 +2125,21 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     .px_of(line, &text, start_col.min(text.chars().count()));
                 let x1 = core
                     .px_of(line, &text, end_col.min(text.chars().count()));
+                // P59：选区矩形与控件边界求交——部分可见行的高亮不再越界
+                // （quad 无任何裁剪，越界部分会压标签条/状态栏）
+                let Some(rect) = Rectangle {
+                    x: bounds.x + gutter_w + x0 - scroll_left,
+                    y: bounds.y + (row - core.scroll_top) * lh,
+                    width: (x1 - x0).max(char_w),
+                    height: lh,
+                }
+                .intersection(&bounds)
+                else {
+                    continue;
+                };
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle {
-                            x: bounds.x + gutter_w + x0 - scroll_left,
-                            y: bounds.y + (row - core.scroll_top) * lh,
-                            width: (x1 - x0).max(char_w),
-                            height: lh,
-                        },
+                        bounds: rect,
                         ..renderer::Quad::default()
                     },
                     colors.selection,
@@ -2114,6 +2151,12 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         let (first, last) = core.visible_range();
         for line in first..=last {
             let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+            // P59：整行完全在控件内才绘制（scroll_top 已整行对齐，唯一的
+            // 部分行是底缘行——视口高非行高整倍数时跳过留白 ≤ 一行，
+            // 换取绝不越界：文字不再压状态栏/水平条，也不再产生重影）
+            if y < bounds.y || y + lh > bounds.y + bounds.height {
+                continue;
+            }
 
             renderer.fill_text(
                 core_text::Text {
@@ -2127,7 +2170,13 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     shaping: core_text::Shaping::Basic,
                     wrapping: core_text::Wrapping::None,
                 },
-                Point::new(bounds.x, y),
+                // P59：Cached 文本的 Right 对齐语义 =「position.x 即右缘」
+                // （tiny-skia draw_cached: x = bounds.x − width）——必须传
+                // 行号盒的右缘，传左缘会把行号整段画到控件左缘之外
+                // （真实应用里行号因此一直不可见）。右缘 = 行号栏宽 −
+                // GUTTER_MIN 间距，数字向左展开且盒宽 ≥ 数字宽（gutter_width
+                // 系数已改 1.0），不再越出控件左缘。
+                Point::new(bounds.x + gutter_w - GUTTER_MIN, y),
                 colors.gutter_text,
                 bounds,
             );
@@ -2200,45 +2249,52 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
-        // 输入法预编辑串（组字中）：内联显示在光标处，带下划线
+        // 输入法预编辑串（组字中）：内联显示在光标处，带下划线。
+        // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹
         if let Some(preedit) = core.preedit.clone() {
             if !preedit.is_empty() {
                 let caret = core.caret_rect_relative();
-                let width = (display_cols(&preedit) * char_w).max(24.0);
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: Rectangle {
-                            x: bounds.x + caret.x,
-                            y: bounds.y + caret.y + lh - 3.0,
-                            width,
-                            height: 2.0,
+                let in_view =
+                    caret.y >= 0.0 && caret.y + lh <= core.viewport_h;
+                if in_view {
+                    let width = (display_cols(&preedit) * char_w).max(24.0);
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: bounds.x + caret.x,
+                                y: bounds.y + caret.y + lh - 3.0,
+                                width,
+                                height: 2.0,
+                            },
+                            ..renderer::Quad::default()
                         },
-                        ..renderer::Quad::default()
-                    },
-                    colors.preedit_underline,
-                );
-                renderer.fill_text(
-                    core_text::Text {
-                        content: preedit,
-                        bounds: Size::new(width + 60.0, lh),
-                        size: Pixels(core.font_size()),
-                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                        font: body_font,
-                        align_x: core_text::Alignment::Default,
-                        align_y: alignment::Vertical::Top,
-                        shaping: core_text::Shaping::Advanced,
-                        wrapping: core_text::Wrapping::None,
-                    },
-                    Point::new(bounds.x + caret.x, bounds.y + caret.y),
-                    colors.preedit_text,
-                    bounds,
-                );
+                        colors.preedit_underline,
+                    );
+                    renderer.fill_text(
+                        core_text::Text {
+                            content: preedit,
+                            bounds: Size::new(width + 60.0, lh),
+                            size: Pixels(core.font_size()),
+                            line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                            font: body_font,
+                            align_x: core_text::Alignment::Default,
+                            align_y: alignment::Vertical::Top,
+                            shaping: core_text::Shaping::Advanced,
+                            wrapping: core_text::Wrapping::None,
+                        },
+                        Point::new(bounds.x + caret.x, bounds.y + caret.y),
+                        colors.preedit_text,
+                        bounds,
+                    );
+                }
             }
         }
 
-        // 光标竖线（静止期按闪烁相位隐现；活动窗口期内常显）
+        // 光标竖线（静止期按闪烁相位隐现；活动窗口期内常显）。
+        // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹
         let caret = core.caret_rect_relative();
-        if core.caret_visible() {
+        let caret_in_view = caret.y >= 0.0 && caret.y + caret.height <= core.viewport_h;
+        if core.caret_visible() && caret_in_view {
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
@@ -2255,13 +2311,6 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）。
         // P53：按活动淡入淡出——闲置滑块自动隐藏，不再常驻遮挡行尾；
         // alpha≈0 时整条跳绘（含命中门控，隐藏即不可点）
-        let sb = VScrollbar::measure(
-            core.doc.line_count(),
-            core.viewport_h,
-            lh,
-            bounds.height,
-            core.scroll_top,
-        );
         if sb.needed {
             let sb_alpha = core.scrollbar_visibility();
             if sb_alpha > 0.004 {
@@ -2299,12 +2348,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
         // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）。
         // P45：行程统一走「列模型 ∪ 真实行宽」口径，与滚动钳制一致。
         // P54：与竖直条共用活动戳，同款淡入淡出（横向滚动点亮，闲置淡出）。
-        let hsb = HScrollbar::measure(
-            core.content_width_px(),
-            (bounds.width - gutter_w).max(0.0),
-            bounds.width,
-            core.scroll_left,
-        );
+        // P59：测量已提前到裁剪层之前。
         if hsb.needed {
             let sb_alpha = core.scrollbar_visibility();
             if sb_alpha > 0.004 {
@@ -2791,6 +2835,27 @@ mod tests {
         assert_eq!(wheel_zoom_step(-0.75, -0.25, true), (0.0, -1.0));
         // 反向增量先抵消同向累积
         assert_eq!(wheel_zoom_step(0.75, -0.25, true), (0.5, 0.0));
+    }
+
+    #[test]
+    fn ensure_visible_keeps_cursor_on_fully_visible_row() {
+        // P59：视口高非行高整倍数时底缘部分行不绘制——光标贴底必须
+        // 收敛到完整可见行，否则贴底打字时光标所在行整行不可见
+        let mut c = core_with(&"l\n".repeat(50));
+        c.set_viewport_height(100.0); // 100/22 = 4.54 → 完整可见 4 行
+        c.scroll_top = 10.0;
+        c.cursor = CursorPos { line: 14, col: 0 };
+        c.ensure_visible();
+        let offset = c.cursor.line as f32 - c.scroll_top;
+        assert!(
+            offset >= 0.0 && (offset + 1.0) * c.line_height() <= 100.0 + 0.01,
+            "光标行必须完整可见：scroll_top={} offset={offset}",
+            c.scroll_top
+        );
+        // 顶侧同理：向上跳到视口上方的行，行首对齐即完整可见
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.ensure_visible();
+        assert_eq!(c.scroll_top, 2.0, "顶侧跳转行首对齐");
     }
 
     #[test]
@@ -3773,10 +3838,215 @@ fn headless_render_shows_characters_beyond_old_viewport_bound() {
     }
 }
 
+/// P59 诊断：小数 scroll_top（平滑滚动/触控板增量的等价物）下渲染真实
+/// EditorView，控件边界外不得有任何墨迹——越界绘制会压到标签条/状态栏，
+/// 且越界区域不在损伤区内、部分重绘从不清除，逐帧叠加即用户截图的
+/// 「缓慢滚动花屏」。本测试先复现（若红）后钉住修复（若绿）。
+#[test]
+fn headless_fractional_scroll_paints_no_ink_outside_bounds() {
+    let (w, h) = (700u32, 500u32);
+    // 编辑器摆在 (50, 60)、尺寸 600×300——四周留出可检测的越界带
+    let (ex, ey, ew, eh) = (50.0f32, 60.0f32, 600.0f32, 300.0f32);
+
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        let doc_text: String =
+            (1..=20).map(|i| format!("第{i}行内容\n")).collect();
+        c.reset_document(editpad_core::Document::from_str(&doc_text));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        // 平滑滚动到小数行位：首行半可见（顶部越界带）+ 末行半可见（底部）
+        c.scroll_by_lines(-2.5);
+    }
+    let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+
+    let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+    let mut tree = Tree::empty();
+    // 控件尺寸 = 600×300（limits 收紧到目标尺寸，Fill 才解析成 600×300
+    // 而非整个画布——首版脚手架此处给错，"越界"多为合法绘制）
+    let limits = layout::Limits::new(
+        Size::new(ew, eh),
+        Size::new(ew, eh),
+    );
+    let node = view.layout(&mut tree, &renderer, &limits);
+    // 平移到 (50, 60)：四周留出可检测的越界带（原点渲染无法检测上方越界）
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    let damage = vec![viewport_rect];
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
+
+    // 统计控件边界外的墨迹（暗像素；底色已填白），按方位带细分定位
+    let (x0, y0) = (ex as u32, ey as u32);
+    let (mut top, mut bottom, mut left, mut right) = (0u32, 0u32, 0u32, 0u32);
+    let mut top_x = (u32::MAX, 0u32);
+    let mut bottom_box: Option<(u32, u32, u32, u32)> = None;
+    let mut left_box: Option<(u32, u32, u32, u32)> = None;
+    let grow = |box_: &mut Option<(u32, u32, u32, u32)>, x: u32, y: u32| {
+        *box_ = match *box_ {
+            None => Some((x, y, x, y)),
+            Some((x_min, y_min, x_max, y_max)) => Some((
+                x_min.min(x),
+                y_min.min(y),
+                x_max.max(x),
+                y_max.max(y),
+            )),
+        };
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let inside = x >= x0
+                && x < x0 + ew as u32
+                && y >= y0
+                && y < y0 + eh as u32;
+            if inside {
+                continue;
+            }
+            if let Some(px) = pixels.pixel(x, y) {
+                if px.red() < 200 {
+                    if y < y0 {
+                        top += 1;
+                        top_x = (top_x.0.min(x), top_x.1.max(x));
+                    } else if y >= y0 + eh as u32 {
+                        bottom += 1;
+                        grow(&mut bottom_box, x, y);
+                    } else if x < x0 {
+                        left += 1;
+                        grow(&mut left_box, x, y);
+                    } else {
+                        right += 1;
+                    }
+                }
+            }
+        }
+    }
+    let escaped = top + bottom + left + right;
+    // 调试产物：整帧渲染结果存 PNG，人工核对越界内容
+    let _ = pixels.save_png("target/p59-debug.png");
+    {
+        let c = view.core.borrow();
+        eprintln!(
+            "[P59] scroll_top={} visible_range={:?} gutter_w={} lh={} viewport={}x{}",
+            c.scroll_top,
+            c.visible_range(),
+            c.gutter_width(),
+            c.line_height(),
+            c.viewport_w,
+            c.viewport_h,
+        );
+    }
+    // 逃逸像素的包围盒（按带），定位泄漏源
+    let mut bbox: Option<(u32, u32, u32, u32)> = None; // (min_x, min_y, max_x, max_y)
+    for y in 0..h {
+        for x in 0..w {
+            let inside = x >= x0
+                && x < x0 + ew as u32
+                && y >= y0
+                && y < y0 + eh as u32;
+            if inside {
+                continue;
+            }
+            if let Some(px) = pixels.pixel(x, y) {
+                if px.red() < 200 {
+                    bbox = match bbox {
+                        None => Some((x, y, x, y)),
+                        Some((x_min, y_min, x_max, y_max)) => Some((
+                            x_min.min(x),
+                            y_min.min(y),
+                            x_max.max(x),
+                            y_max.max(y),
+                        )),
+                    };
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[P59] 越界墨迹 = {escaped}（上 {top} / 下 {bottom} / 左 {left} / 右 {right}），上带x={top_x:?}，下带盒={bottom_box:?}，左带盒={left_box:?}，控件 = ({x0},{y0},{ew},{eh})"
+    );
+    assert_eq!(
+        escaped, 0,
+        "小数滚动下控件边界外不得有墨迹（压标签条/状态栏/重影）"
+    );
+}
+
+/// P59 微实验（钉住上游缺陷）：iced 0.14 tiny-skia 的 `fill_text` 第 4 参
+/// clip_bounds 对 Cached 文本**不裁剪**——flush 掩码快路径
+/// `physical_bounds.is_within(clip)` 的 physical 就是 clip 自身，恒真 →
+/// 整段无掩码绘制。本测试断言逃逸**存在**：升级 iced 后若此断言翻转
+/// （clip 生效、逃逸归零），可重新依赖裁剪并简化 P59 的源头规避
+/// （整行对齐 + 越界行/光标跳过 + 选区求交）。
+#[test]
+fn fill_text_clip_bounds_is_not_reliable_upstream() {
+    let (w, h) = (400u32, 300u32);
+    let clip = Rectangle::new(Point::new(0.0, 100.0), Size::new(400.0, 200.0));
+    let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+    renderer.fill_text(
+        core_text::Text {
+            content: "逃逸测试".to_owned(),
+            bounds: Size::new(f32::INFINITY, 22.0),
+            size: Pixels(16.0),
+            line_height: core_text::LineHeight::Absolute(Pixels(22.0)),
+            font: BODY_FONT,
+            align_x: core_text::Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: core_text::Shaping::Advanced,
+            wrapping: core_text::Wrapping::None,
+        },
+        Point::new(50.0, 89.0), // 11px 在 clip 上方之外
+        Color::BLACK,
+        clip,
+    );
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![Rectangle::with_size(Size::new(w as f32, h as f32))];
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+
+    // 裁剪区外（y < 100）的墨迹
+    let mut escaped = 0u32;
+    for y in 0..100u32 {
+        for x in 0..w {
+            if let Some(px) = pixels.pixel(x, y) {
+                if px.red() < 200 {
+                    escaped += 1;
+                }
+            }
+        }
+    }
+    eprintln!("[P59-微] clip 外墨迹 = {escaped}（上游缺陷钉住：>0 即未裁剪）");
+    assert!(
+        escaped > 0,
+        "iced 已修复 fill_text 裁剪？请复核 P59 的源头规避是否可以简化"
+    );
+}
+
 /// P46 诊断：滚动条出现阈值必须与「当前文档最宽行的真实像素宽」一致——
-    /// 实测列宽注入后，90 ASCII 字符（720px）在 800px 视口内**不**出现滚动条；
-    /// 未实测（9px 假设）或文档确有超宽行时出现。此测试钉住判定口径，
-    /// 防止任何一侧高估导致「文字还没占满右边滚动条就出现」。
+/// 实测列宽注入后，90 ASCII 字符（720px）在 800px 视口内**不**出现滚动条；
+/// 未实测（9px 假设）或文档确有超宽行时出现。此测试钉住判定口径，
+/// 防止任何一侧高估导致「文字还没占满右边滚动条就出现」。
     #[test]
     fn hscrollbar_threshold_matches_real_content_width() {
         // 90 ASCII 字符 × 实测 8px = 720px < 视口 800px → 不出现
