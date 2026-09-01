@@ -6,6 +6,7 @@
 pub mod document;
 pub mod error;
 pub mod highlight;
+pub mod json;
 pub mod loader;
 pub(crate) mod syntaxes;
 pub mod saver;
@@ -15,6 +16,7 @@ pub mod settings;
 pub use document::{Document, LineEnding};
 pub use error::CoreError;
 pub use highlight::{resolve_language, syntax_for_extension, LazyHighlighter, StyledRun};
+pub use json::{format_json, validate_json, JsonError};
 pub use loader::{load_file, load_file_streaming, load_document_streaming, decode, LoadProgress,
     LoadedText, LoadedDocument};
 pub use saver::{save_atomic, save_document_atomic};

@@ -371,17 +371,17 @@ impl EditorCore {
         hl.borrow().strides_missing(last_visible) > LazyHighlighter::MAX_INLINE_STRIDES
     }
 
-    /// 当前高亮器代次；未启用高亮时为 None。
-    pub fn highlight_generation(&self) -> Option<u64> {
-        self.highlight.as_ref().map(|h| h.borrow().generation())
-    }
-
-    /// 使用的语法名（测试诊断用）。
-    #[cfg(test)]
+    /// 当前使用的语法名（None = 纯文本路径）。
+    /// 状态栏展示与「按当前语法判断」的功能开关共用。
     pub fn highlight_syntax_name(&self) -> Option<String> {
         self.highlight
             .as_ref()
             .map(|h| h.borrow().syntax_name().to_owned())
+    }
+
+    /// 当前高亮器代次；未启用高亮时为 None。
+    pub fn highlight_generation(&self) -> Option<u64> {
+        self.highlight.as_ref().map(|h| h.borrow().generation())
     }
 
     /// 检查点数量（测试诊断用；生产路径经 [`Self::needs_paving`] 间接消费）。

@@ -78,6 +78,8 @@ enum Message {
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
     HighlightPaveNeeded,
+    /// 格式化 JSON（Ctrl+Shift+F，仅当前语法为 JSON 时生效；P22 第二批）
+    FormatJson,
     /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
     HlPaveProgress(u64, u64),
     /// 后台高亮铺建完成：(代次, 推进后的高亮器)。期间编辑过（换代）
@@ -784,6 +786,43 @@ impl Editpad {
 
             // ---------- 高亮后台分批补建（P12） ----------
             Message::HighlightPaveNeeded => self.schedule_highlight_pave(),
+            Message::FormatJson => {
+                const FORMAT_JSON_MAX_CHARS: usize = 4_000_000;
+                // 仅当前语法为 JSON 时生效（P22 第二批：按当前语法判断）
+                if self.editor.borrow().highlight_syntax_name().as_deref() != Some("JSON") {
+                    self.status = "格式化 JSON 仅对 JSON 文件可用（Ctrl+Shift+F）".to_owned();
+                    return Task::none();
+                }
+                let (text, chars) = {
+                    let ed = self.editor.borrow();
+                    (ed.doc.to_text(), ed.doc.text_len())
+                };
+                if chars > FORMAT_JSON_MAX_CHARS {
+                    // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
+                    self.status =
+                        format!("文档过大（{chars} 字符），暂不支持格式化（上限 {FORMAT_JSON_MAX_CHARS}）");
+                    return Task::none();
+                }
+                match editpad_core::format_json(&text) {
+                    Ok(pretty) => {
+                        // replace_whole_document 内部快照 → 可撤销；光标复位到文首
+                        self.editor
+                            .borrow_mut()
+                            .replace_whole_document(editpad_core::Document::from_str(&pretty));
+                        self.dirty = true;
+                        self.status = "已格式化 JSON".to_owned();
+                        if self.find_visible {
+                            // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
+                            return self.schedule_find_scan();
+                        }
+                        Task::none()
+                    }
+                    Err(error) => {
+                        self.status = format!("JSON 格式化失败：{error}");
+                        Task::none()
+                    }
+                }
+            }
             Message::HlPaveProgress(gen, strides_done) => {
                 // 双重代次检查：任务登记一致且高亮器未换代（换文件后
                 // 旧任务的迟到进度不得污染新会话的状态栏）
@@ -1488,6 +1527,15 @@ fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> 
     // （德语 @=AltGr+Q 等）若进此分支匹配不到就被静默吞掉；
     // 因此仅「纯 Ctrl」才当快捷键，带 Alt 的一律按普通字符处理。
     if mods.control() && !mods.alt() {
+        // P22 第二批：Ctrl+Shift+F = 格式化 JSON。必须先于普通字母映射
+        // 分流，否则 Shift 产生的 'F' 会被小写化成 f 撞上「查找」。
+        if mods.shift() {
+            if let Key::Character(letter) = &key {
+                if letter.to_ascii_lowercase() == "f" {
+                    return Some(Message::FormatJson);
+                }
+            }
+        }
         if let Key::Character(letter) = &key {
             let message = match letter.to_ascii_lowercase().as_str() {
                 "o" => Message::OpenRequested,
@@ -1731,6 +1779,93 @@ mod tests {
             app2.editor.borrow().highlight_syntax_name().as_deref(),
             Some("Bourne Again Shell (bash)")
         );
+    }
+
+    // ---------- P22 第二批：格式化 JSON ----------
+
+    /// 构造一个已按 .json 加载完成的应用。
+    fn json_app(text: &str) -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/x/data.json")));
+        let seq = app.job_seq;
+        let doc = editpad_core::Document::from_str(text);
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((doc, String::new(), "UTF-8".to_owned())),
+            ),
+        );
+        app
+    }
+
+    #[test]
+    fn format_json_pretty_prints_and_is_revertible() {
+        let mut app = json_app("{\"b\":1,\"a\":[2,3]}");
+        dispatch(&mut app, Message::FormatJson);
+        let expected = "{\n  \"b\": 1,\n  \"a\": [\n    2,\n    3\n  ]\n}";
+        assert_eq!(app.editor.borrow().doc.to_text(), expected);
+        assert!(app.dirty, "格式化属于内容修改，必须置脏");
+        assert_eq!(app.status, "已格式化 JSON");
+
+        // 可撤销：replace_whole_document 走快照链
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(
+            app.editor.borrow().doc.to_text(),
+            "{\"b\":1,\"a\":[2,3]}",
+            "撤销应还原到格式化前"
+        );
+    }
+
+    #[test]
+    fn format_json_reports_error_position_and_keeps_document() {
+        let bad = "{\"a\": 1,,}";
+        let mut app = json_app(bad);
+        dispatch(&mut app, Message::FormatJson);
+        assert_eq!(
+            app.editor.borrow().doc.to_text(),
+            bad,
+            "校验失败不得改动文档"
+        );
+        assert!(
+            app.status.contains("JSON 格式化失败") && app.status.contains("第"),
+            "状态栏应带出错误行列，实际 {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn format_json_is_noop_for_non_json_documents() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/notes/plain.txt")));
+        let seq = app.job_seq;
+        let doc = editpad_core::Document::from_str("{not:json,but:plain txt}");
+        dispatch(
+            &mut app,
+            Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+        );
+        dispatch(&mut app, Message::FormatJson);
+        assert_eq!(
+            app.editor.borrow().doc.to_text(),
+            "{not:json,but:plain txt}",
+            "非 JSON 文档不得被改动"
+        );
+        assert!(app.status.contains("仅对 JSON"), "应提示语法不匹配");
+    }
+
+    #[test]
+    fn ctrl_shift_f_maps_to_format_json_but_ctrl_f_stays_find() {
+        use iced::keyboard::{self};
+        let shift_ctrl = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
+        assert!(matches!(
+            handle_key(keyboard::Key::Character("F".into()), shift_ctrl),
+            Some(Message::FormatJson)
+        ));
+        // 普通 Ctrl+F 不受影响
+        assert!(matches!(
+            handle_key(keyboard::Key::Character("f".into()), keyboard::Modifiers::CTRL),
+            Some(Message::FindToggled)
+        ));
     }
 
     #[test]
