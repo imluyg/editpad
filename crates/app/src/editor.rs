@@ -126,11 +126,12 @@ pub fn normalize_font_size(size: f32) -> f32 {
 }
 
 /// 感知亮度的颜色工具：判断主题深浅、把背景提亮。
-fn luminance(c: Color) -> f32 {
+/// P47 起设置弹窗配色（main.rs `settings_colors`）复用同一深浅判别口径。
+pub(crate) fn luminance(c: Color) -> f32 {
     0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 }
 
-fn lighten(c: Color, amount: f32) -> Color {
+pub(crate) fn lighten(c: Color, amount: f32) -> Color {
     Color {
         r: c.r + (1.0 - c.r) * amount,
         g: c.g + (1.0 - c.g) * amount,

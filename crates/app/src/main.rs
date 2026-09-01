@@ -220,6 +220,12 @@ enum Message {
     SettingsFontReset,
     /// 设置弹窗的字体过滤输入框变化（仅影响列表展示，不落盘）
     FontFilterChanged(String),
+
+    // ---------- 设置弹窗分类导航（P47，侧栏分类风格） ----------
+    /// 侧栏选中一个分类页（同时清空搜索词，离开搜索态——同款语义）
+    SettingsPageSelected(SettingsPage),
+    /// 侧栏搜索框变化：内容区跨分类过滤命中行（纯 UI 态，不落盘）
+    SettingsSearchChanged(String),
 }
 
 /// 后台加载线程 → 订阅流的事件。
@@ -1104,6 +1110,10 @@ struct Editpad {
     settings_path_override: Option<PathBuf>,
     /// 设置弹窗是否可见（P27）：工具栏「设置」按钮开、Esc/关闭按钮关。
     settings_visible: bool,
+    /// 设置弹窗当前分类页（P47 侧栏导航；重开弹窗保留上次位置）。
+    settings_page: SettingsPage,
+    /// 设置弹窗侧栏搜索词（P47；纯 UI 态不落盘，关弹窗/点导航即清）。
+    settings_search: String,
 
     // ---------- 字体选择（P34） ----------
     /// 启动期从 fontdb 枚举的系统字体族名清单（去重、不区分大小写排序）。
@@ -1234,6 +1244,8 @@ impl Default for Editpad {
             settings: editpad_core::Settings::default(),
             settings_path_override: None,
             settings_visible: false,
+            settings_page: SettingsPage::default(),
+            settings_search: String::new(),
             available_fonts: Vec::new(),
             active_font_family: None,
             font_filter: String::new(),
@@ -2365,7 +2377,21 @@ impl Editpad {
                 // busy（加载/保存中）禁开，与工具栏其余按钮同一守卫语义
                 if !self.busy {
                     self.settings_visible = !self.settings_visible;
+                    // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
+                    if !self.settings_visible {
+                        self.settings_search.clear();
+                    }
                 }
+                Task::none()
+            }
+            // P47：侧栏分类导航——点分类即离开搜索态（同款语义）
+            Message::SettingsPageSelected(page) => {
+                self.settings_page = page;
+                self.settings_search.clear();
+                Task::none()
+            }
+            Message::SettingsSearchChanged(query) => {
+                self.settings_search = query;
                 Task::none()
             }
             Message::SettingsAutosaveToggled(value) => {
@@ -3597,245 +3623,388 @@ impl Editpad {
         panel.into()
     }
 
-    /// P27 设置弹窗面板：收编原本只能手改 config.toml 的散落设置
-    /// （主题/字号/即时保存/隐私/会话）+ 只读热键速查表。改动即写回。
-    fn settings_panel(&self) -> Element<'_, Message> {
-        let s = &self.settings;
+    /// P47 设置弹窗面板：两栏布局——顶部标题行（+ 右上角
+    /// 关闭），下方左侧「搜索 + 分类导航」、右侧「标题 + 灰描述 + 右对齐
+    /// 控件」的行式列表（行间 1px 分隔线），内容区内部滚动。设置项与
+    /// P27 完全一致（消息不改，只重排展示），改动即写回的语义不变。
+    ///
+    /// `content_h`：内容滚动区高度（来自 `settings_card_size`，随窗口钳制）。
+    fn settings_panel(&self, content_h: f32) -> Element<'_, Message> {
         // P33/P36：UI 与正文同族，字号固定不随正文缩放；P34：族随设置
         let uipx = editor::ui_font_px();
         let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
 
-        // 热键速查表（只读）：数据源 = HOTKEYS，与 README「快捷键」段同源
-        let mut hotkey_col = column![text("热键（速查）").size(uipx).font(uifont)].spacing(2);
-        for (combo, desc) in HOTKEYS {
-            hotkey_col = hotkey_col.push(
-                row![
-                    text(*combo).size(uipx).font(uifont).width(150),
-                    text(*desc).size(uipx).font(uifont).color([0.5, 0.5, 0.5]),
-                ]
-                .spacing(8),
+        // 标题行：「设置」+ 右上角 ×（关闭按钮放在标题栏右侧）
+        let header = container(
+            row![
+                text("设置").size(uipx * 1.25).font(uifont),
+                container(
+                    button(text("×").size(uipx).font(uifont))
+                        .padding([2, 9])
+                        .style(settings_action_button_style)
+                        .on_press(Message::SettingsToggled),
+                )
+                .width(Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([10, 14])
+        .width(Fill);
+
+        // 显式统一生命周期：分隔线是 'static 元素，收进本地生命周期的列
+        let header_sep: Element<'_, Message> = settings_separator(sc);
+        let divider: Element<'_, Message> = settings_divider(sc);
+
+        column![
+            header,
+            header_sep,
+            row![
+                self.settings_sidebar(),
+                divider,
+                self.settings_content(content_h),
+            ]
+            .align_y(iced::alignment::Vertical::Top),
+        ]
+        .into()
+    }
+
+    /// 左侧栏（P47）：搜索框 + 「选项」小标 + 分类导航。选中项 = 底色
+    /// + 1px 描边高亮（同款）；搜索进行中不高亮（内容区已是
+    /// 跨分类的命中结果）。
+    fn settings_sidebar(&self) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+        let searching = !self.settings_search.trim().is_empty();
+
+        let mut nav = column![].spacing(2);
+        for page in SettingsPage::ALL {
+            let selected = !searching && self.settings_page == page;
+            nav = nav.push(
+                button(
+                    container(text(page.title()).size(uipx).font(uifont))
+                        .width(Fill)
+                        .align_x(iced::alignment::Horizontal::Left),
+                )
+                .width(Fill)
+                .padding([5, 10])
+                .style(move |theme, status| {
+                    settings_nav_button_style(theme, status, selected)
+                })
+                .on_press(Message::SettingsPageSelected(page)),
             );
         }
 
-        container(
-            column![
-                row![
-                    text("设置").size(uipx * 1.25).font(uifont),
-                    button(text("×").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press(Message::SettingsToggled),
-                ]
-                .align_y(Alignment::Center)
-                .spacing(8),
-                rule::horizontal(1),
+        column![
+            text_input("搜索设置…", &self.settings_search)
+                .size(uipx)
+                .font(uifont)
+                .on_input(Message::SettingsSearchChanged)
+                .style(settings_input_style)
+                .width(Fill),
+            text("选项").size(uipx * 0.85).font(uifont).color(sc.desc),
+            nav,
+        ]
+        .spacing(10)
+        .padding(Padding { top: 12.0, right: 10.0, bottom: 12.0, left: 12.0 })
+        .width(170)
+        .into()
+    }
 
-                // ---- 外观 ----
-                text("外观").size(uipx).font(uifont),
-                row![
-                    text("主题").size(uipx).font(uifont),
-                    button(text(if s.is_dark() { "深色" } else { "浅色" })
-                        .size(uipx)
-                        .font(uifont))
-                        .padding([2, 8])
-                        .on_press(Message::ThemeToggled),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                row![
-                    text("字号").size(uipx).font(uifont),
-                    button(text("A-").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press_maybe(
-                            (self.display_font_size()
-                                > editpad_core::settings::MIN_FONT_SIZE)
-                                .then_some(Message::FontSizeDelta(-2.0))
-                        ),
-                    text(format!("{:.0}", self.display_font_size()))
-                        .size(uipx)
+    /// 右侧内容区（P47）：无搜索词 = 当前分类页（页首标题 + 行列表）；
+    /// 有搜索词 = 跨分类的命中行，按分类分组展示（同款），
+    /// 无命中给出提示。整列由外层 scrollable 钳高滚动。
+    fn settings_content(&self, content_h: f32) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+        let query = self.settings_search.trim();
+        let current_page = self.settings_page;
+
+        let mut list = column![].spacing(0);
+        if query.is_empty() {
+            // 分类浏览：页首标题 + 该页全部行
+            list = list.push(
+                container(
+                    text(current_page.title())
+                        .size(uipx * 1.25)
                         .font(uifont),
-                    button(text("A+").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press_maybe(
-                            (self.display_font_size()
-                                < editpad_core::settings::MAX_FONT_SIZE)
-                                .then_some(Message::FontSizeDelta(2.0))
-                        ),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-
-                // ---- 正文字体（P34） ----
-                text("正文字体").size(uipx).font(uifont),
-                row![
-                    text(match (&s.font_family, &self.active_font_family) {
-                        (Some(cfg), Some(eff)) if cfg.as_str() == *eff => {
-                            format!("当前：{eff}")
-                        }
-                        (Some(cfg), _) => {
-                            format!("当前：默认等宽（配置的「{cfg}」未安装）")
-                        }
-                        (None, _) => "当前：默认（等宽）".to_owned(),
+                )
+                .padding(Padding { top: 4.0, right: 4.0, bottom: 8.0, left: 4.0 }),
+            );
+            for r in settings_rows().filter(|r| r.page == current_page) {
+                list = list.push(self.settings_row_widget(r));
+            }
+        } else {
+            // 搜索：按分类顺序分组展示命中行
+            let mut total_hits = 0;
+            for page in SettingsPage::ALL {
+                let hits: Vec<SettingsRow> = settings_rows()
+                    .filter(|r| {
+                        r.page == page && settings_search_hit(query, r.title, r.desc)
                     })
+                    .collect();
+                if hits.is_empty() {
+                    continue;
+                }
+                total_hits += hits.len();
+                list = list.push(
+                    container(
+                        text(page.title())
+                            .size(uipx * 0.9)
+                            .font(uifont)
+                            .color(sc.desc),
+                    )
+                    .padding(Padding { top: 8.0, right: 4.0, bottom: 2.0, left: 4.0 }),
+                );
+                for r in hits {
+                    list = list.push(self.settings_row_widget(r));
+                }
+            }
+            if total_hits == 0 {
+                list = list.push(
+                    container(
+                        text(format!("没有匹配「{query}」的设置"))
+                            .size(uipx)
+                            .font(uifont)
+                            .color(sc.desc),
+                    )
+                    .padding([12, 4]),
+                );
+            }
+        }
+        scrollable(
+            container(list)
+                .padding(Padding { top: 4.0, right: 16.0, bottom: 16.0, left: 16.0 })
+                .width(Fill),
+        )
+            .width(Fill)
+            .height(content_h)
+            .into()
+    }
+
+    /// 单个设置行（P47）：左「标题 + 灰色描述」、右对齐控件，行下 1px
+    /// 分隔线（行式布局）。「正文字体」行下方附带字体挑选块。
+    fn settings_row_widget(&self, r: SettingsRow) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+
+        let left = column![
+            text(r.title).size(uipx).font(uifont),
+            text(r.desc).size(uipx * 0.85).font(uifont).color(sc.desc),
+        ]
+        .spacing(2)
+        .width(Fill);
+
+        let mut body = row![left].spacing(12).align_y(Alignment::Center);
+        if let Some(control) = self.settings_row_control(r.key) {
+            body = body.push(control);
+        }
+
+        let mut cell = column![container(body).width(Fill).padding([10, 4])];
+        // 正文字体行附带过滤框 + 候选列表（P34 的选择 UI 原样收编）
+        if r.key == FONT_ROW_KEY {
+            cell = cell.push(self.settings_font_picker());
+        }
+        let sep: Element<'_, Message> = settings_separator(sc);
+        cell = cell.push(sep);
+        cell.into()
+    }
+
+    /// 按行键构建右侧控件（P47）；返回 None = 纯展示行（热键速查/关于）。
+    /// 控件消息与 P27 完全一致，写回语义不变。
+    fn settings_row_control(&self, key: &str) -> Option<Element<'_, Message>> {
+        let s = &self.settings;
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+
+        let control: Element<'_, Message> = match key {
+            // ---- 外观 ----
+            "主题" => button(
+                text(if s.is_dark() { "深色" } else { "浅色" })
                     .size(uipx)
                     .font(uifont),
-                    button(text("回退默认").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press_maybe(
-                            s.font_family.is_some().then_some(Message::SettingsFontReset)
-                        ),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                text("建议选含中文字形的等宽字体；非等宽字体的列对齐会漂移")
+            )
+            .padding([3, 12])
+            .style(settings_action_button_style)
+            .on_press(Message::ThemeToggled)
+            .into(),
+            "字号" => self.settings_stepper(
+                format!("{:.0}", self.display_font_size()),
+                (self.display_font_size()
+                    > editpad_core::settings::MIN_FONT_SIZE)
+                    .then_some(Message::FontSizeDelta(-2.0)),
+                (self.display_font_size()
+                    < editpad_core::settings::MAX_FONT_SIZE)
+                    .then_some(Message::FontSizeDelta(2.0)),
+            ),
+            // ---- 字体 ----
+            FONT_ROW_KEY => button(text("回退默认").size(uipx).font(uifont))
+                .padding([3, 12])
+                .style(settings_action_button_style)
+                .on_press_maybe(
+                    s.font_family.is_some().then_some(Message::SettingsFontReset),
+                )
+                .into(),
+            // ---- 保存 ----
+            "即时保存" => checkbox(s.autosave_enabled)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsAutosaveToggled)
+                .into(),
+            "防抖秒数" => self.settings_stepper(
+                format!("{}s", s.autosave_delay_secs),
+                (s.autosave_delay_secs
+                    > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
+                    .then_some(Message::SettingsAutosaveDelayDelta(-1)),
+                (s.autosave_delay_secs
+                    < editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS)
+                    .then_some(Message::SettingsAutosaveDelayDelta(1)),
+            ),
+            // ---- 会话与隐私 ----
+            "记住最近打开的文件" => checkbox(s.remember_recent_files)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsRememberRecentToggled)
+                .into(),
+            "会话快照" => checkbox(s.enable_snapshots)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsSnapshotsToggled)
+                .into(),
+            "启动时恢复上次界面" => checkbox(s.remember_session)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsRememberSessionToggled)
+                .into(),
+            "关窗行为" => button(
+                text(if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
+                    "快照直退"
+                } else {
+                    "每次询问"
+                })
+                .size(uipx)
+                .font(uifont),
+            )
+            .padding([3, 12])
+            .style(settings_action_button_style)
+            .on_press(Message::SettingsExitModeToggled)
+            .into(),
+            "快照心跳间隔（秒）" => self.settings_stepper(
+                format!("{}s", s.snapshot_interval_secs),
+                (s.snapshot_interval_secs
+                    > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
+                    .then_some(Message::SettingsIntervalDelta(-5)),
+                (s.snapshot_interval_secs
+                    < editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS)
+                    .then_some(Message::SettingsIntervalDelta(5)),
+            ),
+            // 热键速查 / 关于：纯展示行（标题+描述已完整表达）
+            _ => return None,
+        };
+        Some(control)
+    }
+
+    /// 「− 值 +」步进器（P47 右对齐控件；越界方向按钮禁用置灰）。
+    fn settings_stepper(
+        &self,
+        value: String,
+        dec: Option<Message>,
+        inc: Option<Message>,
+    ) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let mk = |label: &str, msg: Option<Message>| {
+            button(text(label.to_owned()).size(uipx).font(uifont))
+                .padding([2, 9])
+                .style(settings_action_button_style)
+                .on_press_maybe(msg)
+        };
+        row![mk("−", dec), text(value).size(uipx).font(uifont), mk("+", inc)]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+    }
+
+    /// 「正文字体」行的附属块（P47 收编 P34 选择 UI）：当前生效说明 +
+    /// 过滤框 + 候选列表（数据源 = 启动期 fontdb 枚举，名字即选即用）。
+    fn settings_font_picker(&self) -> Element<'_, Message> {
+        let s = &self.settings;
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let sc = settings_colors(&self.theme());
+
+        let current = text(match (&s.font_family, &self.active_font_family) {
+            (Some(cfg), Some(eff)) if cfg.as_str() == *eff => {
+                format!("当前：{eff}")
+            }
+            (Some(cfg), _) => {
+                format!("当前：默认等宽（配置的「{cfg}」未安装）")
+            }
+            (None, _) => "当前：默认（等宽）".to_owned(),
+        })
+        .size(uipx * 0.85)
+        .font(uifont)
+        .color(sc.desc);
+
+        let filter = text_input("输入关键字过滤字体", &self.font_filter)
+            .size(uipx)
+            .font(uifont)
+            .on_input(Message::FontFilterChanged)
+            .style(settings_input_style)
+            .width(Fill);
+
+        // 显式标注：两个分支的 widget 类型不同，靠 Into 目标统一
+        let picker: Element<'_, Message> = if self.available_fonts.is_empty() {
+            text("无法枚举系统字体（保持默认等宽）")
+                .size(uipx)
+                .font(uifont)
+                .color([0.7, 0.4, 0.1])
+                .into()
+        } else {
+            let needle = editor::normalize_family(&self.font_filter);
+            let matches: Vec<&String> = self
+                .available_fonts
+                .iter()
+                .filter(|f| {
+                    needle.is_empty()
+                        || editor::normalize_family(f).contains(&needle)
+                })
+                .collect();
+            let total = matches.len();
+            let mut list = column![].spacing(2);
+            for name in matches.iter().take(FONT_PICKER_MAX_ROWS) {
+                list = list.push(
+                    button(
+                        container(text(name.as_str()).size(uipx).font(uifont))
+                            .width(Fill)
+                            .align_x(iced::alignment::Horizontal::Left),
+                    )
+                    .width(Fill)
+                    .padding([4, 8])
+                    .style(settings_list_item_style)
+                    .on_press(Message::SettingsFontSelected(
+                        (*name).clone(),
+                    )),
+                );
+            }
+            if total > FONT_PICKER_MAX_ROWS {
+                list = list.push(
+                    text(format!(
+                        "…共 {total} 个命中，请继续输入关键字缩小范围"
+                    ))
                     .size(uipx * 0.85)
                     .font(uifont)
-                    .color([0.5, 0.5, 0.5]),
-                // 过滤框 + 候选列表（数据源 = 启动期 fontdb 枚举，名字即选即用）
-                text_input("输入关键字过滤字体", &self.font_filter)
-                    .size(uipx)
-                    .font(uifont)
-                    .on_input(Message::FontFilterChanged)
-                    .width(Fill),
-                {
-                    let needle = editor::normalize_family(&self.font_filter);
-                    let matches: Vec<&String> = self
-                        .available_fonts
-                        .iter()
-                        .filter(|f| {
-                            needle.is_empty()
-                                || editor::normalize_family(f).contains(&needle)
-                        })
-                        .collect();
-                    let total = matches.len();
-                    // 显式标注：两个分支的 widget 类型不同，靠 Into 目标统一
-                    let picker: Element<'_, Message> =
-                        if self.available_fonts.is_empty() {
-                            text("无法枚举系统字体（保持默认等宽）")
-                                .size(uipx)
-                                .font(uifont)
-                                .color([0.7, 0.4, 0.1])
-                                .into()
-                        } else {
-                            let mut list = column![].spacing(2);
-                            for name in matches.iter().take(FONT_PICKER_MAX_ROWS) {
-                                list = list.push(
-                                    button(container(
-                                        text(name.as_str()).size(uipx).font(uifont),
-                                    )
-                                    .width(Fill))
-                                    .width(Fill)
-                                    .on_press(Message::SettingsFontSelected(
-                                        (*name).clone(),
-                                    )),
-                                );
-                            }
-                            if total > FONT_PICKER_MAX_ROWS {
-                                list = list.push(
-                                    text(format!(
-                                        "…共 {total} 个命中，请继续输入关键字缩小范围"
-                                    ))
-                                    .size(uipx * 0.85)
-                                    .font(uifont)
-                                    .color([0.5, 0.5, 0.5]),
-                                );
-                            }
-                            scrollable(list).height(180).into()
-                        };
-                    picker
-                },
+                    .color(sc.desc),
+                );
+            }
+            scrollable(list).height(180).width(Fill).into()
+        };
 
-                // ---- 即时保存（P18） ----
-                text("即时保存").size(uipx).font(uifont),
-                checkbox(s.autosave_enabled)
-                    .label("停手后自动落盘")
-                    .text_size(uipx)
-                    .font(uifont)
-                    .on_toggle(Message::SettingsAutosaveToggled),
-                row![
-                    text("防抖秒数").size(uipx).font(uifont),
-                    button(text("-").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press_maybe(
-                            (s.autosave_delay_secs
-                                > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
-                                .then_some(Message::SettingsAutosaveDelayDelta(-1))
-                        ),
-                    text(format!("{}", s.autosave_delay_secs))
-                        .size(uipx)
-                        .font(uifont),
-                    button(text("+").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press_maybe(
-                            (s.autosave_delay_secs
-                                < editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS)
-                                .then_some(Message::SettingsAutosaveDelayDelta(1))
-                        ),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-
-                // ---- 隐私与会话（P20/P29/P30/P31） ----
-                text("隐私与会话").size(uipx).font(uifont),
-                checkbox(s.remember_recent_files)
-                    .label("记住最近打开的文件")
-                    .text_size(uipx)
-                    .font(uifont)
-                    .on_toggle(Message::SettingsRememberRecentToggled),
-                checkbox(s.enable_snapshots)
-                    .label("会话快照（关窗自动保存未存内容）")
-                    .text_size(uipx)
-                    .font(uifont)
-                    .on_toggle(Message::SettingsSnapshotsToggled),
-                checkbox(s.remember_session)
-                    .label("启动时恢复上次界面")
-                    .text_size(uipx)
-                    .font(uifont)
-                    .on_toggle(Message::SettingsRememberSessionToggled),
-                row![
-                    text("关窗行为").size(uipx).font(uifont),
-                    button(text(if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
-                        "快照直退"
-                    } else {
-                        "每次询问"
-                    })
-                    .size(uipx)
-                    .font(uifont))
-                    .padding([2, 8])
-                    .on_press(Message::SettingsExitModeToggled),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                row![
-                    text("心跳间隔秒数").size(uipx).font(uifont),
-                    button(text("-").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press_maybe(
-                            (s.snapshot_interval_secs
-                                > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
-                                .then_some(Message::SettingsIntervalDelta(-5))
-                        ),
-                    text(format!("{}", s.snapshot_interval_secs))
-                        .size(uipx)
-                        .font(uifont),
-                    button(text("+").size(uipx).font(uifont))
-                        .padding([2, 8])
-                        .on_press_maybe(
-                            (s.snapshot_interval_secs
-                                < editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS)
-                                .then_some(Message::SettingsIntervalDelta(5))
-                        ),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-
-                rule::horizontal(1),
-                hotkey_col,
-            ]
+        column![current, filter, picker]
             .spacing(6)
-            .padding(12),
-        )
-        .width(460)
-        .into()
+            .padding(Padding { top: 0.0, right: 4.0, bottom: 10.0, left: 4.0 })
+            .into()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -4332,18 +4501,17 @@ impl Editpad {
         .into()
     }
 
-    /// P40：设置弹窗浮层——整窗背板（点击关闭）+ 居中卡片，卡片内部
-    /// 滚动（内容高约 700px+，小窗口不溢出）。opaque 卡片让点击卡片
+    /// P40：设置弹窗浮层——整窗背板（点击关闭）+ 居中卡片。P47 起卡片
+    /// 为 两栏布局：侧栏固定、内容区内部滚动，宽 720、
+    /// 高按窗口钳制（`settings_card_size`）。opaque 卡片让点击卡片
     /// 空白处（padding/标题行旁）不误触背板关闭。
     fn settings_overlay(&self) -> Element<'_, Message> {
-        // 卡片内容高度上限 = 窗口高 − 边距；窗口尺寸未知时给保守值
-        let vh = self.viewport_size.1;
-        let list_h = if vh > 120.0 { vh - 80.0 } else { 600.0 };
+        let (card_w, content_h) =
+            settings_card_size(self.viewport_size.0, self.viewport_size.1);
         let card = opaque(
-            container(scrollable(self.settings_panel()).width(Fill).height(list_h))
-                .width(500)
-                .padding(4)
-                .style(popup_card_style),
+            container(self.settings_panel(content_h))
+                .width(card_w)
+                .style(settings_card_style),
         );
         mouse_area(
             container(card)
@@ -4446,6 +4614,412 @@ const HOTKEYS: &[(&str, &str)] = &[
     ("Ctrl+End", "跳到文档尾"),
     ("Shift+滚轮", "横向滚动"),
 ];
+
+// ---------- 设置弹窗分类导航（P47，侧栏分类风格） ----------
+
+/// 设置弹窗左侧导航的分类页。`ALL` 的顺序 = 侧栏与搜索分组的展示顺序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsPage {
+    /// 外观：主题、字号
+    #[default]
+    Appearance,
+    /// 字体：正文字体族（含过滤候选列表）
+    Font,
+    /// 保存：即时保存与防抖
+    Save,
+    /// 会话与隐私：最近文件 / 快照 / 恢复 / 关窗行为
+    Session,
+    /// 快捷键：只读速查表（数据源 = HOTKEYS）
+    Hotkeys,
+    /// 关于：名称 / 版本 / 渲染后端 / 协议
+    About,
+}
+
+impl SettingsPage {
+    /// 侧栏顺序（= 搜索结果分组顺序）
+    const ALL: [SettingsPage; 6] = [
+        Self::Appearance,
+        Self::Font,
+        Self::Save,
+        Self::Session,
+        Self::Hotkeys,
+        Self::About,
+    ];
+
+    /// 侧栏项 / 内容区分组小标题
+    fn title(self) -> &'static str {
+        match self {
+            Self::Appearance => "外观",
+            Self::Font => "字体",
+            Self::Save => "保存",
+            Self::Session => "会话与隐私",
+            Self::Hotkeys => "快捷键",
+            Self::About => "关于",
+        }
+    }
+}
+
+/// 「正文字体」行的行键：控件匹配与字体挑选块挂载点共用同一常量，
+/// 防止文案改动后两处漂移。
+const FONT_ROW_KEY: &str = "正文字体";
+
+/// 设置行的统一视图：静态元数据（SETTINGS_ROWS）+ 热键行动态展开，
+/// 渲染与搜索共用同一清单（防「展示一套、过滤另一套」的数据漂移）。
+#[derive(Debug, Clone, Copy)]
+struct SettingsRow {
+    page: SettingsPage,
+    /// 控件匹配键（= title；热键行 = 组合键，全清单唯一）
+    key: &'static str,
+    title: &'static str,
+    desc: &'static str,
+}
+
+/// 设置行静态元数据（P47）：标题 / 描述文案与所属页。热键行不在此列
+/// （渲染时由 HOTKEYS 展开），关于页信息在此登记。
+const SETTINGS_ROWS: &[SettingsRow] = &[
+    SettingsRow {
+        page: SettingsPage::Appearance,
+        key: "主题",
+        title: "主题",
+        desc: "切换深色 / 浅色主题，立即生效并记住。",
+    },
+    SettingsRow {
+        page: SettingsPage::Appearance,
+        key: "字号",
+        title: "字号",
+        desc: "正文文字大小；编辑器内也可用 Ctrl+滚轮 或 A-/A+ 调节。",
+    },
+    SettingsRow {
+        page: SettingsPage::Font,
+        key: FONT_ROW_KEY,
+        title: FONT_ROW_KEY,
+        desc: "界面与正文共用的字体族；建议选含中文字形的等宽字体，非等宽字体的列对齐会漂移。",
+    },
+    SettingsRow {
+        page: SettingsPage::Save,
+        key: "即时保存",
+        title: "即时保存",
+        desc: "停手后自动落盘，不必手动 Ctrl+S。",
+    },
+    SettingsRow {
+        page: SettingsPage::Save,
+        key: "防抖秒数",
+        title: "防抖秒数",
+        desc: "停手多少秒后执行自动保存。",
+    },
+    SettingsRow {
+        page: SettingsPage::Session,
+        key: "记住最近打开的文件",
+        title: "记住最近打开的文件",
+        desc: "在「最近打开」保留历史；关闭开关会一并清空存量记录。",
+    },
+    SettingsRow {
+        page: SettingsPage::Session,
+        key: "会话快照",
+        title: "会话快照",
+        desc: "关窗时自动保存未存内容，异常退出后可恢复。",
+    },
+    SettingsRow {
+        page: SettingsPage::Session,
+        key: "启动时恢复上次界面",
+        title: "启动时恢复上次界面",
+        desc: "启动时还原上次的标签页与内容。",
+    },
+    SettingsRow {
+        page: SettingsPage::Session,
+        key: "关窗行为",
+        title: "关窗行为",
+        desc: "「快照直退」不打断；「每次询问」先确认未保存内容。",
+    },
+    SettingsRow {
+        page: SettingsPage::Session,
+        key: "快照心跳间隔（秒）",
+        title: "快照心跳间隔（秒）",
+        desc: "后台周期保存快照的间隔。",
+    },
+    SettingsRow {
+        page: SettingsPage::About,
+        key: "名称",
+        title: "名称",
+        desc: "Editpad —— 极简记事本。",
+    },
+    SettingsRow {
+        page: SettingsPage::About,
+        key: "版本",
+        title: "版本",
+        desc: env!("CARGO_PKG_VERSION"),
+    },
+    SettingsRow {
+        page: SettingsPage::About,
+        key: "渲染后端",
+        title: "渲染后端",
+        desc: "tiny-skia 软渲染（P41 内存取舍：进程内存约为 GPU 路径的 1/12）。",
+    },
+    SettingsRow {
+        page: SettingsPage::About,
+        key: "开源协议",
+        title: "开源协议",
+        desc: "Apache-2.0",
+    },
+];
+
+/// 全部设置行的统一清单：SETTINGS_ROWS + HOTKEYS 展开的热键行。
+/// 顺序 = 分类内自上而下的展示顺序；搜索过滤与行渲染都从这里出发。
+fn settings_rows() -> impl Iterator<Item = SettingsRow> {
+    SETTINGS_ROWS.iter().copied().chain(HOTKEYS.iter().map(
+        |(combo, desc)| SettingsRow {
+            page: SettingsPage::Hotkeys,
+            key: combo,
+            title: combo,
+            desc,
+        },
+    ))
+}
+
+/// 搜索命中判定（P47）：空白词 = 不过滤（全部命中）；否则对标题或描述
+/// 做大小写不敏感的子串匹配（中文不受影响）。纯函数可单测。
+fn settings_search_hit(query: &str, title: &str, desc: &str) -> bool {
+    let needle = query.trim().to_lowercase();
+    needle.is_empty()
+        || title.to_lowercase().contains(&needle)
+        || desc.to_lowercase().contains(&needle)
+}
+
+/// 设置弹窗配色（P47）：浅色 = 参考用户提供的 设计稿观感的固定值
+/// （米白底 + 橄榄绿点缀）；深色 = 从主题 palette 派生。深浅判别与
+/// editor::EditorColors::resolve 同一口径（前景比背景亮 = 深色），
+/// 不依赖具体主题枚举。
+#[derive(Debug, Clone, Copy)]
+struct SettingsColors {
+    /// 卡片背景（浅色 = 米白）
+    card_bg: Color,
+    /// 标题与正文
+    text: Color,
+    /// 描述等次要文字
+    desc: Color,
+    /// 行分隔线 / 分栏线
+    separator: Color,
+    /// 点缀色：复选框选中底、输入框聚焦描边
+    accent: Color,
+    /// 控件（按钮 / 输入框）底色
+    control_bg: Color,
+    /// 控件描边
+    control_border: Color,
+    /// 悬停底色（导航项 / 列表项 / 按钮）
+    hover: Color,
+    /// 选中导航项底色
+    selected_bg: Color,
+}
+
+/// 按主题解析设置弹窗配色（浅色固定值 / 深色 palette 派生，见结构体注释）。
+fn settings_colors(theme: &Theme) -> SettingsColors {
+    let p = theme.palette();
+    let dark = editor::luminance(p.text) > editor::luminance(p.background);
+    if !dark {
+        SettingsColors {
+            card_bg: Color::from_rgb8(0xFA, 0xF8, 0xF0),
+            text: Color::from_rgb8(0x35, 0x34, 0x2C),
+            desc: Color::from_rgb8(0x92, 0x90, 0x84),
+            separator: Color::from_rgb8(0xE8, 0xE4, 0xD7),
+            accent: Color::from_rgb8(0x71, 0x9E, 0x4F),
+            control_bg: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+            control_border: Color::from_rgb8(0xD9, 0xD5, 0xC7),
+            hover: Color::from_rgba8(0x00, 0x00, 0x00, 0.05),
+            selected_bg: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+        }
+    } else {
+        SettingsColors {
+            card_bg: editor::lighten(p.background, 0.05),
+            text: p.text,
+            desc: Color { a: 0.55, ..p.text },
+            separator: Color { a: 0.14, ..p.text },
+            accent: p.primary,
+            control_bg: editor::lighten(p.background, 0.10),
+            control_border: Color { a: 0.30, ..p.text },
+            hover: Color { a: 0.06, ..p.text },
+            selected_bg: Color { a: 0.10, ..p.text },
+        }
+    }
+}
+
+/// P47：侧栏导航项样式——选中 = 底色 + 1px 描边（ 选中态）；
+/// 未选中 = 透明，悬停淡染。
+fn settings_nav_button_style(
+    theme: &Theme,
+    status: button::Status,
+    selected: bool,
+) -> button::Style {
+    let sc = settings_colors(theme);
+    let mut style = button::Style {
+        background: None,
+        text_color: sc.text,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 1.0,
+            radius: Radius::from(6.0),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    };
+    if selected {
+        style.background = Some(Background::Color(sc.selected_bg));
+        style.border.color = sc.control_border;
+    } else if matches!(
+        status,
+        button::Status::Hovered | button::Status::Pressed
+    ) {
+        style.background = Some(Background::Color(sc.hover));
+    }
+    style
+}
+
+/// P47：设置行内小按钮（主题切换 / 步进 / 回退默认 / 关窗行为 / ×）：
+/// 控件底 + 描边，悬停淡染、按压转点缀色描边、禁用降为次要色。
+fn settings_action_button_style(theme: &Theme, status: button::Status) -> button::Style {
+    let sc = settings_colors(theme);
+    let mut style = button::Style {
+        background: Some(Background::Color(sc.control_bg)),
+        text_color: sc.text,
+        border: Border {
+            color: sc.control_border,
+            width: 1.0,
+            radius: Radius::from(5.0),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    };
+    match status {
+        button::Status::Hovered => style.background = Some(Background::Color(sc.hover)),
+        button::Status::Pressed => style.border.color = sc.accent,
+        button::Status::Disabled => style.text_color = sc.desc,
+        button::Status::Active => {}
+    }
+    style
+}
+
+/// P47：字体候选列表项——透明底 + 悬停淡染（ 列表观感，无描边）。
+fn settings_list_item_style(theme: &Theme, status: button::Status) -> button::Style {
+    let sc = settings_colors(theme);
+    button::Style {
+        background: Some(Background::Color(match status {
+            button::Status::Hovered | button::Status::Pressed => sc.hover,
+            _ => Color::TRANSPARENT,
+        })),
+        text_color: sc.text,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 1.0,
+            radius: Radius::from(5.0),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
+/// P47：设置弹窗输入框（侧栏搜索 / 字体过滤）：控件底 + 描边，
+/// 聚焦转点缀色。
+fn settings_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let sc = settings_colors(theme);
+    let border_color = match status {
+        text_input::Status::Focused { .. } => sc.accent,
+        text_input::Status::Disabled => sc.separator,
+        _ => sc.control_border,
+    };
+    text_input::Style {
+        background: Background::Color(sc.control_bg),
+        border: Border {
+            color: border_color,
+            width: 1.0,
+            radius: Radius::from(5.0),
+        },
+        icon: sc.desc,
+        placeholder: sc.desc,
+        value: sc.text,
+        selection: Color { a: 0.25, ..sc.accent },
+    }
+}
+
+/// P47：设置行复选框——选中 = 点缀色底白勾，未选中 = 控件底 + 描边。
+fn settings_checkbox_style(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let sc = settings_colors(theme);
+    let is_checked = match status {
+        checkbox::Status::Active { is_checked }
+        | checkbox::Status::Hovered { is_checked }
+        | checkbox::Status::Disabled { is_checked } => is_checked,
+    };
+    checkbox::Style {
+        background: Background::Color(if is_checked {
+            sc.accent
+        } else {
+            sc.control_bg
+        }),
+        icon_color: Color::WHITE,
+        border: Border {
+            color: if is_checked { sc.accent } else { sc.control_border },
+            width: 1.0,
+            radius: Radius::from(4.0),
+        },
+        text_color: Some(sc.text),
+    }
+}
+
+/// P47：设置弹窗卡片样式——设置专属底色（浅色 = 米白）+ 1px 描边 +
+/// 大圆角。无投影（P43 的 damage 取舍对一切浮层成立，见
+/// `popup_card_style` 注释）。
+fn settings_card_style(theme: &Theme) -> container::Style {
+    let sc = settings_colors(theme);
+    container::Style {
+        background: Some(Background::Color(sc.card_bg)),
+        border: Border {
+            color: sc.control_border,
+            width: 1.0,
+            radius: Radius::from(8.0),
+        },
+        shadow: Shadow::default(),
+        ..container::Style::default()
+    }
+}
+
+/// 设置行之间的 1px 分隔线（行式布局的视觉骨架）。
+fn settings_separator(sc: SettingsColors) -> Element<'static, Message> {
+    rule::horizontal(1)
+        .style(move |_| rule::Style {
+            color: sc.separator,
+            radius: Radius::from(0.0),
+            fill_mode: rule::FillMode::Full,
+            snap: true,
+        })
+        .into()
+}
+
+/// 侧栏与内容区之间的 1px 纵向分栏线。
+fn settings_divider(sc: SettingsColors) -> Element<'static, Message> {
+    rule::vertical(1)
+        .style(move |_| rule::Style {
+            color: sc.separator,
+            radius: Radius::from(0.0),
+            fill_mode: rule::FillMode::Full,
+            snap: true,
+        })
+        .into()
+}
+
+/// 设置弹窗卡片的目标宽度（目标 ≈ 720px：侧栏 170 + 内容 ~530）。
+const SETTINGS_CARD_W: f32 = 720.0;
+
+/// P47：设置弹窗卡片尺寸适配——宽度 720 上限，小窗收缩到 vw−32（永不
+/// 出窗）；返回的内容滚动区高度 ≤ vh−96（卡片总高 = 内容 + 标题行
+/// ≈ vh−48，配合浮层 16px 边距上下各留 ~24px）。窗口尺寸未知（0）时
+/// 用保守默认。纯函数可单测。
+fn settings_card_size(vw: f32, vh: f32) -> (f32, f32) {
+    let w = if vw >= 48.0 {
+        SETTINGS_CARD_W.min(vw - 32.0)
+    } else {
+        SETTINGS_CARD_W
+    };
+    let h = if vh >= 144.0 { (vh - 96.0).min(680.0) } else { 560.0 };
+    (w, h)
+}
 
 /// 全局按键分发：Ctrl 组合快捷键优先，其次编辑键与光标移动。
 fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> {
@@ -7522,6 +8096,132 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P47 设置弹窗分类导航（侧栏分类风格） ----------
+
+    #[test]
+    fn settings_page_nav_selects_and_clears_search() {
+        let mut app = app_with_tabs(2);
+        dispatch(&mut app, Message::ViewportResized(1024.0, 768.0));
+        assert_eq!(app.settings_page, SettingsPage::default(), "默认落在第一分类");
+
+        // 打开弹窗 → 每个分类都可选中，且选中后视图树可构造
+        dispatch(&mut app, Message::SettingsToggled);
+        for page in SettingsPage::ALL {
+            dispatch(&mut app, Message::SettingsPageSelected(page));
+            assert_eq!(app.settings_page, page);
+            let _ = app.view();
+        }
+
+        // 搜索态：输入词入账、视图可构造（跨分类过滤分支）
+        dispatch(&mut app, Message::SettingsSearchChanged("快照".to_owned()));
+        assert_eq!(app.settings_search, "快照");
+        let _ = app.view();
+
+        // 点导航 = 离开搜索态（同款语义：搜索词被清空）
+        dispatch(&mut app, Message::SettingsPageSelected(SettingsPage::Save));
+        assert!(app.settings_search.is_empty(), "点分类必须清空搜索词");
+        assert_eq!(app.settings_page, SettingsPage::Save);
+
+        // 关闭弹窗：搜索词清空、分类位置保留（重开回到上次分类）
+        dispatch(&mut app, Message::SettingsToggled);
+        assert!(app.settings_search.is_empty(), "关弹窗必须清空搜索词");
+        dispatch(&mut app, Message::SettingsToggled);
+        assert_eq!(app.settings_page, SettingsPage::Save, "分类位置跨开合保留");
+    }
+
+    #[test]
+    fn settings_search_hit_rules() {
+        // 空词 / 纯空白 = 不过滤（全部命中）
+        assert!(settings_search_hit("", "任意", "任意"));
+        assert!(settings_search_hit("   ", "任意", "任意"));
+
+        // 大小写不敏感：desc 里的 JSON 命中 "json" 查询（热键行描述）
+        let (_, json_desc) = HOTKEYS
+            .iter()
+            .find(|(_, d)| d.contains("JSON"))
+            .expect("热键表必有 JSON 格式化条目");
+        assert!(settings_search_hit("json", "Ctrl+Shift+F", json_desc));
+
+        // 中文子串：标题命中（会话快照）与描述命中（关窗行为含「快照直退」）
+        assert!(settings_search_hit("快照", "会话快照", "关窗时自动保存未存内容"));
+        assert!(settings_search_hit("快照", "关窗行为", "「快照直退」不打断"));
+
+        // 未命中
+        assert!(!settings_search_hit("打印机", "主题", "切换深色 / 浅色主题"));
+    }
+
+    #[test]
+    fn settings_row_catalog_covers_pages_and_controls() {
+        let rows: Vec<SettingsRow> = settings_rows().collect();
+
+        // 行元数据完整：键/标题/描述非空，键全清单唯一（控件匹配的依据）
+        let mut keys: Vec<&str> = rows.iter().map(|r| r.key).collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), total, "设置行键存在重复：{keys:?}");
+        for r in &rows {
+            assert!(!r.key.trim().is_empty() && !r.title.trim().is_empty());
+            assert!(!r.desc.trim().is_empty(), "行 {} 描述不得为空", r.key);
+        }
+
+        // 每个分类页至少一行；热键行与 HOTKEYS 表一一对应（防两套数据漂移）
+        for page in SettingsPage::ALL {
+            assert!(
+                rows.iter().any(|r| r.page == page),
+                "分类 {} 在行清单中没有条目",
+                page.title()
+            );
+        }
+        let hotkey_rows: Vec<&SettingsRow> =
+            rows.iter().filter(|r| r.page == SettingsPage::Hotkeys).collect();
+        assert_eq!(hotkey_rows.len(), HOTKEYS.len());
+        for ((combo, desc), r) in HOTKEYS.iter().zip(hotkey_rows) {
+            assert_eq!(r.key, *combo, "热键行键必须与 HOTKEYS 组合键一致");
+            assert_eq!(r.desc, *desc, "热键行描述必须与 HOTKEYS 一致");
+        }
+
+        // 控件覆盖：功能行必有控件；热键/关于为纯展示行（设计如此）
+        let app = Editpad::default();
+        for r in &rows {
+            let control = app.settings_row_control(r.key);
+            match r.page {
+                SettingsPage::Hotkeys | SettingsPage::About => {
+                    assert!(control.is_none(), "展示行 {} 不应有控件", r.key);
+                }
+                _ => {
+                    assert!(control.is_some(), "设置行 {} 缺右侧控件", r.key);
+                }
+            }
+        }
+
+        // 字体挑选块挂载点：FONT_ROW_KEY 行存在于字体页（键与标题同源）
+        assert!(rows.iter().any(|r| {
+            r.page == SettingsPage::Font && r.key == FONT_ROW_KEY && r.title == FONT_ROW_KEY
+        }));
+    }
+
+    #[test]
+    fn settings_card_size_adapts_to_viewport() {
+        // 大窗：宽封顶 720，内容高封顶 680
+        assert_eq!(settings_card_size(1600.0, 1000.0), (720.0, 680.0));
+        // 中窗：高度跟随 vh−96
+        assert_eq!(settings_card_size(1000.0, 700.0), (720.0, 604.0));
+        // 窄窗：宽度收缩到 vw−32，永不出窗
+        assert_eq!(settings_card_size(500.0, 700.0), (468.0, 604.0));
+        // 窗口尺寸未知：保守默认
+        assert_eq!(settings_card_size(0.0, 0.0), (720.0, 560.0));
+        // 极小窗：高度走保守默认，宽度仍收缩
+        assert_eq!(settings_card_size(300.0, 100.0), (268.0, 560.0));
+
+        // 不变式：任意尺寸下卡片宽 ≤ 视口宽（已知时）、内容高 ≤ vh−96
+        for (vw, vh) in [(800.0, 600.0), (1024.0, 768.0), (1920.0, 1080.0), (360.0, 500.0)] {
+            let (w, h) = settings_card_size(vw, vh);
+            assert!(w <= vw - 32.0 + 0.5, "{vw}x{vh}: 宽 {w} 出窗");
+            assert!(h <= vh - 96.0 + 0.5, "{vw}x{vh}: 高 {h} 出窗");
+        }
     }
 
     // ---------- P34 字体选择 ----------
