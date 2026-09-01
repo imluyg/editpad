@@ -13,3 +13,10 @@ path = "src/main.rs"
 iced.workspace = true
 rfd.workspace = true
 editpad-core.workspace = true
+
+# 仅测试用：headless 像素级渲染实验（P46 字形截断定位）——
+# 与 iced 主依赖同版本，不进入发布构建
+[dev-dependencies]
+iced_tiny_skia = "0.14"
+iced_graphics = "0.14"
+tiny-skia = "0.11.4"

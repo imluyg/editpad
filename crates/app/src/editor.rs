@@ -3369,7 +3369,106 @@ mod tests {
         assert_eq!(c.content_width_px(), c.max_line_cols as f32 * c.char_width(), "无注入回退列模型");
     }
 
-    /// P46 诊断：滚动条出现阈值必须与「当前文档最宽行的真实像素宽」一致——
+    /// P46 结论固化：bounds 宽度**不**影响 glyph 生成数量——cosmic-text 对
+    /// 无换行长行全量 shape（视口宽 bounds 与 INFINITY 出的字形一样多）；
+    /// 「41 字封顶」的截断不在 shape 层（headless 像素实验
+    /// `headless_render_shows_characters_beyond_old_viewport_bound`
+    /// 同证绘制层两版均无截断）。
+    #[test]
+    fn paragraph_shapes_all_glyphs_regardless_of_bounds() {
+        let text: String = "字".repeat(41);
+        let make = |bounds: Size| {
+            <iced::Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
+                content: text.as_str(),
+                bounds,
+                size: Pixels(16.0),
+                line_height: core_text::LineHeight::Absolute(Pixels(22.0)),
+                font: BODY_FONT,
+                align_x: core_text::Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: core_text::Shaping::Advanced,
+                wrapping: core_text::Wrapping::None,
+            })
+        };
+        let glyphs = |p: &<iced::Renderer as core_text::Renderer>::Paragraph| {
+            p.buffer().layout_runs().map(|run| run.glyphs.len()).sum::<usize>()
+        };
+        let limited_count = glyphs(&make(Size::new(570.0, 22.0)));
+        let full_count = glyphs(&make(Size::new(f32::INFINITY, 22.0)));
+        eprintln!(
+            "[诊断] bounds=570px → {limited_count} 字形；bounds=∞ → {full_count} 字形（41 汉字）"
+        );
+        assert!(limited_count >= 41, "视口宽 bounds 也必须 shape 全部字形");
+        assert!(full_count >= 41, "无限宽 bounds 必须 shape 全部字形");
+        assert_eq!(limited_count, full_count, "bounds 不改变字形数量");
+    }
+
+    /// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
+/// tiny-skia 光栅化）下，41 汉字行 + 水平滚动（scroll_left=80），
+/// 「第 40/41 字」区域必须有墨迹。视口宽 bounds（旧版形态）与
+/// INFINITY bounds（新版）对照，定位「41 字封顶」的真实截断点：
+/// bounds 只影响 shape 的宽度断言（段落 shape 本身全量，见
+/// `paragraph_shapes_full_row_when_bounds_unbounded`），最终可见性
+/// 以像素墨迹为准。
+#[test]
+fn headless_render_shows_characters_beyond_old_viewport_bound() {
+    let (w, h) = (630u32, 200u32);
+    let text: String = "字".repeat(41);
+    let gutter = 60.0f32;
+    let scroll_left = 80.0f32;
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let damage = vec![viewport_rect];
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+
+    for (label, bounds_w) in [("旧视口宽570", 570.0f32), ("新INFINITY", f32::INFINITY)] {
+        let mut renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
+        renderer.fill_text(
+            core_text::Text {
+                content: text.clone(),
+                bounds: Size::new(bounds_w, 22.0),
+                size: Pixels(16.0),
+                line_height: core_text::LineHeight::Absolute(Pixels(22.0)),
+                font: Font::MONOSPACE,
+                align_x: core_text::Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: core_text::Shaping::Advanced,
+                wrapping: core_text::Wrapping::None,
+            },
+            Point::new(gutter - scroll_left, 10.0),
+            Color::BLACK,
+            viewport_rect,
+        );
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
+        // 文本起点 x = gutter - scroll_left = -20；第 40 字逻辑 x 600..616，
+        // 第 41 字 616..656 → 屏幕 640..656 区间在 [620,640) 采样第 41 字
+        let (x0, x1) = (620i32, 640i32);
+        let mut ink = 0u32;
+        for y in 4..24 {
+            for x in x0..x1 {
+                if let Some(px) = pixels.pixel(x as u32, y as u32) {
+                    if px.alpha() > 0 {
+                        ink += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("[{label}] 第41字区域墨迹像素 = {ink}");
+        assert!(
+            ink > 20,
+            "[{label}] 行尾第41字不可见（墨迹 {ink}px）——字形截断仍存在"
+        );
+    }
+}
+
+/// P46 诊断：滚动条出现阈值必须与「当前文档最宽行的真实像素宽」一致——
     /// 实测列宽注入后，90 ASCII 字符（720px）在 800px 视口内**不**出现滚动条；
     /// 未实测（9px 假设）或文档确有超宽行时出现。此测试钉住判定口径，
     /// 防止任何一侧高估导致「文字还没占满右边滚动条就出现」。
