@@ -235,6 +235,8 @@ enum Message {
     ConfirmExternalReload(usize),
     /// 提示条「忽略」：以当前磁盘状态重记时间戳，直到下次再变不再提示
     IgnoreExternalChange(usize),
+    /// 提示条「全部忽略」（聚合态）：队列内所有页一律重记时间戳并收条
+    IgnoreAllExternalChanges,
 }
 
 /// 后台加载线程 → 订阅流的事件。
@@ -1127,9 +1129,10 @@ struct Editpad {
     settings_page: SettingsPage,
     /// 设置弹窗侧栏搜索词（P47；纯 UI 态不落盘，关弹窗/点导航即清）。
     settings_search: String,
-    /// P50：外部修改提示条指向的页下标；Some = 提示条可见。
-    /// Esc（BarsDismissed）/重载/忽略即清。
-    external_change: Option<usize>,
+    /// P50：外部修改提示条队列（P52 起聚合多页）：待用户裁决的页下标，
+    /// 按标签顺序排列。None/空 = 提示条不可见。Esc（BarsDismissed）/
+    /// 逐个裁决/全部忽略即清。
+    external_change: Option<Vec<usize>>,
 
     // ---------- 字体选择（P34） ----------
     /// 启动期从 fontdb 枚举的系统字体族名清单（去重、不区分大小写排序）。
@@ -1849,18 +1852,41 @@ impl Editpad {
                 Task::none()
             }
             Message::ConfirmExternalReload(idx) => {
-                self.external_change = None;
+                // 出队后重载；Loaded 归页时重记戳（失败则下次聚焦再报）
+                if let Some(queue) = self.external_change.as_mut() {
+                    queue.retain(|i| *i != idx);
+                    if queue.is_empty() {
+                        self.external_change = None;
+                    }
+                }
                 match self.tabs.get(idx).and_then(|t| t.path.clone()) {
                     Some(path) => self.start_loading(path, idx),
                     None => Task::none(),
                 }
             }
             Message::IgnoreExternalChange(idx) => {
-                // 以当前磁盘状态重记戳：此后直到文件再次变化都不再提示
+                // 以当前磁盘状态重记戳：此后直到文件再次变化都不再提示；
+                // 队列还有剩余则条上自动切到下一页（P52 聚合语义）
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
                 }
-                self.external_change = None;
+                if let Some(queue) = self.external_change.as_mut() {
+                    queue.retain(|i| *i != idx);
+                    if queue.is_empty() {
+                        self.external_change = None;
+                    }
+                }
+                Task::none()
+            }
+            Message::IgnoreAllExternalChanges => {
+                // P52 聚合态：队列内所有页一律按磁盘现状重记戳并收条
+                if let Some(queue) = self.external_change.take() {
+                    for idx in queue {
+                        if let Some(tab) = self.tabs.get_mut(idx) {
+                            tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
+                        }
+                    }
+                }
                 Task::none()
             }
             Message::ConfirmSaveAndClose => {
@@ -2180,12 +2206,18 @@ impl Editpad {
             Message::CaretTick => {
                 // 打磨项：翻转闪烁相位（update 本身会触发重绘）。
                 // 心跳链在 new() 启动后自我续期，占用一个常驻睡眠节拍。
+                // P53：一条链两用——竖直滚动条淡出动画期间切换 33ms 快拍
+                // 驱动渐变（相位翻转由 tick_blink 按真实间隔门控，不受影响），
+                // 其余时间维持 ~530ms 常规节拍。
                 self.cur_handle.borrow_mut().tick_blink();
+                let next_ms = if self.cur_handle.borrow().scrollbar_fading() {
+                    editor::SCROLLBAR_FADE_TICK_MS
+                } else {
+                    editor::CARET_BLINK_MS
+                };
                 Task::perform(
-                    async {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            editor::CARET_BLINK_MS,
-                        ));
+                    async move {
+                        std::thread::sleep(std::time::Duration::from_millis(next_ms));
                     },
                     |_| Message::CaretTick,
                 )
@@ -2683,15 +2715,16 @@ impl Editpad {
     /// * busy / 加载中跳过（在途任务的结果马上会刷新戳，此时比对无意义）；
     /// * 干净的**活动页**被外部修改 → 静默重载（无未保存工作可丢，内容
     ///   以磁盘为准；走既有加载管线，Loaded 归页时重记戳）；
-    /// * 其余被改页（置脏页 / 后台页）→ 弹一次提示条由用户裁决
-    ///   （置脏页绝不能静默重载——那等于丢弃用户未保存的工作）。
-    /// * 一次聚焦至多发起一个动作：重载发起即返回，提示条只取第一个
-    ///   命中页；未裁决的页等下次聚焦再报。
+    /// * 其余被改页（置脏页 / 后台页）→ 进入提示条队列由用户逐个裁决
+    ///   （置脏页绝不能静默重载——那等于丢弃用户未保存的工作）；
+    ///   P52 起队列聚合多页，条上显示总数，可逐个处理或全部忽略。
+    /// * 一次聚焦至多发起一个重载（防批量加载风暴）；聚焦即全量重算
+    ///   队列——已忽略的页（重记戳）自然不再命中。
     fn check_external_changes(&mut self) {
         if self.busy || self.active_load.is_some() {
             return;
         }
-        let mut prompt = None;
+        let mut queue: Vec<usize> = Vec::new();
         for (idx, tab) in self.tabs.iter().enumerate() {
             let Some(path) = tab.path.as_deref() else {
                 continue;
@@ -2709,13 +2742,9 @@ impl Editpad {
                 let _ = self.start_loading(path, idx);
                 return;
             }
-            if prompt.is_none() {
-                prompt = Some(idx);
-            }
+            queue.push(idx);
         }
-        if self.external_change.is_none() {
-            self.external_change = prompt;
-        }
+        self.external_change = if queue.is_empty() { None } else { Some(queue) };
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -4467,30 +4496,46 @@ impl Editpad {
             );
         }
 
-        // P50 外部修改提示条：指向页已被外部改动且不能静默重载
-        // （置脏页/后台页）。下标失效（页已关）时不渲染，等下次聚焦重算。
-        if let Some(idx) = self.external_change {
-            if let Some(tab) = self.tabs.get(idx) {
-                if tab.path.is_some() {
-                    body = body.push(rule::horizontal(1)).push(
-                        row![
-                            text(format!(
-                                "「{}」已被外部修改，是否重新加载？",
-                                tab.display_name()
-                            ))
+        // P50/P52 外部修改提示条：队列首页展示，聚合时带总数与「全部忽略」。
+        // 下标失效（页已关）时跳过，等下次聚焦重算。
+        if let Some(queue) = self.external_change.as_ref() {
+            if let Some(first) = queue.first().copied() {
+                if let Some(tab) = self.tabs.get(first) {
+                    if tab.path.is_some() {
+                        let total = queue.len();
+                        let mut bar = row![
+                            text(if total > 1 {
+                                format!(
+                                    "「{}」已被外部修改（共 {total} 个文件），是否重新加载？",
+                                    tab.display_name()
+                                )
+                            } else {
+                                format!(
+                                    "「{}」已被外部修改，是否重新加载？",
+                                    tab.display_name()
+                                )
+                            })
                             .size(uipx)
                             .font(uifont),
                             button(text("重新加载").size(uipx).font(uifont))
                                 .padding([4, 12])
-                                .on_press(Message::ConfirmExternalReload(idx)),
+                                .on_press(Message::ConfirmExternalReload(first)),
                             button(text("忽略").size(uipx).font(uifont))
                                 .padding([4, 12])
-                                .on_press(Message::IgnoreExternalChange(idx)),
+                                .on_press(Message::IgnoreExternalChange(first)),
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center)
-                        .padding([6, 10]),
-                    );
+                        .padding([6, 10]);
+                        if total > 1 {
+                            bar = bar.push(
+                                button(text("全部忽略").size(uipx).font(uifont))
+                                    .padding([4, 12])
+                                    .on_press(Message::IgnoreAllExternalChanges),
+                            );
+                        }
+                        body = body.push(rule::horizontal(1)).push(bar);
+                    }
                 }
             }
         }
@@ -8670,7 +8715,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
         // 聚焦：置脏页绝不静默重载，弹提示条
         dispatch(&mut app, Message::WindowFocused);
-        assert_eq!(app.external_change, Some(0));
+        assert_eq!(app.external_change, Some(vec![0]));
         let _ = app.view(); // 提示条视图可构造
 
         // 忽略 → 以磁盘现状重记戳，再次聚焦不再提示
@@ -8682,7 +8727,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 文件再次变化 → 又提示；这次选重载 → 放弃本地编辑取磁盘内容
         std::fs::write(&path, "disk v3").unwrap();
         dispatch(&mut app, Message::WindowFocused);
-        assert_eq!(app.external_change, Some(0));
+        assert_eq!(app.external_change, Some(vec![0]));
         dispatch(&mut app, Message::ConfirmExternalReload(0));
         let seq2 = app.job_seq;
         dispatch(
@@ -8698,6 +8743,103 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         );
         assert_eq!(app.cur_handle.borrow().doc.to_text(), "disk v3");
         assert!(!app.tabs[0].dirty, "重载完成后回净");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn external_change_prompt_queues_multiple_tabs() {
+        // P52 聚合：两个置脏后台页同被外部修改 → 队列按序聚合；
+        // 忽略首页自动切下一页；全部忽略一次清队
+        let dir = scratch_dir("p52-queue");
+        let (p0, p1) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&p0, "a1").unwrap();
+        std::fs::write(&p1, "b1").unwrap();
+
+        let mut app = Editpad::default();
+        // 页0：加载后置脏；页1：新开加载（保持干净，但属后台页）
+        dispatch(&mut app, Message::FileDropped(p0.clone()));
+        let s1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s1,
+                Ok((
+                    editpad_core::Document::from_str("a1"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::FileDropped(p1.clone()));
+        let s2 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s2,
+                Ok((
+                    editpad_core::Document::from_str("b1"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.active_tab, 1, "第二个打开落新页并聚焦");
+
+        // 两页同被外部修改 → 聚焦后队列 [0, 1]（活动页1干净本可静默重载，
+        // 但页0置脏在先——巡检按序扫描，页0先命中进队列；页1是干净活动页
+        // 走静默重载分支并提前返回，队列只收页0。此处钉住该优先级语义。）
+        std::fs::write(&p0, "a2").unwrap();
+        std::fs::write(&p1, "b2").unwrap();
+        dispatch(&mut app, Message::WindowFocused);
+        assert!(
+            app.active_load.is_some(),
+            "干净活动页(1)优先静默重载并提前返回"
+        );
+        let s3 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s3,
+                Ok((
+                    editpad_core::Document::from_str("b2"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        // 重载完成后再次聚焦：页1已重记戳不再命中，队列只剩页0
+        dispatch(&mut app, Message::WindowFocused);
+        assert_eq!(app.external_change, Some(vec![0]));
+        let _ = app.view();
+
+        // 忽略页0 → 队列清空；再改两页且都置脏 → 聚合 [0,1]
+        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        assert!(app.external_change.is_none());
+
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("more".into())));
+        std::fs::write(&p0, "a3").unwrap();
+        std::fs::write(&p1, "b3").unwrap();
+        dispatch(&mut app, Message::WindowFocused);
+        assert_eq!(
+            app.external_change,
+            Some(vec![0, 1]),
+            "两页同变必须聚合成队列"
+        );
+
+        // 忽略首页 → 队列切到下一页（条不消失）
+        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        assert_eq!(app.external_change, Some(vec![1]));
+        let _ = app.view();
+
+        // 全部忽略 → 清队且两页都重记戳（再次聚焦不再提示）
+        dispatch(&mut app, Message::IgnoreAllExternalChanges);
+        assert!(app.external_change.is_none());
+        dispatch(&mut app, Message::WindowFocused);
+        assert!(app.external_change.is_none(), "全部忽略后同状态不再提示");
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -244,6 +244,12 @@ pub struct EditorCore {
     /// 任何光标活动会重置为可见并刷新活动时刻，静止超时后按相位隐现。
     blink_on: bool,
     last_activity: Option<std::time::Instant>,
+    /// P53：上次闪烁相位翻转的真实时刻——淡出动画期间心跳临时加密到
+    /// 33ms 快拍，相位翻转仍按 CARET_BLINK_MS 门控，光标节奏不受影响。
+    last_blink_at: Option<std::time::Instant>,
+    /// P53：竖直滚动条最近活动时刻（滚动/滚动条交互/悬停命中区）。
+    /// 淡出判定与绘制 alpha 都以它为基准；None = 从未活动（恒隐藏）。
+    sb_activity: Option<std::time::Instant>,
     /// P38 落盘基线：最近一次已知「磁盘内容」的文档快照（rope 结构
     /// 共享克隆，O(1)）。撤销/重做后据此判断内容是否回到了已保存状态，
     /// 让 dirty 如实反映「与磁盘的差异」而不是「自保存后动过没有」。
@@ -279,6 +285,25 @@ pub const CARET_BLINK_MS: u64 = 530;
 /// 光标活动后的常显窗口（移动/输入时不受闪烁相位影响）。
 const CARET_ACTIVE_MS: u128 = 450;
 
+/// P53：竖直滚动条闲置窗——距上次滚动/滚动条交互不超过该时长保持全显。
+pub const SCROLLBAR_IDLE_MS: u32 = 900;
+/// P53：淡出动画时长（闲置后从全显线性降到隐藏）。
+pub const SCROLLBAR_FADE_MS: u32 = 300;
+/// P53：淡出动画的重绘节拍（CaretTick 常驻链在淡出期间切换到的快拍间隔）。
+pub const SCROLLBAR_FADE_TICK_MS: u64 = 33;
+
+/// P53：竖直滚动条淡出 alpha（纯函数可单测）——闲置窗内全显 1.0；其后
+/// [`SCROLLBAR_FADE_MS`] 内线性降到 0.0；再后恒 0（不回弹）。
+pub fn scrollbar_alpha(idle_ms: u32) -> f32 {
+    if idle_ms <= SCROLLBAR_IDLE_MS {
+        1.0
+    } else {
+        let remaining =
+            (SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS).saturating_sub(idle_ms);
+        remaining as f32 / SCROLLBAR_FADE_MS as f32
+    }
+}
+
 impl Default for EditorCore {
     fn default() -> Self {
         Self {
@@ -303,6 +328,9 @@ impl Default for EditorCore {
             focused: true,
             blink_on: true,
             last_activity: None,
+            last_blink_at: None,
+            // P53：boot 即全显（打开长文档时滚动条立即可用），闲置后淡出
+            sb_activity: Some(std::time::Instant::now()),
             // P38：未命名页的基线 = 初始空内容——撤销回空白即可安全关页
             saved_baseline: Some(Document::new()),
             // P42：默认未实测，走 0.5625 固定假设（既有契约不变）
@@ -1212,6 +1240,8 @@ impl EditorCore {
     pub fn scroll_by_lines(&mut self, lines: f32) {
         self.scroll_top = (self.scroll_top - lines).max(0.0);
         self.clamp_scroll();
+        // P53：滚动即活动——竖直滚动条点亮（淡出中的条立即回全显）
+        self.touch_scrollbar_activity();
     }
 
     /// 拖选时视口边缘的自动滚动量（打磨项）：
@@ -1338,6 +1368,10 @@ impl EditorCore {
             self.scroll_top = line - self.viewport_h / self.line_height() + 1.0;
         }
         self.clamp_scroll();
+        // P53：视口确实随光标移动才点亮滚动条（行内打字不无谓点亮）
+        if (self.scroll_top - first).abs() > f32::EPSILON {
+            self.touch_scrollbar_activity();
+        }
         self.ensure_visible_horizontal();
     }
 
@@ -1454,10 +1488,26 @@ impl EditorCore {
 
     // ---------- 光标闪烁（打磨项） ----------
 
-    /// 心跳：翻转闪烁相位（由应用层 ~530ms 一次的节拍驱动）。
+    /// 心跳：翻转闪烁相位（由应用层节拍驱动）。P53：按真实流逝间隔门控
+    /// ——淡出动画期间心跳临时加密到 33ms 快拍，相位翻转仍保持
+    /// ~CARET_BLINK_MS 节奏，光标闪烁不受动画驱动影响。
     pub fn tick_blink(&mut self) {
-        if self.last_activity.is_none_or(|t| t.elapsed().as_millis() >= CARET_ACTIVE_MS) {
-            self.blink_on = !self.blink_on;
+        self.tick_blink_at(std::time::Instant::now());
+    }
+
+    /// [`Self::tick_blink`] 的可注入时钟版（单测用）。
+    fn tick_blink_at(&mut self, now: std::time::Instant) {
+        let blink_due = self.last_blink_at.is_none_or(|t| {
+            now.duration_since(t).as_millis() >= CARET_BLINK_MS as u128
+        });
+        if blink_due {
+            if self
+                .last_activity
+                .is_none_or(|t| now.duration_since(t).as_millis() >= CARET_ACTIVE_MS)
+            {
+                self.blink_on = !self.blink_on;
+            }
+            self.last_blink_at = Some(now);
         }
     }
 
@@ -1475,6 +1525,41 @@ impl EditorCore {
             }
         }
         self.blink_on
+    }
+
+    // ---------- P53 竖直滚动条淡入淡出 ----------
+
+    /// 滚动/滚动条交互活动：重置竖直滚动条显示计时（淡出中的条立即回全显）。
+    pub fn touch_scrollbar_activity(&mut self) {
+        self.sb_activity = Some(std::time::Instant::now());
+    }
+
+    /// 当前竖直滚动条绘制 alpha（0 = 隐藏，1 = 全显）。
+    pub fn scrollbar_visibility(&self) -> f32 {
+        self.scrollbar_visibility_at(std::time::Instant::now())
+    }
+
+    /// [`Self::scrollbar_visibility`] 的可注入时钟版（单测用）。
+    fn scrollbar_visibility_at(&self, now: std::time::Instant) -> f32 {
+        match self.sb_activity {
+            None => 0.0,
+            Some(t) => scrollbar_alpha(now.duration_since(t).as_millis() as u32),
+        }
+    }
+
+    /// 淡出动画是否进行中（应用层 CaretTick 常驻链据此切换 33ms 快拍）。
+    pub fn scrollbar_fading(&self) -> bool {
+        self.scrollbar_fading_at(std::time::Instant::now())
+    }
+
+    fn scrollbar_fading_at(&self, now: std::time::Instant) -> bool {
+        match self.sb_activity {
+            None => false,
+            Some(t) => {
+                let e = now.duration_since(t).as_millis() as u32;
+                e > SCROLLBAR_IDLE_MS && e < SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS
+            }
+        }
     }
 
     /// 相对控件的光标矩形（供输入法定位候选框，双宽感知）。
@@ -1496,6 +1581,8 @@ impl EditorCore {
     pub fn set_viewport_height(&mut self, h: f32) {
         self.viewport_h = h.max(self.line_height());
         self.clamp_scroll();
+        // P53：几何变化（窗口缩放/字号调整）后滚动条重新点亮
+        self.touch_scrollbar_activity();
     }
 
     /// 同步视口宽度（P13；RedrawRequested 时与高度一起更新）。
@@ -2161,7 +2248,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             );
         }
 
-        // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）
+        // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）。
+        // P53：按活动淡入淡出——闲置滑块自动隐藏，不再常驻遮挡行尾；
+        // alpha≈0 时整条跳绘（含命中门控，隐藏即不可点）
         let sb = VScrollbar::measure(
             core.doc.line_count(),
             core.viewport_h,
@@ -2170,26 +2259,37 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             core.scroll_top,
         );
         if sb.needed {
-            let track_rect = Rectangle {
-                x: bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - SCROLLBAR_WIDTH,
-                y: bounds.y + sb.track_y,
-                width: SCROLLBAR_WIDTH,
-                height: sb.track_h,
-            };
-            let mut track_quad = renderer::Quad::default();
-            track_quad.bounds = track_rect;
-            track_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
-            renderer.fill_quad(track_quad, colors.scrollbar_track);
+            let sb_alpha = core.scrollbar_visibility();
+            if sb_alpha > 0.004 {
+                let track_color = Color {
+                    a: colors.scrollbar_track.a * sb_alpha,
+                    ..colors.scrollbar_track
+                };
+                let thumb_color = Color {
+                    a: colors.scrollbar_thumb.a * sb_alpha,
+                    ..colors.scrollbar_thumb
+                };
+                let track_rect = Rectangle {
+                    x: bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - SCROLLBAR_WIDTH,
+                    y: bounds.y + sb.track_y,
+                    width: SCROLLBAR_WIDTH,
+                    height: sb.track_h,
+                };
+                let mut track_quad = renderer::Quad::default();
+                track_quad.bounds = track_rect;
+                track_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
+                renderer.fill_quad(track_quad, track_color);
 
-            let thumb = sb.thumb_rect(bounds.width);
-            let mut thumb_quad = renderer::Quad::default();
-            thumb_quad.bounds = Rectangle {
-                x: bounds.x + thumb.x,
-                y: bounds.y + thumb.y,
-                ..thumb
-            };
-            thumb_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
-            renderer.fill_quad(thumb_quad, colors.scrollbar_thumb);
+                let thumb = sb.thumb_rect(bounds.width);
+                let mut thumb_quad = renderer::Quad::default();
+                thumb_quad.bounds = Rectangle {
+                    x: bounds.x + thumb.x,
+                    y: bounds.y + thumb.y,
+                    ..thumb
+                };
+                thumb_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
+                renderer.fill_quad(thumb_quad, thumb_color);
+            }
         }
 
         // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）。
@@ -2288,6 +2388,8 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
 
                 // 滚动条优先于文本命中：落在交互区则进入拖拽/轨道跳转，
                 // 不触发文本选区。垂直条优先判定，右下角归属垂直条。
+                // P53：淡出隐藏中的竖直条不拦截点击（点击落到正文）——
+                // 悬停会先点亮它（见 CursorMoved），点之前必然可见。
                 {
                     let core = self.core.borrow();
                     let sb = VScrollbar::measure(
@@ -2298,9 +2400,12 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         core.scroll_top,
                     );
                     let (local_x, local_y) = (pos.x - bounds.x, pos.y - bounds.y);
-                    if sb.hits(local_x, local_y, bounds.width) {
+                    if sb.hits(local_x, local_y, bounds.width)
+                        && core.scrollbar_visibility() > 0.05
+                    {
                         drop(core);
                         let mut core = self.core.borrow_mut();
+                        core.touch_scrollbar_activity();
                         if local_y >= sb.thumb_y && local_y <= sb.thumb_y + sb.thumb_h {
                             core.scrollbar_grab = Some(local_y - sb.thumb_y);
                         } else {
@@ -2358,6 +2463,24 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     return;
                 };
                 let mut core = self.core.borrow_mut();
+
+                // P53：悬停进入竖直滚动条命中区 → 提前点亮（淡出隐藏时
+                // 先可见再可点）；拖拽中随移动续期，条不中途消失
+                {
+                    let sb = VScrollbar::measure(
+                        core.doc.line_count(),
+                        core.viewport_h,
+                        core.line_height(),
+                        bounds.height,
+                        core.scroll_top,
+                    );
+                    let (local_x, local_y) = (pos.x - bounds.x, pos.y - bounds.y);
+                    if sb.hits(local_x, local_y, bounds.width)
+                        || core.scrollbar_grab.is_some()
+                    {
+                        core.touch_scrollbar_activity();
+                    }
+                }
 
                 // 垂直滚动条拖拽中：按抓取偏移反解 scroll_top
                 if let Some(grab) = core.scrollbar_grab {
@@ -2639,6 +2762,85 @@ mod tests {
         assert_eq!(wheel_zoom_step(-0.75, -0.25, true), (0.0, -1.0));
         // 反向增量先抵消同向累积
         assert_eq!(wheel_zoom_step(0.75, -0.25, true), (0.5, 0.0));
+    }
+
+    #[test]
+    fn scrollbar_alpha_fades_after_idle_window() {
+        // 闲置窗内（含边界）全显
+        assert_eq!(scrollbar_alpha(0), 1.0);
+        assert_eq!(scrollbar_alpha(SCROLLBAR_IDLE_MS), 1.0);
+        // 窗后线性下降：中点 ≈ 0.5，末端归零
+        let mid = scrollbar_alpha(SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS / 2);
+        assert!((mid - 0.5).abs() < 0.01, "淡出中点应约 0.5，实际 {mid}");
+        assert_eq!(
+            scrollbar_alpha(SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS),
+            0.0
+        );
+        // 之后恒 0（不回弹）
+        assert_eq!(
+            scrollbar_alpha(SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS * 10),
+            0.0
+        );
+    }
+
+    #[test]
+    fn scrollbar_visibility_touch_fade_and_refade() {
+        let mut c = core_with("line1\nline2\n");
+        let t0 = std::time::Instant::now();
+
+        // 从未活动 → 恒隐藏
+        c.sb_activity = None;
+        assert_eq!(c.scrollbar_visibility_at(t0), 0.0);
+        assert!(!c.scrollbar_fading_at(t0));
+
+        // 刚活动 → 全显且不在淡出态
+        c.sb_activity = Some(t0 - std::time::Duration::from_millis(100));
+        assert_eq!(c.scrollbar_visibility_at(t0), 1.0);
+        assert!(!c.scrollbar_fading_at(t0));
+
+        // 闲置超窗 → 淡出进行中（alpha 半程 + 动画态上报）
+        c.sb_activity = Some(
+            t0 - std::time::Duration::from_millis(
+                (SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS / 2) as u64,
+            ),
+        );
+        let mid = c.scrollbar_visibility_at(t0);
+        assert!((mid - 0.5).abs() < 0.02, "半程 alpha 应约 0.5，实际 {mid}");
+        assert!(c.scrollbar_fading_at(t0), "淡出进行中必须报告动画态");
+
+        // 淡出完成 → 隐藏且动画态结束（应用层据此停快拍）
+        c.sb_activity = Some(
+            t0 - std::time::Duration::from_millis(
+                (SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS + 50) as u64,
+            ),
+        );
+        assert_eq!(c.scrollbar_visibility_at(t0), 0.0);
+        assert!(!c.scrollbar_fading_at(t0));
+
+        // 淡出中再次活动 → 立即回全显（touch 重置计时）
+        c.touch_scrollbar_activity();
+        assert_eq!(c.scrollbar_visibility(), 1.0);
+    }
+
+    #[test]
+    fn scrolling_and_view_shifts_light_up_scrollbar() {
+        let mut c = core_with(&"x\n".repeat(200));
+        c.set_viewport_height(100.0);
+
+        // 滚轮/滚动入口点亮
+        c.sb_activity = None;
+        c.scroll_by_lines(3.0);
+        assert!(c.scrollbar_visibility() > 0.99, "滚动必须点亮滚动条");
+
+        // 光标跳转引发视口移动同样点亮（ensure_visible 的条件触点）
+        c.sb_activity = None;
+        c.apply_motion(Motion::DocEnd, false);
+        assert!(c.scrollbar_visibility() > 0.99, "视口随光标移动应点亮");
+
+        // 行内移动不改变视口 → 不点亮（打字不无谓遮挡行尾）
+        c.sb_activity = None;
+        c.apply_motion(Motion::Left, false);
+        assert_eq!(c.scrollbar_visibility(), 0.0, "视口未移动不得点亮");
     }
 
     #[test]
@@ -4257,18 +4459,25 @@ fn headless_render_shows_characters_beyond_old_viewport_bound() {
     #[test]
     fn caret_blink_phase_toggles_and_activity_forces_visible() {
         let mut c = core_with("hello");
+        let t0 = std::time::Instant::now();
         assert!(c.caret_visible(), "初始相位可见");
 
-        // 心跳翻转相位
-        c.tick_blink();
+        // 心跳翻转相位（P53 起按真实间隔门控：注入时钟逐拍推进 ~530ms）
+        c.tick_blink_at(t0);
         assert!(!c.caret_visible(), "静止期应按相位隐没");
-        c.tick_blink();
+        c.tick_blink_at(t0 + std::time::Duration::from_millis(CARET_BLINK_MS));
         assert!(c.caret_visible());
+
+        // 间隔不足一拍（P53 淡出动画的 33ms 快拍）：相位不得加速翻转
+        c.tick_blink_at(
+            t0 + std::time::Duration::from_millis(CARET_BLINK_MS + 33),
+        );
+        assert!(c.caret_visible(), "快拍不得加速相位翻转");
 
         // 活动窗口：移动光标后 450ms 内无论相位都常显
         c.poke_caret();
         assert!(c.caret_visible());
-        c.tick_blink(); // 相位翻到隐，但活动窗未过期
+        c.tick_blink_at(t0 + std::time::Duration::from_millis(CARET_BLINK_MS * 2)); // 相位翻到隐，但活动窗未过期
         assert!(c.caret_visible(), "活动窗口期内不得隐没");
     }
 
