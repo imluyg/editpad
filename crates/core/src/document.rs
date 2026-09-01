@@ -5,22 +5,106 @@
 
 use ropey::Rope;
 
+/// 行尾风格。加载时按全文统计检测主导行尾（P9），
+/// 编辑层的回车插入、粘贴归一、退格/删除的 EOL 单元语义都以它为准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineEnding {
+    /// `\n` —— Unix 风格；空文档/无换行文本/平票时的保守默认。
+    #[default]
+    Lf,
+    /// `\r\n` —— Windows 风格。
+    CrLf,
+    /// 孤立 `\r` —— 经典 Mac 风格（罕见；rope 渲染层并不把它当行界，
+    /// 仅用于归一化时不再制造混合行尾）。
+    Cr,
+}
+
+impl LineEnding {
+    /// 按全文统计检测主导行尾：CRLF / LF / CR 三种计数，多者胜；
+    /// 平票或全文没有换行时回退 [`LineEnding::Lf`]（与旧版行为一致）。
+    pub fn detect(text: &str) -> Self {
+        let (mut crlf, mut lf, mut cr) = (0usize, 0usize, 0usize);
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' => {
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                        crlf += 1;
+                    } else {
+                        cr += 1;
+                    }
+                }
+                '\n' => lf += 1,
+                _ => {}
+            }
+        }
+        if crlf > lf && crlf > cr {
+            LineEnding::CrLf
+        } else if cr > lf {
+            LineEnding::Cr
+        } else {
+            LineEnding::Lf
+        }
+    }
+
+    /// 该风格对应的换行字符串。
+    pub fn newline(self) -> &'static str {
+        match self {
+            LineEnding::Lf => "\n",
+            LineEnding::CrLf => "\r\n",
+            LineEnding::Cr => "\r",
+        }
+    }
+
+    /// 把任意来源文本里的换行（`\r\n`、`\n`、孤立 `\r`）统一改写为本风格。
+    /// 粘贴、输入法上屏、按键字符在入文前都经过这里，从源头杜绝混合行尾。
+    pub fn normalize(self, text: &str) -> String {
+        let target = self.newline();
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' => {
+                    // \r\n 是一个逻辑换行：整体消费，避免改写成两个换行
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    out.push_str(target);
+                }
+                '\n' => out.push_str(target),
+                other => out.push(other),
+            }
+        }
+        out
+    }
+}
+
 #[derive(Clone)]
 pub struct Document {
     rope: Rope,
+    /// 主导行尾（P9）：`from_str` 时自动检测；编辑层用它统一换行语义。
+    eol: LineEnding,
 }
 
 impl Document {
     pub fn new() -> Self {
         Self {
             rope: Rope::new(),
+            eol: LineEnding::Lf,
         }
     }
 
     pub fn from_str(text: &str) -> Self {
         Self {
             rope: Rope::from_str(text),
+            eol: LineEnding::detect(text),
         }
+    }
+
+    /// 文档的主导行尾（编辑层据此归一插入文本、按 EOL 单元删除）。
+    pub fn line_ending(&self) -> LineEnding {
+        self.eol
     }
 
     /// 字符数（Unicode scalar 单位，与 ropey 一致）。
@@ -145,5 +229,57 @@ mod tests {
         let snapshot = doc.clone();
         // 将来撤销栈就靠这种廉价快照实现
         let _ = snapshot;
+    }
+
+    // ---------- P9 主导行尾 ----------
+
+    #[test]
+    fn line_ending_detection_picks_dominant_style() {
+        use LineEnding::{CrLf, Cr, Lf};
+        // 空文本 / 无换行文本 → 保守默认 LF
+        assert_eq!(LineEnding::detect(""), Lf);
+        assert_eq!(LineEnding::detect("no newline at all"), Lf);
+
+        assert_eq!(LineEnding::detect("a\nb\nc"), Lf);
+        assert_eq!(LineEnding::detect("a\r\nb\r\nc"), CrLf);
+        assert_eq!(LineEnding::detect("a\rb\rc"), Cr);
+
+        // 混合行尾：多者胜
+        assert_eq!(LineEnding::detect("a\r\nb\r\nc\nd"), CrLf, "CRLF 多于 LF 应判 CRLF");
+        assert_eq!(LineEnding::detect("a\nb\nc\r\nd"), Lf, "LF 多于 CRLF 应判 LF");
+
+        // 三者平票 → 回退 LF
+        assert_eq!(LineEnding::detect("a\r\nb\nc\rd"), Lf);
+    }
+
+    #[test]
+    fn normalize_rewrites_every_eol_to_target() {
+        let mixed = "a\r\nb\nc\rd";
+        assert_eq!(LineEnding::Lf.normalize(mixed), "a\nb\nc\nd");
+        assert_eq!(LineEnding::CrLf.normalize(mixed), "a\r\nb\r\nc\r\nd");
+        assert_eq!(LineEnding::Cr.normalize(mixed), "a\rb\rc\rd");
+
+        // \r\n 必须整体消费：不得膨胀成两个换行
+        assert_eq!(LineEnding::Lf.normalize("x\r\ny"), "x\ny");
+        assert_eq!(LineEnding::CrLf.normalize("x\ny"), "x\r\ny");
+
+        // 无换行内容（含 4 字节 emoji）原样保留
+        assert_eq!(LineEnding::CrLf.normalize("中文🚀"), "中文🚀");
+        assert_eq!(LineEnding::Lf.normalize(""), "");
+    }
+
+    #[test]
+    fn from_str_detects_and_preserves_crlf_content() {
+        let doc = Document::from_str("first\r\nsecond\r\n");
+        assert_eq!(doc.line_ending(), LineEnding::CrLf);
+        // 内容字节原样保留——保存路径往返一致，不悄悄改写用户的行尾
+        assert_eq!(doc.to_text(), "first\r\nsecond\r\n");
+
+        assert_eq!(Document::from_str("a\nb\n").line_ending(), LineEnding::Lf);
+        assert_eq!(Document::new().line_ending(), LineEnding::Lf, "空文档默认 LF");
+
+        // 克隆快照（撤销栈的基础）必须带着同一行尾元数据
+        let snapshot = doc.clone();
+        assert_eq!(snapshot.line_ending(), LineEnding::CrLf);
     }
 }

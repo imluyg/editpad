@@ -11,7 +11,7 @@ pub mod saver;
 pub mod search;
 pub mod settings;
 
-pub use document::Document;
+pub use document::{Document, LineEnding};
 pub use error::CoreError;
 pub use highlight::{LazyHighlighter, StyledRun};
 pub use loader::{load_file, load_file_streaming, decode, LoadProgress, LoadedText};

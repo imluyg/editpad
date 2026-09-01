@@ -43,7 +43,8 @@ enum Message {
     CutRequested,
     /// 请求读系统剪贴板（Ctrl+V），内容经 Pasted 回来
     PasteRequested,
-    /// 剪贴板读取完成：归一换行后按普通插入入文
+    /// 剪贴板读取完成：按普通插入入文
+    /// （换行归一由 insert_str 按文档主导行尾完成，P9 起不再在 app 层预处理）
     Pasted(String),
 
     OpenRequested,
@@ -220,12 +221,6 @@ fn strings_equal(a: &str, b: &str, case_sensitive: bool) -> bool {
     }
 }
 
-/// 粘贴内容的换行归一：`\r\n` 与孤立 `\r` 统一为 `\n`。
-/// 文档内部以 `\n` 为主导行尾（P9 落地主导师行尾后此函数可下沉/退役）。
-fn normalize_paste_newlines(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
 /// P6 编码知情权：saver 只写 UTF-8，原文件若是其他编码（或带 BOM），
 /// 首次保存即发生不可逆转码 / BOM 丢失。返回需要展示的提示；None 表示无需提示。
 fn transcode_notice(original_encoding: &str) -> Option<String> {
@@ -341,11 +336,10 @@ impl Editpad {
                     .map(|content| Message::Pasted(content.unwrap_or_default()))
             }
             Message::Pasted(text) => {
-                let normalized = normalize_paste_newlines(&text);
-                if normalized.is_empty() {
+                if text.is_empty() {
                     Task::none()
                 } else {
-                    self.update(Message::Edit(EditOp::InsertText(normalized)))
+                    self.update(Message::Edit(EditOp::InsertText(text)))
                 }
             }
 
@@ -1171,6 +1165,7 @@ fn handle_key(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> 
         Key::Character(chars) => edit(EditOp::InsertText(chars.to_string())),
         Key::Named(Named::Backspace) => edit(EditOp::Backspace),
         Key::Named(Named::Delete) => edit(EditOp::Delete),
+        // P9：统一插 \n，由 insert_str 归一为文档主导行尾（CRLF 文档得 \r\n）
         Key::Named(Named::Enter) => edit(EditOp::InsertText("\n".into())),
         Key::Named(Named::Escape) => Some(Message::BarsDismissed),
 
@@ -1279,16 +1274,18 @@ mod tests {
     }
 
     #[test]
-    fn paste_newlines_are_normalized() {
-        // CRLF / 孤立 CR / 混合行尾全部归一为 \n；无行尾内容原样保留
-        assert_eq!(normalize_paste_newlines("a\r\nb\rc\n\r\nd"), "a\nb\nc\n\nd");
-        assert_eq!(normalize_paste_newlines("中文🚀"), "中文🚀");
-        assert_eq!(normalize_paste_newlines(""), "");
+    fn pasted_text_enters_document_as_dominant_eol() {
+        // P9：粘贴不再在 app 层预归一；insert_str 按文档主导行尾统一改写。
+        // CRLF 文档进来什么行尾都落成 \r\n，LF 文档落成 \n（与旧版行为一致）。
+        let mut crlf = editor::EditorCore::default();
+        crlf.reset_document(editpad_core::Document::from_str("a\r\nb"));
+        crlf.cursor = editor::CursorPos { line: 1, col: 1 }; // 文末
+        crlf.insert_str("x\r\ny\rz");
+        assert_eq!(crlf.doc.to_text(), "a\r\nbx\r\ny\r\nz");
 
-        // 归一后的文本可整体经 insert_str 入文且光标落在末尾
-        let mut c = editor::EditorCore::default();
-        c.insert_str(&normalize_paste_newlines("x\r\ny"));
-        assert_eq!(c.doc.to_text(), "x\ny");
+        let mut lf = editor::EditorCore::default();
+        lf.insert_str(&"x\r\ny\rz");
+        assert_eq!(lf.doc.to_text(), "x\ny\nz");
     }
 
     // ---------- P6 编码知情权 ----------

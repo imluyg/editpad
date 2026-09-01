@@ -193,6 +193,32 @@ fn prefix_width(text: &str, col: usize) -> f32 {
     display_cols(&text.chars().take(col).collect::<String>())
 }
 
+/// 统计待插入文本的「换行单元数」与末行列数（P9）：
+/// `\r\n` 与孤立 `\r` 也各算一次换行——旧实现 `split('\n')` 只认 `\n`，
+/// CRLF 文本入文后光标列会漂移一个字符。
+fn measure_insertion(text: &str) -> (usize, usize) {
+    let mut lines = 0usize;
+    let mut tail_cols = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                lines += 1;
+                tail_cols = 0;
+            }
+            '\n' => {
+                lines += 1;
+                tail_cols = 0;
+            }
+            _ => tail_cols += 1,
+        }
+    }
+    (lines, tail_cols)
+}
+
 impl EditorCore {
     // ---------- 字号与几何度量 ----------
 
@@ -350,7 +376,10 @@ impl EditorCore {
     }
 
     /// 在光标处插入文本（先吃掉当前选区）。支持多行文本。
+    /// P9：入文前把 `\r\n` / `\n` / 孤立 `\r` 统一归一为文档主导行尾，
+    /// 回车（插 `\n`）、输入法上屏、剪贴板粘贴共用本入口，不再产生混合行尾。
     pub fn insert_str(&mut self, text: &str) {
+        let text = self.doc.line_ending().normalize(text);
         self.snapshot();
 
         let start_offset = match self.selection_offsets() {
@@ -367,14 +396,13 @@ impl EditorCore {
         };
         self.anchor = None;
 
-        self.doc.insert(start_offset, text);
+        self.doc.insert(start_offset, &text);
         self.invalidate_highlight_from(start_offset);
 
-        // 推进光标到插入文本的末尾
-        let new_lines = text.split('\n').count();
-        let tail_cols = text.rsplit('\n').next().unwrap_or("").chars().count();
-        if new_lines > 1 {
-            self.cursor.line += new_lines - 1;
+        // 推进光标到插入文本的末尾（EOL 单元感知，CRLF 算一次换行）
+        let (new_lines, tail_cols) = measure_insertion(&text);
+        if new_lines > 0 {
+            self.cursor.line += new_lines;
             self.cursor.col = tail_cols;
         } else {
             self.cursor.col += tail_cols;
@@ -412,6 +440,20 @@ impl EditorCore {
         self.ensure_visible();
     }
 
+    /// 全文字符偏移处的字符；越界返回 None
+    /// （ropey 切片越界会 panic，探测相邻字符前必须先夹紧）。
+    fn char_at(&self, offset: usize) -> Option<char> {
+        if offset >= self.doc.text_len() {
+            return None;
+        }
+        self.doc.slice_text(offset, offset + 1).chars().next()
+    }
+
+    /// 光标偏移处是否为完整的 CRLF 换行单元（`\r\n` 相邻成对）。
+    fn is_crlf_at(&self, offset: usize) -> bool {
+        self.char_at(offset) == Some('\r') && self.char_at(offset + 1) == Some('\n')
+    }
+
     pub fn backspace(&mut self) {
         if self.delete_selection() {
             return;
@@ -421,9 +463,12 @@ impl EditorCore {
         }
         self.snapshot();
         self.move_local(Motion::Left);
-        let offset = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
-        self.doc.remove_range(offset, offset + 1);
-        self.invalidate_highlight_from(offset);
+        let start = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
+        // P9：跨行回退落在 CRLF 上时把 `\r\n` 当一个换行单元整体移除。
+        // 旧行为只删一半字符：第一下视觉无反应，第二下才真正并行的两行。
+        let end = start + 1 + usize::from(self.is_crlf_at(start));
+        self.doc.remove_range(start, end);
+        self.invalidate_highlight_from(start);
         self.ensure_visible();
     }
 
@@ -436,7 +481,9 @@ impl EditorCore {
             return;
         }
         self.snapshot();
-        self.doc.remove_range(offset, offset + 1);
+        // P9：行尾 Delete 同样按 EOL 单元处理，一下删掉整个 `\r\n`
+        let end = offset + 1 + usize::from(self.is_crlf_at(offset));
+        self.doc.remove_range(offset, end);
         self.invalidate_highlight_from(offset);
         self.ensure_visible();
     }
@@ -1142,6 +1189,8 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // P9 断言用；非测试代码只经 Document::line_ending() 间接接触该类型
+    use editpad_core::LineEnding;
 
     fn core_with(text: &str) -> EditorCore {
         let mut c = EditorCore::default();
@@ -1366,5 +1415,89 @@ mod tests {
         assert_eq!(c.ime_commit(""), ImeCommit::Consumed(None));
         assert_eq!(c.preedit, None);
         assert_eq!(c.doc.to_text(), "", "空提交不得改动文档");
+    }
+
+    // ---------- P9 CRLF 按 EOL 单元处理 ----------
+
+    #[test]
+    fn backspace_joins_crlf_lines_in_one_press() {
+        let mut c = core_with("ab\r\ncd");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.backspace();
+        // 旧实现第一下只删 \r：两行没并上，看起来像按键无反应
+        assert_eq!(c.doc.to_text(), "abcd", "一次退格必须删掉整个 \\r\\n");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+        assert_eq!(c.line_display_len(0), 4, "并行后不得残留孤立 \\r");
+
+        // 撤销一步回到并行前（快照语义不受 EOL 单元影响）
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "ab\r\ncd");
+    }
+
+    #[test]
+    fn delete_forward_removes_crlf_in_one_press() {
+        let mut c = core_with("ab\r\ncd");
+        c.cursor = CursorPos { line: 0, col: 2 }; // 行尾
+        c.delete_forward();
+        assert_eq!(c.doc.to_text(), "abcd", "一次 Delete 必须删掉整个 \\r\\n");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+
+        // 文档末尾的单个字符照常单删；越界探测不得 panic
+        c.reset_document(Document::from_str("ab\r"));
+        c.cursor = CursorPos { line: 0, col: 2 };
+        c.delete_forward();
+        assert_eq!(c.doc.to_text(), "ab", "孤立尾部 \\r 单字符删除");
+    }
+
+    #[test]
+    fn backspace_still_deletes_single_char_within_line() {
+        let mut c = core_with("abc\r\ndef");
+        c.cursor = CursorPos { line: 0, col: 3 }; // 行尾 'c' 之后
+        c.backspace();
+        assert_eq!(c.doc.to_text(), "ab\r\ndef", "行内退格不得误删行尾 CRLF");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+    }
+
+    #[test]
+    fn enter_and_paste_follow_dominant_line_ending() {
+        // CRLF 文档：回车（插 \n）与粘贴的混合行尾都归一为 \r\n
+        let mut c = core_with("a\r\nb");
+        c.cursor = CursorPos { line: 0, col: 1 }; // 'a' 之后
+        c.insert_str("\n");
+        assert_eq!(c.doc.to_text(), "a\r\n\r\nb", "回车应插入主导行尾 CRLF");
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 0 });
+        assert_eq!(c.doc.line_ending(), LineEnding::CrLf);
+
+        // 此时光标在第 1 行行首；粘贴混合行尾文本统一改写为主导行尾
+        c.insert_str("剪贴板\r\n来了\n多行");
+        assert_eq!(
+            c.doc.to_text(),
+            "a\r\n剪贴板\r\n来了\r\n多行\r\nb",
+            "粘贴的 LF/CRLF 应统一改写为主导行尾"
+        );
+        assert_eq!(c.cursor, CursorPos { line: 3, col: 2 }, "光标推进按 EOL 单元计列");
+
+        // LF 文档：CRLF 粘贴归一为 \n，行为与旧版一致
+        let mut lf = core_with("");
+        lf.insert_str("x\r\ny\rz");
+        assert_eq!(lf.doc.to_text(), "x\ny\nz", "LF 文档把 CRLF/孤立 CR 归一为 LF");
+        assert_eq!(lf.cursor, CursorPos { line: 2, col: 1 });
+
+        // 无换行内容不产生任何改动（光标先移到文末再插入）
+        let mut plain = core_with("plain");
+        plain.cursor = CursorPos { line: 0, col: 5 };
+        plain.insert_str("中文🚀");
+        assert_eq!(plain.doc.to_text(), "plain中文🚀");
+    }
+
+    #[test]
+    fn crlf_document_keeps_eol_through_undo() {
+        let mut c = core_with("l1\r\nl2\r\n");
+        c.cursor = CursorPos { line: 1, col: 2 }; // 行尾
+        c.insert_str("\n");
+        assert_eq!(c.doc.to_text(), "l1\r\nl2\r\n\r\n", "行尾回车追加一个 CRLF");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "l1\r\nl2\r\n", "撤销完整还原");
+        assert_eq!(c.doc.line_ending(), LineEnding::CrLf, "快照携带同一行尾元数据");
     }
 }
