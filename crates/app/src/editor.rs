@@ -261,6 +261,12 @@ pub struct EditorCore {
     /// 真实补充——列模型 `max_line_cols` 对分数/超宽字形可能欠估，
     /// 不补则超宽行滚不到头、光标越界。
     max_row_width_px: f32,
+    /// 缩短类编辑/撤销重做后置位：`max_line_cols` 高水位可能过估
+    /// （只升不降的既有取舍），由 [`Self::clamp_scroll_horizontal`] 按
+    /// 冷却窗惰性全量重算收敛——否则删除超宽行后水平滚动条永不消失。
+    max_cols_stale: bool,
+    /// 上次全量重算 `max_line_cols` 的时刻（限流用，见上字段）。
+    max_cols_checked: Option<std::time::Instant>,
 }
 
 /// 光标闪烁半周期。
@@ -299,6 +305,8 @@ impl Default for EditorCore {
             metric_key: None,
             row_layouts: HashMap::new(),
             max_row_width_px: 0.0,
+            max_cols_stale: false,
+            max_cols_checked: None,
         }
     }
 }
@@ -311,6 +319,10 @@ impl Default for EditorCore {
 
 /// 制表位间距（显示列）。
 const TAB_STOP_COLS: usize = 4;
+
+/// P45：`max_line_cols` 惰性收敛的冷却窗——缩短编辑后在 500ms 内最多
+/// 全量重算一次（50MB 文档约 50~100ms），连续删除不会每次付出 O(n)。
+const RECOMPUTE_MAX_COLS_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// 字符是否按「全宽（2 列）」计。
 ///
@@ -570,6 +582,10 @@ impl EditorCore {
     /// 行内第 `col` 个字符起点的真实像素 x；未注入返回 None（调用方回退
     /// 列模型 `prefix_width × char_width`）。越界 col 取行尾（与列模型
     /// 的 min(chars.count()) 口径一致）。
+    ///
+    /// P45 起生产路径改用滞后感知的 [`Self::px_of`]（update 期布局滞后
+    /// 时回退实时列模型）；本查询保留为 public API（外部兼容 + 诊断）。
+    #[allow(dead_code)]
     pub fn row_x(&self, line: usize, col: usize) -> Option<f32> {
         let xs = self.row_layouts.get(&line)?;
         let last = xs.len() - 1;
@@ -586,6 +602,30 @@ impl EditorCore {
     /// 已注入行宽的最大值（水平行程钳制的真实补充上界）。
     pub fn max_row_width_px(&self) -> f32 {
         self.max_row_width_px
+    }
+
+    /// 第 P45 轮：行内第 `col` 个字符起点的水平像素——**布局滞后感知**。
+    ///
+    /// update 期（键盘/点击事件处理）早于本帧 `layout` 注入，`row_layouts`
+    /// 里还是**上一帧的旧文本布局**：行刚变长时布局覆盖不到目标列，
+    /// 若直接取用会得到旧行尾位置——光标可见性判断失灵，超宽后新字符
+    /// 全部画在视口外，表现为「打字吞字」（P45 根因）。
+    ///
+    /// 规则：行布局新鲜（长度覆盖到目标列）用真实字形位置；滞后回退
+    /// 列模型**实时文本**计算（`text` 必须为当前文档该行文本）。draw 期
+    /// 布局恒新鲜，此函数两期通用。
+    fn px_of(&self, line: usize, text: &str, col: usize) -> f32 {
+        let col = col.min(text.chars().count());
+        match self.row_layouts.get(&line) {
+            Some(xs) if xs.len().saturating_sub(1) >= col => xs[col],
+            _ => prefix_width(text, col) * self.char_width(),
+        }
+    }
+
+    /// 水平内容宽（像素）：列模型高水位与真实行宽证据取较大者。
+    /// 滚动条行程/钳制/绘制统一走本口径，避免与真实字形位置脱节。
+    pub fn content_width_px(&self) -> f32 {
+        (self.max_line_cols as f32 * self.char_width()).max(self.max_row_width_px())
     }
 
     /// P42：注入实测列宽（控件层量得真实字形 advance 后调用）。
@@ -796,6 +836,9 @@ impl EditorCore {
         // P37：开新快照 = 上一组就此终结（删除类编辑/整体替换/非合并
         // 插入都经此处打断成组；合并插入走的是跳过本函数的路径）
         self.typing_run = None;
+        // P45：任何经快照的编辑都可能改变文档宽度结构——高水位可能
+        // 过估，标记惰性收敛（合并插入只增不减，无需标记）
+        self.max_cols_stale = true;
         self.undo_stack.push(Snapshot {
             doc: self.doc.clone(), // rope 克隆是结构共享，廉价
             cursor: self.cursor,
@@ -823,6 +866,8 @@ impl EditorCore {
         if let Some(hl) = &self.highlight {
             hl.borrow_mut().invalidate_from(0);
         }
+        // P45：撤销 = 整个文档替换，宽度结构可能缩短——标记惰性收敛
+        self.max_cols_stale = true;
         self.ensure_visible();
         true
     }
@@ -842,6 +887,8 @@ impl EditorCore {
         if let Some(hl) = &self.highlight {
             hl.borrow_mut().invalidate_from(0);
         }
+        // P45：重做同样整体替换文档——标记惰性收敛（对称 undo）
+        self.max_cols_stale = true;
         self.ensure_visible();
         true
     }
@@ -1226,12 +1273,27 @@ impl EditorCore {
         (self.viewport_w - self.gutter_width()).max(0.0)
     }
 
-    /// 水平行程钳制：左缘不出负，右缘不超出最宽行
-    /// （高水位偏大时允许滚进一小段空白，见字段注释）。
+    /// 水平行程钳制：左缘不出负，右缘不超出最宽行。
+    ///
+    /// P45：缩短类编辑/撤销重做后置 [`Self::max_cols_stale`]，这里按
+    /// 冷却窗（可重现的限流，避免 50MB 文档每次删除都 O(n) 全扫）惰性
+    /// 全量重算——`max_line_cols` 只升不降的旧取舍会让删除超宽行后
+    /// 水平滚动条永不消失。重算结果仍取「列模型 ∪ 真实行宽」。
     pub fn clamp_scroll_horizontal(&mut self) {
+        if self.max_cols_stale {
+            let now = std::time::Instant::now();
+            if self
+                .max_cols_checked
+                .is_none_or(|t| now.duration_since(t) >= RECOMPUTE_MAX_COLS_COOLDOWN)
+            {
+                self.max_cols_checked = Some(now);
+                self.recompute_max_line_cols();
+                self.max_cols_stale = false;
+            }
+        }
         // 第 40 轮：真实行宽高水位并取最大——列模型对分数/超宽字形可能
         // 欠估，不补则超宽行（emoji/全宽符号）滚不到头、光标被钳出视口
-        let content_w = (self.max_line_cols as f32 * self.char_width()).max(self.max_row_width_px());
+        let content_w = self.content_width_px();
         let max = (content_w - self.text_viewport_w()).max(0.0);
         if self.scroll_left.is_finite() {
             self.scroll_left = self.scroll_left.clamp(0.0, max);
@@ -1244,10 +1306,9 @@ impl EditorCore {
     fn ensure_visible_horizontal(&mut self) {
         let text = self.line_text(self.cursor.line);
         let col = self.cursor.col.min(text.chars().count());
-        // 第 40 轮：真实字形位置优先（与 caret_rect_relative 同口径）
-        let cx = self
-            .row_x(self.cursor.line, col)
-            .unwrap_or_else(|| prefix_width(&text, col) * self.char_width());
+        // P45：滞后感知——布局新鲜走真实字形位置，滞后回退列模型
+        // （实时文本），保证超宽打字立即滚动、不吞字
+        let cx = self.px_of(self.cursor.line, &text, col);
         let view_w = self.text_viewport_w();
         if view_w <= 0.0 {
             return;
@@ -1337,19 +1398,22 @@ impl EditorCore {
         let text = self.line_text(line);
         let rel = (x - gutter + self.scroll_left).max(0.0);
 
-        // 第 40 轮：真实字形布局命中（与绘制同源，字符边界 = 真实 x 中点，
-        // 与列模型的「左半/右半」选位语义一致）；未注入回退列模型
+        // P45：真实字形布局命中（与绘制同源，字符边界 = 真实 x 中点，
+        // 与列模型的「左半/右半」选位语义一致）；布局滞后（注入的是
+        // 上一帧旧文本，长度覆盖不到当前文本）整体回退列模型实时计算
         if let Some(xs) = self.row_layouts.get(&line) {
-            let mut col = xs.len() - 1;
-            for (k, pair) in xs.windows(2).enumerate() {
-                let mid = (pair[0] + pair[1]) * 0.5;
-                if rel < mid {
-                    col = k;
-                    break;
+            if xs.len().saturating_sub(1) >= text.chars().count() {
+                let mut col = xs.len() - 1;
+                for (k, pair) in xs.windows(2).enumerate() {
+                    let mid = (pair[0] + pair[1]) * 0.5;
+                    if rel < mid {
+                        col = k;
+                        break;
+                    }
+                    col = k + 1;
                 }
-                col = k + 1;
+                return CursorPos { line, col };
             }
-            return CursorPos { line, col };
         }
 
         let mut col = text.chars().count();
@@ -1413,10 +1477,9 @@ impl EditorCore {
     pub fn caret_rect_relative(&self) -> Rectangle {
         let text = self.line_text(self.cursor.line);
         let col = self.cursor.col.min(text.chars().count());
-        // 第 40 轮：优先真实字形位置；未注入回退列模型
-        let x_px = self
-            .row_x(self.cursor.line, col)
-            .unwrap_or_else(|| prefix_width(&text, col) * self.char_width());
+        // P45：滞后感知（同 ensure_visible_horizontal）——布局新鲜走真实
+        // 字形位置，滞后回退列模型实时计算；IME 候选框定位同样受益
+        let x_px = self.px_of(self.cursor.line, &text, col);
         Rectangle {
             x: self.gutter_width() + x_px - self.scroll_left,
             y: (self.cursor.line as f32 - self.scroll_top) * self.line_height(),
@@ -1909,15 +1972,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     continue;
                 }
                 let x0 = core
-                    .row_x(line, start_col.min(text.chars().count()))
-                    .unwrap_or_else(|| {
-                        prefix_width(&text, start_col.min(text.chars().count())) * char_w
-                    });
+                    .px_of(line, &text, start_col.min(text.chars().count()));
                 let x1 = core
-                    .row_x(line, end_col.min(text.chars().count()))
-                    .unwrap_or_else(|| {
-                        prefix_width(&text, end_col.min(text.chars().count())) * char_w
-                    });
+                    .px_of(line, &text, end_col.min(text.chars().count()));
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1988,9 +2045,7 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     if segment.is_empty() {
                         continue;
                     }
-                    let offset_px = core
-                        .row_x(line, run.start_col)
-                        .unwrap_or_else(|| prefix_width(&text, run.start_col) * char_w);
+                    let offset_px = core.px_of(line, &text, run.start_col);
                     let [r, g, b, a] = run.color;
                     renderer.fill_text(
                         core_text::Text {
@@ -2103,9 +2158,10 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             renderer.fill_quad(thumb_quad, colors.scrollbar_thumb);
         }
 
-        // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）
+        // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）。
+        // P45：行程统一走「列模型 ∪ 真实行宽」口径，与滚动钳制一致
         let hsb = HScrollbar::measure(
-            core.max_line_cols as f32 * char_w,
+            core.content_width_px(),
             (bounds.width - gutter_w).max(0.0),
             bounds.width,
             core.scroll_left,
@@ -2224,9 +2280,10 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                         return;
                     }
 
-                    // 水平滚动条（P13）：下缘窄带，交互语义与垂直条对称
+                    // 水平滚动条（P13）：下缘窄带，交互语义与垂直条对称。
+                    // P45：行程口径与钳制一致（列模型 ∪ 真实行宽）
                     let hsb = HScrollbar::measure(
-                        core.max_line_cols as f32 * core.char_width(),
+                        core.content_width_px(),
                         (bounds.width - core.gutter_width()).max(0.0),
                         bounds.width,
                         core.scroll_left,
@@ -2285,10 +2342,11 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     return;
                 }
 
-                // 水平滚动条拖拽中（P13）：按抓取偏移反解 scroll_left
+                // 水平滚动条拖拽中（P13）：按抓取偏移反解 scroll_left。
+                // P45：行程口径与钳制一致（列模型 ∪ 真实行宽）
                 if let Some(grab) = core.hscrollbar_grab {
                     let hsb = HScrollbar::measure(
-                        core.max_line_cols as f32 * core.char_width(),
+                        core.content_width_px(),
                         (bounds.width - core.gutter_width()).max(0.0),
                         bounds.width,
                         core.scroll_left,
@@ -2429,9 +2487,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                     mouse::Interaction::Grab
                 };
             }
-            // 水平滚动条（P13）同款指针语义
+            // 水平滚动条（P13）同款指针语义（行程口径见拖拽路径）
             let hsb = HScrollbar::measure(
-                core.max_line_cols as f32 * core.char_width(),
+                core.content_width_px(),
                 (bounds.width - core.gutter_width()).max(0.0),
                 bounds.width,
                 core.scroll_left,
@@ -3178,6 +3236,132 @@ mod tests {
         // 与旧 LINE_HEIGHT/CHAR_WIDTH 常量完全一致，保证默认观感不变
         assert_eq!(c.line_height(), 22.0);
         assert_eq!(c.char_width(), 9.0);
+    }
+
+    // ---------- P45：超宽打字的滚动即时性与滚动条收敛 ----------
+
+    /// P45 回归 1：布局滞后（上一帧旧文本注入）时，光标水平位置必须回退
+    /// 列模型实时计算——否则超宽后新字符画在视口外（吞字）。
+    #[test]
+    fn typing_beyond_viewport_scrolls_immediately_despite_stale_layout() {
+        let mut c = core_with("short");
+        c.set_viewport_width(260.0); // 视口窄，容纳约 20 字符
+        // 模拟「上一帧注入的是短文本布局」：行内容已变长、布局滞后
+        c.set_row_layout(0, vec![0.0, 9.0, 18.0]); // 旧布局（2 字符 + 行尾）
+
+        // 光标移到行尾并输入 40 字符（远超视口）
+        let text = "x".repeat(40);
+        c.cursor = CursorPos { line: 0, col: 5 };
+        c.insert_str(&text); // 内部 ensure_visible → px_of 滞后回退列模型
+
+        // 光标必须仍在视口内（行尾光标右缘允许探出内容末端 2px——
+        // 通用编辑器语义：贴行尾绘制；clamp 以内容宽为上限截停滚动）
+        let caret = c.caret_rect_relative();
+        assert!(
+            caret.x >= 0.0 && caret.x <= 260.0,
+            "光标左缘必须仍在视口内（吞字回归），x={}",
+            caret.x
+        );
+        let view_w = 260.0 - c.gutter_width();
+        // 期望滚动 = ensure 目标（cx−view_w+2）与内容宽上限（405−view_w）取小
+        let expect_scroll =
+            ((405.0 - view_w + CARET_WIDTH).max(0.0)).min((405.0 - view_w).max(0.0));
+        assert!(
+            (c.scroll_left - expect_scroll).abs() < 1e-3,
+            "视口应紧随光标右移：{}/{}",
+            c.scroll_left,
+            expect_scroll
+        );
+    }
+
+    /// P45 回归 2：`px_of` 布局新鲜走真实字形位置、滞后回退列模型。
+    #[test]
+    fn px_of_prefers_fresh_layout_and_falls_back_when_stale() {
+        let mut c = core_with("短行abcX");
+        c.set_row_layout(0, vec![0.0, 16.0, 24.0, 32.0, 40.0, 48.0, 56.0]);
+        // 布局新鲜（覆盖全部 6 字符 + 行尾）：真实字形位置
+        assert_eq!(c.px_of(0, "短行abcX", 1), 16.0);
+        assert_eq!(c.px_of(0, "短行abcX", 3), 32.0);
+        assert_eq!(c.px_of(0, "短行abcX", 6), 56.0, "行尾 = 第 6 字符后");
+        // 越界列按行文本长度夹紧（col 5 = 第 5 字符后 = 48）
+        assert_eq!(c.px_of(0, "短行abcX", 99), 56.0);
+        // 文本变长但布局未刷新（滞后）：回退列模型实时文本
+        assert_eq!(
+            c.px_of(0, "短行abcXXXX", 10),
+            prefix_width("短行abcXXXX", 10) * c.char_width()
+        );
+    }
+
+    /// P45 回归 3：点击命中在布局滞后时回退列模型（点新字符不落旧行尾）。
+    #[test]
+    fn hit_test_falls_back_when_layout_stale() {
+        // 布局滞后：注入的是旧文本（3 字符）布局，文档当前 6 字符
+        let mut c = core_with("abcdef");
+        c.set_viewport_height(200.0);
+        c.set_row_layout(0, vec![0.0, 9.0, 18.0, 27.0]); // 旧布局（3 字符+行尾）
+        let gutter = c.gutter_width();
+        // 第 6 字符左半区（x∈[45,49.5)）：滞后回退列模型 → col 5
+        let hit = c.hit_test(gutter + 49.0, 0.0);
+        assert_eq!(hit, CursorPos { line: 0, col: 5 });
+        // 行尾之后：夹紧新文本行尾（6）
+        let hit_tail = c.hit_test(gutter + 100.0, 0.0);
+        assert_eq!(hit_tail, CursorPos { line: 0, col: 6 });
+        // 布局新鲜（6 字符布局注入）后同一点走真实路径，结果一致
+        c.set_row_layout(0, vec![0.0, 9.0, 18.0, 27.0, 36.0, 45.0, 54.0]);
+        let hit2 = c.hit_test(gutter + 49.0, 0.0);
+        assert_eq!(hit2, CursorPos { line: 0, col: 5 }, "布局新鲜走真实路径");
+    }
+
+    /// P45 回归 4：缩短类编辑后 `max_line_cols` 过冷却窗收敛——水平滚动条
+    /// 不会常驻不消（旧取舍：只升不降）。
+    #[test]
+    fn max_line_cols_converges_after_shrinking_edits() {
+        let mut c = core_with(&format!("{}\n短", "x".repeat(100)));
+        c.set_viewport_width(400.0);
+        assert!(c.max_line_cols >= 100, "长行抬高水位");
+
+        // 删除 1 字符：ensure_visible→clamp 链上 stale 首次触发即收敛
+        // （checked=None 视为已过冷却窗）
+        c.cursor = CursorPos { line: 0, col: 100 };
+        c.backspace();
+        assert_eq!(c.max_line_cols, 99, "删除后水位即刻收敛到 99");
+        assert!(!c.max_cols_stale, "收敛后清除标记");
+
+        // 同一冷却窗内再删：限流生效，不立即全量重算（50MB 文档防每删
+        // 一次 O(n)）——水位暂保持 99（过估 1 列，滚动条宽度误差可忽略）
+        c.cursor = CursorPos { line: 0, col: 99 };
+        c.backspace();
+        assert!(c.max_cols_stale, "冷却窗内仍保持待收敛标记");
+        assert!(c.max_line_cols >= 98, "限流期内不重算（旧高水位暂存）");
+
+        // 越过冷却窗后任一钳制路径触发全量重算 → 收敛
+        c.max_cols_checked = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        c.clamp_scroll_horizontal();
+        assert!(!c.max_cols_stale, "收敛后清除标记");
+        assert_eq!(c.max_line_cols, 98, "最宽行 = 收缩后的 98 字符行");
+
+        // 整文档替换为短内容（再经编辑路径）→ 收敛到 2 列
+        c.cursor = CursorPos { line: 0, col: 1 };
+        c.select_all();
+        c.replace_selection("短");
+        c.max_cols_checked = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        c.clamp_scroll_horizontal();
+        assert_eq!(c.max_line_cols, 2, "「短」= 2 列");
+
+        // 再输入长内容：水位随输入即时抬高（不影响即时滚动行为）
+        c.cursor = CursorPos { line: 0, col: 1 };
+        c.insert_str(&"y".repeat(50));
+        assert!(c.max_line_cols >= 50);
+    }
+
+    /// P45 回归 5：水平行程统一口径——真实行宽证据并入行程上限。
+    #[test]
+    fn content_width_merges_column_highwater_and_real_rows() {
+        let mut c = core_with("a");
+        c.set_row_layout(0, vec![0.0, 200.0]); // 注入超宽真实行（如全宽符号）
+        assert_eq!(c.content_width_px(), 200.0, "真实行宽接管行程");
+        c.clear_row_layouts();
+        assert_eq!(c.content_width_px(), c.max_line_cols as f32 * c.char_width(), "无注入回退列模型");
     }
 
     #[test]
