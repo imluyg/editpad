@@ -13,6 +13,7 @@ pub(crate) mod syntaxes;
 pub mod saver;
 pub mod search;
 pub mod settings;
+pub mod snapshot;
 
 pub use document::{Document, LineEnding};
 pub use error::CoreError;
@@ -25,4 +26,8 @@ pub use search::{
     find_all, find_all_document, next_from, prev_from, replace_all, replace_all_document,
     ascii_case_eq, MatchPos,
 };
-pub use settings::Settings;
+pub use settings::{Settings, EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
+pub use snapshot::{
+    clear_session, enforce_quota, read_manifest, read_page, snapshot_dir, write_session,
+    SessionManifest, SessionPage, SessionTab, HEARTBEAT_MAX_PAGE_BYTES, SNAPSHOT_QUOTA_BYTES,
+};

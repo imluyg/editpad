@@ -927,6 +927,13 @@ impl Editpad {
 
     fn new() -> (Self, Task<Message>) {
         let settings = editpad_core::Settings::load();
+        // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
+        // （对齐 P20「记住最近文件」先例）
+        if !settings.enable_snapshots {
+            if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
+                editpad_core::snapshot::clear_session(&dir);
+            }
+        }
         let dark_mode = settings.is_dark();
         // 设置里的字号可能未归一（旧配置/手改），boot 时按同一规则 clamp
         let font_size = editor::normalize_font_size(settings.font_size);
@@ -1122,8 +1129,16 @@ impl Editpad {
                 // 落盘后文件已是纯 UTF-8，标签同步归一（避免后续保存重复提示）
                 self.tab_mut().encoding_label = "UTF-8".to_owned();
                 if self.pending_close {
-                    // 落盘确认后才真正关窗
+                    // 落盘确认后才真正关窗。P29：保存的是活动页，
+                    // 其余置脏页走快照直退（不再二次弹窗），快照失败才降级
                     self.pending_close = false;
+                    if self.settings.enable_snapshots
+                        && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT
+                    {
+                        if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
+                            return self.exit_via_snapshot(&dir);
+                        }
+                    }
                     return self.close_window();
                 }
                 Task::none()
@@ -1159,15 +1174,7 @@ impl Editpad {
 
             // ---------- 关闭确认 ----------
             Message::CloseRequested(id) => {
-                // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
-                self.main_window = Some(id);
-                // P21：任一标签页置脏即弹确认（聚合口径）
-                if self.any_dirty() {
-                    self.confirm_visible = true;
-                    Task::none()
-                } else {
-                    self.close_window()
-                }
+                self.handle_close_request(id, editpad_core::snapshot::snapshot_dir())
             }
             Message::ConfirmSaveAndClose => {
                 self.confirm_visible = false;
@@ -1179,12 +1186,7 @@ impl Editpad {
                 }
             }
             Message::DiscardAndClose => {
-                // P21：放弃关闭 = 全部标签页的未保存标记一并放弃
-                for tab in &mut self.tabs {
-                    tab.dirty = false;
-                }
-                self.confirm_visible = false;
-                self.close_window()
+                self.discard_all_and_close(editpad_core::snapshot::snapshot_dir())
             }
             Message::CancelClose => {
                 self.confirm_visible = false;
@@ -1812,6 +1814,98 @@ impl Editpad {
     /// 设置里归一后的当前字号（显示与按钮可用性判断都用它）。
     fn display_font_size(&self) -> f32 {
         editor::normalize_font_size(self.settings.font_size)
+    }
+
+    /// 「放弃更改并关闭」：P21 聚合放弃 + P29 连快照一起丢
+    /// （§3 P29 第 4 条——不清场的话，下次启动会把已放弃的内容
+    /// 当会话恢复回来）。`snapshot_dir` 注入点同 [`Self::handle_close_request`]。
+    fn discard_all_and_close(&mut self, snapshot_dir: Option<PathBuf>) -> Task<Message> {
+        // P21：放弃关闭 = 全部标签页的未保存标记一并放弃
+        for tab in &mut self.tabs {
+            tab.dirty = false;
+        }
+        self.confirm_visible = false;
+        if self.settings.enable_snapshots {
+            if let Some(dir) = snapshot_dir {
+                editpad_core::snapshot::clear_session(&dir);
+            }
+        }
+        self.close_window()
+    }
+
+    // ---------- 关窗流（P29 快照直退） ----------
+
+    /// 关窗请求处置：快照直退的前提 = 总开关开启 + 模式为快照 + 快照目录
+    /// 可用；任一不满足即回退旧行为（置脏弹确认条 / 干净直接关）。
+    ///
+    /// `snapshot_dir` 由调用方解析传入——测试注入项目内目录，
+    /// 避免触碰真实 %APPDATA%（None = 无目录可用，功能自动降级）。
+    fn handle_close_request(&mut self, id: window::Id, snapshot_dir: Option<PathBuf>) -> Task<Message> {
+        // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
+        self.main_window = Some(id);
+        if !self.settings.enable_snapshots
+            || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
+        {
+            return self.confirm_or_close();
+        }
+        match snapshot_dir {
+            Some(dir) => self.exit_via_snapshot(&dir),
+            None => self.confirm_or_close(),
+        }
+    }
+
+    /// 旧关窗行为（P29 前的原语义）：任一标签页置脏即弹确认（聚合口径）。
+    fn confirm_or_close(&mut self) -> Task<Message> {
+        if self.any_dirty() {
+            self.confirm_visible = true;
+            Task::none()
+        } else {
+            self.close_window()
+        }
+    }
+
+    /// P29 退出零询问：全部置脏页写内容快照 → 清单提交 → 直接关窗。
+    ///
+    /// 同步执行——关窗瞬间阻塞 UI 数百毫秒量级（50MB 分块写 ~200ms），
+    /// 换取「快照必然反映最终状态」的无竞话语义；窗口即将关闭，用户无感。
+    /// 干净页只记元数据（路径/光标/滚动），不产生内容文件；
+    /// 失败降级：回退旧确认条（数据仍在内存不丢），状态栏留原因。
+    fn exit_via_snapshot(&mut self, dir: &Path) -> Task<Message> {
+        let pages: Vec<editpad_core::snapshot::SessionPage> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let ed = t.editor.borrow();
+                editpad_core::snapshot::SessionPage {
+                    tab: editpad_core::snapshot::SessionTab {
+                        path: t.path.as_ref().map(|p| p.display().to_string()),
+                        untitled_num: t.untitled_num,
+                        dirty: t.dirty,
+                        file: None,
+                        cursor_line: ed.cursor.line,
+                        cursor_col: ed.cursor.col,
+                        scroll_top: ed.scroll_top,
+                        scroll_left: ed.scroll_left,
+                    },
+                    doc: ed.doc.clone(),
+                }
+            })
+            .collect();
+        match editpad_core::snapshot::write_session(
+            dir,
+            &pages,
+            self.active_tab,
+            self.untitled_next,
+        ) {
+            Ok(_) => {
+                self.status.clear();
+                self.close_window()
+            }
+            Err(error) => {
+                self.status = format!("会话快照失败:{error}");
+                self.confirm_or_close()
+            }
+        }
     }
 
     /// 关闭主窗口；id 来自 close_requests 订阅的捕获。
@@ -2598,6 +2692,8 @@ mod tests {
     #[test]
     fn window_close_confirms_when_any_background_tab_is_dirty() {
         let mut app = Editpad::default();
+        // P29 起默认快照直退；本测试钉住「每次询问」模式的聚合确认口径
+        app.settings.exit_mode = editpad_core::EXIT_MODE_ASK.to_owned();
         dispatch(&mut app, Message::Edit(EditOp::InsertText("make dirty".into())));
         dispatch(&mut app, Message::NewTab); // 切到干净的新页
 
@@ -2760,8 +2856,11 @@ mod tests {
     #[test]
     fn close_during_load_exits_without_confirm_bar_or_stuck_state() {
         // 加载中关窗：dirty 必为 false（打开确认已清），应走直接关窗路径，
-        // 不弹未保存确认条、不残留 pending 状态
+        // 不弹未保存确认条、不残留 pending 状态。
+        // P29：快照直退路径有专门测试（注入目录），此处关掉开关钉住降级行为，
+        // 同时避免测试触碰真实 %APPDATA%。
         let mut app = Editpad::default();
+        app.settings.enable_snapshots = false;
         dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/big.log")));
         assert!(app.active_load.is_some());
         assert!(!app.tab().dirty);
@@ -2781,6 +2880,166 @@ mod tests {
             Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
         );
         assert!(app.active_load.is_none());
+    }
+
+    // ---------- P29 会话快照直退（关窗状态机） ----------
+
+    /// 项目内落盘目录：快照测试绝不触碰真实 %APPDATA%。
+    fn snapshot_scratch_dir(tag: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("app-p29-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn snapshot_exit_writes_session_and_closes_without_confirm() {
+        let dir = snapshot_scratch_dir("exit");
+        let mut app = Editpad::default();
+
+        // 页 0：未命名页，已编辑置脏（未命名页正是 auto-save 的盲区）
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("草稿内容\r\n第二行".into())));
+        // 页 1：命名干净页——只记元数据不写内容文件
+        let mut named = Tab::empty();
+        named.path = Some(PathBuf::from("C:/work/notes.md"));
+        app.tabs.push(named);
+
+        let id = iced::window::Id::unique();
+        let _ = app.handle_close_request(id, Some(dir.clone()));
+
+        assert!(!app.confirm_visible, "快照直退零询问");
+        assert_eq!(app.main_window, Some(id));
+
+        // 清单完整落盘且可解析
+        let manifest = editpad_core::snapshot::read_manifest(&dir)
+            .expect("关窗后必须有可解析的会话清单");
+        assert!(manifest.clean_exit, "正常退出必须带收尾标记");
+        assert_eq!(manifest.tabs.len(), 2);
+        assert_eq!(manifest.active, 0);
+        assert_eq!(manifest.next_untitled, app.untitled_next);
+
+        // 置脏未命名页：序号延续 + 内容逐字回来
+        // （插入文本经 P9 归一为文档主导行尾 LF;CRLF 保真已由 core 测试钉住）
+        let t0 = &manifest.tabs[0];
+        assert!(t0.dirty);
+        assert_eq!(t0.path, None);
+        assert_eq!(t0.untitled_num, Some(1));
+        let doc = editpad_core::snapshot::read_page(&dir, t0).expect("置脏页必须有快照");
+        assert_eq!(doc.to_text(), "草稿内容\n第二行");
+
+        // 干净命名页：路径记住、无内容文件
+        let t1 = &manifest.tabs[1];
+        assert!(!t1.dirty);
+        assert_eq!(t1.path.as_deref(), Some("C:/work/notes.md"));
+        assert_eq!(t1.file, None);
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn snapshot_exit_captures_cursor_and_scroll_positions() {
+        let dir = snapshot_scratch_dir("cursor");
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("a\nb\nc\n".into())));
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.jump_to_line(3); // 跳到末行
+            ed.scroll_top = 7.5;
+            ed.scroll_left = 2.0;
+        }
+        let _ = app.handle_close_request(iced::window::Id::unique(), Some(dir.clone()));
+
+        let manifest = editpad_core::snapshot::read_manifest(&dir).unwrap();
+        let t0 = &manifest.tabs[0];
+        assert_eq!(t0.cursor_line, 2, "光标行（0 基）必须被记录");
+        assert!((t0.scroll_top - 7.5).abs() < f32::EPSILON);
+        assert!((t0.scroll_left - 2.0).abs() < f32::EPSILON);
+
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn disabled_or_ask_mode_falls_back_to_confirm_bar_without_writes() {
+        let dir = snapshot_scratch_dir("fallback");
+        fs::create_dir_all(&dir).unwrap();
+
+        // 开关关闭 + 置脏 → 旧确认条，且磁盘上什么都没写
+        let mut off = Editpad::default();
+        off.settings.enable_snapshots = false;
+        dispatch(&mut off, Message::Edit(EditOp::InsertText("x".into())));
+        let _ = off.handle_close_request(iced::window::Id::unique(), Some(dir.clone()));
+        assert!(off.confirm_visible, "开关关闭必须回退旧确认条");
+        assert!(
+            editpad_core::snapshot::read_manifest(&dir).is_none(),
+            "降级路径不得写任何快照"
+        );
+
+        // 模式为「每次询问」+ 置脏 → 同样回退
+        let mut ask = Editpad::default();
+        ask.settings.exit_mode = editpad_core::EXIT_MODE_ASK.to_owned();
+        dispatch(&mut ask, Message::Edit(EditOp::InsertText("y".into())));
+        let _ = ask.handle_close_request(iced::window::Id::unique(), Some(dir.clone()));
+        assert!(ask.confirm_visible);
+        assert!(editpad_core::snapshot::read_manifest(&dir).is_none());
+
+        // 目录不可用（None）→ 功能自动降级，同样回退确认条
+        let mut nodir = Editpad::default();
+        dispatch(&mut nodir, Message::Edit(EditOp::InsertText("z".into())));
+        let _ = nodir.handle_close_request(iced::window::Id::unique(), None);
+        assert!(nodir.confirm_visible, "无快照目录时必须降级而不是丢数据");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_failure_degrades_to_confirm_bar_with_status_reason() {
+        // 用一个普通文件冒充快照目录 → create_dir_all 必败
+        let dir = snapshot_scratch_dir("fail");
+        fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        fs::write(&dir, "").unwrap();
+
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText(" precious ".into())));
+        let _ = app.handle_close_request(iced::window::Id::unique(), Some(dir.clone()));
+
+        assert!(app.confirm_visible, "快照失败必须降级回确认条保住数据");
+        assert!(
+            app.status.contains("会话快照失败"),
+            "失败原因要留在状态栏:{:?}",
+            app.status
+        );
+        assert!(
+            editpad_core::snapshot::read_manifest(&dir).is_none(),
+            "失败的提交不得产生清单"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discard_and_close_clears_snapshot_area() {
+        let dir = snapshot_scratch_dir("discard");
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("will discard".into())));
+        // 先正常快照一次（模拟上一轮退出留下的会话记录）
+        let _ = app.handle_close_request(iced::window::Id::unique(), Some(dir.clone()));
+        assert!(editpad_core::snapshot::read_manifest(&dir).is_some());
+
+        // 新会话里用户选择「放弃更改」→ 快照区必须一并清空，
+        // 否则下次启动会把已放弃的内容当会话恢复回来
+        let mut app2 = Editpad::default();
+        dispatch(&mut app2, Message::Edit(EditOp::InsertText("new session".into())));
+        let _ = app2.discard_all_and_close(Some(dir.clone()));
+        assert!(!app2.confirm_visible && !app2.any_dirty());
+        assert!(
+            editpad_core::snapshot::read_manifest(&dir).is_none(),
+            "放弃语义 = 连快照一起丢"
+        );
+        assert!(!dir.exists(), "清场应删除整个快照目录");
+
+        // 开关关闭时放弃不清场（本来就没有快照承诺）
+        let mut off = Editpad::default();
+        off.settings.enable_snapshots = false;
+        let _ = off.discard_all_and_close(Some(dir.clone()));
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

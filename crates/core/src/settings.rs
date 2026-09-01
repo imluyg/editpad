@@ -45,6 +45,15 @@ pub struct Settings {
     /// 自动保存防抖秒数：加载时收敛到 `[1, 60]`。
     #[serde(default = "default_autosave_delay_secs")]
     pub autosave_delay_secs: u32,
+    /// 会话快照总开关（P29，隐私对齐 P20 先例）：明文快照落盘必须可一键关闭。
+    /// 关闭后退出回旧确认条行为；加载/启动时清空存量快照区。
+    #[serde(default = "default_true")]
+    pub enable_snapshots: bool,
+    /// 关窗行为（P29）：[`EXIT_MODE_SNAPSHOT`] = 置脏页写快照后直接退出、
+    /// 零询问（默认）；[`EXIT_MODE_ASK`] = 每次弹「未保存确认条」旧行为。
+    /// 非法值在加载时归一为快照直退。
+    #[serde(default = "default_exit_mode")]
+    pub exit_mode: String,
 }
 
 // 手写 Default 而非 derive：f32/String 的派生默认值（0.0 / ""）不是合法偏好，
@@ -58,6 +67,8 @@ impl Default for Settings {
             remember_recent_files: true,
             autosave_enabled: true,
             autosave_delay_secs: DEFAULT_AUTOSAVE_DELAY_SECS,
+            enable_snapshots: true,
+            exit_mode: EXIT_MODE_SNAPSHOT.to_string(),
         }
     }
 }
@@ -67,6 +78,11 @@ pub const DEFAULT_AUTOSAVE_DELAY_SECS: u32 = 2;
 /// 防抖秒数允许范围（闭区间），越界值加载时被 clamp。
 pub const MIN_AUTOSAVE_DELAY_SECS: u32 = 1;
 pub const MAX_AUTOSAVE_DELAY_SECS: u32 = 60;
+
+/// 关窗模式（P29）：快照直退——置脏页写快照后直接退出，零询问。
+pub const EXIT_MODE_SNAPSHOT: &str = "snapshot";
+/// 关窗模式（P29）：旧行为——置脏即弹「未保存确认条」逐次询问。
+pub const EXIT_MODE_ASK: &str = "ask";
 
 /// `#[serde(default)]` 用：缺字段时的主题默认值。
 fn default_theme() -> String {
@@ -86,6 +102,11 @@ fn default_true() -> bool {
 /// `#[serde(default)]` 用：P18 防抖秒数缺字段时的默认值。
 fn default_autosave_delay_secs() -> u32 {
     DEFAULT_AUTOSAVE_DELAY_SECS
+}
+
+/// `#[serde(default)]` 用：P29 关窗模式缺字段时的默认值（快照直退）。
+fn default_exit_mode() -> String {
+    EXIT_MODE_SNAPSHOT.to_string()
 }
 
 impl Settings {
@@ -119,6 +140,10 @@ impl Settings {
         self.autosave_delay_secs = self
             .autosave_delay_secs
             .clamp(MIN_AUTOSAVE_DELAY_SECS, MAX_AUTOSAVE_DELAY_SECS);
+        // P29：关窗模式只认两个规范值，手改/旧文件非法值归一为快照直退
+        if self.exit_mode != EXIT_MODE_SNAPSHOT && self.exit_mode != EXIT_MODE_ASK {
+            self.exit_mode = EXIT_MODE_SNAPSHOT.to_string();
+        }
     }
 
     /// 当前是否为深色主题（仅规范值 `"dark"` 视为深色）。
@@ -445,6 +470,57 @@ mod tests {
         let huge = dir.join("huge.toml");
         fs::write(&huge, "autosave_delay_secs = 9999\n").unwrap();
         assert_eq!(Settings::load_from(&huge).autosave_delay_secs, 60);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P29 会话快照设置 ----------
+
+    #[test]
+    fn snapshot_settings_default_on_with_snapshot_exit_and_legacy_compat() {
+        let s = Settings::default();
+        assert!(s.enable_snapshots, "快照默认开启（P30/P31 的前提底座）");
+        assert_eq!(s.exit_mode, EXIT_MODE_SNAPSHOT, "默认快照直退零询问");
+
+        // 旧 config.toml 缺 P29 字段 → 同样得到默认值
+        let dir = scratch_dir("p29-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "theme = \"dark\"\n").unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(loaded.enable_snapshots);
+        assert_eq!(loaded.exit_mode, EXIT_MODE_SNAPSHOT);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exit_mode_normalized_and_legal_values_preserved() {
+        let dir = scratch_dir("p29-normalize");
+        fs::create_dir_all(&dir).unwrap();
+
+        // 非法值归一为快照直退
+        let weird = dir.join("weird.toml");
+        fs::write(&weird, "exit_mode = \"never\"\n").unwrap();
+        assert_eq!(Settings::load_from(&weird).exit_mode, EXIT_MODE_SNAPSHOT);
+
+        // 合法的「每次询问」原样保留
+        let ask = dir.join("ask.toml");
+        fs::write(&ask, format!("exit_mode = \"{EXIT_MODE_ASK}\"\n")).unwrap();
+        assert_eq!(Settings::load_from(&ask).exit_mode, EXIT_MODE_ASK);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_settings_roundtrip() {
+        let mut s = Settings::default();
+        s.enable_snapshots = false;
+        s.exit_mode = EXIT_MODE_ASK.to_string();
+
+        let dir = scratch_dir("p29-roundtrip");
+        let path = dir.join("config.toml");
+        s.save_to(&path).expect("保存应成功");
+        assert_eq!(Settings::load_from(&path), s, "P29 字段必须参与 roundtrip");
 
         fs::remove_dir_all(&dir).ok();
     }
