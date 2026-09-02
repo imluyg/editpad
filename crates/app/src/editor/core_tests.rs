@@ -3056,6 +3056,22 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert!(!h.clear_block(), "二次清除返回 false");
     }
 
+    #[test]
+    fn cursor_offset_is_full_document_char_index() {
+        // 第 69 轮状态栏「位置」：全文字符偏移（CRLF 的 \r 计 1）
+        let mut c = core_with("ab\ncd\r\nef");
+        c.cursor = CursorPos { line: 0, col: 1 };
+        assert_eq!(c.cursor_offset(), 1);
+        c.cursor = CursorPos { line: 1, col: 2 };
+        // 行0 "ab\n"=3 + 行1 "cd" 前 2 = 5
+        assert_eq!(c.cursor_offset(), 5);
+        c.cursor = CursorPos { line: 2, col: 2 };
+        // 3 + ("cd\r\n"=4) + 2 = 9
+        assert_eq!(c.cursor_offset(), 9);
+        // 文档尾 = 总字符数
+        assert_eq!(c.cursor_offset(), c.doc.text_len());
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，

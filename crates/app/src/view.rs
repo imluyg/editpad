@@ -1,10 +1,10 @@
 use super::*;
 use iced::widget::column;
 use super::settings_ui::{
-    chrome_button_style, chrome_menu_item_style, chrome_nav_button_style, settings_card_size,
-    settings_card_style, settings_checkbox_style, settings_colors, settings_divider,
-    settings_input_style, settings_rows, settings_search_hit, settings_separator, FONT_ROW_KEY,
-    SettingsPage, SettingsRow,
+    chrome_button_style, chrome_menu_item_style, chrome_nav_button_style, menu_bar_open_style,
+    settings_card_size, settings_card_style, settings_checkbox_style, settings_colors,
+    settings_divider, settings_input_style, settings_rows, settings_search_hit,
+    settings_separator, FONT_ROW_KEY, SettingsPage, SettingsRow,
 };
 
 impl Editpad {
@@ -1435,8 +1435,29 @@ impl Editpad {
         let uipx = editor::ui_font_px();
         let uifont = self.body_font();
 
-        // P57：工具栏全部换全局中性按钮（白/深底描边+正文字色+悬停淡染），
-        // 取代 iced 默认实心蓝底白字
+        // 第 69 轮：顶部菜单栏（文件/编辑/查看/视图/设置）——整条包
+        // mouse_area 跟踪指针作浮层锚点（仿标签条 P39 模式）；展开的
+        // 菜单以高亮态标示。功能项自工具栏收编迁移（见各 menubar_panel）。
+        let menu_names = ["文件", "编辑", "查看", "视图", "设置"];
+        let mut menubar_inner = row![].spacing(2);
+        for (idx, name) in menu_names.iter().enumerate() {
+            let open = self.menu_bar_open == Some(idx);
+            menubar_inner = menubar_inner.push(
+                button(
+                    text(*name).size(uipx).font(uifont),
+                )
+                .padding([3, 12])
+                .style(if open { menu_bar_open_style } else { chrome_button_style })
+                .on_press_maybe((!self.busy).then_some(Message::MenuToggled(idx))),
+            );
+        }
+        let menubar = mouse_area(
+            menubar_inner.padding([4, 6]),
+        )
+        .on_move(|p| Message::MenubarHovered(p));
+
+        // P57：工具栏换全局中性按钮；第 69 轮精简——另存为/MD 预览/
+        // 跳转到行/最近文件收编进顶部菜单栏，只留最高频四入口 + 置脏指示
         let toolbar = row![
             button(text("打开…").size(uipx).font(uifont))
                 .padding([4, 12])
@@ -1447,35 +1468,10 @@ impl Editpad {
                 .style(chrome_button_style)
                 .on_press_maybe((!self.busy && self.tab().dirty)
                     .then_some(Message::SaveRequested)),
-            button(text("另存为…").size(uipx).font(uifont))
-                .padding([4, 12])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy).then_some(Message::SaveAsRequested)),
-            // P22 第三批：Markdown 预览开关（仅 Markdown 语法页可用）
-            button(text(if self.preview_visible {
-                "关闭预览"
-            } else {
-                "MD 预览"
-            })
-            .size(uipx)
-            .font(uifont))
-            .padding([4, 12])
-            .style(chrome_button_style)
-            .on_press_maybe(is_markdown.then_some(Message::PreviewToggled)),
             button(text("查找/替换").size(uipx).font(uifont))
                 .padding([4, 12])
                 .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::FindToggled)),
-            button(text("跳转到行").size(uipx).font(uifont))
-                .padding([4, 12])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy).then_some(Message::GotoToggled)),
-            button(text("最近文件").size(uipx).font(uifont))
-                .padding([4, 12])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy).then_some(Message::RecentsToggled)),
-            // P48：主题与字号按钮已随设置弹窗（P47）收编移除——工具栏只留
-            // 高频动作；外观调节入口 = 设置弹窗 + 编辑器内 Ctrl+滚轮缩放。
             // P27：设置弹窗入口（busy 时禁开，与其余工具栏按钮同一守卫）
             button(text("设置").size(uipx).font(uifont))
                 .padding([4, 12])
@@ -1497,7 +1493,7 @@ impl Editpad {
         // 右键无人捕获，落到 on_right_press。
         // P39：整条标签条再包一层 mouse_area 跟踪指针位置（浮层菜单
         // 锚点数据源；只在标签条悬停时产生消息，量级可忽略）。
-        let mut body = column![toolbar, rule::horizontal(1)];
+        let mut body = column![menubar, toolbar, rule::horizontal(1)];
         {
             let mut strip = row![].spacing(2).padding([4, 6]);
             for (i, tab) in self.tabs.iter().enumerate() {
@@ -1969,13 +1965,26 @@ impl Editpad {
         let cursor = self.cur_handle.borrow().cursor;
         // P67：行尾短标签（主导行尾随文档实时读取）
         let eol = eol_label(self.cur_handle.borrow().doc.line_ending());
-        // 第 63 轮：状态栏统计——字符数 O(1)（rope 存储长度）；选区显示
-        // 跨度经 EditorCore 键控缓存（P81 同一失效汇点），命中帧零开销
-        let (doc_chars, sel_chars) = {
+        // 第 69 轮：状态栏重构为**固定分区**布局（对齐主流编辑器参考稿）
+        // ——左侧统计组（长度/行数/行/列/位置）与右侧组（选区/行尾/编码）
+        // 槽位固定，中间用弹性路径段吸收余量：选词出现/消失不再推挤任何
+        // 段落（旧布局的痛点）。位置 = 光标全文字符偏移 +1（VS Code 口径）。
+        let (doc_chars, line_count, sel_chars, cur_off) = {
             let ed = self.cur_handle.borrow();
-            (ed.doc.text_len(), ed.selection_display_len())
+            (
+                ed.doc.text_len(),
+                ed.doc.line_count(),
+                ed.selection_display_len(),
+                ed.cursor_offset(),
+            )
         };
         let status_bar = row![
+            text(format!("长度: {doc_chars}")).size(uipx).font(uifont),
+            text(format!("行数: {line_count}")).size(uipx).font(uifont),
+            text(format!("行: {}", cursor.line + 1)).size(uipx).font(uifont),
+            text(format!("列: {}", cursor.col + 1)).size(uipx).font(uifont),
+            text(format!("位置: {cur_off}")).size(uipx).font(uifont),
+            // 弹性段：路径（未命名页显示占位名），吸收中部全部余量
             text(
                 self.tab()
                     .path
@@ -1986,7 +1995,21 @@ impl Editpad {
             .size(uipx)
             .font(uifont)
             .width(Fill),
-            // P67：编码/行尾为可点标签——点开各自的弹出菜单
+            // 选区段：定宽占位（无选区显示占位空白），保证右侧组零推移
+            container(
+                text(match sel_chars {
+                    Some(n) => format!("选 {n} 字符"),
+                    None => String::new(),
+                })
+                .size(uipx)
+                .font(uifont)
+            )
+            .width(110)
+            .align_x(iced::alignment::Horizontal::Right),
+            button(text(eol).size(uipx).font(uifont))
+                .padding([2, 8])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::ToggleEolMenu)),
             button(
                 text(if self.tab().encoding_label.is_empty() {
                     "—".to_owned()
@@ -1999,28 +2022,10 @@ impl Editpad {
             .padding([2, 8])
             .style(chrome_button_style)
             .on_press_maybe((!self.busy).then_some(Message::ToggleEncodingMenu)),
-            button(text(eol).size(uipx).font(uifont))
-                .padding([2, 8])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy).then_some(Message::ToggleEolMenu)),
-            text(format!("{} 行", self.cur_handle.borrow().doc.line_count()))
-                .size(uipx)
-                .font(uifont),
-            // 第 63 轮：字符数（O(1)，rope 存储长度）
-            text(format!("{} 字符", doc_chars)).size(uipx).font(uifont),
         ]
-        .spacing(24)
-        .align_y(Alignment::Center);
-        // 选区计数按需插入：有选区才出现（空 text 段会白占一个 24px 间距）
-        let mut status_bar = status_bar;
-        if let Some(n) = sel_chars {
-            status_bar = status_bar.push(
-                text(format!("选 {n} 字符")).size(uipx).font(uifont),
-            );
-        }
-        let status_bar = status_bar
-            .push(text(format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1)).size(uipx).font(uifont))
-            .padding([6, 10]);
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .padding([6, 10]);
 
         body = body.push(rule::horizontal(1)).push(status_bar);
 
@@ -2030,6 +2035,10 @@ impl Editpad {
         // 防止点菜单外的落穿透到正文。
         let base: Element<'_, Message> = container(body).width(Fill).height(Fill).into();
         let mut layered = Stack::new().push(base);
+        // 第 69 轮：顶部菜单栏浮层（最上层优先渲染）
+        if let Some(idx) = self.menu_bar_open {
+            layered = layered.push(self.menubar_overlay(idx));
+        }
         if let Some(idx) = self.tab_context_menu {
             if idx < self.tabs.len() {
                 layered = layered.push(self.context_menu_overlay(idx));
@@ -2088,6 +2097,224 @@ impl Editpad {
         .on_press(Message::TabContextMenuClosed)
         .on_right_press(Message::TabContextMenuClosed)
         .into()
+    }
+
+    // ---------- 第 69 轮：顶部菜单栏浮层 ----------
+
+    /// 菜单栏浮层：整窗透明背板（点击/Esc 经 BarsDismissed 收起）+
+    /// 锚在触发按钮下方的卡片（x 取菜单栏悬停位置、y 固定菜单栏下缘，
+    /// 贴边钳制复用 P39）。卡片高度按窗口钳制 + 内部滚动（P44 同款）。
+    fn menubar_overlay(&self, idx: usize) -> Element<'_, Message> {
+        const W: f32 = 240.0;
+        const MENU_BAR_H: f32 = 36.0;
+        let card_h = ctx_menu_card_h(self.viewport_size.1).min(380.0);
+        let (ax, ay) = clamp_menu_anchor(
+            (self.menubar_pos.0 - 12.0, MENU_BAR_H),
+            self.viewport_size,
+            W,
+            card_h,
+        );
+        let ay = ay.max(MENU_BAR_H); // 永不遮住菜单栏本身
+        let card = opaque(
+            container(
+                scrollable(self.menubar_panel(idx))
+                    .width(W)
+                    .height(card_h),
+            )
+            .padding(4)
+            .style(popup_card_style),
+        );
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
+        )
+        .on_press(Message::BarsDismissed)
+        .into()
+    }
+
+    /// 第 `idx` 个菜单的面板内容。全部复用既有消息（零新编辑逻辑）；
+    /// 守卫口径与原工具栏按钮一致（busy / dirty / is_markdown）。
+    fn menubar_panel(&self, idx: usize) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let interactive = !self.busy;
+        let item = |label: String, msg: Option<Message>| {
+            button(container(text(label).size(uipx).font(uifont)).width(Fill))
+                .width(Fill)
+                .padding([5, 10])
+                .style(chrome_menu_item_style)
+                .on_press_maybe(msg)
+        };
+        let sep = || rule::horizontal(1);
+        let is_markdown = self
+            .cur_handle
+            .borrow()
+            .highlight_syntax_name()
+            .as_deref()
+            == Some("Markdown");
+        let mut panel = column![].spacing(2).padding([4, 6]);
+        match idx {
+            // ---------- 文件 ----------
+            0 => {
+                panel = panel
+                    .push(item(
+                        "打开…  Ctrl+O".to_owned(),
+                        interactive.then_some(Message::OpenRequested),
+                    ))
+                    .push(item(
+                        "保存  Ctrl+S".to_owned(),
+                        (interactive && self.tab().dirty).then_some(Message::SaveRequested),
+                    ))
+                    .push(item(
+                        "另存为…".to_owned(),
+                        interactive.then_some(Message::SaveAsRequested),
+                    ))
+                    .push(sep())
+                    .push(item(
+                        format!(
+                            "恢复上次关闭的标签页  Ctrl+Shift+W{}",
+                            if self.closed_stack.is_empty() { "（空）" } else { "" }
+                        ),
+                        (!self.busy && !self.closed_stack.is_empty())
+                            .then_some(Message::ReopenLastClosedFile),
+                    ))
+                    .push(item(
+                        "最近文件".to_owned(),
+                        interactive.then_some(Message::RecentsToggled),
+                    ));
+            }
+            // ---------- 编辑 ----------
+            1 => {
+                panel = panel
+                    .push(item(
+                        "撤销  Ctrl+Z".to_owned(),
+                        interactive.then_some(Message::Edit(EditOp::Undo)),
+                    ))
+                    .push(item(
+                        "重做  Ctrl+Y".to_owned(),
+                        interactive.then_some(Message::Edit(EditOp::Redo)),
+                    ))
+                    .push(sep())
+                    .push(item(
+                        "剪切  Ctrl+X".to_owned(),
+                        interactive.then_some(Message::CutRequested),
+                    ))
+                    .push(item(
+                        "复制  Ctrl+C".to_owned(),
+                        interactive.then_some(Message::CopyRequested),
+                    ))
+                    .push(item(
+                        "粘贴  Ctrl+V".to_owned(),
+                        interactive.then_some(Message::PasteRequested),
+                    ))
+                    .push(item(
+                        "全选  Ctrl+A".to_owned(),
+                        interactive.then_some(Message::Edit(EditOp::SelectAll)),
+                    ))
+                    .push(sep())
+                    .push(item(
+                        "查找/替换栏  Ctrl+F".to_owned(),
+                        interactive.then_some(Message::FindToggled),
+                    ))
+                    .push(item(
+                        "跳转到行  Ctrl+G".to_owned(),
+                        interactive.then_some(Message::GotoToggled),
+                    ))
+                    .push(sep())
+                    .push(item(
+                        "插入日期时间  F5".to_owned(),
+                        interactive.then_some(Message::Edit(EditOp::InsertDateTime)),
+                    ))
+                    .push(item(
+                        "切换行注释  Ctrl+Q".to_owned(),
+                        interactive.then_some(Message::Edit(EditOp::ToggleLineComment)),
+                    ));
+            }
+            // ---------- 查看 ----------
+            2 => {
+                let step = editor::FONT_ZOOM_STEP;
+                panel = panel
+                    .push(item(
+                        "放大  Ctrl+滚轮".to_owned(),
+                        interactive.then_some(Message::FontSizeDelta(step)),
+                    ))
+                    .push(item(
+                        "缩小  Ctrl+滚轮".to_owned(),
+                        interactive.then_some(Message::FontSizeDelta(-step)),
+                    ))
+                    .push(item(
+                        "重置缩放".to_owned(),
+                        interactive.then_some(Message::FontSizeDelta(
+                            16.0 - self.display_font_size(),
+                        )),
+                    ))
+                    .push(item(
+                        "切换深浅主题".to_owned(),
+                        interactive.then_some(Message::ThemeToggled),
+                    ))
+                    .push(sep())
+                    .push(item(
+                        format!(
+                            "{}显示空白字符",
+                            if self.settings.show_whitespace { "✓ " } else { "" }
+                        ),
+                        interactive.then_some(Message::SettingsShowWhitespaceToggled(
+                            !self.settings.show_whitespace,
+                        )),
+                    ))
+                    .push(item(
+                        format!(
+                            "{}显示行尾符",
+                            if self.settings.show_line_endings { "✓ " } else { "" }
+                        ),
+                        interactive.then_some(Message::SettingsShowLineEndingsToggled(
+                            !self.settings.show_line_endings,
+                        )),
+                    ));
+            }
+            // ---------- 视图 ----------
+            3 => {
+                panel = panel
+                    .push(item(
+                        if self.preview_visible {
+                            "关闭 MD 预览".to_owned()
+                        } else {
+                            "MD 预览".to_owned()
+                        },
+                        (interactive && is_markdown).then_some(Message::PreviewToggled),
+                    ))
+                    .push(item(
+                        "最近文件面板".to_owned(),
+                        interactive.then_some(Message::RecentsToggled),
+                    ));
+            }
+            // ---------- 设置 ----------
+            _ => {
+                panel = panel
+                    .push(item(
+                        "打开设置…".to_owned(),
+                        interactive.then_some(Message::SettingsToggled),
+                    ))
+                    .push(item(
+                        format!(
+                            "保存时备份：{}",
+                            match self.settings.backup_mode.as_str() {
+                                editpad_core::settings::BACKUP_MODE_SIMPLE => "覆盖式",
+                                editpad_core::settings::BACKUP_MODE_TIMESTAMPED => {
+                                    "时间戳历史"
+                                }
+                                _ => "关闭",
+                            }
+                        ),
+                        interactive.then_some(Message::SettingsBackupModeToggled),
+                    ));
+            }
+        }
+        panel.into()
     }
 
     /// 第 62 轮：「查找全部」结果面板（停靠式，非浮层）——数据源 =

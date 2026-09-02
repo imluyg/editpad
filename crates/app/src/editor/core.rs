@@ -1835,6 +1835,12 @@ impl EditorCore {
         self.show_line_endings = line_endings;
     }
 
+    /// 光标的全文字符偏移（第 69 轮状态栏「位置」用，1 起显示由调用方
+    /// +1）。列即行内字符索引，无宽字符折算——与查找偏移同口径。
+    pub fn cursor_offset(&self) -> usize {
+        self.doc.line_to_char(self.cursor.line) + self.cursor.col
+    }
+
     /// 行注释前缀查表（第 64 轮）：按当前语法名（syntect 名，大小写
     /// 不敏感匹配）取行注释前缀。未知语法默认 `//`。块注释不入表
     /// （`/* */` 需要成对处理，超出本动作的「整行」范畴）。

@@ -2803,6 +2803,25 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     }
 
     #[test]
+    fn menubar_toggle_and_hover_flow() {
+        let mut app = Editpad::default();
+        // 悬停存位（浮层锚点数据源）
+        dispatch(&mut app, Message::MenubarHovered(iced::Point::new(64.0, 10.0)));
+        assert_eq!(app.menubar_pos, (64.0, 10.0));
+        // 开 → 同项关 → 异项切换（互斥展开）
+        dispatch(&mut app, Message::MenuToggled(0));
+        assert_eq!(app.menu_bar_open, Some(0));
+        dispatch(&mut app, Message::MenuToggled(0));
+        assert_eq!(app.menu_bar_open, None);
+        dispatch(&mut app, Message::MenuToggled(1));
+        dispatch(&mut app, Message::MenuToggled(2));
+        assert_eq!(app.menu_bar_open, Some(2), "异项直接切换");
+        // 背板收起（BarsDismissed 现有语义覆盖菜单浮层）
+        dispatch(&mut app, Message::BarsDismissed);
+        assert_eq!(app.menu_bar_open, None);
+    }
+
+    #[test]
     fn backup_mode_setting_cycles() {
         let mut app = Editpad::default();
         // 三态循环 none→simple→timestamped→none

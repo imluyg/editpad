@@ -125,6 +125,12 @@ enum Message {
     /// 设置：保存时备份模式循环切换（第 64 轮 ⑭，none→simple→
     /// timestamped→none，仿关窗行为的三态按钮）
     SettingsBackupModeToggled,
+    // ---------- 第 69 轮：顶部菜单栏 ----------
+    /// 菜单栏第 `idx` 个菜单开/关（0 文件 1 编辑 2 查看 3 视图 4 设置；
+    /// 再次点击同项关闭，点背板/Esc 走 BarsDismissed）
+    MenuToggled(usize),
+    /// 指针在菜单栏条上移动（浮层菜单锚点数据源，仿标签条 P39 模式）
+    MenubarHovered(Point),
 
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
@@ -1443,6 +1449,10 @@ struct Editpad {
     /// 「恢复上次关闭的文件」记忆栈（第 64 轮）：会话内 Vec<PathBuf>，
     /// 最近期在前；close_tabs_now 统一入栈、ReopenLastClosedFile 出栈
     closed_stack: Vec<PathBuf>,
+    /// 第 69 轮：顶部菜单栏当前展开的菜单（None = 全收起）
+    menu_bar_open: Option<usize>,
+    /// 菜单栏条上最近指针位置（浮层菜单锚点）
+    menubar_pos: (f32, f32),
 
     // ---------- 外观 ----------
     dark_mode: bool,
@@ -1513,6 +1523,8 @@ impl Default for Editpad {
             pending_close_tab: None,
             // 第 64 轮：会话内「上次关闭」栈，启动为空（不跨重启）
             closed_stack: Vec::new(),
+            menu_bar_open: None,
+            menubar_pos: (12.0, 8.0),
             dark_mode: false,
             preview_visible: false,
             // P25：初始页即「未命名1」，下一个新页为「未命名2」

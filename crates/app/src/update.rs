@@ -670,6 +670,18 @@ impl Editpad {
                 Task::none()
             }
 
+            // ---------- 顶部菜单栏（第 69 轮） ----------
+            Message::MenuToggled(idx) => {
+                // 同项再点关闭，异项切换（互斥展开）
+                self.menu_bar_open =
+                    if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
+                Task::none()
+            }
+            Message::MenubarHovered(pos) => {
+                self.menubar_pos = (pos.x, pos.y);
+                Task::none()
+            }
+
             // ---------- 关闭确认 ----------
             Message::CloseRequested(id) => {
                 self.handle_close_request(id, editpad_core::snapshot::snapshot_dir())
@@ -1199,6 +1211,8 @@ impl Editpad {
                 // P28：Esc 同时收起右键菜单与批量关闭确认
                 self.tab_context_menu = None;
                 self.batch_close_confirm = None;
+                // 第 69 轮：Esc 同时收起顶部菜单栏浮层
+                self.menu_bar_open = None;
                 // P50：Esc 一并收起外部修改提示条
                 self.external_change = None;
                 // P55：Esc 一并取消就地重命名（一切保持原状）

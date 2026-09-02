@@ -337,11 +337,22 @@ pub(crate) fn chrome_button_style(theme: &Theme, status: button::Status) -> butt
     style
 }
 
+/// 第 69 轮：菜单栏按钮展开态——淡底 + 点缀色描边（区别于普通悬停，
+/// 标示「该菜单正展开」）。
+pub(crate) fn menu_bar_open_style(theme: &Theme, status: button::Status) -> button::Style {
+    let sc = settings_colors(theme);
+    let mut style = chrome_button_style(theme, status);
+    if matches!(status, button::Status::Active) {
+        style.background = Some(Background::Color(sc.hover));
+        style.border.color = sc.accent;
+    }
+    style
+}
+
 /// P56：菜单项 / 下拉列表项样式（右键菜单、最近文件、字体候选共用）——
 /// 常态透明融入卡片、正文字色，悬停淡染，禁用降为次要色。取代 iced
 /// 默认实心蓝（菜单项一度像全选中的高亮条）。
-pub(crate) fn chrome_menu_item_style(theme: &Theme, status: button::Status) -> button::Style {
-    let sc = settings_colors(theme);
+pub(crate) fn chrome_menu_item_style(theme: &Theme, status: button::Status) -> button::Style {    let sc = settings_colors(theme);
     button::Style {
         background: Some(Background::Color(match status {
             button::Status::Hovered | button::Status::Pressed => sc.hover,
