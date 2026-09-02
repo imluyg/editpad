@@ -26,6 +26,9 @@ iced = { version = "0.14", default-features = false, features = [
     # 代价：无 GPU 加速，滚动/打字帧走 CPU 栅化；如需恢复 GPU 渲染，
     # 把 features 改回 ["advanced", "crisp", "thread-pool"]（默认含 wgpu）。
     # ⚠️ thread-pool 必须保留：Task::perform 的执行器，丢了全部后台任务瘫痪。
+    # 注：官方 image feature 未启用——其链路（iced_graphics/image）硬依赖
+    # kamadak-exif 与 image 默认特性（gif→color_quant），离线环境拉不到；
+    # 标签栏 Logo（P76）改为自研像素 quad 渲染（零依赖，见 view.rs AppLogo）。
     "tiny-skia", "advanced", "crisp", "thread-pool",
 ] }
 rfd = "0.15"

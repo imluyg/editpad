@@ -1,7 +1,7 @@
 use super::*;
 use iced::widget::column;
 use super::settings_ui::{
-    chrome_button_style, chrome_menu_item_style, chrome_nav_button_style, menu_bar_open_style,
+    chrome_button_style, chrome_menu_item_style, chrome_nav_button_style, menubar_text_style,
     settings_card_size, settings_card_style, settings_checkbox_style, settings_colors,
     settings_divider, settings_input_style, settings_rows, settings_search_hit,
     settings_separator, FONT_ROW_KEY, SettingsPage, SettingsRow,
@@ -1443,21 +1443,24 @@ impl Editpad {
         // 第 69 轮：顶部菜单栏（文件/编辑/查看/视图/设置）——整条包
         // mouse_area 跟踪指针作浮层锚点（仿标签条 P39 模式）；展开的
         // 菜单以高亮态标示。功能项自工具栏收编迁移（见各 menubar_panel）。
+        // 第 76 轮（用户点单）：按钮改纯文字扁平（menubar_text_style，
+        // 无背景无边框无凸起），行高压缩（按钮 padding [1,8] + 行内
+        // padding [0,4]）——看起来不像按钮、更紧凑。
         let menu_names = ["文件", "编辑", "查看", "视图", "设置"];
-        let mut menubar_inner = row![].spacing(2);
+        let mut menubar_inner = row![].spacing(4);
         for (idx, name) in menu_names.iter().enumerate() {
             let open = self.menu_bar_open == Some(idx);
             menubar_inner = menubar_inner.push(
                 button(
                     text(*name).size(uipx).font(uifont),
                 )
-                .padding([3, 12])
-                .style(if open { menu_bar_open_style } else { chrome_button_style })
+                .padding([1, 8])
+                .style(move |theme, status| menubar_text_style(theme, status, open))
                 .on_press_maybe((!self.busy).then_some(Message::MenuToggled(idx))),
             );
         }
         let menubar = mouse_area(
-            menubar_inner.padding([4, 6]),
+            menubar_inner.padding([0, 4]),
         )
         .on_move(|p| Message::MenubarHovered(p));
 
@@ -1475,6 +1478,9 @@ impl Editpad {
         let mut body = column![menubar, rule::horizontal(1)];
         {
             let mut strip = row![].spacing(2).padding([4, 6]);
+            // 注：窗口标题栏图标见 [`crate::window_title_icon`]（main.rs）；
+            // 标签条保持纯文本前缀（▸ 活动 / ● 置脏 / 📌 固定，P21/P28
+            // 语义，用户点名「标签栏黑点保持原样」不动）。
             for (i, tab) in self.tabs.iter().enumerate() {
                 // P55：就地重命名——该页的标签按钮替换为输入框 + ✓/× 微型按钮
                 // （Enter 等价 ✓；Esc 走 BarsDismissed 取消）
@@ -1523,6 +1529,22 @@ impl Editpad {
                     .on_right_press(Message::TabContextMenu(i)),
                 );
             }
+            // 第 76 轮（用户点单）：标签条右侧空白区 = 双击新建标签页的
+            // 命中面——透明无边框按钮、宽度弹性填充剩余空间（Space Fill，
+            // 不会与任何胶囊标签重叠：标签按钮各自有 on_press=SwitchTab，
+            // 双击现有标签仍走 P65 重命名语义）。单击记账、双击窗内
+            // 二次点击触发 NewTab（update 层 is_blank_double_click 判定）；
+            // busy 时禁用（与标签一致）。
+            strip = strip.push(
+                button(
+                    iced::widget::Space::new()
+                        .width(iced::Length::Fill)
+                        .height(iced::Length::Fill),
+                )
+                    .padding(0)
+                    .style(|theme, status| menubar_text_style(theme, status, false))
+                    .on_press_maybe((!self.busy).then_some(Message::TabStripBlankPressed)),
+            );
             body = body.push(
                 mouse_area(strip).on_move(Message::CursorMoved),
             );
@@ -1956,10 +1978,12 @@ impl Editpad {
             Theme::Light.palette()
         };
         let sep_color = Color { a: 0.30, ..palette.text };
+        // 第 76 轮：状态栏行高与顶部菜单栏一致压缩（竖条 20→14px 随行高
+        // 同缩；整行 padding [6,10]→[1,8]）
         let sep_v = move || -> Element<'_, Message> {
             container(text(""))
                 .width(1)
-                .height(20)
+                .height(14)
                 .style(move |_: &Theme| {
                     container::Style {
                         background: Some(Background::Color(sep_color)),
@@ -2015,7 +2039,7 @@ impl Editpad {
             .width(110)
             .align_x(iced::alignment::Horizontal::Right),
             button(text(eol).size(uipx).font(uifont))
-                .padding([2, 8])
+                .padding([1, 6])
                 .style(chrome_button_style)
                 .on_press_maybe((!self.busy).then_some(Message::ToggleEolMenu)),
             button(
@@ -2027,13 +2051,13 @@ impl Editpad {
                 .size(uipx)
                 .font(uifont)
             )
-            .padding([2, 8])
+            .padding([1, 6])
             .style(chrome_button_style)
             .on_press_maybe((!self.busy).then_some(Message::ToggleEncodingMenu)),
         ]
         .spacing(12)
         .align_y(Alignment::Center)
-        .padding([6, 10]);
+        .padding([1, 8]);
 
         body = body.push(rule::horizontal(1)).push(status_bar);
 

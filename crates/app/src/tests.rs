@@ -2113,6 +2113,72 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(!app.busy, "双击重命名不进对话框阶段");
     }
 
+    // ---------- 第 76 轮：标签条空白区双击新建 + 品牌 Logo ----------
+
+    #[test]
+    fn p76_blank_double_click_detector_contract() {
+        let t0 = std::time::Instant::now();
+        // 无记录：单击不算
+        assert!(!is_blank_double_click(None, t0));
+        // 窗内二次：算
+        let quick = t0 + std::time::Duration::from_millis(TAB_DOUBLE_CLICK_MS);
+        assert!(is_blank_double_click(Some(t0), quick));
+        // 超窗（+1ms）：不算
+        let late = t0 + std::time::Duration::from_millis(TAB_DOUBLE_CLICK_MS)
+            + std::time::Duration::from_millis(1);
+        assert!(!is_blank_double_click(Some(t0), late));
+    }
+
+    #[test]
+    fn p76_blank_strip_double_click_creates_tab_but_single_does_not() {
+        let mut app = Editpad::default();
+        let before = app.tabs.len();
+        // 单击空白：只记账，不新建
+        dispatch(&mut app, Message::TabStripBlankPressed);
+        assert_eq!(app.tabs.len(), before, "单击空白不得新建");
+        assert!(app.last_blank_click.is_some(), "首次点击应记账");
+        // 双击窗内二次：新建并聚焦新页（两次派发间隔远小于 500ms）
+        dispatch(&mut app, Message::TabStripBlankPressed);
+        assert_eq!(app.tabs.len(), before + 1, "双击空白应新建标签页");
+        assert_eq!(app.active_tab, app.tabs.len() - 1, "新页应为活动页");
+        assert!(app.last_blank_click.is_none(), "双击后记账清零");
+        // 记账已清：随后单击再计一次
+        dispatch(&mut app, Message::TabStripBlankPressed);
+        assert!(app.last_blank_click.is_some());
+        // 现有标签自身点击（SwitchTab）绝不触发空白记账/新建
+        dispatch(&mut app, Message::SwitchTab(0));
+        assert!(app.last_blank_click.is_some(), "标签点击不得清除空白记账");
+        assert_eq!(app.tabs.len(), before + 1, "标签点击不得新建");
+        // 双击窗内再来一次空白双击：再次新建
+        dispatch(&mut app, Message::TabStripBlankPressed);
+        dispatch(&mut app, Message::TabStripBlankPressed);
+        assert_eq!(app.tabs.len(), before + 2, "再次双击空白继续新建");
+    }
+
+    #[test]
+    fn p76_window_title_icon_decodes_48px_entry() {
+        // P71 自定义 ICO 的 48px 条目必须可解析为窗口图标：48×48、
+        // RGBA 长度正确、存在非透明像素（纯透明 = 白图，标题栏无意义）、
+        // 且与 boot 下发的为同一实例（OnceLock 缓存语义）
+        let Some(icon) = window_title_icon() else {
+            panic!("app.ico 48px 条目解析失败（DIB 解码或条目缺失）");
+        };
+        let (rgba, size) = icon.into_raw();
+        assert_eq!((size.width, size.height), (48, 48), "窗口图标应为 48×48");
+        assert_eq!(rgba.len(), 48 * 48 * 4);
+        assert!(
+            rgba.chunks_exact(4).any(|px| px[3] > 0),
+            "窗口图标不得为全透明位图"
+        );
+        // 预乘校验：非透明像素的 RGB ≤ alpha（premultiply 不变量）
+        for px in rgba.chunks_exact(4) {
+            let a = px[3] as u32;
+            if a > 0 {
+                assert!(px[0] as u32 <= a && px[1] as u32 <= a && px[2] as u32 <= a);
+            }
+        }
+    }
+
     #[test]
     fn p64_rename_input_id_is_stable_for_focus_operation() {
         // 聚焦操作按 id 查找控件：每次调用必须产出相等的 id（逐帧稳定），

@@ -29,10 +29,16 @@ use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSp
 
 fn main() -> iced::Result {
     // iced 0.14：第一个参数是 boot 函数（返回初始状态），title/theme/subscription 走 builder
+    // 第 76 轮（用户点单）：窗口标题栏图标 = 应用自定义 Logo（P71 四档
+    // ICO 的 48px 条目；解析失败回退 exe 资源图标，见 window_title_icon）
     iced::application(Editpad::new, Editpad::update, Editpad::view)
         .title(Editpad::title)
         .theme(Editpad::theme)
         .subscription(Editpad::subscription)
+        .window(window::Settings {
+            icon: window_title_icon(),
+            ..window::Settings::default()
+        })
         // 关闭请求必须以事件流转到 subscription（exit_on_close_request 默认 true，
         // 不显式关掉的话点 X 会直接退进程，永远轮不到未保存确认）
         .exit_on_close_request(false)
@@ -145,6 +151,10 @@ enum Message {
     // ---------- 多标签（P21） ----------
     /// 新建空标签页（Ctrl+T）
     NewTab,
+    /// 第 76 轮：标签条右侧空白区被左键点击（连点两次 = 新建标签页）。
+    /// 现有标签按钮自身不产生本消息（其 on_press 是 SwitchTab）——双击
+    /// 现有标签仍走 P65 重命名语义，互不干扰。
+    TabStripBlankPressed,
     /// 切到下一个标签页（Ctrl+Tab，循环）
     SwitchTabNext,
     /// 切换到第 `i` 个标签页（标签条点击）
@@ -1340,6 +1350,9 @@ struct Editpad {
     /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
     /// on_double_click（iced 事件流实测），故在 SwitchTab 里记账判定。
     last_tab_click: Option<(usize, std::time::Instant)>,
+    /// 第 76 轮：标签条空白区最近一次左键点击时刻（双击 → 新建标签页，
+    /// 与 P65 同窗口判定；标签自身点击走 last_tab_click，互不干扰）。
+    last_blank_click: Option<std::time::Instant>,
     /// P62：热键捕获态——Some(动作 id) = 设置热键页正在等待新组合键。
     hotkey_capture: Option<&'static str>,
 
@@ -1495,6 +1508,7 @@ impl Default for Editpad {
             eol_menu: false,
             regex_enabled: false,
             last_tab_click: None,
+            last_blank_click: None,
             hotkey_capture: None,
             available_fonts: Vec::new(),
             active_font_family: None,
@@ -2015,6 +2029,123 @@ fn is_double_click(
     last.is_some_and(|(i, at)| {
         i == idx && now.duration_since(at).as_millis() as u64 <= TAB_DOUBLE_CLICK_MS
     })
+}
+
+/// 第 76 轮：标签条空白区双击判定（纯函数可单测）——与 P65 同一时间窗
+/// 与记账模式，只是没有「页下标」维度（空白区是一个整体目标）。
+fn is_blank_double_click(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    last.is_some_and(|at| now.duration_since(at).as_millis() as u64 <= TAB_DOUBLE_CLICK_MS)
+}
+
+// ---------- 第 76 轮：应用 Logo（P71 用户自定义 ICO → 标签栏渲染） ----------
+
+/// ICO 条目：尺寸与 DIB 像素区（BMP BITMAPINFOHEADER 起，含 AND mask）。
+struct IcoEntry {
+    width: u32,
+    height: u32,
+    bit_count: u16,
+    /// 图像数据区整体（40B BITMAPINFOHEADER + 像素 + AND mask）。
+    data: &'static [u8],
+}
+
+/// 解析 app.ico 的全部条目（ICONDIR 骨架，零依赖）。
+/// 本资源（P71 用户四档 ICO，首字节 28 00 00 00 = BITMAPINFOHEADER）
+/// 全部为 ICO 内嵌 DIB；PNG 条目不在支持范围（不存在于本资源）。
+fn parse_app_ico_entries(raw: &'static [u8]) -> Vec<IcoEntry> {
+    let mut out = Vec::new();
+    if raw.len() < 6 {
+        return out;
+    }
+    let count = u16::from_le_bytes([raw[4], raw[5]]) as usize;
+    for i in 0..count {
+        let o = 6 + i * 16;
+        if o + 16 > raw.len() {
+            break;
+        }
+        let width = if raw[o] == 0 { 256 } else { raw[o] as u32 };
+        let height = if raw[o + 1] == 0 { 256 } else { raw[o + 1] as u32 };
+        let bytes = u32::from_le_bytes([raw[o + 8], raw[o + 9], raw[o + 10], raw[o + 11]]) as usize;
+        let off = u32::from_le_bytes([raw[o + 12], raw[o + 13], raw[o + 14], raw[o + 15]]) as usize;
+        if off + bytes > raw.len() || bytes < 40 {
+            continue;
+        }
+        let bit_count = u16::from_le_bytes([raw[off + 14], raw[off + 15]]);
+        out.push(IcoEntry { width, height, bit_count, data: &raw[off..off + bytes] });
+    }
+    out
+}
+
+/// ICO 内嵌 32bpp DIB → RGBA（自底向上翻转行，忽略 AND mask）。
+/// 仅支持 BI_RGB + 32bpp（本资源全为此格式）；其余返回 None。
+fn dib_bgra32_to_rgba(dib: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    if dib.len() < 40 {
+        return None;
+    }
+    let w = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
+    let h2 = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
+    if w <= 0 || h2 <= 0 {
+        return None;
+    }
+    // ICO 内嵌 DIB 的 biHeight = 2 × 实际高度（高度 + AND mask 各一份）
+    let h = h2 / 2;
+    let bit_count = u16::from_le_bytes([dib[14], dib[15]]);
+    let comp = u32::from_le_bytes([dib[16], dib[17], dib[18], dib[19]]);
+    if bit_count != 32 || comp != 0 {
+        return None;
+    }
+    let (w, h) = (w as u32, h as u32);
+    let row_stride = w as usize * 4;
+    let px = 40usize; // 32bpp 无调色板：头部后直接是底向上 BGRA 像素
+    if dib.len() < px + row_stride * h as usize {
+        return None;
+    }
+    let mut rgba = vec![0u8; row_stride * h as usize];
+    for y in 0..h as usize {
+        let src = &dib[px + row_stride * y..px + row_stride * (y + 1)];
+        let dst = &mut rgba[row_stride * (h as usize - 1 - y)..row_stride * (h as usize - y)];
+        for x in 0..w as usize {
+            dst[x * 4] = src[x * 4 + 2]; // BGR → RGB
+            dst[x * 4 + 1] = src[x * 4 + 1];
+            dst[x * 4 + 2] = src[x * 4];
+            dst[x * 4 + 3] = src[x * 4 + 3];
+        }
+    }
+    Some((w, h, rgba))
+}
+
+/// 窗口标题栏/任务栏图标（第 76 轮用户点单：替换标题栏默认通用图标）：
+/// P71 自定义四档 ICO 的 **48px** 条目 → RGBA（winit 期望**预乘 alpha**，
+/// 防透明边缘发亮/漏色）。解析失败返回 None（winit 回退 exe 资源图标）。
+/// OnceLock 缓存：只解析一次（Icon: Clone，重复取零成本）。
+pub(crate) fn window_title_icon() -> Option<iced::window::Icon> {
+    static ICON: std::sync::OnceLock<Option<iced::window::Icon>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        for e in parse_app_ico_entries(include_bytes!("../assets/app.ico")) {
+            if e.width == 48 && e.height == 48 && e.bit_count == 32 {
+                if let Some((w, h, rgba)) = dib_bgra32_to_rgba(e.data) {
+                    // sRGB → 预乘 alpha（winit/windows 标题栏渲染要求）
+                    let premul: Vec<u8> = rgba
+                        .chunks_exact(4)
+                        .flat_map(|px| {
+                            let a = px[3] as u32;
+                            [
+                                (px[0] as u32 * a / 255) as u8,
+                                (px[1] as u32 * a / 255) as u8,
+                                (px[2] as u32 * a / 255) as u8,
+                                px[3],
+                            ]
+                        })
+                        .collect();
+                    return iced::window::icon::from_rgba(premul, w, h).ok();
+                }
+            }
+        }
+        None
+    })
+    .clone()
 }
 
 /// P55/P64：标签就地重命名输入框的唯一 id。视图侧 text_input 挂同一

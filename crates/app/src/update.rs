@@ -258,6 +258,8 @@ impl Editpad {
         // P30：启动会话恢复——读清单重建标签；命名干净页经加载管线回填。
         // 开关判定在 boot_restore 内部（关闭 = 空白启动 + 存量清场）。
         let restore_task = state.boot_restore();
+        // 注：窗口标题栏图标（第 76 轮用户点单）在 main() 的
+        // `.window(Settings { icon })` 声明期下发（见 window_title_icon）
         (
             state,
             Task::batch([caret_chain, heartbeat_chain, restore_task]),
@@ -1265,6 +1267,18 @@ impl Editpad {
                 self.cancel_find_scan();
                 // P28：页集合已变，右键菜单随之下收
                 self.tab_context_menu = None;
+                Task::none()
+            }
+            // 第 76 轮：标签条空白区左键——双击窗内连点两次 = 新建标签页
+            // （形如主流编辑器的「双击空白新建」；现有标签自身点击走
+            // SwitchTab/P65 重命名，不会进入本分支，互不干扰）
+            Message::TabStripBlankPressed => {
+                let now = std::time::Instant::now();
+                if is_blank_double_click(self.last_blank_click, now) {
+                    self.last_blank_click = None;
+                    return self.update(Message::NewTab);
+                }
+                self.last_blank_click = Some(now);
                 Task::none()
             }
             Message::SwitchTabNext => {
