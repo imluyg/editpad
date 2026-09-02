@@ -122,6 +122,9 @@ enum Message {
     SettingsShowWhitespaceToggled(bool),
     /// 设置：显示行尾符标记（第 64 轮，外观页）
     SettingsShowLineEndingsToggled(bool),
+    /// 设置：保存时备份模式循环切换（第 64 轮 ⑭，none→simple→
+    /// timestamped→none，仿关窗行为的三态按钮）
+    SettingsBackupModeToggled,
 
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
@@ -1048,6 +1051,7 @@ async fn drive_autosave_once(
     version: u64,
     expected_stamp: Option<(std::time::SystemTime, u64)>,
     delay: std::time::Duration,
+    backup_mode: String,
 ) -> Message {
     let (tx, rx) = std_mpsc::channel::<AutosaveOutcome>();
     let thread_path = path.clone();
@@ -1056,6 +1060,9 @@ async fn drive_autosave_once(
         let outcome = if autosave_must_skip(expected_stamp, file_stamp(&path)) {
             AutosaveOutcome::SkippedExternalChange
         } else {
+            // 第 64 轮 ⑭：写前备份磁盘旧版（自动保存静默口径——备份
+            // 提示不打扰，失败同样降级不阻断）
+            let _ = perform_backup_before_overwrite(&path, &backup_mode);
             match editpad_core::save_document_atomic(&path, &doc) {
                 Ok(()) => AutosaveOutcome::Written,
                 Err(e) => AutosaveOutcome::Failed(e.to_string()),
@@ -1079,6 +1086,59 @@ fn autosave_must_skip(
     current: Option<(std::time::SystemTime, u64)>,
 ) -> bool {
     expected.is_some() && current != expected
+}
+
+// ---------- 第 64 轮 ⑭：保存时备份磁盘旧版 ----------
+
+/// 大文件豁免阈值：源文件超过此字节数跳过备份（复制耗时会拖慢保存，
+/// 且 64MB+ 的日志类文件通常有专门的轮转手段）。取值对齐性能基准
+/// bench-50mb.log 量级再留余量。
+pub(crate) const MAX_BACKUP_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 写前备份磁盘旧版（⑭）。返回状态栏提示文本；None = 无事发生。
+///
+/// 口径：
+/// * 目标文件不存在（新建/另存到新路径）→ 无旧版可备份，None；
+/// * 源超过 [`MAX_BACKUP_SOURCE_BYTES`] → 跳过并提示；
+/// * simple → 同目录 `name.bak` 覆盖式；
+/// * timestamped → 同目录 `name.bak.d/` **目录**内
+///   `name.YYYYMMDD-HHMMSS.bak` 历史留存（`.bak.d` 与 simple 的
+///   `name.bak` 文件不同名，两模式可自由切换互不污染）；
+/// * 任何 IO 失败都**不阻断保存**——降级为状态栏提示（备份是锦上添
+///   花，不能成为丢保存的理由）。
+pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option<String> {
+    use editpad_core::settings::{BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED};
+    if mode == editpad_core::settings::BACKUP_MODE_NONE {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if meta.len() > MAX_BACKUP_SOURCE_BYTES {
+        return Some("文件超过 64MB，按策略跳过备份".to_owned());
+    }
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let report = |r: std::io::Result<PathBuf>| match r {
+        Ok(p) => Some(format!("已备份旧版 → {}", p.display())),
+        Err(e) => Some(format!("备份失败（继续保存）：{e}")),
+    };
+    match mode {
+        BACKUP_MODE_SIMPLE => {
+            let bak = path.with_file_name(format!("{name}.bak"));
+            report(std::fs::copy(path, &bak).map(|_| bak))
+        }
+        BACKUP_MODE_TIMESTAMPED => {
+            let dir = path.with_file_name(format!("{name}.bak.d"));
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return Some(format!("备份失败（继续保存）：{e}"));
+            }
+            let stamp = editor::local_datetime_stamp_compact();
+            let target = dir.join(format!("{name}.{stamp}.bak"));
+            report(std::fs::copy(path, &target).map(|_| target))
+        }
+        _ => None,
+    }
 }
 
 // ---------- 周期快照心跳（P31） ----------

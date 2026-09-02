@@ -2748,6 +2748,73 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         }
     }
 
+    #[test]
+    fn perform_backup_modes_and_guards() {
+        use editpad_core::settings::{BACKUP_MODE_NONE, BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED};
+        let dir = scratch_dir("p64-backup");
+        let target = dir.join("note.txt");
+        std::fs::write(&target, "OLD-VERSION").unwrap();
+
+        // none 模式：不产生任何文件、无提示
+        assert!(perform_backup_before_overwrite(&target, BACKUP_MODE_NONE).is_none());
+        // 目标不存在（另存新路径场景）：无旧版可备份
+        let ghost = dir.join("ghost.txt");
+        assert!(perform_backup_before_overwrite(&ghost, BACKUP_MODE_SIMPLE).is_none());
+
+        // simple：同名 .bak 覆盖式，内容 = 磁盘旧版
+        let note = perform_backup_before_overwrite(&target, BACKUP_MODE_SIMPLE).unwrap();
+        assert!(note.starts_with("已备份"), "{note}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("note.txt.bak")).unwrap(),
+            "OLD-VERSION"
+        );
+
+        // timestamped：name.bak.d 目录内 name.YYYYMMDD-HHMMSS.bak
+        // （.bak.d 与 simple 的 .bak 文件不同名——模式切换互不污染，
+        // 本用例顺序即先 simple 后 timestamped 的实证）
+        let note = perform_backup_before_overwrite(&target, BACKUP_MODE_TIMESTAMPED).unwrap();
+        assert!(note.starts_with("已备份"), "{note}");
+        let bakdir = dir.join("note.txt.bak.d");
+        assert!(bakdir.is_dir(), "时间戳模式建目录留存");
+        let entries: Vec<_> = std::fs::read_dir(&bakdir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(entries.len(), 1, "同秒两次调用覆盖同一名，不累积");
+        let fname = &entries[0];
+        assert!(
+            fname.starts_with("note.txt.") && fname.ends_with(".bak"),
+            "文件名形如 note.txt.YYYYMMDD-HHMMSS.bak，实际 {fname}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(bakdir.join(fname)).unwrap(),
+            "OLD-VERSION"
+        );
+
+        // 大文件豁免：set_len 秒建稀疏文件验证阈值短路
+        let big = dir.join("big.log");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_BACKUP_SOURCE_BYTES + 1).unwrap();
+        drop(f);
+        let note = perform_backup_before_overwrite(&big, BACKUP_MODE_SIMPLE).unwrap();
+        assert!(note.contains("跳过备份"), "{note}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_mode_setting_cycles() {
+        let mut app = Editpad::default();
+        // 三态循环 none→simple→timestamped→none
+        assert_eq!(app.settings.backup_mode, "none", "默认关闭");
+        dispatch(&mut app, Message::SettingsBackupModeToggled);
+        assert_eq!(app.settings.backup_mode, "simple");
+        dispatch(&mut app, Message::SettingsBackupModeToggled);
+        assert_eq!(app.settings.backup_mode, "timestamped");
+        dispatch(&mut app, Message::SettingsBackupModeToggled);
+        assert_eq!(app.settings.backup_mode, "none");
+    }
+
     /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
     fn key_f5() -> Option<Message> {
         use iced::keyboard::{self, key::Named};
@@ -4119,9 +4186,6 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     #[test]
     fn settings_page_nav_selects_and_clears_search() {
         let mut app = app_with_tabs(2);
-        // P51 起点分类即落盘：注入配置路径，测试绝不碰真实 %APPDATA%
-        let dir = scratch_dir("p47-nav");
-        app.settings_path_override = Some(dir.join("config.toml"));
         dispatch(&mut app, Message::ViewportResized(1024.0, 768.0));
         assert_eq!(app.settings_page, SettingsPage::default(), "默认落在第一分类");
 
@@ -4143,12 +4207,16 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(app.settings_search.is_empty(), "点分类必须清空搜索词");
         assert_eq!(app.settings_page, SettingsPage::Save);
 
-        // 关闭弹窗：搜索词清空、分类位置保留（重开回到上次分类）
+        // 关闭弹窗：搜索词清空；重开 = 回到第一分类（第 64 轮用户点单：
+        // 不再记忆上次浏览位置，P51 撤销）
         dispatch(&mut app, Message::SettingsToggled);
         assert!(app.settings_search.is_empty(), "关弹窗必须清空搜索词");
         dispatch(&mut app, Message::SettingsToggled);
-        assert_eq!(app.settings_page, SettingsPage::Save, "分类位置跨开合保留");
-        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            app.settings_page,
+            SettingsPage::default(),
+            "每次进入设置都默认第一分类"
+        );
     }
 
     // ---------- P51 分类页记忆持久化 ----------
@@ -4169,35 +4237,24 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         for (page, key) in SettingsPage::ALL.iter().zip(editpad_core::SETTINGS_PAGES) {
             assert_eq!(page.key(), key);
         }
-        // 未知键经 core 归一 → 默认页
-        assert_eq!(SettingsPage::from_key("hacked"), SettingsPage::Appearance);
-        assert_eq!(SettingsPage::from_key("hotkeys"), SettingsPage::Hotkeys);
     }
 
     #[test]
-    fn settings_page_selection_persists_and_restores() {
-        let dir = scratch_dir("p51-restore");
+    fn settings_page_selection_is_not_persisted_anymore() {
+        // 第 64 轮用户点单回归钉子：选分类只改 UI 态——配置里不再出现
+        // settings_page 键（旧文件里的遗留键由 serde 忽略、下次保存消失）
+        let dir = scratch_dir("p64-no-page-memory");
         let config = dir.join("config.toml");
-
-        // 选中分类 → 即时落盘
         let mut app = Editpad::default();
         app.settings_path_override = Some(config.clone());
         dispatch(&mut app, Message::SettingsPageSelected(SettingsPage::Hotkeys));
-        assert_eq!(app.settings.settings_page, "hotkeys");
-        assert_eq!(
-            editpad_core::Settings::load_from(&config).settings_page,
-            "hotkeys",
-            "分类选择必须即时写回注入路径的 config.toml"
+        assert_eq!(app.settings_page, SettingsPage::Hotkeys, "会话内导航照常");
+        dispatch(&mut app, Message::SettingsToggled); // 触发一次落盘
+        let raw = std::fs::read_to_string(&config).unwrap_or_default();
+        assert!(
+            !raw.contains("settings_page"),
+            "config.toml 不得再写入分类页键"
         );
-
-        // 重启恢复：boot 同款逻辑（from_key 读配置键）
-        let restored = editpad_core::Settings::load_from(&config);
-        assert_eq!(
-            SettingsPage::from_key(&restored.settings_page),
-            SettingsPage::Hotkeys,
-            "重启后必须回到上次浏览的分类页"
-        );
-
         std::fs::remove_dir_all(&dir).ok();
     }
 

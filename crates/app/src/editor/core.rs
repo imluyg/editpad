@@ -2844,12 +2844,24 @@ fn entab_leading_ws(s: &str) -> String {
 
 /// F5 时间戳（第 63 轮）：`YYYY-MM-DD HH:MM` 24 小时制，记事本同款
 /// 场景（日志打点）。
+pub(crate) fn local_datetime_stamp() -> String {
+    let (y, mo, d, h, mi, _s) = now_local_fields();
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
+}
+
+/// 备份文件名用紧凑时间戳（第 64 轮 ⑭）：`YYYYMMDD-HHMMSS`。
+pub(crate) fn local_datetime_stamp_compact() -> String {
+    let (y, mo, d, h, mi, s) = now_local_fields();
+    format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
+}
+
+/// 本地时间六元组 (年, 月, 日, 时, 分, 秒)。
 ///
 /// 本地时区获取：Windows 上直接 FFI kernel32!GetLocalTime（本应用本就
 /// Windows 专属构建，build.rs 已依赖 SDK 工具链；零新依赖——曾试
 /// time+local-offset 特性，会引入缓存中没有的 num_threads，离线环境
 /// 无法解析，弃）。其他平台回退 UTC 历法换算（Hinnant civil_from_days）。
-fn local_datetime_stamp() -> String {
+fn now_local_fields() -> (u16, u16, u16, u16, u16, u16) {
     #[cfg(windows)]
     {
         #[repr(C)]
@@ -2877,10 +2889,7 @@ fn local_datetime_stamp() -> String {
             millis: 0,
         };
         unsafe { GetLocalTime(&mut st) };
-        format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}",
-            st.year, st.month, st.day, st.hour, st.minute
-        )
+        (st.year, st.month, st.day, st.hour, st.minute, st.second)
     }
     #[cfg(not(windows))]
     {
@@ -2901,13 +2910,13 @@ fn local_datetime_stamp() -> String {
         let d = doy - (153 * mp + 2) / 5 + 1;
         let m = if mp < 10 { mp + 3 } else { mp - 9 };
         let y = if m <= 2 { y + 1 } else { y };
-        format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}",
-            y,
-            m,
-            d,
-            rem / 3600,
-            (rem % 3600) / 60
+        (
+            y.clamp(0, 65535) as u16,
+            m as u16,
+            d as u16,
+            (rem / 3600) as u16,
+            ((rem % 3600) / 60) as u16,
+            (rem % 60) as u16,
         )
     }
 }

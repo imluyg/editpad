@@ -1249,6 +1249,20 @@ impl Editpad {
                     < editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS)
                     .then_some(Message::SettingsAutosaveDelayDelta(1)),
             ),
+            // ---- 第 64 轮 ⑭：保存时备份（三态循环按钮，仿关窗行为） ----
+            "保存时备份" => button(
+                text(match s.backup_mode.as_str() {
+                    editpad_core::settings::BACKUP_MODE_SIMPLE => "覆盖式 name.bak",
+                    editpad_core::settings::BACKUP_MODE_TIMESTAMPED => "时间戳历史",
+                    _ => "关闭",
+                })
+                .size(uipx)
+                .font(uifont),
+            )
+            .padding([3, 12])
+            .style(chrome_button_style)
+            .on_press(Message::SettingsBackupModeToggled)
+            .into(),
             // ---- 会话与隐私 ----
             "显示空白字符" => checkbox(s.show_whitespace)
                 .style(settings_checkbox_style)

@@ -45,6 +45,9 @@ impl SettingsPage {
 
     /// config 持久化键（P51）。与 core `SETTINGS_PAGES` 注册表的对应
     /// 关系由 `settings_nav_keys_match_core_registry` 测试钉住防漂移。
+    /// 持久化键。第 64 轮撤销分类页记忆后仅剩测试消费（注册表对拍），
+    /// 故限定测试编译。
+    #[cfg(test)]
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Appearance => editpad_core::SETTINGS_PAGE_APPEARANCE,
@@ -55,18 +58,8 @@ impl SettingsPage {
             Self::About => editpad_core::SETTINGS_PAGE_ABOUT,
         }
     }
-
-    /// 从 config 键恢复分类页（P51）；未知值经 core 归一回默认页。
-    pub(crate) fn from_key(key: &str) -> Self {
-        match editpad_core::normalize_settings_page(key) {
-            editpad_core::SETTINGS_PAGE_FONT => Self::Font,
-            editpad_core::SETTINGS_PAGE_SAVE => Self::Save,
-            editpad_core::SETTINGS_PAGE_SESSION => Self::Session,
-            editpad_core::SETTINGS_PAGE_HOTKEYS => Self::Hotkeys,
-            editpad_core::SETTINGS_PAGE_ABOUT => Self::About,
-            _ => Self::Appearance,
-        }
-    }
+    // 第 64 轮用户点单：设置弹窗不再持久化/恢复上次浏览的分类页——
+    // 每次打开都落在第一分类（外观），原 from_key 恢复入口随之移除。
 }
 
 /// 「正文字体」行的行键：控件匹配与字体挑选块挂载点共用同一常量，
@@ -142,6 +135,12 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         key: "自动写盘延迟（秒）",
         title: "自动写盘延迟（秒）",
         desc: "停手多少秒后执行自动写盘；仅在上面的开关开启时生效。",
+    },
+    StaticRow {
+        page: SettingsPage::Save,
+        key: "保存时备份",
+        title: "保存时备份",
+        desc: "覆盖已有文件前把磁盘旧版复制一份：「覆盖式」= 同目录 name.bak；「时间戳历史」= name.bak.d 目录内逐次留存；超过 64MB 的文件自动跳过，备份失败不阻断保存。",
     },
     StaticRow {
         page: SettingsPage::Session,

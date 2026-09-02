@@ -102,10 +102,12 @@ pub struct Settings {
     /// 第 63 轮：显示行尾符标记（行尾短标）。默认关。
     #[serde(default)]
     pub show_line_endings: bool,
-    /// 设置弹窗上次浏览的分类页（P51）：合法键见 [`SETTINGS_PAGES`]，
-    /// 非法/缺省在加载时归一为默认页。纯界面偏好，不参与行为语义。
-    #[serde(default = "default_settings_page")]
-    pub settings_page: String,
+    /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
+    /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/ 
+    /// [`BACKUP_MODE_TIMESTAMPED`]（`name.bak/` 目录内时间戳历史）。
+    /// 非法值在加载时归一为 none。
+    #[serde(default = "default_backup_mode")]
+    pub backup_mode: String,
     /// P62 热键重映射：动作 id → 组合键串（如 `"Ctrl+Shift+S"`）。
     /// 空 = 全部默认。加载时逐条经 [`normalize_combo`] 归一，非法组合
     /// 条目删除；动作 id 的合法性由 app 层过滤（core 不掌握动作清单）。
@@ -146,7 +148,8 @@ impl Default for Settings {
             // 第 63 轮：不可见字符标记默认全关（主流编辑器同款初始态）
             show_whitespace: false,
             show_line_endings: false,
-            settings_page: SETTINGS_PAGE_APPEARANCE.to_string(),
+            // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
+            backup_mode: BACKUP_MODE_NONE.to_string(),
             hotkeys: HashMap::new(),
             // 新装用户直接落在当前策略版本：不经历迁移（迁移只面向旧文件）
             settings_version: SETTINGS_VERSION,
@@ -196,6 +199,9 @@ pub const SETTINGS_PAGES: [&str; 6] = [
 ];
 
 /// 分类页键归一（纯函数）：空白/未知值收敛为默认页（外观）。
+/// 第 64 轮用户点单后设置弹窗不再持久化分类位置——本函数保留仅为
+/// 公开 API 兼容（历史配置文件里遗留的 settings_page 键由 serde 忽略，
+/// 下次保存自然消失），app 侧已无调用方。
 pub fn normalize_settings_page(value: &str) -> &'static str {
     let v = value.trim();
     SETTINGS_PAGES
@@ -205,9 +211,30 @@ pub fn normalize_settings_page(value: &str) -> &'static str {
         .unwrap_or(SETTINGS_PAGE_APPEARANCE)
 }
 
-/// `#[serde(default)]` 用：P51 分类页缺字段时的默认值。
-fn default_settings_page() -> String {
-    SETTINGS_PAGE_APPEARANCE.to_string()
+// ---------- 第 64 轮 ⑭：保存时备份 ----------
+
+/// 备份模式：不备份（默认）。
+pub const BACKUP_MODE_NONE: &str = "none";
+/// 备份模式：同目录 `name.bak`，每次覆盖。
+pub const BACKUP_MODE_SIMPLE: &str = "simple";
+/// 备份模式：`name.bak/` 目录内 `name.YYYYMMDD-HHMMSS.bak` 历史留存。
+pub const BACKUP_MODE_TIMESTAMPED: &str = "timestamped";
+
+#[cfg(test)]
+pub(crate) const BACKUP_MODES: [&str; 3] =
+    [BACKUP_MODE_NONE, BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED];
+
+fn default_backup_mode() -> String {
+    BACKUP_MODE_NONE.to_string()
+}
+
+/// 备份模式归一（纯函数可单测）：未知/空白收敛为 none。
+pub fn normalize_backup_mode(value: &str) -> &'static str {
+    match value.trim() {
+        BACKUP_MODE_SIMPLE => BACKUP_MODE_SIMPLE,
+        BACKUP_MODE_TIMESTAMPED => BACKUP_MODE_TIMESTAMPED,
+        _ => BACKUP_MODE_NONE,
+    }
 }
 
 // ---------- P62 组合键串归一 ----------
@@ -377,6 +404,8 @@ impl Settings {
         if self.exit_mode != EXIT_MODE_SNAPSHOT && self.exit_mode != EXIT_MODE_ASK {
             self.exit_mode = EXIT_MODE_SNAPSHOT.to_string();
         }
+        // 第 64 轮 ⑭：备份模式归一——未知/空白收敛为 none
+        self.backup_mode = normalize_backup_mode(&self.backup_mode).to_string();
         // P31：心跳间隔收敛到合法区间（过密=写盘风暴，过疏=丢失窗口过大）
         self.snapshot_interval_secs = self
             .snapshot_interval_secs
@@ -394,8 +423,6 @@ impl Settings {
                 self.font_family = Some(name.trim().to_owned());
             }
         }
-        // P51：分类页键归一——手改/损坏值收敛为默认页
-        self.settings_page = normalize_settings_page(&self.settings_page).to_string();
         // P62：热键重映射逐条归一——非法组合条目删除（动作 id 的合法性
         // 由 app 层过滤，core 不掌握动作清单）
         self.hotkeys.retain(|_, combo| {
@@ -1189,12 +1216,12 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    // ---------- P51 设置分类页记忆 ----------
+    // ---------- P51 设置分类页记忆（第 64 轮撤销后仅存归一纯函数） ----------
 
     #[test]
-    fn settings_page_normalized_roundtrip_and_legacy_compatible() {
-        // 默认 = 外观页；合法键透传，未知/空白归一默认
-        assert_eq!(Settings::default().settings_page, SETTINGS_PAGE_APPEARANCE);
+    fn normalize_settings_page_registry_and_fallbacks() {
+        // 合法键透传，未知/空白归一默认（函数保留仅为公开 API 兼容，
+        // app 侧已不再持久化/恢复分类位置）
         assert_eq!(normalize_settings_page("hotkeys"), SETTINGS_PAGE_HOTKEYS);
         assert_eq!(normalize_settings_page(" no-such "), SETTINGS_PAGE_APPEARANCE);
         assert_eq!(normalize_settings_page(""), SETTINGS_PAGE_APPEARANCE);
@@ -1202,36 +1229,44 @@ mod tests {
         for key in SETTINGS_PAGES {
             assert_eq!(normalize_settings_page(key), key, "注册键 {key} 必须合法");
         }
-
-        // 旧 config.toml 缺 P51 字段 → 默认页（serde default，零迁移升级）
+        // 旧 config.toml 里的 settings_page 遗留键：serde 忽略未知字段，
+        // 加载成功且不再回写该键
         let dir = scratch_dir("p51-legacy");
         fs::create_dir_all(&dir).unwrap();
         let legacy = dir.join("legacy.toml");
-        fs::write(&legacy, "theme = \"dark\"\n").unwrap();
-        assert_eq!(
-            Settings::load_from(&legacy).settings_page,
-            SETTINGS_PAGE_APPEARANCE
-        );
+        fs::write(&legacy, "settings_page = \"hotkeys\"\ntheme = \"dark\"\n").unwrap();
+        let s = Settings::load_from(&legacy);
+        assert_eq!(s.theme, "dark");
+        let path = dir.join("roundtrip.toml");
+        s.save_to(&path).expect("保存应成功");
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("settings_page"), "遗留键不得被回写");
+        fs::remove_dir_all(&dir).ok();
+    }
 
-        // 手改损坏值 → 加载归一为默认页
-        let broken = dir.join("broken.toml");
-        fs::write(&broken, "settings_page = \"hacked\"\n").unwrap();
-        assert_eq!(
-            Settings::load_from(&broken).settings_page,
-            SETTINGS_PAGE_APPEARANCE
-        );
-
-        // 往返：选中的页落盘后原样读回
+    #[test]
+    fn backup_mode_normalize_default_and_roundtrip() {
+        // 默认 none；三模式合法键透传；未知/带空白归一
+        assert_eq!(Settings::default().backup_mode, BACKUP_MODE_NONE);
+        for mode in BACKUP_MODES {
+            assert_eq!(normalize_backup_mode(mode), mode, "mode {mode}");
+        }
+        assert_eq!(normalize_backup_mode(" simple "), BACKUP_MODE_SIMPLE);
+        assert_eq!(normalize_backup_mode("nope"), BACKUP_MODE_NONE);
+        // roundtrip：timestamped 落盘原样读回；损坏值加载归一为 none
+        let dir = scratch_dir("backup-mode");
+        fs::create_dir_all(&dir).unwrap();
         let mut s = Settings::default();
-        s.settings_page = SETTINGS_PAGE_HOTKEYS.to_string();
+        s.backup_mode = BACKUP_MODE_TIMESTAMPED.to_string();
         let path = dir.join("config.toml");
         s.save_to(&path).expect("保存应成功");
         assert_eq!(
-            Settings::load_from(&path).settings_page,
-            SETTINGS_PAGE_HOTKEYS,
-            "P51 字段必须参与 roundtrip"
+            Settings::load_from(&path).backup_mode,
+            BACKUP_MODE_TIMESTAMPED
         );
-
+        let weird = dir.join("weird.toml");
+        fs::write(&weird, "backup_mode = \"hacked\"\n").unwrap();
+        assert_eq!(Settings::load_from(&weird).backup_mode, BACKUP_MODE_NONE);
         fs::remove_dir_all(&dir).ok();
     }
 

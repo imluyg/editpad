@@ -220,15 +220,11 @@ impl Editpad {
         let dark_mode = settings.is_dark();
         // 设置里的字号可能未归一（旧配置/手改），boot 时按同一规则 clamp
         let font_size = editor::normalize_font_size(settings.font_size);
-        // P51：分类页记忆随配置恢复（非法/缺省键归一为默认页）。
-        // 先取键再移动 settings 进结构体。
-        let settings_page = SettingsPage::from_key(&settings.settings_page);
         let mut state = Self {
             settings,
             dark_mode,
             available_fonts,
             active_font_family: active_font_family.map(leak_font_family),
-            settings_page,
             ..Self::default()
         };
         state.cur().borrow_mut().set_font_size(font_size);
@@ -1549,20 +1545,23 @@ impl Editpad {
                 // busy（加载/保存中）禁开，与工具栏其余按钮同一守卫语义
                 if !self.busy {
                     self.settings_visible = !self.settings_visible;
-                    // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
-                    if !self.settings_visible {
+                    if self.settings_visible {
+                        // 第 64 轮用户点单：每次进入设置默认落在第一分类，
+                        // 不记忆上次浏览位置（P51 撤销）
+                        self.settings_page = SettingsPage::default();
+                    } else {
+                        // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
                         self.settings_search.clear();
                     }
                 }
                 Task::none()
             }
-            // P47：侧栏分类导航——点分类即离开搜索态（同款语义）
+            // P47：侧栏分类导航——点分类即离开搜索态（同款语义）。
+            // 第 64 轮用户点单：分类位置不再持久化（P51 撤销），每次打开
+            // 设置都回到第一分类；弹窗打开期间导航照常。
             Message::SettingsPageSelected(page) => {
                 self.settings_page = page;
                 self.settings_search.clear();
-                // P51：分类位置即时落盘，重启后回到上次浏览的页
-                self.settings.settings_page = page.key().to_owned();
-                self.persist_settings();
                 Task::none()
             }
             Message::SettingsSearchChanged(query) => {
@@ -1596,6 +1595,29 @@ impl Editpad {
             Message::SettingsSnapshotsToggled(value) => {
                 self.settings.enable_snapshots = value;
                 self.persist_settings();
+                Task::none()
+            }
+            // 第 64 轮 ⑭：备份模式三态循环（none→simple→timestamped）
+            Message::SettingsBackupModeToggled => {
+                use editpad_core::settings::{
+                    BACKUP_MODE_NONE, BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED,
+                };
+                self.settings.backup_mode = if self.settings.backup_mode == BACKUP_MODE_SIMPLE {
+                    BACKUP_MODE_TIMESTAMPED
+                } else if self.settings.backup_mode == BACKUP_MODE_TIMESTAMPED {
+                    BACKUP_MODE_NONE
+                } else {
+                    BACKUP_MODE_SIMPLE
+                }
+                .to_owned();
+                self.persist_settings();
+                self.status = match self.settings.backup_mode.as_str() {
+                    BACKUP_MODE_SIMPLE => "保存时备份：同目录 name.bak 覆盖式".to_owned(),
+                    BACKUP_MODE_TIMESTAMPED => {
+                        "保存时备份：name.bak/ 目录按时间戳留存".to_owned()
+                    }
+                    _ => "保存时备份：已关闭".to_owned(),
+                };
                 Task::none()
             }
             Message::SettingsRememberSessionToggled(value) => {
@@ -2085,6 +2107,13 @@ impl Editpad {
             }
         }
         self.enter_busy();
+        // 第 64 轮 ⑭：写前备份磁盘旧版（提示进状态栏；同步执行——
+        // 显式保存本就用户等待语义，≤64MB 复制为一次性毫秒级开销）
+        if let Some(note) =
+            crate::perform_backup_before_overwrite(&path, &self.settings.backup_mode)
+        {
+            self.status = note;
+        }
         // P67：按页编码偏好落盘（None = 默认 UTF-8，历史行为）
         let encoding = self
             .tab()
@@ -2143,11 +2172,21 @@ impl Editpad {
             let expected_stamp = self.tabs[idx].file_stamp;
             let delay =
                 std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs));
+            // 第 64 轮 ⑭：备份模式随任务快照下发（后台线程无 &Settings）
+            let self_backup_mode = self.settings.backup_mode.clone();
             self.tabs[idx].autosave_inflight = true;
             tasks.push(Task::perform(
                 async move {
-                    drive_autosave_once(idx, path, doc, version, expected_stamp, delay)
-                        .await
+                    drive_autosave_once(
+                        idx,
+                        path,
+                        doc,
+                        version,
+                        expected_stamp,
+                        delay,
+                        self_backup_mode.clone(),
+                    )
+                    .await
                 },
                 |message| message,
             ));
