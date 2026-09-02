@@ -204,6 +204,12 @@ impl Editpad {
     pub(crate) fn handle_close_request(&mut self, id: window::Id, snapshot_dir: Option<PathBuf>) -> Task<Message> {
         // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
         self.main_window = Some(id);
+        // P102：窗口几何兜底落盘——最后一次拖动/拉伸可能仍在节流窗内，
+        // 关窗前补写（门控 = 本会话确有几何变化：测试环境不发窗口事件，
+        // 恒不触碰真实配置目录）
+        if self.last_geometry_persist.is_some() {
+            self.persist_settings();
+        }
         // P32：关窗前把全部命名页的光标/滚动回写最近文件记忆
         // （快照直退与旧确认条两条路径都要覆盖；未命名页自然跳过）
         let all: Vec<usize> = (0..self.tabs.len()).collect();

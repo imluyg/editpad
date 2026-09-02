@@ -2236,6 +2236,97 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         );
     }
 
+    // ---------- P102：窗口几何记忆 + 实例隔离 ----------
+
+    /// P102 回归：窗口移动/拉伸事件 → 设置字段更新并（节流）落盘——
+    /// 写盘走注入路径，绝不碰真实 %APPDATA%；icon 测试同款零数据泄漏。
+    #[test]
+    fn p102_window_geometry_events_update_and_persist_settings() {
+        let dir = scratch_dir("p102-geom");
+        let mut app = Editpad::default();
+        app.settings_path_override = Some(dir.join("config.toml"));
+
+        // 移动 + 拉伸：首事件立即落盘；紧随的拉伸在节流窗内不落盘
+        dispatch(&mut app, Message::WindowMoved(iced::Point::new(320.0, 180.0)));
+        dispatch(&mut app, Message::ViewportResized(1280.0, 720.0));
+        let loaded = editpad_core::Settings::load_from(&dir.join("config.toml"));
+        assert_eq!(
+            (loaded.window_x, loaded.window_y),
+            (Some(320), Some(180)),
+            "首个几何事件必须落盘"
+        );
+        assert_eq!(
+            (loaded.window_width, loaded.window_height),
+            (None, None),
+            "节流窗内的拉伸不得落盘"
+        );
+
+        // 节流：紧随其后的第二次移动（同节流窗内）不得再写盘
+        let before = std::fs::read(&dir.join("config.toml")).unwrap();
+        dispatch(&mut app, Message::WindowMoved(iced::Point::new(333.0, 188.0)));
+        let after = std::fs::read(&dir.join("config.toml")).unwrap();
+        assert_eq!(before, after, "节流窗内不得反复写盘");
+        // 内存态已更新（关闭路径兜底落盘时带走最后的移动）
+        assert_eq!((app.settings.window_x, app.settings.window_y), (Some(333), Some(188)));
+
+        // 关闭路径兜底落盘：handle_close_request 补写最后状态（含节流窗内的尺寸）
+        let _ = app.handle_close_request(iced::window::Id::unique(), None);
+        let final_loaded = editpad_core::Settings::load_from(&dir.join("config.toml"));
+        assert_eq!(
+            (final_loaded.window_x, final_loaded.window_y),
+            (Some(333), Some(188)),
+            "关闭时必须兜底写入节流窗内的最后几何"
+        );
+        assert_eq!(
+            (final_loaded.window_width, final_loaded.window_height),
+            (Some(1280.0), Some(720.0)),
+            "关闭时必须兜底写入被节流挡下的尺寸"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P102 契约：restore_window_geometry 把配置换算成建窗参数——
+    /// 合法值原样还原、缺省回退默认居中、坏值（越界坐标/极小尺寸）
+    /// 回退且不 panic。
+    #[test]
+    fn p102_restore_window_geometry_clamps_bad_values() {
+        use iced::window::Position;
+
+        let mut s = editpad_core::Settings::default();
+        let (size, pos) = restore_window_geometry(&s);
+        assert_eq!((size.width, size.height), (1024.0, 768.0), "未记录回退默认尺寸");
+        assert!(matches!(pos, Position::Centered), "未记录回退居中");
+
+        s.window_x = Some(120);
+        s.window_y = Some(-8);
+        s.window_width = Some(1280.5);
+        s.window_height = Some(720.25);
+        let (size, pos) = restore_window_geometry(&s);
+        assert_eq!((size.width, size.height), (1280.5, 720.25));
+        assert!(
+            matches!(pos, Position::Specific(p) if p.x == 120.0 && p.y == -8.0),
+            "合法记录必须原样建窗"
+        );
+
+        // 坏值：坐标越界、尺寸过小/非有限 → 回退，不得建出不可用窗口
+        s.window_x = Some(1 << 30);
+        s.window_y = Some(1 << 30);
+        s.window_width = Some(10.0);
+        s.window_height = Some(10.0);
+        let (_, pos) = restore_window_geometry(&s);
+        assert!(matches!(pos, Position::Centered));
+        let (size, _) = restore_window_geometry(&s);
+        assert_eq!((size.width, size.height), (1024.0, 768.0));
+
+        s.window_x = Some(5);
+        s.window_y = Some(5);
+        s.window_width = Some(f32::NAN);
+        s.window_height = Some(f32::INFINITY);
+        let (size, _) = restore_window_geometry(&s);
+        assert_eq!((size.width, size.height), (1024.0, 768.0), "非有限尺寸必须回退");
+    }
+
     #[test]
     fn p76_window_title_icon_decodes_48px_entry() {
         // P71 自定义 ICO 的 48px 条目必须可解析为窗口图标：48×48、

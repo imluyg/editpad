@@ -1,87 +1,176 @@
-//! 数据目录解析（P101 用户点单：生产/开发隔离）。
+//! 数据目录解析（P102 用户点单：多份拷贝自动各搞各的，不要手动标记）。
 //!
-//! 常规模式 = 系统配置目录（Windows 上为 `%APPDATA%\editpad`）——配置
-//! 与会话快照因此**与 exe 所在位置无关**：任意拷贝的程序都读写同一份
-//! 用户数据（改设置、恢复的会话、最近文件全部互通），多份部署无法靠
-//! 移动 exe 隔离（用户实测：两个目录的软件「互通」，打字内容互相可见——
-//! 机制 = 共享 `%APPDATA%\editpad\snapshot\` 心跳快照）。
+//! 背景：配置与会话快照曾固定写死在系统目录（`%APPDATA%\editpad`），与
+//! exe 位置无关——任意拷贝共享同一份用户数据（设置、最近文件、未保存
+//! 会话互相可见），多份部署无法隔离（用户实测「两个软件互通，打字内容
+//! 互相可见」= 共享会话快照）。P101 曾引入 `portable.txt` 手动标记，
+//! 用户明确不要手动标记。
 //!
-//! 便携模式 = exe 同目录放 [`PORTABLE_MARKER`]（`portable.txt`）即启用：
-//! 数据根目录改指 exe 所在目录，配置与会话随程序走——一份拷贝自成一体，
-//! 与开发版/其他拷贝互不干扰。标记不存在（或 exe 路径不可得）时行为与
-//! 既往完全一致，存量用户零变化。
+//! 本方案：**按 exe 位置自动分实例**——数据根目录 =
+//! `%APPDATA%\editpad\instances\<规范化 exe 路径的 FNV-1a 64 哈希>`：
+//! 每份拷贝/每个目录自动各搞各的数据，零配置零标记；exe 更新/重装到
+//! 同一位置时数据延续（同一路径 → 同一哈希）。首次运行迁移：P101 前
+//! 布局的遗留 `%APPDATA%\editpad\` 目录整体搬入首个实例目录（原拷贝
+//! 数据无缝续用），之后所有拷贝各自建实例目录、互不互通。
 
 use std::path::{Path, PathBuf};
 
-/// 便携模式标记文件名：与 exe 同目录存在**该文件**（内容可为空）即启用
-/// 便携模式。放文件的动作本身就是显式意图，比「检测 exe 目录可写性」
-/// 更不易误判（UAC/资源管理器位置也可能恰好可写）。
-pub const PORTABLE_MARKER: &str = "portable.txt";
+/// 实例目录在 `%APPDATA%\editpad\` 下的子目录名。
+const INSTANCES_DIR: &str = "instances";
 
-/// 数据根目录（运行时）：exe 旁有 [`PORTABLE_MARKER`] 时 = exe 目录；
-/// 否则 = 系统配置目录下的 `editpad` 目录（拿不到返回 None，功能降级）。
+/// 数据根目录（运行时）：exe 路径 → 对应实例目录；exe 路径不可得时
+/// 回退遗留根（拿不到系统配置目录返回 None，功能降级）。
 pub fn data_root() -> Option<PathBuf> {
     data_root_for(std::env::current_exe().ok().as_deref())
 }
 
-/// 可注入 exe 路径的纯判定（单测用；`exe` = None 等价于「查不到自身
-/// 路径」——这种情况下无法进入便携模式，恒回退系统配置目录）。
+/// 可注入 exe 路径的判定（单测用；`exe` = None 等价于查不到自身路径）。
 pub fn data_root_for(exe: Option<&Path>) -> Option<PathBuf> {
-    let portable = exe
-        .and_then(|p| p.parent())
-        .map(|dir| dir.join(PORTABLE_MARKER).is_file())
-        .unwrap_or(false);
-    if portable {
-        exe.and_then(|p| p.parent()).map(|d| d.to_path_buf())
-    } else {
-        dirs::config_dir().map(|d| d.join("editpad"))
+    data_root_for_base(exe, dirs::config_dir().as_deref())
+}
+
+/// 注入系统配置目录的判定（单测用）：`appdata` = `%APPDATA%` 或测试替身。
+pub fn data_root_for_base(exe: Option<&Path>, appdata: Option<&Path>) -> Option<PathBuf> {
+    let appdata = appdata?;
+    let Some(exe) = exe else {
+        // 查不到自身路径：无法定位实例目录，遗留根兜底（功能不变）
+        return Some(appdata.join("editpad"));
+    };
+    let dir = appdata
+        .join("editpad")
+        .join(INSTANCES_DIR)
+        .join(instance_key(exe));
+    if dir.exists() {
+        return Some(dir);
+    }
+    // 首次运行迁移：把遗留目录（P101 前布局）整体搬入本实例。
+    // 多拷贝并发首启时只有先搬走 config.toml 的进程胜出，其余拷贝看到
+    // 源缺失即自建实例目录；迁移失败无害（数据仍留在遗留目录，下次
+    // 启动重试），绝不丢数据。
+    migrate_legacy(appdata, &dir);
+    Some(dir)
+}
+
+/// 实例键 = 规范化 exe 路径的 FNV-1a 64 十六进制（稳定、无随机种子：
+/// 目录名必须跨进程/跨启动一致）。规范化解析链接与大小写形态；失败
+/// （如测试中的虚构路径）回退原路径字符串。
+fn instance_key(exe: &Path) -> String {
+    let canonical = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    format!("{:016x}", fnv1a64(canonical.to_string_lossy().as_bytes()))
+}
+
+/// FNV-1a 64b：无需依赖标准库哈希的随机种子（默认 SipHash 带随机 key，
+/// 跨进程不稳定，不可用于目录名）。
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// 把遗留 `%APPDATA%\editpad` 目录内容整体搬入 `dir`（尽力而为）。
+///
+/// 顺序固定 **config.toml 在先**：并发下最多一个进程搬走它，其余进程
+/// 在「源缺失」判定处立即作罢，不会与胜者交错搬同一批文件。`instances`
+/// 子目录本身（本目录的家）与已存在的条目跳过。
+fn migrate_legacy(appdata: &Path, dir: &Path) {
+    let legacy = appdata.join("editpad");
+    if !legacy.join("config.toml").is_file() {
+        return; // 无遗留数据（含已被并发进程抢先迁移的情形）
+    }
+    let _ = std::fs::create_dir_all(dir);
+    let Ok(entries) = std::fs::read_dir(&legacy) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_str() == Some(INSTANCES_DIR) {
+            continue; // 不得把实例目录搬进自己
+        }
+        let target = dir.join(&name);
+        if target.exists() {
+            continue;
+        }
+        // 移动失败（占用/权限等）退化为复制：数据要到实例目录，目录
+        // 里残留副本无碍（下次启动不再读遗留目录）
+        if std::fs::rename(entry.path(), &target).is_err() {
+            let _ = std::fs::copy(entry.path(), &target);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    /// 便携标记切换数据根目录：有标记 → exe 目录；无标记 → 系统配置
-    /// 目录（与「移动 exe 无法隔离」的既有行为一致）；exe 路径不可得
-    /// 时即使标记存在也不进便携模式（查不到自身位置无从定位标记）。
+    /// 每个 exe 位置一个实例目录：互不相同、同路径稳定；遗留目录整体
+    /// 搬入首个实例且不再 互通（其余拷贝拿自己的空实例目录）。
     #[test]
-    fn portable_marker_switches_data_root_to_exe_dir() {
-        let dir = std::env::temp_dir()
-            .join(format!("editpad-paths-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("editpad.exe");
+    fn instances_isolated_by_exe_location_with_legacy_migration_once() {
+        let appdata = std::env::temp_dir().join(format!("editpad-paths-{}", std::process::id()));
+        let exe_a = appdata.join("prod").join("editpad.exe");
+        let exe_b = appdata.join("dev").join("editpad.exe");
 
-        // 无标记：系统配置目录（常规模式，行为与既往一致）
-        assert_eq!(
-            data_root_for(Some(&exe)),
-            dirs::config_dir().map(|d| d.join("editpad")),
-            "无便携标记必须维持 %APPDATA% 口径"
+        // 无遗留：各拷贝各得一个实例目录，互不相同且同路径稳定
+        let root_a = data_root_for_base(Some(&exe_a), Some(&appdata)).unwrap();
+        let root_b = data_root_for_base(Some(&exe_b), Some(&appdata)).unwrap();
+        assert_ne!(root_a, root_b, "不同位置的拷贝必须各搞各的数据");
+        assert!(
+            root_a.starts_with(appdata.join("editpad").join("instances")),
+            "实例目录必须在 instances 树下：{root_a:?}"
         );
-        // 有标记（空文件即可）：数据根目录 = exe 目录
-        std::fs::write(dir.join(PORTABLE_MARKER), b"").unwrap();
         assert_eq!(
-            data_root_for(Some(&exe)),
-            Some(dir.clone()),
-            "便携标记存在时数据必须落在 exe 目录"
-        );
-        // 标记只认 exe 同目录：别处的标记不影响
-        let elsewhere = std::env::temp_dir()
-            .join(format!("editpad-paths-elsewhere-{}", std::process::id()));
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::fs::write(elsewhere.join(PORTABLE_MARKER), b"").unwrap();
-        assert_eq!(
-            data_root_for(Some(&elsewhere.join("other").join("editpad.exe"))),
-            dirs::config_dir().map(|d| d.join("editpad")),
-            "标记不在 exe 同目录时不得启用便携模式"
-        );
-        // exe 路径不可得：恒回退系统配置目录
-        assert_eq!(
-            data_root_for(None),
-            dirs::config_dir().map(|d| d.join("editpad"))
+            root_a,
+            data_root_for_base(Some(&exe_a), Some(&appdata)).unwrap(),
+            "同一 exe 路径必须映射到同一实例目录"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&elsewhere).ok();
+        // exe 路径不可得 → 遗留根兜底（功能不降级为 None）
+        assert_eq!(
+            data_root_for_base(None, Some(&appdata)),
+            Some(appdata.join("editpad"))
+        );
+
+        // 构造 P101 前遗留布局：config.toml + snapshot/ + 无关注入文件
+        fs::create_dir_all(appdata.join("editpad").join("snapshot")).unwrap();
+        fs::write(appdata.join("editpad").join("config.toml"), b"theme = \"dark\"").unwrap();
+        fs::write(appdata.join("editpad").join("snapshot").join("s1.snap"), b"x").unwrap();
+
+        // 首个实例（exe_a）整体迁入：config 与 snapshot 都进了自己的
+        // 实例目录，遗留目录不再持有数据
+        let adopted = data_root_for_base(Some(&exe_a), Some(&appdata)).unwrap();
+        assert_eq!(adopted, root_a);
+        assert!(adopted.join("config.toml").is_file(), "config 必须搬入实例目录");
+        assert!(adopted.join("snapshot").join("s1.snap").is_file(), "快照必须搬入实例目录");
+        assert!(
+            !appdata.join("editpad").join("config.toml").exists(),
+            "遗留目录不得再留 config（互通根被拔掉）"
+        );
+
+        // 另一拷贝（exe_b）不再见遗留：拿到自己的空实例目录
+        let root_b2 = data_root_for_base(Some(&exe_b), Some(&appdata)).unwrap();
+        assert_eq!(root_b2, root_b);
+        assert!(!root_b2.join("config.toml").exists(), "新拷贝必须零继承");
+
+        // 迁移幂等：重复调用结果不变
+        assert_eq!(data_root_for_base(Some(&exe_a), Some(&appdata)).unwrap(), adopted);
+
+        fs::remove_dir_all(&appdata).ok();
+    }
+
+    /// 无遗留数据时不得凭空迁出目录结构（空 editpad 目录保持不动）。
+    #[test]
+    fn no_legacy_means_fresh_empty_instance() {
+        let appdata = std::env::temp_dir().join(format!("editpad-paths-none-{}", std::process::id()));
+        fs::create_dir_all(&appdata).unwrap();
+        fs::create_dir_all(appdata.join("editpad")).unwrap(); // 空遗留目录
+        let exe = appdata.join("c").join("editpad.exe");
+        let root = data_root_for_base(Some(&exe), Some(&appdata)).unwrap();
+        assert!(root.starts_with(appdata.join("editpad").join("instances")));
+        assert!(!root.join("config.toml").exists());
+        fs::remove_dir_all(&appdata).ok();
     }
 }

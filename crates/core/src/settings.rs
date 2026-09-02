@@ -1,8 +1,9 @@
 //! 应用设置持久化：最近打开的文件列表。
 //!
-//! 存储位置由 [`crate::paths`] 决定：常规模式 = `dirs::config_dir()`
-//! （Windows 上是 `%APPDATA%\editpad\config.toml`）；P101 便携模式
-//! （exe 同目录存在 `portable.txt`）= exe 目录内的 `config.toml`。
+//! 存储位置由 [`crate::paths`] 决定：P102 实例隔离——数据根目录 =
+//! 系统配置目录下按 **exe 路径哈希** 分出的实例目录（Windows 上
+//! `%APPDATA%\editpad\instances\<实例键>\`），每份拷贝各搞各的数据；
+//! 首次运行把旧版遗留的 `%APPDATA%\editpad\` 整体搬入首个实例。
 //! 读写都是尽力而为：配置损坏或目录不可写时静默回退默认值，绝不
 //! 影响编辑器本体。
 
@@ -126,6 +127,18 @@ pub struct Settings {
     /// 的一次性迁移；普通新增字段一律走 serde default 零迁移。
     #[serde(default)]
     pub settings_version: u32,
+    /// P102：窗口几何记忆——上次关闭时的窗口位置（逻辑像素，屏幕坐标）。
+    /// None = 未记录过（启动回退默认/居中）。只入 config.toml，不在
+    /// 设置弹窗展示（它属于窗口自身状态）。
+    #[serde(default)]
+    pub window_x: Option<i32>,
+    #[serde(default)]
+    pub window_y: Option<i32>,
+    /// P102：窗口尺寸（逻辑像素）。None = 未记录过（启动回退默认 1024×768）。
+    #[serde(default)]
+    pub window_width: Option<f32>,
+    #[serde(default)]
+    pub window_height: Option<f32>,
 }
 
 /// 当前设置策略版本（P63）。历史：
@@ -163,6 +176,11 @@ impl Default for Settings {
             hotkeys: HashMap::new(),
             // 新装用户直接落在当前策略版本：不经历迁移（迁移只面向旧文件）
             settings_version: SETTINGS_VERSION,
+            // P102：窗口几何默认未记录（首次启动回退默认尺寸/居中）
+            window_x: None,
+            window_y: None,
+            window_width: None,
+            window_height: None,
         }
     }
 }
@@ -1009,6 +1027,40 @@ mod tests {
         let path = dir.join("config.toml");
         s.save_to(&path).expect("保存应成功");
         assert_eq!(Settings::load_from(&path), s, "P31 字段必须参与 roundtrip");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P102 窗口几何记忆 ----------
+
+    #[test]
+    fn window_geometry_roundtrips_to_disk_with_defaults_empty() {
+        // 默认 None：旧配置缺字段加载后仍为 None（零迁移）
+        let mut s = Settings::default();
+        assert_eq!((s.window_x, s.window_y), (None, None));
+        assert_eq!((s.window_width, s.window_height), (None, None));
+
+        let dir = scratch_dir("p102-geometry");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // 缺字段的旧配置：加载后几何为 None
+        fs::write(&path, "theme = \"dark\"\n").unwrap();
+        let legacy = Settings::load_from(&path);
+        assert_eq!((legacy.window_x, legacy.window_y), (None, None));
+
+        // 记录后 roundtrip 逐字还原（含小数尺寸）
+        s.window_x = Some(120);
+        s.window_y = Some(-8);
+        s.window_width = Some(1280.5);
+        s.window_height = Some(720.25);
+        s.save_to(&path).expect("保存应成功");
+        let loaded = Settings::load_from(&path);
+        assert_eq!((loaded.window_x, loaded.window_y), (Some(120), Some(-8)));
+        assert_eq!(
+            (loaded.window_width, loaded.window_height),
+            (Some(1280.5), Some(720.25)),
+            "窗口几何必须参与 roundtrip"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

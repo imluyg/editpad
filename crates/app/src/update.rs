@@ -1493,6 +1493,21 @@ impl Editpad {
             }
             Message::ViewportResized(w, h) => {
                 self.viewport_size = (w, h);
+                // P102：窗口尺寸记忆（0,0 = 未知窗口，跳过；实测正常值
+                // 才记录）。节流：拖动/拉伸每帧事件，2s 才落盘一次，
+                // 关闭路径 handle_close_request 兜底落盘最后状态。
+                if w > 0.0 && h > 0.0 {
+                    self.settings.window_width = Some(w);
+                    self.settings.window_height = Some(h);
+                    self.persist_geometry_if_due();
+                }
+                Task::none()
+            }
+            Message::WindowMoved(p) => {
+                // P102：窗口位置记忆（逻辑坐标，iced 与建窗 Specific 同空间）
+                self.settings.window_x = Some(p.x as i32);
+                self.settings.window_y = Some(p.y as i32);
+                self.persist_geometry_if_due();
                 Task::none()
             }
             Message::TabContextMenuClosed => {
@@ -2158,6 +2173,10 @@ impl Editpad {
                 (iced::Event::Window(window::Event::Resized(size)), _) => {
                     Some(Message::ViewportResized(size.width, size.height))
                 }
+                // P102：窗口移动（逻辑坐标）→ 几何记忆（节流落盘见 update）
+                (iced::Event::Window(window::Event::Moved(position)), _) => {
+                    Some(Message::WindowMoved(position))
+                }
                 _ => None,
             });
         // 窗口关闭请求：exit_on_close_request(false) 后以订阅事件流转
@@ -2330,7 +2349,7 @@ impl Editpad {
 
     /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到
     /// 临时目录，绝不动真实 %APPDATA%；否则走系统配置目录（尽力而为）。
-    fn persist_settings(&self) {
+    pub(crate) fn persist_settings(&self) {
         if let Some(path) = &self.settings_path_override {
             let _ = self.settings.save_to(path);
         } else {
@@ -2338,4 +2357,22 @@ impl Editpad {
         }
     }
 
+    /// P102：窗口几何节流落盘——拖动/拉伸是每帧事件，至少隔
+    /// [`GEOMETRY_PERSIST_INTERVAL`] 才写一次盘；关闭路径在
+    /// `handle_close_request` 里兜底补一次（见 view.rs）。
+    fn persist_geometry_if_due(&mut self) {
+        let now = std::time::Instant::now();
+        let due = self
+            .last_geometry_persist
+            .is_none_or(|t| now.duration_since(t) >= GEOMETRY_PERSIST_INTERVAL);
+        if due {
+            self.last_geometry_persist = Some(now);
+            self.persist_settings();
+        }
+    }
+
 }
+
+/// P102：窗口几何落盘节流窗（2 秒一道；最后一次状态由关闭路径兜底）。
+const GEOMETRY_PERSIST_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);

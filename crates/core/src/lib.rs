@@ -24,7 +24,7 @@ pub use highlight::{resolve_language, syntax_for_extension, LazyHighlighter, Sty
 pub use json::{format_json, validate_json, JsonError};
 pub use loader::{load_file, load_file_streaming, load_document_streaming, decode, LoadProgress,
     LoadedText, LoadedDocument};
-pub use paths::{data_root, data_root_for, PORTABLE_MARKER};
+pub use paths::{data_root, data_root_for, data_root_for_base};
 pub use saver::{save_atomic, save_document_atomic, save_document_encoded, EncodeNotice,
     SaveEncoding};
 pub use search::{

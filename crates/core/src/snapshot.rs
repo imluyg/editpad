@@ -118,9 +118,9 @@ pub struct SessionPage {
 }
 
 /// 默认快照目录；拿不到数据目录时返回 None（功能自动降级）。
-/// P101：便携模式（exe 同目录存在 `portable.txt`）下为 exe 目录内的
-/// `snapshot/`；否则走系统配置目录（Windows `%APPDATA%\editpad`），
-/// 见 [`crate::paths`]。
+/// P102：实例隔离——数据根目录按 exe 路径哈希分出实例（Windows 上
+/// `%APPDATA%\editpad\instances\<实例键>\snapshot\`），每份拷贝各搞
+/// 各的数据，见 [`crate::paths`]。
 pub fn snapshot_dir() -> Option<PathBuf> {
     crate::paths::data_root().map(|d| d.join(SNAPSHOT_DIR_NAME))
 }

@@ -31,18 +31,46 @@ fn main() -> iced::Result {
     // iced 0.14：第一个参数是 boot 函数（返回初始状态），title/theme/subscription 走 builder
     // 第 76 轮（用户点单）：窗口标题栏图标 = 应用自定义 Logo（P71 四档
     // ICO 的 48px 条目；解析失败回退 exe 资源图标，见 window_title_icon）
+    // P102：窗口几何记忆——按上次关闭的位置/尺寸建窗（缺省回退
+    // 默认尺寸居中；配置损坏等异常均回退，不影响启动）
+    let geometry = editpad_core::Settings::load();
+    let (window_size, window_position) = restore_window_geometry(&geometry);
     iced::application(Editpad::new, Editpad::update, Editpad::view)
         .title(Editpad::title)
         .theme(Editpad::theme)
         .subscription(Editpad::subscription)
         .window(window::Settings {
             icon: window_title_icon(),
+            size: window_size,
+            position: window_position,
             ..window::Settings::default()
         })
         // 关闭请求必须以事件流转到 subscription（exit_on_close_request 默认 true，
         // 不显式关掉的话点 X 会直接退进程，永远轮不到未保存确认）
         .exit_on_close_request(false)
         .run()
+}
+
+/// P102：把配置里的窗口几何换算成 iced 建窗参数。值域钳制防坏配置
+/// （越界坐标/极端尺寸）建出用户无法操作的窗口；缺省 = 1024×768 居中。
+fn restore_window_geometry(s: &editpad_core::Settings) -> (iced::Size, window::Position) {
+    const MAX_GEOM: f32 = 16384.0;
+    let size = match (s.window_width, s.window_height) {
+        (Some(w), Some(h))
+            if w.is_finite() && h.is_finite() && w >= 400.0 && h >= 300.0 =>
+        {
+            iced::Size::new(w.min(MAX_GEOM), h.min(MAX_GEOM))
+        }
+        _ => iced::Size::new(1024.0, 768.0),
+    };
+    let position = match (s.window_x, s.window_y) {
+        // i32 全幅理论上界以内才采用（防坏值把窗口建到屏幕外十万像素）
+        (Some(x), Some(y)) if x.abs() < (1 << 20) && y.abs() < (1 << 20) => {
+            window::Position::Specific(Point::new(x as f32, y as f32))
+        }
+        _ => window::Position::Centered,
+    };
+    (size, position)
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +210,8 @@ enum Message {
     CursorMoved(Point),
     /// 窗口逻辑尺寸变化（浮层贴边钳制的依据；启动时 winit 也会发一次）
     ViewportResized(f32, f32),
+    /// P102：窗口被移动（逻辑坐标）——记录到设置并节流落盘
+    WindowMoved(Point),
     /// 固定/取消固定第 `idx` 页：固定页豁免单页与批量关闭
     TogglePinTab(usize),
     /// 菜单「保存」：切到第 `idx` 页并复用既有活动页保存流
@@ -1461,6 +1491,10 @@ struct Editpad {
     session_manifest_stale: bool,
     /// 快照目录注入点（测试用）；None = 系统配置目录。
     snapshot_dir_override: Option<PathBuf>,
+    /// P102：窗口几何最后一次落盘时刻（拖动/拉伸事件高频，节流用）。
+    /// None = 本会话尚无几何变化（关闭时的兜底落盘据此门控，测试
+    /// 环境不发窗口事件 = 永不触碰真实配置目录）。
+    last_geometry_persist: Option<std::time::Instant>,
 
     /// 「恢复上次关闭的文件」记忆栈（第 64 轮）：会话内 Vec<PathBuf>，
     /// 最近期在前；close_tabs_now 统一入栈、ReopenLastClosedFile 出栈
@@ -1560,6 +1594,7 @@ impl Default for Editpad {
             heartbeat_inflight: false,
             session_manifest_stale: false,
             snapshot_dir_override: None,
+            last_geometry_persist: None,
         }
     }
 }

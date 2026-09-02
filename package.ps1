@@ -3,11 +3,6 @@
 # Usage (run from repo root, inside the harness PowerShell session):
 #   & .\package.ps1             # full flow (includes release build)
 #   & .\package.ps1 -SkipBuild  # repackage existing exe only
-#   & .\package.ps1 -Portable   # plus portable.txt marker (isolated data dir)
-#
-# -Portable (P101): drops an empty portable.txt next to the exe. The app
-# then keeps config.toml + snapshot/ in the exe directory instead of
-# %APPDATA%\editpad -- a self-contained copy isolated from other installs.
 #
 # Output: dist/Editpad-<version>-win64.zip (exe + README + license).
 # dist/ is gitignored (artifacts are reproducible).
@@ -15,7 +10,7 @@
 # without a BOM using the legacy ANSI codepage, so non-ASCII comments
 # would turn into mojibake and can break parsing.
 
-param([switch]$SkipBuild, [switch]$Portable)
+param([switch]$SkipBuild)
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -42,12 +37,6 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item $exe $stage
 Copy-Item (Join-Path $root 'README.md') $stage
 Copy-Item (Join-Path $root 'LICENSE-APACHE') $stage
-
-# 2.5. Portable marker (P101): zero-byte file, presence only matters.
-if ($Portable) {
-    New-Item -ItemType File -Force -Path (Join-Path $stage 'portable.txt') | Out-Null
-    Write-Host '== portable mode: portable.txt dropped (isolated data dir) =='
-}
 
 # 3. Zip.
 $zip = Join-Path $root "dist\$stageName-win64.zip"
