@@ -95,6 +95,13 @@ pub struct Settings {
     /// （core 不掌握系统字体清单），且只影响本次生效，不抹掉用户配置。
     #[serde(default)]
     pub font_family: Option<String>,
+    /// 第 63 轮：显示空白字符覆盖标记（空格点/制表符箭头）。默认关；
+    /// 纯渲染层偏好，不影响文档模型与命中测试。
+    #[serde(default)]
+    pub show_whitespace: bool,
+    /// 第 63 轮：显示行尾符标记（行尾短标）。默认关。
+    #[serde(default)]
+    pub show_line_endings: bool,
     /// 设置弹窗上次浏览的分类页（P51）：合法键见 [`SETTINGS_PAGES`]，
     /// 非法/缺省在加载时归一为默认页。纯界面偏好，不参与行为语义。
     #[serde(default = "default_settings_page")]
@@ -136,6 +143,9 @@ impl Default for Settings {
             remember_session: true,
             snapshot_interval_secs: DEFAULT_SNAPSHOT_INTERVAL_SECS,
             font_family: None,
+            // 第 63 轮：不可见字符标记默认全关（主流编辑器同款初始态）
+            show_whitespace: false,
+            show_line_endings: false,
             settings_page: SETTINGS_PAGE_APPEARANCE.to_string(),
             hotkeys: HashMap::new(),
             // 新装用户直接落在当前策略版本：不经历迁移（迁移只面向旧文件）

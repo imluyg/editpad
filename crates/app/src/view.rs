@@ -1250,6 +1250,14 @@ impl Editpad {
                     .then_some(Message::SettingsAutosaveDelayDelta(1)),
             ),
             // ---- 会话与隐私 ----
+            "显示空白字符" => checkbox(s.show_whitespace)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsShowWhitespaceToggled)
+                .into(),
+            "显示行尾符" => checkbox(s.show_line_endings)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsShowLineEndingsToggled)
+                .into(),
             "记住最近打开的文件" => checkbox(s.remember_recent_files)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsRememberRecentToggled)
@@ -1586,6 +1594,28 @@ impl Editpad {
                         .on_press_maybe(
                             (!self.busy).then_some(Message::RecentSelected(entry.clone())),
                         ),
+                );
+            }
+            // 第 64 轮：会话内「上次关闭」栈非空时，置顶提供一键恢复
+            if !self.closed_stack.is_empty() {
+                panel = panel.push(
+                    button(
+                        container(text(format!(
+                            "恢复上次关闭的文件（{}）",
+                            self.closed_stack[0]
+                                .file_name()
+                                .map(|n| n.display().to_string())
+                                .unwrap_or_else(|| self.closed_stack[0].display().to_string())
+                        ))
+                        .size(uipx)
+                        .font(uifont))
+                        .width(Fill),
+                    )
+                    .width(Fill)
+                    .style(chrome_menu_item_style)
+                    .on_press_maybe(
+                        (!self.busy).then_some(Message::ReopenLastClosedFile),
+                    ),
                 );
             }
             // P20 隐私出口：一键抹掉 config.toml 里的全部历史路径

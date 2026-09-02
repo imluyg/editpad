@@ -14,7 +14,7 @@ use iced::{alignment, border::Radius, mouse, window, Color, Element, Font, Lengt
 use super::core::{
     luminance, lighten, EditOp, EditorHandle, ImeCommit, SCROLL_LINES_PER_NOTCH,
 };
-use super::metrics::{display_cols, measure_char_width, shape_row_xs};
+use super::metrics::{char_cols, display_cols, measure_char_width, shape_row_xs};
 use super::scrollbars::{
     HScrollbar, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
     VScrollbar,
@@ -219,6 +219,9 @@ struct EditorColors {
     scrollbar_thumb: Color,
     bookmark: Color,
     bracket: Color,
+    /// 不可见字符标记（第 64 轮）：与选区同族的淡蓝（低透明度），
+    /// 深浅主题都足够「隐」又不至于在白/黑底上消失。
+    invisibles: Color,
 }
 
 impl EditorColors {
@@ -241,6 +244,8 @@ impl EditorColors {
                 scrollbar_thumb: Color::from_rgba8(0x00, 0x00, 0x00, 0.30),
                 bookmark: BOOKMARK_COLOR,
                 bracket: BRACKET_LIGHT,
+                // 与选区同族的淡蓝（更淡），像素对拍可复用蓝色判据
+                invisibles: Color::from_rgba8(0x33, 0x66, 0xCC, 0.30),
             };
         }
         let text = palette.text;
@@ -255,6 +260,7 @@ impl EditorColors {
             scrollbar_thumb: Color { a: 0.38, ..palette.text },
             bookmark: BOOKMARK_COLOR,
             bracket: Color { a: 0.85, ..text },
+            invisibles: Color { a: 0.32, ..text },
         }
     }
 }
@@ -447,6 +453,83 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         }
 
         // A 层（quad）收口
+        // 不可见字符覆盖标记（第 64 轮）：空格=字符格中央小点、制表符=
+        // 格内短横、行尾=右端短竖标。纯 A 层 quad 叠加，不改文本布局与
+        // 命中测试；x 优先取实测行布局 row_x（O(1)），该行布局未就绪则
+        // 整行跳过（滞后一帧出现，可接受）。可见行外剔除与书签同款。
+        if core.show_whitespace || core.show_line_endings {
+            let mark = colors.invisibles;
+            let (iv_first, iv_last) = core.visible_range();
+            for line in iv_first..=iv_last {
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                if core.show_whitespace {
+                    let text = core.line_text(line);
+                    let mut col = 0usize;
+                    for ch in text.chars() {
+                        if ch == '\n' || ch == '\r' {
+                            break;
+                        }
+                        let adv = char_cols(ch, col) as usize;
+                        if let Some(x) = core.row_x(line, col) {
+                            let cx = bounds.x + gutter_w + x - scroll_left;
+                            match ch {
+                                ' ' => renderer.fill_quad(
+                                    renderer::Quad {
+                                        bounds: Rectangle {
+                                            x: cx + char_w * 0.5 - 1.0,
+                                            y: y + lh * 0.62,
+                                            width: 2.0,
+                                            height: 2.0,
+                                        },
+                                        ..renderer::Quad::default()
+                                    },
+                                    mark,
+                                ),
+                                '\t' => {
+                                    let w = (adv as f32 * char_w * 0.6).max(3.0);
+                                    renderer.fill_quad(
+                                        renderer::Quad {
+                                            bounds: Rectangle {
+                                                x: cx + char_w * 0.3,
+                                                y: y + lh * 0.55,
+                                                width: w,
+                                                height: 1.5,
+                                            },
+                                            ..renderer::Quad::default()
+                                        },
+                                        mark,
+                                    )
+                                }
+                                _ => {}
+                            }
+                        }
+                        col += adv;
+                    }
+                }
+                if core.show_line_endings {
+                    // 行尾短竖标：行内容右端再让出四分之一格
+                    let cols = core.line_display_len(line);
+                    if let Some(x) = core.row_x(line, cols) {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x: bounds.x + gutter_w + x - scroll_left
+                                        + char_w * 0.25,
+                                    y: y + lh * 0.25,
+                                    width: 2.0,
+                                    height: lh * 0.45,
+                                },
+                                ..renderer::Quad::default()
+                            },
+                            mark,
+                        );
+                    }
+                }
+            }
+        }
         renderer.end_layer();
 
         // B 层：文本专用，四周内缩 TEXT_LAYER_INSET——层边界严格小于

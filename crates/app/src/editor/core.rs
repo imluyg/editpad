@@ -132,6 +132,10 @@ pub enum EditOp {
     // ---------- 第 63 轮：插入日期时间 ----------
     /// 在光标处插入当前本地日期时间（F5，记事本同款）
     InsertDateTime,
+    // ---------- 第 64 轮：行注释切换 ----------
+    /// 行注释切换：触及块全部已注释则去掉一层前缀，否则加上；
+    /// 前缀按当前语法查表（未知语法默认 `//`），Ctrl+Q
+    ToggleLineComment,
 }
 
 /// 大小写转换方向（第 58 轮）。
@@ -315,6 +319,10 @@ pub struct EditorCore {
     /// 值 = 显示字符数（None = 无选区）。跨行精确计数是 O(选区行数)，
     /// 状态栏每帧查询必须有缓存；失效走同一汇点（P81 口径）。
     sel_span_cache: RefCell<Option<((usize, usize), Option<usize>)>>,
+    /// 不可见字符覆盖标记开关（第 63 轮）：渲染层读取；不影响文档
+    /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
+    pub(crate) show_whitespace: bool,
+    pub(crate) show_line_endings: bool,
 }
 
 /// 光标闪烁半周期。
@@ -380,6 +388,8 @@ impl Default for EditorCore {
             bookmarks: BTreeSet::new(),
             bracket_cache: RefCell::new(None),
             sel_span_cache: RefCell::new(None),
+            show_whitespace: false,
+            show_line_endings: false,
         }
     }
 }
@@ -1277,7 +1287,18 @@ impl EditorCore {
         // `\r`，ropey 口径两者皆换行）→ 最后一行是空壳。仅在块内还有
         // 更前面的行时才排除（a == b 时无从回退，交由调用方的「不足两行」
         // no-op 兜底，避免下溢）。
+        // 第 64 轮勘误（🟠 既有缺陷）：补 b == count-1 守卫——幻影只可能
+        // 是文档最后一行；此前凡块区域顶到文档尾就把 b 行当幻影剔除，
+        // 「选中含末真实行、未含末尾换行后的空壳」的局部选区会把该行
+        // 从重建内容里丢掉（排序/去重/注释切换共用此骨架，均受影响）。
         let phantom_tail = end == len
+            && len > start
+            && b == count - 1
+            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        // 块尾换行补回判定与幻影排除解耦（第 64 轮勘误第二半）：只要块
+        // 区域以换行单元收尾（含「选中真实末行、其行尾即文档末尾换行」），
+        // 行数不变式重建就必须补回，否则丢尾随换行。
+        let nl_tail = end == len
             && len > start
             && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
         let last = if phantom_tail && b > a { b - 1 } else { b };
@@ -1287,7 +1308,7 @@ impl EditorCore {
             b,
             start,
             end,
-            push_nl: end < len || phantom_tail,
+            push_nl: end < len || nl_tail,
             lines,
         }
     }
@@ -1622,6 +1643,84 @@ impl EditorCore {
     }
 
     // ---------- 第 63 轮：选区统计 + 插入日期时间 ----------
+
+    /// 下发不可见字符标记开关（设置保存/建页时调用）。
+    pub fn set_invisibles(&mut self, whitespace: bool, line_endings: bool) {
+        self.show_whitespace = whitespace;
+        self.show_line_endings = line_endings;
+    }
+
+    /// 行注释前缀查表（第 64 轮）：按当前语法名（syntect 名，大小写
+    /// 不敏感匹配）取行注释前缀。未知语法默认 `//`。块注释不入表
+    /// （`/* */` 需要成对处理，超出本动作的「整行」范畴）。
+    fn comment_prefix_for(&self) -> &'static str {
+        let lang = self.highlight_syntax_name().unwrap_or_default();
+        let lang = lang.to_ascii_lowercase();
+        match lang.as_str() {
+            "python" | "ruby" | "shellscript" | "bash" | "yaml" | "toml" | "ini"
+            | "properties" | "r" | "perl" => "#",
+            "sql" | "lua" => "--",
+            "batch file" | "bat" | "dosbatch" => "::",
+            _ => "//", // rust/c/cpp/java/js/ts/go/json/css/php/未知……
+        }
+    }
+
+    /// 行注释切换（Ctrl+Q）。有选区只作用触及块，无选区全文。
+    /// 返回是否改动。
+    ///
+    /// - 判定：块内**全部非空行的缩进后都已带本前缀** → 去（每行剥一层：
+    ///   前缀 + 紧随的一个空格，若有）；否则 → 加（在每行首个非空白字符
+    ///   前插 `前缀 + 空格`；纯空行跳过不参与）；
+    /// - 行数不变 → 恒等映射书签原位；无变化 no-op 不产快照；
+    /// - 前缀只认「缩进后紧跟」——字符串里出现的 `//` 不受影响（不做
+    ///   语法感知是既有取舍，与括号匹配同口径）。
+    pub fn toggle_line_comment(&mut self) -> bool {
+        let prefix = self.comment_prefix_for();
+        let blk = self.collect_line_block();
+        let is_commented = |s: &str| -> bool {
+            let t = s.trim_start();
+            !t.is_empty() && t.starts_with(prefix)
+        };
+        let commentable: Vec<bool> = blk.lines.iter().map(|s| !s.trim().is_empty()).collect();
+        // 全部非空行已注释 → 去一层；否则加一层
+        let unwrap_mode = blk
+            .lines
+            .iter()
+            .zip(commentable.iter())
+            .all(|(s, &c)| !c || is_commented(s));
+        let mut changed = false;
+        let lines: Vec<String> = blk
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                if !commentable[i] {
+                    return s.clone();
+                }
+                let out = if unwrap_mode {
+                    // 剥：缩进保留，去前缀 + 至多一个紧随空格
+                    let t = s.trim_start();
+                    let ind = &s[..s.len() - t.len()];
+                    let rest = &t[prefix.len()..];
+                    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                    format!("{ind}{rest}")
+                } else {
+                    // 加：插到首个非空白字符前
+                    let t = s.trim_start();
+                    let ind = &s[..s.len() - t.len()];
+                    format!("{ind}{prefix} {t}")
+                };
+                changed |= out != *s;
+                out
+            })
+            .collect();
+        if !changed {
+            return false;
+        }
+        let map: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
+        self.apply_line_block(&blk, &lines, &map);
+        true
+    }
 
     /// 当前选区的显示字符数（None = 无选区/零宽）。口径与查找命中的
     /// `len_chars` 一致：行尾 `\r\n` 计 1、每跨一行计 1——可直接与

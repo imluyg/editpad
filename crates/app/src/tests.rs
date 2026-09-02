@@ -64,9 +64,10 @@
             Some(Message::OpenRequested)
         ));
 
-        // Ctrl+未绑定字母仍返回 None（不插入；注意 x 已是 P4 剪切键）
-        let q = keyboard::Key::Character("q".into());
-        assert!(handle_key_defaults(q, ctrl).is_none());
+        // Ctrl+未绑定字母仍返回 None（不插入；注意 x 已是 P4 剪切键、
+        // q 已是第 64 轮行注释键、v 是粘贴——探针用至今无主的 e）
+        let e = keyboard::Key::Character("e".into());
+        assert!(handle_key_defaults(e, ctrl).is_none());
 
         // Shift+字符（无 Ctrl）照常插入
         let bang = keyboard::Key::Character("!".into());
@@ -2681,6 +2682,70 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(matches!(msg, Message::CopyFilePath(None)), "热键以活动页为目标");
         let msg = key("q").expect("Ctrl+Shift+Q 应产生消息");
         assert!(matches!(msg, Message::CopyFileName(None)));
+        // 第 64 轮：Ctrl+Q 行注释 + Ctrl+Shift+W 恢复上次关闭
+        let msg = handle_key_defaults(
+            keyboard::Key::Character("q".into()),
+            Modifiers::CTRL,
+        )
+        .expect("Ctrl+Q 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::ToggleLineComment)));
+        let (mods, k) = parse_combo_for_test("Ctrl+Shift+W");
+        let msg = handle_key_defaults(k, mods).expect("Ctrl+Shift+W 应产生消息");
+        assert!(matches!(msg, Message::ReopenLastClosedFile));
+    }
+
+    #[test]
+    fn reopen_last_closed_pops_stack_and_guards_empty() {
+        // 空栈：给提示、不进入加载
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::ReopenLastClosedFile);
+        assert!(app.status.contains("没有可恢复"), "空栈应有状态栏提示");
+        assert!(app.active_load.is_none());
+        // 栈非空：出栈并走打开管线（Task 被 dispatch 丢弃，仅查状态）
+        app.closed_stack = vec![std::path::PathBuf::from(r"C:\tmp\gone.txt")];
+        app.recents_visible = true;
+        dispatch(&mut app, Message::ReopenLastClosedFile);
+        assert!(app.closed_stack.is_empty(), "恢复即出栈");
+        assert!(app.active_load.is_some(), "复用打开管线进入 busy");
+        assert!(!app.recents_visible, "面板随动作收起");
+    }
+
+    #[test]
+    fn close_tab_pushes_named_path_into_closed_stack() {
+        let mut app = Editpad::default();
+        app.tabs[0].path = Some(std::path::PathBuf::from(r"C:\tmp\a.txt"));
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert_eq!(
+            app.closed_stack,
+            vec![std::path::PathBuf::from(r"C:\tmp\a.txt")]
+        );
+        // 同一文件反复开关只占一位（去重保首现=最近期）
+        app.tabs[0].path = Some(std::path::PathBuf::from(r"C:\tmp\a.txt"));
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert_eq!(app.closed_stack.len(), 1);
+        // 未命名页不入栈
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert_eq!(app.closed_stack.len(), 1);
+    }
+
+    #[test]
+    fn invisibles_settings_propagate_to_all_tabs() {
+        let mut app = Editpad::default();
+        // 造第二页，两页都应收到下发
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::SettingsShowWhitespaceToggled(true));
+        dispatch(&mut app, Message::SettingsShowLineEndingsToggled(true));
+        assert!(app.settings.show_whitespace && app.settings.show_line_endings);
+        for tab in &app.tabs {
+            let ed = tab.editor.borrow();
+            assert!(ed.show_whitespace && ed.show_line_endings);
+        }
+        // 关闭单边只动一边
+        dispatch(&mut app, Message::SettingsShowWhitespaceToggled(false));
+        for tab in &app.tabs {
+            let ed = tab.editor.borrow();
+            assert!(!ed.show_whitespace && ed.show_line_endings);
+        }
     }
 
     /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。

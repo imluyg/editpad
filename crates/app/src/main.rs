@@ -113,6 +113,15 @@ enum Message {
     CopyFilePath(Option<usize>),
     /// 复制文件名（含扩展名）到剪贴板，作用域口径同上
     CopyFileName(Option<usize>),
+    // ---------- 第 64 轮：恢复上次关闭 / 行注释切换 ----------
+    /// 恢复最近一次关闭的命名页（会话内记忆栈，不跨重启）；栈空 no-op
+    ReopenLastClosedFile,
+    /// 行注释切换（Ctrl+Q，前缀按语法查表）
+    // （走 EditOp::ToggleLineComment，无独立消息）
+    /// 设置：显示空白字符覆盖标记（第 64 轮，外观页）
+    SettingsShowWhitespaceToggled(bool),
+    /// 设置：显示行尾符标记（第 64 轮，外观页）
+    SettingsShowLineEndingsToggled(bool),
 
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
@@ -1371,6 +1380,10 @@ struct Editpad {
     /// 快照目录注入点（测试用）；None = 系统配置目录。
     snapshot_dir_override: Option<PathBuf>,
 
+    /// 「恢复上次关闭的文件」记忆栈（第 64 轮）：会话内 Vec<PathBuf>，
+    /// 最近期在前；close_tabs_now 统一入栈、ReopenLastClosedFile 出栈
+    closed_stack: Vec<PathBuf>,
+
     // ---------- 外观 ----------
     dark_mode: bool,
     /// Markdown 预览面板可见（P22 第三批；仅 Markdown 语法页渲染）
@@ -1438,6 +1451,8 @@ impl Default for Editpad {
             viewport_size: (0.0, 0.0),
             batch_close_confirm: None,
             pending_close_tab: None,
+            // 第 64 轮：会话内「上次关闭」栈，启动为空（不跨重启）
+            closed_stack: Vec::new(),
             dark_mode: false,
             preview_visible: false,
             // P25：初始页即「未命名1」，下一个新页为「未命名2」
@@ -1589,6 +1604,10 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "insert_date_time", default_combo: "F5", desc: "插入日期时间（YYYY-MM-DD HH:MM）" },
     HotkeyAction { id: "copy_file_path", default_combo: "Ctrl+Shift+G", desc: "复制完整路径（当前页）" },
     HotkeyAction { id: "copy_file_name", default_combo: "Ctrl+Shift+Q", desc: "复制文件名（当前页）" },
+    // 第 64 轮：行注释切换（Ctrl+Q，多编辑器通用的注释切换键位）+
+    // 恢复上次关闭的标签页（W=与 Ctrl+W 关页互逆的助记）
+    HotkeyAction { id: "toggle_line_comment", default_combo: "Ctrl+Q", desc: "切换行注释（按语法选 // # -- 等）" },
+    HotkeyAction { id: "reopen_closed_tab", default_combo: "Ctrl+Shift+W", desc: "恢复上次关闭的标签页" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1792,6 +1811,9 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "insert_date_time" => edit(EditOp::InsertDateTime),
         "copy_file_path" => Some(Message::CopyFilePath(None)),
         "copy_file_name" => Some(Message::CopyFileName(None)),
+        // 第 64 轮
+        "toggle_line_comment" => edit(EditOp::ToggleLineComment),
+        "reopen_closed_tab" => Some(Message::ReopenLastClosedFile),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),

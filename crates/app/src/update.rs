@@ -18,6 +18,11 @@ impl Editpad {
         tab.editor
             .borrow_mut()
             .set_font_size(editor::normalize_font_size(self.settings.font_size));
+        // 第 64 轮：不可见字符标记与字号同口径下发（fresh_tab 幂等）
+        tab.editor.borrow_mut().set_invisibles(
+            self.settings.show_whitespace,
+            self.settings.show_line_endings,
+        );
         tab
     }
 
@@ -82,6 +87,21 @@ impl Editpad {
         self.tabs.get(idx).and_then(|t| t.path.clone())
     }
 
+    /// 第 64 轮：命名页关闭时进「上次关闭」记忆栈（会话内，最近期在前；
+    /// 连续重复只保最近一位），容量 10 截断。单页/批量两条移除漏斗
+    /// 都要在移除前调用。
+    fn remember_closed_tab(&mut self, idx: usize) {
+        if let Some(tab) = self.tabs.get(idx) {
+            if let Some(p) = &tab.path {
+                if self.closed_stack.first().map(|f| f == p).unwrap_or(false) {
+                    return;
+                }
+                self.closed_stack.insert(0, p.clone());
+                self.closed_stack.truncate(10);
+            }
+        }
+    }
+
     /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页
     /// （新页分配下一个未命名序号）。返回是否真的移除了页面。
     fn close_tab_now(&mut self, idx: usize) -> bool {
@@ -90,6 +110,8 @@ impl Editpad {
         }
         // P32：移除前把该页光标/滚动回写最近文件记忆
         self.remember_tab_views(&[idx]);
+        // 第 64 轮：命名页进「上次关闭」栈（恢复入口见 ReopenLastClosedFile）
+        self.remember_closed_tab(idx);
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
             let tab = self.fresh_tab();
@@ -114,6 +136,11 @@ impl Editpad {
         let mut idxs = indices.to_vec();
         idxs.sort_unstable();
         idxs.dedup();
+        // 第 64 轮：命名页进「上次关闭」记忆栈（单页/批量共用 remember_
+        // closed_tab；逆序遍历与下方移除同序，先关的更「近」）
+        for &idx in idxs.iter().rev() {
+            self.remember_closed_tab(idx);
+        }
         let mut removed = 0usize;
         for &idx in idxs.iter().rev() {
             if idx < self.tabs.len() {
@@ -287,6 +314,43 @@ impl Editpad {
             }
             Message::CopyFileName(target) => {
                 self.copy_tab_ident(target, false)
+            }
+            // ---------- 恢复上次关闭 / 显示标记（第 64 轮） ----------
+            Message::ReopenLastClosedFile => {
+                // busy 与打开确认流共用守卫语义；栈空静默
+                if self.busy {
+                    return Task::none();
+                }
+                let Some(path) = self.closed_stack.pop() else {
+                    self.status = "没有可恢复的已关闭文件".to_owned();
+                    return Task::none();
+                };
+                // 复用打开管线：置脏走既有确认流，光标记忆由 P32 免费找回
+                let tab = self.target_tab_for_open();
+                self.recents_visible = false;
+                self.start_loading(path, tab)
+            }
+            Message::SettingsShowWhitespaceToggled(value) => {
+                self.settings.show_whitespace = value;
+                for tab in &self.tabs {
+                    tab.editor.borrow_mut().set_invisibles(
+                        value,
+                        self.settings.show_line_endings,
+                    );
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsShowLineEndingsToggled(value) => {
+                self.settings.show_line_endings = value;
+                for tab in &self.tabs {
+                    tab.editor.borrow_mut().set_invisibles(
+                        self.settings.show_whitespace,
+                        value,
+                    );
+                }
+                self.persist_settings();
+                Task::none()
             }
             Message::CutRequested => {
                 let Some(text) = self.cur_handle.borrow().selected_text() else {
@@ -1692,6 +1756,8 @@ impl Editpad {
             E::MergeLines => editor.merge_lines(),
             E::SplitLine => editor.split_line(),
             E::DeleteEmptyLines(kind) => editor.delete_empty_lines(kind),
+            // ---------- 行注释切换（第 64 轮） ----------
+            E::ToggleLineComment => editor.toggle_line_comment(),
             // ---------- 插入日期时间（第 63 轮） ----------
             // 真编辑：走 insert_str 统一管线（置脏+快照+查找重扫由上层
             // changed 驱动）；时间戳文本给状态栏反馈

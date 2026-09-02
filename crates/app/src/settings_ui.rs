@@ -114,6 +114,18 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         desc: "正文文字大小；编辑器内 Ctrl+滚轮 缩放，或在此步进调节。",
     },
     StaticRow {
+        page: SettingsPage::Appearance,
+        key: "显示空白字符",
+        title: "显示空白字符",
+        desc: "在空格与制表符位置画淡色标记（不改文档内容）。",
+    },
+    StaticRow {
+        page: SettingsPage::Appearance,
+        key: "显示行尾符",
+        title: "显示行尾符",
+        desc: "在每行末尾画一个短标，标出换行位置。",
+    },
+    StaticRow {
         page: SettingsPage::Font,
         key: FONT_ROW_KEY,
         title: FONT_ROW_KEY,

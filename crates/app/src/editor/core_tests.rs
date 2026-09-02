@@ -2874,6 +2874,67 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(c.doc.to_text(), "log: \n");
     }
 
+    #[test]
+    fn toggle_line_comment_wrap_unwrap_roundtrip() {
+        // 默认语法（未设置语言）→ `//`；空行不参与
+        let mut c = core_with("alpha\nbeta\n\ngamma");
+        assert!(c.toggle_line_comment());
+        assert_eq!(c.doc.to_text(), "// alpha\n// beta\n\n// gamma");
+        // 全部已注释 → 去一层（往返幂等）
+        assert!(c.toggle_line_comment());
+        assert_eq!(c.doc.to_text(), "alpha\nbeta\n\ngamma");
+        // 缩进保留、插在首个非空白前；混合块按「非全注释」统一加
+        let mut d = core_with("  indented\nplain\n");
+        assert!(d.toggle_line_comment());
+        assert_eq!(d.doc.to_text(), "  // indented\n// plain\n");
+        // 剥层时连紧随的一个空格一起剥，多余空格保留
+        let mut e = core_with("// nospace\n//  keeps double\n");
+        assert!(e.toggle_line_comment());
+        assert_eq!(e.doc.to_text(), "nospace\n keeps double\n");
+        // 已是注释态的判定看缩进后前缀：整块已注释才剥
+        let mut f = core_with("// a\nb\n");
+        assert!(f.toggle_line_comment());
+        assert_eq!(f.doc.to_text(), "// // a\n// b\n");
+        // 无变化 no-op 不产快照（空文档）
+        let mut g = core_with("");
+        assert!(!g.toggle_line_comment());
+    }
+
+    #[test]
+    fn toggle_line_comment_prefix_follows_syntax() {
+        // Python → #；行数不变 → 书签原位
+        let mut c = core_with("x = 1\ny = 2\n");
+        c.set_language_by_name(Some("Python"));
+        assert_eq!(c.highlight_syntax_name().as_deref(), Some("Python"));
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.toggle_bookmark();
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 1, col: 5 };
+        assert!(c.toggle_line_comment());
+        assert_eq!(c.doc.to_text(), "# x = 1\n# y = 2\n");
+        assert_eq!(c.bookmarked_lines(), vec![1], "恒等映射书签不动");
+    }
+
+    #[test]
+    fn collect_block_keeps_last_real_row_when_selection_reaches_eof() {
+        // 第 64 轮勘误回归（🟠 既有缺陷，本测试初版当场暴露）：选区触及
+        // 「最后一个真实行」且文档以换行收尾时，该行曾被幻影排除误剔——
+        // 排序把 a 行整行吞掉、注释切换只处理了首行。守卫 = 幻影只可能
+        // 是 b == line_count()-1 那一行。
+        let mut c = core_with("c\nb\na\n");
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 1, col: 1 }; // 触及行 0..=1（a 行未选）
+        assert!(c.sort_lines(SortOrder::Ascending));
+        assert_eq!(c.doc.to_text(), "b\nc\na\n", "块外行 a 不得被吞");
+        // 同一选区跑注释切换：两行都必须加上前缀
+        let mut d = core_with("x = 1\ny = 2\n");
+        d.set_language_by_name(Some("Python"));
+        d.anchor = Some(CursorPos { line: 0, col: 0 });
+        d.cursor = CursorPos { line: 1, col: 5 };
+        assert!(d.toggle_line_comment());
+        assert_eq!(d.doc.to_text(), "# x = 1\n# y = 2\n");
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，

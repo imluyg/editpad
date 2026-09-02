@@ -748,3 +748,70 @@ fn headless_bracket_underline_ink_at_matched_pair() {
         "无括号邻接时画布出现蓝色墨迹（幽灵下划线/其他越界墨迹）"
     );
 }
+
+/// 第 64 轮（headless 像素级）：不可见字符标记开关——同一份文档在
+/// 关/开两次渲染间，除标记 quad 外应逐像素一致；开启后必须产生足量
+/// 差异墨迹（第 1 行的空格点 + 制表符横杠 + 各行行尾短竖标）。
+/// 用「帧间差分」而非颜色判据：淡蓝标记叠白底后与灰阶抗锯齿难以
+/// 单色区分，差分天然免疫。
+#[test]
+fn headless_invisibles_marks_toggle_frame_diff() {
+    use super::super::CursorPos;
+    let (w, h) = (400u32, 300u32);
+
+    let render = |show: bool| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            let mut doc_text = String::from("a b\tc\n");
+            doc_text.extend((2..=10).map(|i| format!("第{i}行\n")));
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(360.0);
+            c.set_viewport_height(260.0);
+            c.cursor = CursorPos { line: 5, col: 0 }; // 远离首行，光标不参与差分
+            c.set_invisibles(show, show);
+        }
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(360.0, 260.0), Size::new(360.0, 260.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(20.0, 20.0));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    let off = render(false);
+    let on = render(true);
+    let mut diff = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if let (Some(a), Some(b)) = (off.pixel(x, y), on.pixel(x, y)) {
+                if (a.red() as i32 - b.red() as i32).abs() > 8
+                    || (a.green() as i32 - b.green() as i32).abs() > 8
+                    || (a.blue() as i32 - b.blue() as i32).abs() > 8
+                {
+                    diff += 1;
+                }
+            }
+        }
+    }
+    eprintln!("[P84] 不可见标记差异墨迹 = {diff}px");
+    assert!(diff >= 12, "开/关两帧差异墨迹不足（仅 {diff}px），标记未画出");
+}
