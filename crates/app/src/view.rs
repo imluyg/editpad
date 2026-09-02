@@ -1529,24 +1529,17 @@ impl Editpad {
                     .on_right_press(Message::TabContextMenu(i)),
                 );
             }
-            // 第 76 轮（用户点单）：标签条右侧空白区 = 双击新建标签页的
-            // 命中面——透明无边框按钮、宽度弹性填充剩余空间（Space Fill，
-            // 不会与任何胶囊标签重叠：标签按钮各自有 on_press=SwitchTab，
-            // 双击现有标签仍走 P65 重命名语义）。单击记账、双击窗内
-            // 二次点击触发 NewTab（update 层 is_blank_double_click 判定）；
-            // busy 时禁用（与标签一致）。
-            strip = strip.push(
-                button(
-                    iced::widget::Space::new()
-                        .width(iced::Length::Fill)
-                        .height(iced::Length::Fill),
-                )
-                    .padding(0)
-                    .style(|theme, status| menubar_text_style(theme, status, false))
-                    .on_press_maybe((!self.busy).then_some(Message::TabStripBlankPressed)),
-            );
+            // 第 76 轮（用户点单）：标签条右侧空白区双击新建标签页——
+            // 命中面就是整条标签条本身（外层 mouse_area 的 on_double_click）：
+            // 标签按钮/重命名输入框会先消费左键（iced 事件委托语义，P28
+            // 同款），空白区无子组件消费 → 双击判定落在外层。因此**不**
+            // 需要额外的 Fill 按钮占位（此前版本用 Space(Fill, Fill) 撑高
+            // 了标签条、占半窗——已移除）。双击现有标签不触发（其 click
+            // 被 button 消费），与 P65 重命名互不干扰。
             body = body.push(
-                mouse_area(strip).on_move(Message::CursorMoved),
+                mouse_area(strip)
+                    .on_move(Message::CursorMoved)
+                    .on_double_click(Message::TabStripBlankPressed),
             );
         }
 

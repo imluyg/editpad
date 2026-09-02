@@ -1350,9 +1350,6 @@ struct Editpad {
     /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
     /// on_double_click（iced 事件流实测），故在 SwitchTab 里记账判定。
     last_tab_click: Option<(usize, std::time::Instant)>,
-    /// 第 76 轮：标签条空白区最近一次左键点击时刻（双击 → 新建标签页，
-    /// 与 P65 同窗口判定；标签自身点击走 last_tab_click，互不干扰）。
-    last_blank_click: Option<std::time::Instant>,
     /// P62：热键捕获态——Some(动作 id) = 设置热键页正在等待新组合键。
     hotkey_capture: Option<&'static str>,
 
@@ -1508,7 +1505,6 @@ impl Default for Editpad {
             eol_menu: false,
             regex_enabled: false,
             last_tab_click: None,
-            last_blank_click: None,
             hotkey_capture: None,
             available_fonts: Vec::new(),
             active_font_family: None,
@@ -2029,15 +2025,6 @@ fn is_double_click(
     last.is_some_and(|(i, at)| {
         i == idx && now.duration_since(at).as_millis() as u64 <= TAB_DOUBLE_CLICK_MS
     })
-}
-
-/// 第 76 轮：标签条空白区双击判定（纯函数可单测）——与 P65 同一时间窗
-/// 与记账模式，只是没有「页下标」维度（空白区是一个整体目标）。
-fn is_blank_double_click(
-    last: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> bool {
-    last.is_some_and(|at| now.duration_since(at).as_millis() as u64 <= TAB_DOUBLE_CLICK_MS)
 }
 
 // ---------- 第 76 轮：应用 Logo（P71 用户自定义 ICO → 标签栏渲染） ----------

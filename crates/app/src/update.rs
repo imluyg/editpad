@@ -1269,17 +1269,15 @@ impl Editpad {
                 self.tab_context_menu = None;
                 Task::none()
             }
-            // 第 76 轮：标签条空白区左键——双击窗内连点两次 = 新建标签页
-            // （形如主流编辑器的「双击空白新建」；现有标签自身点击走
-            // SwitchTab/P65 重命名，不会进入本分支，互不干扰）
+            // 第 76 轮：标签条空白区双击 → 新建标签页。双击判定由控件层完成
+            // （strip 外层 mouse_area 的 on_double_click，iced 内核 Click
+            // 时间+位置窗口）；标签自身点击被 button 消费不会产生本消息，
+            // 与 P65 重命名互不干扰。busy 时忽略（与标签禁用一致）。
             Message::TabStripBlankPressed => {
-                let now = std::time::Instant::now();
-                if is_blank_double_click(self.last_blank_click, now) {
-                    self.last_blank_click = None;
-                    return self.update(Message::NewTab);
+                if self.busy {
+                    return Task::none();
                 }
-                self.last_blank_click = Some(now);
-                Task::none()
+                self.update(Message::NewTab)
             }
             Message::SwitchTabNext => {
                 let next = (self.active_tab + 1) % self.tabs.len();
