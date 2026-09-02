@@ -4879,8 +4879,11 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 两页同被外部修改 → 聚焦后队列 [0, 1]（活动页1干净本可静默重载，
         // 但页0置脏在先——巡检按序扫描，页0先命中进队列；页1是干净活动页
         // 走静默重载分支并提前返回，队列只收页0。此处钉住该优先级语义。）
+        // ⚠️ 第 71 轮隔离：写盘后跨过 mtime 粒度/缓存窗口（~15-25ms），
+        // 否则全量并发下外部写入可能与加载戳同窗，巡检漏检致偶发失败。
         std::fs::write(&p0, "a2").unwrap();
         std::fs::write(&p1, "b2").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
         dispatch(&mut app, Message::WindowFocused);
         assert!(
             app.active_load.is_some(),

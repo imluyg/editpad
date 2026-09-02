@@ -1942,6 +1942,27 @@ impl Editpad {
         // 第 70 轮：状态栏再排——文件路径移到**最左**并定宽截断（超长
         // 加省略号），随后竖线分隔：路径 │ 统计组(弹性吸收) │ 右组
         // （选区定宽/行尾/编码）。两条竖线位置固定，两侧互不影响。
+        // ⚠️ 第 71 轮勘误：竖线禁用 rule::vertical——iced 0.14 的
+        // vertical rule 在 Row 内长度默认 Fill，会把整条状态栏撑满剩余
+        // 高度（用户实测截图暴露）；改为 1px 定宽定高的 container 竖条。
+        let palette = if self.dark_mode {
+            Theme::Dark.palette()
+        } else {
+            Theme::Light.palette()
+        };
+        let sep_color = Color { a: 0.30, ..palette.text };
+        let sep_v = move || -> Element<'_, Message> {
+            container(text(""))
+                .width(1)
+                .height(20)
+                .style(move |_: &Theme| {
+                    container::Style {
+                        background: Some(Background::Color(sep_color)),
+                        ..container::Style::default()
+                    }
+                })
+                .into()
+        };
         let (doc_chars, line_count, sel_chars, cur_off) = {
             let ed = self.cur_handle.borrow();
             (
@@ -1968,7 +1989,7 @@ impl Editpad {
         };
         let status_bar = row![
             text(path_show).size(uipx).font(uifont).width(280),
-            rule::vertical(1),
+            sep_v(),
             text(format!("长度: {doc_chars}")).size(uipx).font(uifont),
             text(format!("行数: {line_count}")).size(uipx).font(uifont),
             text(format!("行: {}", cursor.line + 1)).size(uipx).font(uifont),
@@ -1976,7 +1997,7 @@ impl Editpad {
             text(format!("位置: {cur_off}")).size(uipx).font(uifont),
             // 弹性段吸收中部余量：左右两组竖线位置恒定
             text("").width(Fill),
-            rule::vertical(1),
+            sep_v(),
             // 选区段：定宽占位（无选区显示占位空白），保证右侧组零推移
             container(
                 text(match sel_chars {
