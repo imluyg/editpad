@@ -5,10 +5,10 @@ use super::*;
 /// 设置弹窗左侧导航的分类页。`ALL` 的顺序 = 侧栏与搜索分组的展示顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsPage {
-    /// 外观：主题、字号
+    /// 外观：主题、不可见字符标记
     #[default]
     Appearance,
-    /// 字体：正文字体族（含过滤候选列表）
+    /// 字体：正文字体族（含过滤候选列表）+ 字号（第 68 轮移入）
     Font,
     /// 保存：自动写盘开关与延迟
     Save,
@@ -102,12 +102,6 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
     },
     StaticRow {
         page: SettingsPage::Appearance,
-        key: "字号",
-        title: "字号",
-        desc: "正文文字大小；编辑器内 Ctrl+滚轮 缩放，或在此步进调节。",
-    },
-    StaticRow {
-        page: SettingsPage::Appearance,
         key: "显示空白字符",
         title: "显示空白字符",
         desc: "在空格与制表符位置画淡色标记（不改文档内容）。",
@@ -123,6 +117,13 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         key: FONT_ROW_KEY,
         title: FONT_ROW_KEY,
         desc: "界面与正文共用的字体族；建议选含中文字形的等宽字体，非等宽字体的列对齐会漂移。",
+    },
+    // 第 68 轮用户点单：字号从外观移入字体分类（族与大小同页调）
+    StaticRow {
+        page: SettingsPage::Font,
+        key: "字号",
+        title: "字号",
+        desc: "正文文字大小；编辑器内 Ctrl+滚轮 缩放，或在此步进调节。",
     },
     StaticRow {
         page: SettingsPage::Save,
