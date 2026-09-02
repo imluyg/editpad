@@ -2122,6 +2122,52 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     }
 
     #[test]
+    fn p63_late_skip_after_own_manual_save_is_silently_dropped() {
+        // 误报抑制：编辑→Ctrl+S 手动落盘（磁盘与记录戳同步刷新）→ 在途
+        // 防抖线程拿着旧期望戳迟到拒写——这是自己的保存不是外部改动，
+        // 必须静默丢弃，不得弹提示条
+        let (mut app, path) = loaded_real_file_app("p63-late-skip");
+        app.settings.autosave_enabled = true;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let v = app.tab().version;
+
+        // 手动保存走完整链路：进入 busy → Saved 回报清脏并按新磁盘重记戳
+        dispatch(&mut app, Message::SaveRequested);
+        assert!(app.busy);
+        std::fs::write(&path, "our own newer content").unwrap();
+        dispatch(&mut app, Message::Saved(v, Ok(())));
+        assert!(!app.tab().dirty && !app.busy);
+        let fresh_stamp = app.tabs[0].file_stamp;
+
+        // 迟到的拒写回报（线程的期望戳仍是载入时刻的旧戳）
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(
+                0,
+                v,
+                path.clone(),
+                AutosaveOutcome::SkippedExternalChange,
+            ),
+        );
+        assert!(
+            app.external_change.is_none(),
+            "自己的手动保存不得触发外部修改提示条"
+        );
+        assert!(!app.status.contains("外部修改"), "实际 {:?}", app.status);
+        assert_eq!(app.tabs[0].file_stamp, fresh_stamp, "记录戳保持不动");
+
+        // 对照：真外部改动后磁盘 ≠ 记录戳，同样的迟到回报必须入队
+        std::fs::write(&path, "genuinely external").unwrap();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+        let v2 = app.tab().version;
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(0, v2, path, AutosaveOutcome::SkippedExternalChange),
+        );
+        assert_eq!(app.external_change, Some(vec![0]), "真外部改动必须入队裁决");
+    }
+
+    #[test]
     fn p63_autosave_must_skip_contract() {
         // 写前判定纯函数契约：期望戳缺失不拦截；期望已知时以差异为准
         let t0 = std::time::SystemTime::UNIX_EPOCH;

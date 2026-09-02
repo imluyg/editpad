@@ -529,16 +529,27 @@ impl Editpad {
                         }
                     }
                     AutosaveOutcome::SkippedExternalChange => {
-                        // P63：拒写不是失败——保持置脏与挂起解除，把裁决权
-                        // 交给 P52 外部修改提示条队列（〔重新加载〕放弃本地
-                        // 改动 / 〔忽略〕按磁盘现状记戳）。不重记戳：磁盘
-                        // 现状还没被用户裁决过。
-                        let queue = self.external_change.get_or_insert_with(Vec::new);
-                        if !queue.contains(&idx) {
-                            queue.push(idx);
+                        // 防误报：若当前记录戳与磁盘现状一致，「外部修改」
+                        // 其实是本应用自己的手动保存——它改写了磁盘并刷新
+                        // 了记录戳，而在途防抖线程还拿着调度时的旧期望戳。
+                        // 此时拒写作废：静默忽略，不弹提示条不打扰。
+                        // 真外部改动时记录戳 ≠ 磁盘 → 照常入队裁决，
+                        // 且未裁决前不重记戳（磁盘现状还没被用户确认过）。
+                        let own_save_superseded = match tab.path.as_deref() {
+                            Some(p) => {
+                                !file_changed_externally(tab.file_stamp, file_stamp(p))
+                            }
+                            None => false,
+                        };
+                        if !own_save_superseded {
+                            let queue =
+                                self.external_change.get_or_insert_with(Vec::new);
+                            if !queue.contains(&idx) {
+                                queue.push(idx);
+                            }
+                            self.status =
+                                "文件已被外部修改，已跳过自动写盘".to_owned();
                         }
-                        self.status =
-                            "文件已被外部修改，已跳过自动写盘".to_owned();
                     }
                     AutosaveOutcome::Failed(error) => {
                         // 失败必须留痕（不能无声吞掉），但不打断编辑；
