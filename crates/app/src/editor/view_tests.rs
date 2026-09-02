@@ -987,3 +987,193 @@ fn headless_block_selection_highlight_frame_diff() {
     assert!(diff_in >= 40, "块选区高亮墨迹不足（仅 {diff_in}px）");
     assert_eq!(diff_out, 0, "高亮不得越出控件矩形");
 }
+
+/// 第 73 轮 ⑯（headless 像素级）：软换行开/关两帧差分——长行开启后
+/// 折行段必须出现在**后续视觉行**（关态该处为空），且全部墨迹落在控件
+/// 矩形内（续行必须从文本区左缘起排，禁止绝对列叠加）。
+#[test]
+fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
+    use super::super::CursorPos;
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    // 行 0 = 80 个 'a'（折 ~3 段），行 1 = 空幻影
+    let doc = format!("{}\n", "a".repeat(80));
+
+    let render = |wrap: bool| -> (tiny_skia::Pixmap, f32) {
+        let core = EditorHandle::default();
+        let lh = {
+            let mut c = core.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str(&doc));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.cursor = CursorPos { line: 0, col: 0 };
+            c.set_word_wrap(wrap);
+            c.line_height()
+        };
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        (pixels, lh)
+    };
+
+    let band_ink = |px: &tiny_skia::Pixmap, band: u32, lh: f32, gutter: f32| -> u32 {
+        let y0 = (ey + band as f32 * lh).max(0.0) as u32;
+        let y1 = (ey + (band + 1) as f32 * lh).min(h as f32) as u32;
+        let x0 = (ex + gutter).max(0.0) as u32;
+        let mut ink = 0u32;
+        for y in y0..y1 {
+            for x in x0..w {
+                if let Some(p) = px.pixel(x, y) {
+                    // 正文墨迹 = 非背景色（行号栏 x0 之前已排除）
+                    if p.red() < 245 || p.green() < 245 || p.blue() < 245 {
+                        ink += 1;
+                    }
+                }
+            }
+        }
+        ink
+    };
+
+    let (off, lh) = render(false);
+    let (on, _) = render(true);
+    let gutter = 49.0f32; // 行号栏宽随行数/列宽（3 位数字 × 9px + 常量）
+    // 关态：行 0 只占视觉行 0；行 1 = 空幻影 → 第 1 段带无墨迹
+    assert_eq!(band_ink(&off, 1, lh, gutter), 0, "关态首行下方不应有正文墨迹");
+    // 开态：折行段出现在视觉行 1、2（80 字符 ≈ 3 段）；段 3 起始
+    // x 必须从文本区左缘起（左缘 ~= gutter 处有墨迹）
+    assert!(band_ink(&on, 1, lh, gutter) > 100, "开态视觉行 1 缺折行段墨迹");
+    assert!(band_ink(&on, 2, lh, gutter) > 100, "开态视觉行 2 缺折行段墨迹");
+    // 开态越界检查：控件矩形之外零墨迹
+    let mut oob = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            let inside = x >= ex as u32
+                && x < (ex + ew) as u32
+                && y >= ey as u32
+                && y < (ey + eh) as u32;
+            if inside {
+                continue;
+            }
+            if let Some(p) = on.pixel(x, y) {
+                if (p.red() as i32 - 255).abs() > 2
+                    || (p.green() as i32 - 255).abs() > 2
+                    || (p.blue() as i32 - 255).abs() > 2
+                {
+                    oob += 1;
+                }
+            }
+        }
+    }
+    eprintln!("[P93] 折行段墨迹带 1={} 带 2={} 越界={oob}", band_ink(&on, 1, lh, gutter), band_ink(&on, 2, lh, gutter));
+    assert_eq!(oob, 0, "开态折行墨迹越出控件矩形 {oob}px");
+}
+
+/// 第 73 轮 ⑯：开态组合批（font × theme × scroll）——任意组合下控件
+/// 矩形之外必须保持纯背景（P86 组合批的 word_wrap 扩维，设计 §5 验收）。
+#[test]
+fn headless_wrap_on_combo_ink_stays_in_bounds() {
+    use super::super::CursorPos;
+    let (w, h) = (420u32, 320u32);
+    let (ex, ey, ew, eh) = (30.0f32, 24.0f32, 340.0f32, 240.0f32);
+
+    let build = |font_px: f32, dark: bool, scroll: f32| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            let mut doc = String::from("alpha beta gamma\n\tindent 中文 🚀\n");
+            for i in 0..30 {
+                doc.push_str(&format!("row{i} lorem ipsum dolor sit amet\n"));
+            }
+            doc.push_str("wide-末行-without-newline");
+            c.reset_document(editpad_core::Document::from_str(&doc));
+            c.set_font_size(font_px);
+            c.toggle_bookmark(); // 行 0 书签圆点参与越界检查
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.cursor = CursorPos { line: 20, col: 6 };
+            c.set_word_wrap(true);
+            c.scroll_top = scroll;
+            c.clamp_scroll();
+        }
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(font_px));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            if dark { &Theme::Dark } else { &Theme::Light },
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    let mut frames = 0u32;
+    for font_px in [12.0f32, 16.0, 28.0] {
+        for dark in [false, true] {
+            for scroll in [0.0f32, 3.5, 80.0] {
+                let px = build(font_px, dark, scroll);
+                let mut out_of_bounds_ink = 0u32;
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = x >= ex as u32
+                            && x < (ex + ew) as u32
+                            && y >= ey as u32
+                            && y < (ey + eh) as u32;
+                        if inside {
+                            continue;
+                        }
+                        if let Some(p) = px.pixel(x, y) {
+                            if (p.red() as i32 - 255).abs() > 2
+                                || (p.green() as i32 - 255).abs() > 2
+                                || (p.blue() as i32 - 255).abs() > 2
+                            {
+                                out_of_bounds_ink += 1;
+                            }
+                        }
+                    }
+                }
+                frames += 1;
+                assert_eq!(
+                    out_of_bounds_ink, 0,
+                    "wrap fs={font_px} dark={dark} scroll={scroll}: 越界墨迹 \
+                     {out_of_bounds_ink}px"
+                );
+            }
+        }
+    }
+    eprintln!("[P93] 折行开态组合批帧数 = {frames}");
+}

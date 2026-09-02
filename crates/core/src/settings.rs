@@ -102,6 +102,12 @@ pub struct Settings {
     /// 第 63 轮：显示行尾符标记（行尾短标）。默认关。
     #[serde(default)]
     pub show_line_endings: bool,
+    /// 第 73 轮 ⑯：自动换行（软换行）开关。默认关——关闭时视觉得到
+    /// 恒等退化（与软换行引入前的渲染逐像素一致），一键可回退。
+    /// 开启时：正文按视口宽折行为若干视觉行；水平滚动条隐藏、
+    /// scroll_left 锁 0、列块编辑禁用（设计 docs/soft-wrap-design.md）。
+    #[serde(default)]
+    pub word_wrap: bool,
     /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
     /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/ 
     /// [`BACKUP_MODE_TIMESTAMPED`]（`name.bak/` 目录内时间戳历史）。
@@ -148,6 +154,8 @@ impl Default for Settings {
             // 第 63 轮：不可见字符标记默认全关（主流编辑器同款初始态）
             show_whitespace: false,
             show_line_endings: false,
+            // 第 73 轮 ⑯：自动换行默认关（恒等退化回退路径）
+            word_wrap: false,
             // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
             backup_mode: BACKUP_MODE_NONE.to_string(),
             hotkeys: HashMap::new(),

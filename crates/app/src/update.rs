@@ -23,6 +23,8 @@ impl Editpad {
             self.settings.show_whitespace,
             self.settings.show_line_endings,
         );
+        // 第 73 轮 ⑯：自动换行（软换行）同口径下发（fresh_tab 幂等）
+        tab.editor.borrow_mut().set_word_wrap(self.settings.word_wrap);
         tab
     }
 
@@ -348,6 +350,16 @@ impl Editpad {
                         self.settings.show_whitespace,
                         value,
                     );
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            // 第 73 轮 ⑯：自动换行开关——全标签页即时生效（列块清、水平
+            // 滚动锁 0、视觉行映射接管，关闭即恒等退化回现状路径）
+            Message::SettingsWordWrapToggled(value) => {
+                self.settings.word_wrap = value;
+                for tab in &self.tabs {
+                    tab.editor.borrow_mut().set_word_wrap(value);
                 }
                 self.persist_settings();
                 Task::none()

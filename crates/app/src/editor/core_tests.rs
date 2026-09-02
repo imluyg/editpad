@@ -3460,3 +3460,254 @@ fn p66_fractional_scroll_top_survives_clamp() {
             assert_eq!(c.doc.to_text(), final_text, "seed={seed} 重放终态发散");
         }
     }
+
+    // ---------- 第 73 轮 ⑯：软换行（自动换行）接线 ----------
+    //
+    // 视口宽 300 → 列预算 = (300 − gutter(≈49) − SCROLLBAR_ZONE_W(16) − 2)/9
+    // ≈ 25 列；行高 = 16×1.375 = 22px。开态后所有断言以 wrap_max_cols()
+    // 实时取值推导，不硬编码字体度量。
+
+    /// 折行开态 core：两行各 50 字符 + 一行 70 字符（未尾行）。
+    fn wrap_core(text: &str) -> EditorCore {
+        let mut c = core_with(text);
+        c.set_viewport_width(300.0);
+        c.set_viewport_height(220.0);
+        c.set_word_wrap(true);
+        c
+    }
+
+    /// 惰性收敛（v1 模型披露：enable/reset 后 BIT 暂记「每行一段」，
+    /// 行被查询才差值更新；生产里 draw 每帧遍历可见行即收敛）。
+    /// 本助手把全部行查询一遍，令 `visual_rows_total` 反映真实总值。
+    fn wrap_converge(c: &mut EditorCore) {
+        let n = c.doc.line_count();
+        for l in 0..n {
+            let t = c.line_text(l);
+            c.segments_of_line(l, &t);
+        }
+    }
+
+    #[test]
+    fn wrap_off_identity_toggle_and_visual_mapping_roundtrip() {
+        let mut c = core_with("aa\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\ncc\n");
+        c.set_viewport_width(300.0);
+        c.set_viewport_height(220.0);
+        // 关态恒等退化：视觉行 = 逻辑行（ropey 行数含尾部幻影行）
+        assert!(!c.wrap_enabled());
+        assert_eq!(c.visual_rows_total() as usize, c.doc.line_count());
+        assert_eq!(c.visual_row_of(1, 40), 1);
+        let (line, seg, s0, s1) = c.locate_visual(2);
+        assert_eq!((line, seg, s0, s1), (2, 0, 0, 2));
+        // 开启：长行折行
+        c.set_word_wrap(true);
+        wrap_converge(&mut c);
+        let mc = c.wrap_max_cols();
+        assert!((20..=30).contains(&mc), "300 宽列预算应≈25，实际 {mc}");
+        let segs_line1 = c.line_visual_segments(1);
+        assert!(segs_line1 == 2, "48 字符行应折 2 段，实际 {segs_line1}");
+        // 1 + 2 + 1 + 幻影 1 = 5
+        assert_eq!(c.visual_rows_total(), 1 + segs_line1 + 2);
+        // 视觉行 → 逻辑行双向映射一致
+        for v in 0..c.visual_rows_total() {
+            let (line, _seg, s0, s1) = c.locate_visual(v);
+            assert!(line < c.doc.line_count(), "幻影行也是合法视觉行");
+            assert!(s0 <= s1);
+            assert_eq!(c.visual_row_of(line, s0), v, "段首列映射回自身视觉行");
+            if s1 > s0 {
+                assert_eq!(c.visual_row_of(line, s1 - 1), v, "段末字符在同一视觉行");
+            }
+        }
+        // 折行边界列属于下一段
+        assert_eq!(c.visual_row_of(1, mc), 1 + segs_line1 - 1, "段 2 起点在行 1 末段");
+        // 关闭恒等退化（含幻影行 4 逻辑行）
+        c.set_word_wrap(false);
+        assert_eq!(c.visual_rows_total(), 4);
+        assert_eq!(c.visual_row_of(1, 40), 1);
+    }
+
+    #[test]
+    fn wrap_cjk_segments_follow_double_width_columns() {
+        // 中×30 = 60 显示列；预算 25 → 段 [0,12),[12,24),[24,30)
+        let mut c = wrap_core("中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中\n");
+        wrap_converge(&mut c);
+        let mc = c.wrap_max_cols();
+        assert!((20..=30).contains(&mc));
+        assert_eq!(c.line_visual_segments(0), 3, "30 个双宽字符应折 3 段");
+        assert_eq!(c.visual_rows_total(), 3 + 1, "3 段 + 幻影行 1 段");
+        assert_eq!(c.visual_row_of(0, 0), 0);
+        assert_eq!(c.visual_row_of(0, 20), 1, "第 20 字符在段 1（更宽列）");
+        let (line, seg, s0, s1) = c.locate_visual(1);
+        assert_eq!((line, seg), (0, 1));
+        assert_eq!((s0, s1), (12, 24), "段 1 覆盖字符 12..24");
+    }
+
+    #[test]
+    fn wrap_motion_vertical_uses_visual_rows_and_goal_column() {
+        // 行 0：50 字符 → 2 段；行 1：70 字符 → 3 段。总视觉行 5。
+        let mut c = wrap_core(&format!("{}\n{}\n", "a".repeat(50), "a".repeat(70)));
+        wrap_converge(&mut c);
+        let mc = c.wrap_max_cols();
+        assert!((20..=30).contains(&mc));
+        assert_eq!(c.visual_rows_total(), 2 + 3 + 1, "行 0 两段 + 行 1 三段 + 幻影");
+        c.cursor = CursorPos { line: 0, col: 40 };
+        // Down：视觉行 1 → 2（行 1 段 0）。goaI = 40 列像素，远超段尾
+        // 25 列 → 钳到段末字符格（mc−1，不跳到下一视觉段）
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: mc - 1 });
+        // goal 保持：再 Down → 行 1 段 1 [mc, 2mc)，goaI 落在列 40
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 40 });
+        // goal 越段 2 起点 → 段起点 (2mc)
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 2 * mc });
+        // 再 Down → 幻影行（与关态同口径：末行之后还有可导航的空行）
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 2, col: 0 });
+        // 末视觉行再 Down 不动
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 2, col: 0 });
+        // 原路返回：goal 保持 → (1,2mc) → (1,40) → (1,mc−1) → (0,40)
+        c.apply_motion(Motion::Up, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 2 * mc });
+        c.apply_motion(Motion::Up, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 40 });
+        c.apply_motion(Motion::Up, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: mc - 1 });
+        c.apply_motion(Motion::Up, false);
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 40 });
+        // 往返闭环：再 Down → (1, seg0) 段尾钳制（goal 仍 40 列像素）
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: mc - 1 });
+        // 非竖向操作清 goal：Left 立即清（断言在 Down 之前）；随后 Down 的
+// 新 goal（23 列像素）落在目标段起点（25 列）之前 → 吸附段首
+        c.apply_motion(Motion::Left, false);
+        assert_eq!(c.cursor.col, mc - 2);
+        assert_eq!(c.goal_px, None, "Left 后 goal 已清");
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: mc });
+        // 关态竖向移动仍是逻辑行口径（回归）
+        c.set_word_wrap(false);
+        c.cursor = CursorPos { line: 0, col: 40 };
+        c.apply_motion(Motion::Down, false);
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 40 });
+    }
+
+    #[test]
+    fn wrap_hit_test_resolves_visual_row_to_segment_col() {
+        let c = wrap_core(&format!("{}\nbb\n", "a".repeat(50)));
+        let mc = c.wrap_max_cols();
+        let char_w = c.char_width();
+        let gutter = c.gutter_width();
+        let lh = c.line_height();
+        // 视觉行 0（逻辑行 0 段 0）段首
+        let hit = c.hit_test(gutter, lh * 0.5);
+        assert_eq!((hit.line, hit.col), (0, 0));
+        // 视觉行 1 = 逻辑行 0 段 1：x 落在段首与段中
+        let hit = c.hit_test(gutter + mc as f32 * char_w, lh * 1.5);
+        assert_eq!((hit.line, hit.col), (0, mc), "段 1 首字符");
+        let hit = c.hit_test(gutter + (mc + 5) as f32 * char_w, lh * 1.5);
+        assert_eq!((hit.line, hit.col), (0, mc + 5), "段 1 中段");
+        // 视觉行 2 = 逻辑行 1
+        let hit = c.hit_test(gutter, lh * 2.5);
+        assert_eq!((hit.line, hit.col), (1, 0));
+        // 段外 x 越右 → 钳到段末（行 50 字符 = 段 1 末列 50）
+        let hit = c.hit_test(gutter + 9999.0, lh * 1.5);
+        assert_eq!((hit.line, hit.col), (0, 50), "段尾钳制应为行末");
+    }
+
+    #[test]
+    fn wrap_scroll_clamp_and_ensure_visible_use_visual_rows() {
+        // 12 行 × 各 50 字符 → 24 视觉行；视口 3 行
+        let doc: String = (0..12)
+            .map(|_| "a".repeat(50))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut c = core_with(&doc);
+        c.set_viewport_width(300.0);
+        c.set_viewport_height(3.0 * 22.0);
+        c.set_word_wrap(true);
+        wrap_converge(&mut c);
+        // 12 行 × 2 段（join 无尾随换行 → 无幻影）= 24 视觉行
+        assert_eq!(c.visual_rows_total(), 24);
+        // clamp 上限 = 24 − 3 = 21（+1 恰与关态「末行留白一行」口径一致）
+        c.scroll_top = 9999.0;
+        c.clamp_scroll();
+        assert_eq!(c.scroll_top, 22.0);
+        // ensure_visible：光标 (5,0) 视觉行 10 → scroll_top 收敛 8
+        c.cursor = CursorPos { line: 5, col: 0 };
+        c.scroll_top = 0.0;
+        c.ensure_visible_pub();
+        assert_eq!(c.scroll_top, 8.0);
+        // visible_range 映射为覆盖视口的逻辑行（first+rows 边距窗口，
+        // last=12 → 行 6，与关态口径一致）
+        assert_eq!(c.visible_range(), (4, 6));
+        // 关态恢复逻辑口径
+        c.set_word_wrap(false);
+        c.scroll_top = 9999.0;
+        c.clamp_scroll();
+        assert_eq!(c.scroll_top, 12.0 - 3.0 + 1.0);
+    }
+
+    #[test]
+    fn wrap_toggle_clears_block_locks_hscroll_and_rejects_block_select() {
+        let mut c = core_with("aaaa\nbbbb\n");
+        c.set_viewport_width(300.0);
+        c.begin_block_select(CursorPos { line: 0, col: 1 });
+        c.update_block_select(CursorPos { line: 1, col: 3 });
+        assert!(c.active_block().is_some());
+        assert!(c.block_dragging);
+        // 开启瞬间：清块 + 锁水平滚动
+        c.set_word_wrap(true);
+        assert!(c.active_block().is_none());
+        assert!(!c.block_dragging);
+        assert_eq!(c.scroll_left, 0.0);
+        c.scroll_left = 100.0;
+        c.clamp_scroll_horizontal();
+        assert_eq!(c.scroll_left, 0.0, "开态横向钳制恒锁 0");
+        // 开态拒绝列块选择（设计 §4.10）
+        c.begin_block_select(CursorPos { line: 0, col: 0 });
+        assert!(c.active_block().is_none());
+        assert!(!c.block_dragging);
+        // 关态恢复可用
+        c.set_word_wrap(false);
+        c.begin_block_select(CursorPos { line: 0, col: 0 });
+        assert!(c.block_dragging);
+        c.finish_block_select();
+    }
+
+    #[test]
+    fn wrap_index_survives_edits_via_shared_invalidation() {
+        let mut c = wrap_core(&format!("{}\n{}\n", "a".repeat(50), "a".repeat(50)));
+        wrap_converge(&mut c);
+        assert_eq!(c.visual_rows_total(), 2 + 2 + 1, "两行各 2 段 + 幻影 1 段");
+        // 行 1 拉长：50 → 54 字符 → 2 → 3 段（BIT 差值更新，总额收敛 6）
+        c.cursor = CursorPos { line: 1, col: 46 };
+        c.insert_str("cccc");
+        assert_eq!(c.line_visual_segments(1), 3);
+        assert_eq!(c.visual_rows_total(), 2 + 3 + 1);
+        // 撤销（整体换文档，行数不变 → 代次失效；被查询行重算收敛）
+        c.undo();
+        let line1 = c.line_text(1);
+        c.segments_of_line(1, &line1); // draw 同款懒惰收敛
+        assert_eq!(c.visual_rows_total(), 2 + 2 + 1);
+        // 插入换行 → 行数变化 → after_edit 整表重置，逐行收敛
+        c.cursor = CursorPos { line: 1, col: 50 };
+        c.insert_str("\n");
+        assert_eq!(c.doc.line_count(), 4);
+        for l in 0..4 {
+            let text = c.line_text(l);
+            c.segments_of_line(l, &text);
+        }
+        assert_eq!(
+            c.visual_rows_total(),
+            2 + 2 + 1 + 1,
+            "行 0/1 各 2 段 + 空行 1 段 + 幻影 1 段"
+        );
+        // 编辑后的光标可见性按视觉行口径：视口 2 行 → (2,0) 视觉行 4
+        // 收敛 scroll_top = 4 − 2 + 1 = 3
+        c.set_viewport_height(2.0 * 22.0);
+        c.scroll_top = 0.0;
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.ensure_visible_pub();
+        assert_eq!(c.scroll_top, 3.0);
+    }

@@ -15,6 +15,8 @@ use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width,
     validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
 };
+use super::scrollbars::SCROLLBAR_ZONE_W;
+use super::wrap::{segment_index, WrapCache};
 use super::{BOOKMARK_STRIP, FONT_SIZE_DEFAULT, GUTTER_MIN};
 
 const CARET_WIDTH: f32 = 2.0;
@@ -364,6 +366,14 @@ pub struct EditorCore {
     /// 列块拖拽进行中（view 层鼠标状态机的 core 侧镜像）：
     /// true = Alt+Shift 按下未松开，CursorMoved 持续更新 head。
     pub(crate) block_dragging: bool,
+    /// 软换行接线态（第 73 轮 ⑯）：开关 + Fenwick 视觉行索引 + 代次失效。
+    /// RefCell 手法同高亮器/括号缓存——只读的 draw/hit_test 也要能懒惰
+    /// 推进 memo（visible 查询是唯一消费方；确保生产路径读校验）。
+    wrap: RefCell<WrapCache>,
+    /// 竖向移动的目标像素列（第 73 轮 ⑯，主流 goal-column 口径）：进入
+    /// Up/Down/PageUp/PageDown 序列时记录当前光标 x，序列内沿用；任一
+    /// 非竖向操作（左右移/编辑/点击/跳转/撤销重做）清除（P37 打断口）。
+    goal_px: Option<f32>,
 }
 
 /// 光标闪烁半周期。
@@ -433,6 +443,8 @@ impl Default for EditorCore {
             show_line_endings: false,
             block_sel: None,
             block_dragging: false,
+            wrap: RefCell::new(WrapCache::new()),
+            goal_px: None,
         }
     }
 }
@@ -605,6 +617,9 @@ impl EditorCore {
         self.bracket_cache.borrow_mut().take();
         // 第 63 轮：选区跨度缓存同汇点失效（偏移键控对「同位异文」同理）
         self.sel_span_cache.borrow_mut().take();
+        // 第 73 轮 ⑯：软换行缓存同汇点失效——行数变化整表重置，
+        // 否则只推代次（memo 过期由下次查询懒惰重算）
+        self.wrap.borrow_mut().after_edit(self.doc.line_count());
         if let Some(hl) = &self.highlight {
             let line = self.doc.char_to_line(offset.min(self.doc.text_len()));
             hl.borrow_mut().invalidate_from(line);
@@ -777,6 +792,7 @@ impl EditorCore {
 
     pub fn undo(&mut self) -> bool {
         self.break_typing(); // P37：撤销本身打断组，防后续输入混入历史组
+        self.goal_px = None; // 第 73 轮 ⑯：撤销 = 非竖向操作，清 goal
         self.clear_block(); // 第 67 轮：列块不参与快照回滚，一并清除
         let Some(snap) = self.undo_stack.pop() else {
             return false;
@@ -801,6 +817,7 @@ impl EditorCore {
 
     pub fn redo(&mut self) -> bool {
         self.break_typing(); // P37 同上
+        self.goal_px = None; // 第 73 轮 ⑯：重做 = 非竖向操作，清 goal
         self.clear_block(); // 第 67 轮：同 undo
         let Some(snap) = self.redo_stack.pop() else {
             return false;
@@ -824,6 +841,7 @@ impl EditorCore {
 
     pub fn select_all(&mut self) {
         self.break_typing(); // P37：选区变更打断组
+        self.goal_px = None; // 第 73 轮 ⑯：选区变更 = 非竖向操作
         self.clear_block(); // 第 67 轮：块态与单选区互斥
         let last = self.doc.line_count().saturating_sub(1);
         self.anchor = Some(CursorPos::default());
@@ -864,6 +882,7 @@ impl EditorCore {
     /// （跳过快照，一次撤销撤掉整段连续输入）；换行、粘贴（多字符）、
     /// 选区替换一律开新组。
     pub fn insert_str(&mut self, text: &str) {
+        self.goal_px = None; // 第 73 轮 ⑯：编辑 = 非竖向操作，清 goal
         let text = self.doc.line_ending().normalize(text);
         let single = {
             let mut it = text.chars();
@@ -989,6 +1008,7 @@ impl EditorCore {
     }
 
     pub fn backspace(&mut self) {
+        self.goal_px = None; // 第 73 轮 ⑯：编辑 = 非竖向操作，清 goal
         if self.delete_selection() {
             return;
         }
@@ -1015,6 +1035,7 @@ impl EditorCore {
     }
 
     pub fn delete_forward(&mut self) {
+        self.goal_px = None; // 第 73 轮 ⑯：编辑 = 非竖向操作，清 goal
         if self.delete_selection() {
             return;
         }
@@ -1709,7 +1730,12 @@ impl EditorCore {
     }
 
     /// Alt+Shift 按下：以命中点为锚角开始块选拖拽。
+    /// 第 73 轮 ⑯：软换行开态直接拒绝（设计 §4.10 互斥——列块依赖整行
+    /// 矩形列几何，折行形态下无意义；开启软换行本身也会清掉既有块）。
     pub(crate) fn begin_block_select(&mut self, at: CursorPos) {
+        if self.wrap.borrow().enabled {
+            return;
+        }
         self.block_dragging = true;
         self.block_sel = Some(BlockSel { anchor: at, head: at });
         // 块态与单选区互斥
@@ -2400,8 +2426,27 @@ impl EditorCore {
         let page_rows = ((self.viewport_h / self.line_height()) as usize).max(1);
         let last_line = self.doc.line_count().saturating_sub(1);
 
+        // 第 73 轮 ⑯：软换行开态，Up/Down/PageUp/PageDown 按视觉行行走
+        // （goal-column 口径）；其余动作为非竖向操作，先清 goal
+        if self.wrap.borrow().enabled {
+            match motion {
+                Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
+                    let Some((line, col)) = self.vertical_target(motion, page_rows) else {
+                        return;
+                    };
+                    self.cursor = CursorPos {
+                        line,
+                        col: col.min(self.line_display_len(line)),
+                    };
+                    return;
+                }
+                _ => self.goal_px = None,
+            }
+        }
+
         match motion {
             Motion::Left => {
+                self.goal_px = None;
                 if self.cursor.col > 0 {
                     self.cursor.col -= 1;
                 } else if self.cursor.line > 0 {
@@ -2410,6 +2455,7 @@ impl EditorCore {
                 }
             }
             Motion::Right => {
+                self.goal_px = None;
                 if self.cursor.col < self.line_display_len(self.cursor.line) {
                     self.cursor.col += 1;
                 } else if self.cursor.line < last_line {
@@ -2431,8 +2477,14 @@ impl EditorCore {
                         self.cursor.col.min(self.line_display_len(self.cursor.line));
                 }
             }
-            Motion::Home => self.cursor.col = 0,
-            Motion::End => self.cursor.col = self.line_display_len(self.cursor.line),
+            Motion::Home => {
+                self.goal_px = None;
+                self.cursor.col = 0
+            }
+            Motion::End => {
+                self.goal_px = None;
+                self.cursor.col = self.line_display_len(self.cursor.line)
+            }
             Motion::PageUp => {
                 self.cursor.line = self.cursor.line.saturating_sub(page_rows);
                 self.cursor.col =
@@ -2443,8 +2495,12 @@ impl EditorCore {
                 self.cursor.col =
                     self.cursor.col.min(self.line_display_len(self.cursor.line));
             }
-            Motion::DocStart => self.cursor = CursorPos::default(),
+            Motion::DocStart => {
+                self.goal_px = None;
+                self.cursor = CursorPos::default()
+            }
             Motion::DocEnd => {
+                self.goal_px = None;
                 self.cursor = CursorPos {
                     line: last_line,
                     col: self.line_display_len(last_line),
@@ -2456,6 +2512,7 @@ impl EditorCore {
     /// 跳转到第 `line_1based` 行行首（1 起）。
     pub fn jump_to_line(&mut self, line_1based: usize) {
         self.break_typing(); // P37：跳转打断组
+        self.goal_px = None; // 第 73 轮 ⑯：跳转 = 非竖向操作
         let target =
             (line_1based.saturating_sub(1)).min(self.doc.line_count().saturating_sub(1));
         self.anchor = None;
@@ -2474,6 +2531,7 @@ impl EditorCore {
     /// 像素级精钳制由布局后的 [`Self::set_viewport_height`] 收口。
     pub fn restore_view(&mut self, line: usize, col: usize, scroll_top: f32, scroll_left: f32) {
         self.break_typing(); // P37：定位打断组（会话恢复/最近文件定位路径）
+        self.goal_px = None; // 第 73 轮 ⑯：恢复定位 = 非竖向操作
         let last = self.doc.line_count().saturating_sub(1);
         let line = line.min(last);
         // 列按显示口径夹紧（行尾 \r 不计，与光标移动语义一致）
@@ -2550,7 +2608,10 @@ impl EditorCore {
 
     pub fn clamp_scroll(&mut self) {
         self.scroll_top = self.scroll_top.max(0.0);
-        let max = (self.doc.line_count() as f32 - self.viewport_h / self.line_height()).max(0.0);
+        // 第 73 轮 ⑯：行程按视觉行总数（软换行开态 = 段计数前缀，
+        // 关态 = 逻辑行数，恒等退化）
+        let rows_total = self.scroll_content_lines() as f32;
+        let max = (rows_total - self.viewport_h / self.line_height()).max(0.0);
         // P66：恢复小数滚动位置。P59 的整行对齐（round）是「tiny-skia 对
         // Cached 文本无真裁剪」年代的权宜——半可见行会画出控件边界且部分
         // 重绘清不掉，只能让每行要么完整要么不可见；副作用是滚动永远整行
@@ -2572,6 +2633,12 @@ impl EditorCore {
     /// 全量重算——`max_line_cols` 只升不降的旧取舍会让删除超宽行后
     /// 水平滚动条永不消失。重算结果仍取「列模型 ∪ 真实行宽」。
     pub fn clamp_scroll_horizontal(&mut self) {
+        // 第 73 轮 ⑯：软换行开态锁水平滚动为 0（设计 §0：hscroll 隐藏、
+        // scroll_left 锁 0——折行形态不存在横向行程）
+        if self.wrap.borrow().enabled {
+            self.scroll_left = 0.0;
+            return;
+        }
         if self.max_cols_stale {
             let now = std::time::Instant::now();
             if self
@@ -2622,6 +2689,22 @@ impl EditorCore {
         // scroll_top 下 last 为小数，光标行（整数）越过它即触发平移，
         // 收敛结果与整行对齐时代一致且随平滑滚动连续
         let rows_visible = (self.viewport_h / self.line_height()).max(1.0);
+        // 第 73 轮 ⑯：软换行开态按视觉行收敛（光标所在段 = 视觉行）
+        if self.wrap.borrow().enabled {
+            let cur_v = self.visual_row_of(self.cursor.line, self.cursor.col) as f32;
+            let last = self.scroll_top + rows_visible - 1.0;
+            if cur_v < first {
+                self.scroll_top = cur_v;
+            } else if cur_v > last {
+                self.scroll_top = cur_v - rows_visible + 1.0;
+            }
+            self.clamp_scroll();
+            // P53：视口确实随光标移动才点亮滚动条（行内打字不无谓点亮）
+            if (self.scroll_top - first).abs() > f32::EPSILON {
+                self.touch_scrollbar_activity();
+            }
+            return; // 开态无水平行程（scroll_left 恒 0），横向收敛跳过
+        }
         let last = self.scroll_top + rows_visible - 1.0;
         let line = self.cursor.line as f32;
         if line < first {
@@ -2669,8 +2752,20 @@ impl EditorCore {
     }
 
     /// 可见的行号闭区间 [first, last]（已夹紧到文档范围）。
+    /// 第 73 轮 ⑯：软换行开态反解为「覆盖可见视觉行的逻辑行区间」。
     pub fn visible_range(&self) -> (usize, usize) {
         let count = self.doc.line_count();
+        if self.wrap.borrow().enabled {
+            if count == 0 {
+                return (0, 0);
+            }
+            let total = self.visual_rows_total();
+            let first_raw = (self.scroll_top.floor() as i64).max(0) as u32;
+            let first = first_raw.min(total.saturating_sub(1));
+            let rows = (self.viewport_h / self.line_height()).ceil() as u32 + 1;
+            let last = first.saturating_add(rows).min(total.saturating_sub(1));
+            return (self.locate_visual(first).0, self.locate_visual(last).0);
+        }
         let first = (self.scroll_top.floor() as i64).max(0) as usize;
         let rows = (self.viewport_h / self.line_height()).ceil() as usize + 1;
         let last = (first + rows).min(count.saturating_sub(1));
@@ -2689,11 +2784,273 @@ impl EditorCore {
             .count()
     }
 
+    // ---------- 软换行（第 73 轮 ⑯）视觉行映射 ----------
+    //
+    // 模型（docs/soft-wrap-design.md §3）：折行完全建立在显示列上，
+    // rope 仍是唯一事实源，本组函数是纯派生缓存。开关关闭时全部函数
+    // 恒等退化（视觉行 = 逻辑行），生产路径零行为变更。
+    // 列预算：正文区可视宽 − 滚动条覆盖区，与渲染同口径（char_cols）。
+
+    /// 软换行开关（设置项 word_wrap 下发）。
+    pub fn wrap_enabled(&self) -> bool {
+        self.wrap.borrow().enabled
+    }
+
+    /// 设置软换行开关（应用层 Settings 下发，fresh_tab 幂等）。
+    /// 开启瞬间：清列块（设计 §4.10 互斥）、锁水平滚动为 0、整表重置；
+    /// 关闭瞬间：清竖向目标列（goal 只在开态有意义）。
+    pub fn set_word_wrap(&mut self, enabled: bool) {
+        if enabled == self.wrap.borrow().enabled {
+            return;
+        }
+        if enabled {
+            self.clear_block();
+            self.scroll_left = 0.0;
+            let (lines, cols) = (self.doc.line_count(), self.wrap_max_cols());
+            self.wrap.borrow_mut().enable(lines, cols);
+        } else {
+            self.wrap.borrow_mut().disable();
+            self.goal_px = None;
+        }
+        self.clamp_scroll();
+    }
+
+    /// 软换行可用显示列预算 = 正文区可视宽 − 滚动条覆盖区 ÷ 列宽，≥1。
+    /// 除以滚动条覆盖区（SCROLLBAR_ZONE_W）让折行文本不钻到覆盖式
+    /// 滚动条底下（与主流编辑器保留滚动条槽位同款观感）。
+    fn wrap_max_cols(&self) -> usize {
+        let cw = self.char_width().max(0.1);
+        let w = (self.text_viewport_w() - SCROLLBAR_ZONE_W - 2.0).max(4.0);
+        (w / cw).floor().max(1.0) as usize
+    }
+
+    /// 总视觉行数（开关关 = 逻辑行数；开 = Fenwick 段数前缀总和）。
+    pub fn visual_rows_total(&self) -> u32 {
+        if !self.wrap.borrow().enabled {
+            return self.doc.line_count() as u32;
+        }
+        let mut w = self.wrap.borrow_mut();
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        w.index.total()
+    }
+
+    /// (line, col) 的视觉行号（开关关 = line）。
+    pub fn visual_row_of(&self, line: usize, col: usize) -> u32 {
+        if !self.wrap.borrow().enabled {
+            return line as u32;
+        }
+        let mut w = self.wrap.borrow_mut();
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        let lines = self.doc.line_count();
+        let line = line.min(lines);
+        let prefix = w.index.prefix_rows(line);
+        if line >= lines {
+            return prefix;
+        }
+        let body = self.line_text(line);
+        let breaks = w.segments_of(line, &body);
+        let seg = segment_index(&breaks, col, body.chars().count());
+        prefix + seg as u32
+    }
+
+    /// 逻辑行 `line` 的视觉段数（测试诊断用）。
+    #[cfg(test)]
+    pub fn line_visual_segments(&self, line: usize) -> u32 {
+        if !self.wrap.borrow().enabled {
+            return 1;
+        }
+        let mut w = self.wrap.borrow_mut();
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        let body = self.line_text(line);
+        w.segments_of(line, &body).len() as u32
+    }
+
+    /// 逻辑行 `line` 的段首列向量（调用方常已持有正文，免二次取串；
+    /// 内部按需重算并差值更新 BIT）。
+    pub(crate) fn segments_of_line(&self, line: usize, body: &str) -> Rc<Vec<usize>> {
+        let mut w = self.wrap.borrow_mut();
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        w.segments_of(line, body)
+    }
+
+    /// 视觉行反解：`(逻辑行, 段序, 段首列, 段末列)`。段末列 = 下一段
+    /// 段首或行尾（含）。`visual` 越界钳到末行末段。
+    /// 关态恒等退化：返回 `(visual, 0, 0, 行长)`。
+    pub fn locate_visual(&self, visual: u32) -> (usize, usize, usize, usize) {
+        let lines = self.doc.line_count();
+        if !self.wrap.borrow().enabled {
+            let line = (visual as usize).min(lines.saturating_sub(1));
+            return (line, 0, 0, self.line_display_len(line));
+        }
+        if lines == 0 {
+            return (0, 0, 0, 0);
+        }
+        let mut w = self.wrap.borrow_mut();
+        w.ensure_synced(lines, self.wrap_max_cols());
+        let total = w.index.total();
+        let v = visual.min(total.saturating_sub(1));
+        // 二分：最大 line 使 prefix_rows(line) ≤ v（prefix_rows = 该行
+        // 首个视觉行号；行号 = 之前所有行的段数和——O(log n) 一次）
+        let (mut lo, mut hi) = (0usize, lines);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if w.index.prefix_rows(mid) <= v {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let line = lo.saturating_sub(1);
+        let body = self.line_text(line);
+        let lens = body.chars().count();
+        let breaks = w.segments_of(line, &body);
+        let off = (v.saturating_sub(w.index.prefix_rows(line))) as usize;
+        let seg = off.min(breaks.len().saturating_sub(1));
+        let seg_start = breaks[seg];
+        let seg_end = breaks.get(seg + 1).copied().unwrap_or(lens);
+        (line, seg, seg_start, seg_end)
+    }
+
+    /// 逻辑行 `line` 的首视觉行号（书签/行号/选区锚定用；O(log n)）。
+    pub fn line_visual_base(&self, line: usize) -> u32 {
+        if !self.wrap.borrow().enabled {
+            return line as u32;
+        }
+        let mut w = self.wrap.borrow_mut();
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        w.index.prefix_rows(line.min(self.doc.line_count()))
+    }
+
+    /// 滚动条/行程口径的「内容行数」（开态 = 视觉行数；关态 = 逻辑行数）。
+    pub(crate) fn scroll_content_lines(&self) -> usize {
+        if self.wrap.borrow().enabled {
+            self.visual_rows_total() as usize
+        } else {
+            self.doc.line_count()
+        }
+    }
+
+    /// 水平行程内容像素宽：软换行开态恒 0（hscroll 隐藏、needed=false）。
+    pub(crate) fn hscroll_content_px(&self) -> f32 {
+        if self.wrap.borrow().enabled {
+            0.0
+        } else {
+            self.content_width_px()
+        }
+    }
+
+    /// 清除竖向移动目标列（P37 打断口：任何非竖向操作调用）。
+    pub(crate) fn clear_vertical_goal(&mut self) {
+        self.goal_px = None;
+    }
+
+    /// 竖向移动的目标解析：目标视觉行内按 goal 像素列反解字符列。
+    /// 返回 (line, col, visual)。视觉行越界（首行上/末行下）返回 None。
+    fn vertical_target(&mut self, motion: Motion, page_rows: usize) -> Option<(usize, usize)> {
+        let total = self.visual_rows_total();
+        let cur_v = self.visual_row_of(self.cursor.line, self.cursor.col);
+        let step: i64 = match motion {
+            Motion::Up => -1,
+            Motion::Down => 1,
+            Motion::PageUp => -(page_rows.max(1) as i64),
+            Motion::PageDown => page_rows.max(1) as i64,
+            _ => return None,
+        };
+        let target_v = (cur_v as i64 + step).clamp(0, total as i64 - 1) as u32;
+        if target_v == cur_v {
+            return None;
+        }
+        // goal-column：竖向序列首步记录当前光标 x，序列内沿用
+        if self.goal_px.is_none() {
+            let text = self.line_text(self.cursor.line);
+            let col = self.cursor.col.min(text.chars().count());
+            self.goal_px = Some(self.px_of(self.cursor.line, &text, col));
+        }
+        let goal = self.goal_px.unwrap_or(0.0);
+        let (line, _seg, s0, s1) = self.locate_visual(target_v);
+        let text = self.line_text(line);
+        let lens = text.chars().count();
+        let (s0, s1) = (s0.min(lens), s1.min(lens));
+        // 段相对 goal：续行从文本区左缘起排——goaI 换算为「段起点之后
+        // 的像素偏移」再按字符中点反解（与 hit_test 同口径）
+        let seg_base_px = self.px_of(line, &text, s0);
+        let goal_seg = goal - seg_base_px;
+        let xs_fresh: Option<&Vec<f32>> = self
+            .row_layouts
+            .get(&line)
+            .filter(|xs| xs.len().saturating_sub(1) >= lens);
+        let mut col = if goal_seg <= 0.0 {
+            s0 // goal 在段起点左侧 → 段首
+        } else if let Some(xs) = xs_fresh {
+            let mut c = s1; // 未命中（goal 越过段尾）→ 段尾
+            for k in s0..s1 {
+                let mid = (xs[k] + xs[k + 1]) * 0.5 - seg_base_px;
+                if mid > goal_seg {
+                    c = k;
+                    break;
+                }
+            }
+            c
+        } else {
+            // 列模型回退（无布局注入/布局滞后；绝对列累计——Tab 宽度
+            // 依赖绝对列——再换算段相对）
+            let mut acc = 0.0f32; // 绝对列
+            let mut base = 0.0f32; // s0 之前的列数
+            let mut c = s1;
+            for (k, ch) in text.chars().enumerate() {
+                if k >= s1 {
+                    break;
+                }
+                let w = char_cols(ch, acc as usize);
+                if k < s0 {
+                    base += w;
+                } else {
+                    let mid_rel = (acc + w * 0.5) * self.char_width()
+                        - base * self.char_width();
+                    if mid_rel > goal_seg {
+                        c = k;
+                        break;
+                    }
+                }
+                acc += w;
+            }
+            c
+        };
+        // 越段钳制：goaI 超出段尾 → 停在段末字符格（不跳到下一视觉段，
+        // 光标视觉行保持目标行；末段（s1 == lens）允许到行尾）
+        if col >= s1 && s1 < lens {
+            col = s1.saturating_sub(1);
+        }
+        Some((line, col))
+    }
+
+    // ---------- 命中测试 ----------
+
     /// 命中测试：控件内坐标 -> 光标位置（CJK 双宽感知）。
     /// P13：x 需先减去水平滚动偏移——点击坐标在视口系，字符列在文档系。
     pub fn hit_test(&self, x: f32, y: f32) -> CursorPos {
         let gutter = self.gutter_width();
         let char_w = self.char_width();
+        // 第 73 轮 ⑯：折行开态——y 先反解视觉行，再映射 (逻辑行, 段)，
+        // x 命中落在该段字符区间内（段起点与绘制同源 px_of）
+        if self.wrap.borrow().enabled {
+            let total = self.visual_rows_total();
+            if total == 0 {
+                return CursorPos::default();
+            }
+            let v_f = self.scroll_top + (y.max(0.0) / self.line_height());
+            let v = ((v_f.floor() as i64).clamp(0, total as i64 - 1)) as u32;
+            let (line, _seg, s0, s1) = self.locate_visual(v);
+            let text = self.line_text(line);
+            let lens = text.chars().count();
+            let (s0, s1) = (s0.min(lens), s1.min(lens));
+            // 段相对 x：续行从文本区左缘起排（px_of(s0) = 段起点像素）
+            let rel_abs = (x - gutter + self.scroll_left).max(0.0);
+            let rel =
+                (rel_abs - self.px_of(line, &text, s0)).max(0.0);
+            let col = self.hit_col_in_range(line, &text, s0, s1, rel);
+            return CursorPos { line, col };
+        }
         let line_f = self.scroll_top + (y.max(0.0) / self.line_height());
         let line = ((line_f.floor() as i64).clamp(0, self.doc.line_count() as i64 - 1)) as usize;
         let text = self.line_text(line);
@@ -2729,6 +3086,47 @@ impl EditorCore {
             acc += w;
         }
         CursorPos { line, col }
+    }
+
+    /// 折行开态：在段字符区间 `[s0, s1)` 内按**段相对** x（已扣 gutter/
+    /// 水平偏移与段起点像素）反解字符列。真实布局新鲜走字形中点；
+    /// 滞后回退列模型（段内累计从零起步）。
+    fn hit_col_in_range(&self, line: usize, text: &str, s0: usize, s1: usize, rel: f32) -> usize {
+        let char_w = self.char_width();
+        let lens = text.chars().count();
+        if s1 <= s0 {
+            return s0;
+        }
+        if let Some(xs) = self.row_layouts.get(&line) {
+            if xs.len().saturating_sub(1) >= lens {
+                let base = xs[s0];
+                for k in s0..s1 {
+                    let mid = (xs[k] + xs[k + 1]) * 0.5 - base;
+                    if rel < mid {
+                        return k;
+                    }
+                }
+                return s1;
+            }
+        }
+        let mut acc = 0.0f32; // 绝对列累计（Tab 宽度依赖绝对列，不能段内重算）
+        let mut base = 0.0f32; // s0 之前的列数（段起点）
+        for (i, ch) in text.chars().enumerate() {
+            if i >= s1 {
+                break;
+            }
+            let w = char_cols(ch, acc as usize);
+            if i < s0 {
+                base += w;
+            } else {
+                let mid_rel = (acc + w * 0.5) * char_w - base * char_w;
+                if rel < mid_rel {
+                    return i;
+                }
+            }
+            acc += w;
+        }
+        s1
     }
 
     /// 第 `line` 行的不含换行文本。
@@ -2833,15 +3231,29 @@ impl EditorCore {
 
     /// 相对控件的光标矩形（供输入法定位候选框，双宽感知）。
     /// P13：x 含水平滚动偏移的抵扣——返回值是视口系坐标。
+    /// 第 73 轮 ⑯：软换行开态 y 走视觉行映射（光标所在段），x 走**段
+    /// 相对**定位（续行从文本区左缘起排，主流折行口径）。
     pub fn caret_rect_relative(&self) -> Rectangle {
         let text = self.line_text(self.cursor.line);
         let col = self.cursor.col.min(text.chars().count());
         // P45：滞后感知（同 ensure_visible_horizontal）——布局新鲜走真实
         // 字形位置，滞后回退列模型实时计算；IME 候选框定位同样受益
         let x_px = self.px_of(self.cursor.line, &text, col);
+        let (v, seg_start) = if self.wrap.borrow().enabled {
+            let mut w = self.wrap.borrow_mut();
+            w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+            let lens = text.chars().count();
+            let breaks = w.segments_of(self.cursor.line, &text);
+            let seg = segment_index(&breaks, col, lens);
+            let v = w.index.prefix_rows(self.cursor.line) + seg as u32;
+            (v, breaks[seg])
+        } else {
+            (self.cursor.line as u32, 0)
+        };
         Rectangle {
-            x: self.gutter_width() + x_px - self.scroll_left,
-            y: (self.cursor.line as f32 - self.scroll_top) * self.line_height(),
+            x: self.gutter_width() + (x_px - self.px_of(self.cursor.line, &text, seg_start))
+                - self.scroll_left,
+            y: (v as f32 - self.scroll_top) * self.line_height(),
             width: CARET_WIDTH,
             height: self.line_height(),
         }

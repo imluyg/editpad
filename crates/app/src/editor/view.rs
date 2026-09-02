@@ -19,6 +19,7 @@ use super::scrollbars::{
     HScrollbar, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
     VScrollbar,
 };
+use super::wrap::segment_index as wrap_segment_index;
 use super::{
     BOOKMARK_DOT, BOOKMARK_STRIP, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET,
 };
@@ -307,17 +308,28 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         let scroll_left = core.scroll_left;
         let gutter_w = core.gutter_width();
 
-        // P59：滚动条测量提前（与绘制共用同一结果）
+        // P59：滚动条测量提前（与绘制共用同一结果）。
+        // 第 73 轮 ⑯：垂直行程按视觉行总数；软换行开态水平行程置 0
+        // （hscroll 隐藏，needed 恒 false）
         let sb = VScrollbar::measure(
-            core.doc.line_count(),
+            core.scroll_content_lines(),
             core.viewport_h,
             lh,
             bounds.height,
             core.scroll_top,
         );
+        let (hcontent_px, hview_px) = if core.wrap_enabled() {
+            (0.0, (bounds.width - gutter_w).max(0.0))
+        } else {
+            // 关态 = 既有口径（列模型 ∪ 真实行宽）
+            (
+                core.content_width_px(),
+                (bounds.width - gutter_w).max(0.0),
+            )
+        };
         let hsb = HScrollbar::measure(
-            core.content_width_px(),
-            (bounds.width - gutter_w).max(0.0),
+            hcontent_px,
+            hview_px,
             bounds.width,
             core.scroll_left,
         );
@@ -353,12 +365,14 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 书签墨迹（第 60 轮）：左侧条带内的琥珀圆点，只为带书签的可见行
         // 画（is_bookmarked O(log n)/行）；在 A 层掩码内，半可见行的越界
         // 半圆被硬裁，与行号/正文同受控件边界约束
+        // 第 73 轮 ⑯：软换行开态圆点锚定逻辑行**首段**的视觉行
         let (bk_first, bk_last) = core.visible_range();
         for line in bk_first..=bk_last {
             if !core.is_bookmarked(line) {
                 continue;
             }
-            let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+            let v = core.visual_row_of(line, 0);
+            let y = bounds.y + (v as f32 - core.scroll_top) * lh;
             if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                 continue;
             }
@@ -380,28 +394,68 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             );
         }
 
-        // 选区高亮：只画与视口相交的行（双宽感知）
+        // 选区高亮：只画与视口相交的视觉行（双宽感知）。
+        // 第 73 轮 ⑯：软换行开态逐视觉段画 [cs, ce) 子区间（跨段选区
+        // 分段着色，段间空隙 = 折行边界天然不画）；关态走既有逻辑行路径
         if let Some((sel_start, sel_end)) = core.ordered_selection() {
             let last_line = core.doc.line_count().saturating_sub(1);
             for line in sel_start.line..=sel_end.line.min(last_line) {
+                let text = core.line_text(line);
+                let lens = text.chars().count();
+                let start_col = if line == sel_start.line { sel_start.col } else { 0 };
+                let end_col = if line == sel_end.line { sel_end.col } else { lens };
+                if end_col <= start_col {
+                    continue;
+                }
+                if core.wrap_enabled() {
+                    let base = core.line_visual_base(line) as f32;
+                    let breaks = core.segments_of_line(line, &text);
+                    for (s, &seg_start) in breaks.iter().enumerate() {
+                        let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
+                        let cs = start_col.max(seg_start);
+                        let ce = end_col.min(seg_end);
+                        if ce <= cs {
+                            continue;
+                        }
+                        let row = base + s as f32;
+                        if row < core.scroll_top
+                            || row > core.scroll_top + core.viewport_h / lh
+                        {
+                            continue;
+                        }
+                        // 段相对：续行从文本区左缘起排
+                        let seg_base = core.px_of(line, &text, seg_start);
+                        let x0 = core.px_of(line, &text, cs.min(lens)) - seg_base;
+                        let x1 = core.px_of(line, &text, ce.min(lens)) - seg_base;
+                        // P59：选区矩形与控件边界求交（quad 无任何裁剪）
+                        let Some(rect) = Rectangle {
+                            x: bounds.x + gutter_w + x0 - scroll_left,
+                            y: bounds.y + (row - core.scroll_top) * lh,
+                            width: (x1 - x0).max(char_w),
+                            height: lh,
+                        }
+                        .intersection(&bounds)
+                        else {
+                            continue;
+                        };
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: rect,
+                                ..renderer::Quad::default()
+                            },
+                            colors.selection,
+                        );
+                    }
+                    continue;
+                }
                 let row = line as f32;
                 if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
                     continue;
                 }
-                let text = core.line_text(line);
-                let start_col = if line == sel_start.line { sel_start.col } else { 0 };
-                let end_col = if line == sel_end.line {
-                    sel_end.col
-                } else {
-                    text.chars().count()
-                };
-                if end_col <= start_col {
-                    continue;
-                }
                 let x0 = core
-                    .px_of(line, &text, start_col.min(text.chars().count()));
+                    .px_of(line, &text, start_col.min(lens));
                 let x1 = core
-                    .px_of(line, &text, end_col.min(text.chars().count()));
+                    .px_of(line, &text, end_col.min(lens));
                 // P59：选区矩形与控件边界求交——部分可见行的高亮不再越界
                 // （quad 无任何裁剪，越界部分会压标签条/状态栏）
                 let Some(rect) = Rectangle {
@@ -461,14 +515,26 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 let col = off - core.doc.line_to_char(line);
                 let text = core.line_text(line);
                 let x = core.px_of(line, &text, col);
-                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+                // 第 73 轮 ⑯：折行开态 y 经视觉行映射（括号可能落在非
+                // 首段，画错行即画到别的逻辑行上——设计 §4.8），x 走
+                // 段相对（续行左缘起排）
+                let (v, seg_base) = if core.wrap_enabled() {
+                    let lens = text.chars().count();
+                    let breaks = core.segments_of_line(line, &text);
+                    let seg = wrap_segment_index(&breaks, col.min(lens), lens);
+                    let base = core.line_visual_base(line);
+                    (base + seg as u32, core.px_of(line, &text, breaks[seg]))
+                } else {
+                    (line as u32, 0.0)
+                };
+                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
                 if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                     continue;
                 }
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
-                            x: bounds.x + gutter_w + x - scroll_left,
+                            x: bounds.x + gutter_w + (x - seg_base) - scroll_left,
                             y: y + lh - 2.0,
                             width: char_w.max(2.0),
                             height: 2.0,
@@ -485,16 +551,133 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 格内短横、行尾=右端短竖标。纯 A 层 quad 叠加，不改文本布局与
         // 命中测试；x 优先取实测行布局 row_x（O(1)），该行布局未就绪则
         // 整行跳过（滞后一帧出现，可接受）。可见行外剔除与书签同款。
+        // 第 73 轮 ⑯：软换行开态标记逐视觉段定位（字符所在段 = 视觉行）；
+        // 行尾标只在逻辑行末段画（设计 §4.1）。关态整行单段，恒等退化。
         if core.show_whitespace || core.show_line_endings {
             let mark = colors.invisibles;
+            // 空白标记绘制（闭包收纳 A 层 quad 分支，两态共用）
+            let draw_ws_mark = |renderer: &mut iced::Renderer,
+                                y: f32,
+                                cx: f32,
+                                ch: char,
+                                adv: usize| {
+                match ch {
+                    ' ' => renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: cx + char_w * 0.5 - 1.0,
+                                y: y + lh * 0.62,
+                                width: 2.0,
+                                height: 2.0,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        mark,
+                    ),
+                    '\t' => {
+                        let w = (adv as f32 * char_w * 0.6).max(3.0);
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x: cx + char_w * 0.3,
+                                    y: y + lh * 0.55,
+                                    width: w,
+                                    height: 1.5,
+                                },
+                                ..renderer::Quad::default()
+                            },
+                            mark,
+                        )
+                    }
+                    _ => {}
+                }
+            };
             let (iv_first, iv_last) = core.visible_range();
             for line in iv_first..=iv_last {
+                let text = core.line_text(line);
+                let lens = text.chars().count();
+                if core.wrap_enabled() {
+                    let breaks = core.segments_of_line(line, &text);
+                    let base = core.line_visual_base(line);
+                    // 最后可见段（视口下缘内的段序上限，供空白标记截断）
+                    let max_vis_seg = {
+                        let mut m = 0usize;
+                        for (s, _) in breaks.iter().enumerate() {
+                            // ⚠️ `<` 必须与左操作数同行（换行会被解析器
+                            // 当成 f32 的泛型参数开始）
+                            if ((base + s as u32) as f32) < (core.scroll_top + core.viewport_h / lh + 1.0) {
+                                m = s;
+                            } else {
+                                break;
+                            }
+                        }
+                        m
+                    };
+                    if core.show_line_endings {
+                        // 行尾短竖标只在逻辑行末段画
+                        let last_seg = breaks.len() - 1;
+                        if last_seg <= max_vis_seg {
+                            let v = base + last_seg as u32;
+                            let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                            if y + lh > bounds.y && y < bounds.y + bounds.height {
+                                let cols = core.line_display_len(line);
+                                if let Some(x) = core.row_x(line, cols) {
+                                    // 段相对：x 减末段起点像素（续行左缘）
+                                    let x_rel =
+                                        x - core.px_of(line, &text, breaks[last_seg]);
+                                    renderer.fill_quad(
+                                        renderer::Quad {
+                                            bounds: Rectangle {
+                                                x: bounds.x + gutter_w + x_rel
+                                                    - scroll_left
+                                                    + char_w * 0.25,
+                                                y: y + lh * 0.25,
+                                                width: 2.0,
+                                                height: lh * 0.45,
+                                            },
+                                            ..renderer::Quad::default()
+                                        },
+                                        mark,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if core.show_whitespace {
+                        let mut col = 0usize;
+                        for ch in text.chars() {
+                            if ch == '\n' || ch == '\r' {
+                                break;
+                            }
+                            let adv = char_cols(ch, col) as usize;
+                            // 字符所在段 → 其视觉行（段序随 col 非降，
+                            // 越过最后可见段的字符直接截断）
+                            let seg = wrap_segment_index(&breaks, col, lens);
+                            if seg > max_vis_seg {
+                                break;
+                            }
+                            let y = bounds.y
+                                + ((base + seg as u32) as f32 - core.scroll_top) * lh;
+                            if y + lh > bounds.y && y < bounds.y + bounds.height {
+                                if let Some(x) = core.row_x(line, col) {
+                                    // 段相对：续行字符标记从段起点起排
+                                    let cx = bounds.x + gutter_w
+                                        + x
+                                        - core.px_of(line, &text, breaks[seg])
+                                        - scroll_left;
+                                    draw_ws_mark(renderer, y, cx, ch, adv);
+                                }
+                            }
+                            col += adv;
+                        }
+                    }
+                    continue;
+                }
                 let y = bounds.y + (line as f32 - core.scroll_top) * lh;
                 if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                     continue;
                 }
                 if core.show_whitespace {
-                    let text = core.line_text(line);
                     let mut col = 0usize;
                     for ch in text.chars() {
                         if ch == '\n' || ch == '\r' {
@@ -503,36 +686,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         let adv = char_cols(ch, col) as usize;
                         if let Some(x) = core.row_x(line, col) {
                             let cx = bounds.x + gutter_w + x - scroll_left;
-                            match ch {
-                                ' ' => renderer.fill_quad(
-                                    renderer::Quad {
-                                        bounds: Rectangle {
-                                            x: cx + char_w * 0.5 - 1.0,
-                                            y: y + lh * 0.62,
-                                            width: 2.0,
-                                            height: 2.0,
-                                        },
-                                        ..renderer::Quad::default()
-                                    },
-                                    mark,
-                                ),
-                                '\t' => {
-                                    let w = (adv as f32 * char_w * 0.6).max(3.0);
-                                    renderer.fill_quad(
-                                        renderer::Quad {
-                                            bounds: Rectangle {
-                                                x: cx + char_w * 0.3,
-                                                y: y + lh * 0.55,
-                                                width: w,
-                                                height: 1.5,
-                                            },
-                                            ..renderer::Quad::default()
-                                        },
-                                        mark,
-                                    )
-                                }
-                                _ => {}
-                            }
+                            draw_ws_mark(renderer, y, cx, ch, adv);
                         }
                         col += adv;
                     }
@@ -572,6 +726,127 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         renderer.start_layer(text_layer);
 
         // 文本与行号：只为可见行调用排版（虚拟化的核心）；启用高亮时按语法分色
+        // 第 73 轮 ⑯：软换行开态改逐**视觉行**（折行段独立 shape，
+        // P46 的 INFINITY bounds 对段依然成立，且段长天然 ≤ 视口，
+        // 「超宽行 shaping 封顶」问题消失）；关态走既有逐逻辑行路径
+        // （恒等退化，由既有像素批守护）
+        if core.wrap_enabled() {
+            let total = core.visual_rows_total();
+            if total > 0 {
+                let first_v = (core.scroll_top.floor() as i64).max(0) as u32;
+                let rows_v = (core.viewport_h / lh).ceil() as u32 + 1;
+                let last_v = first_v.saturating_add(rows_v).min(total - 1);
+                for v in first_v..=last_v {
+                    let (line, seg, seg_start, seg_end) = core.locate_visual(v);
+                    let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                    if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                        continue;
+                    }
+                    // 行号数字：仅逻辑行首段（设计 §4.1）。算法复刻关态
+                    // （左缘 + Default 对齐，P66附 口径；数字仍右对齐于
+                    // 行号栏右缘 − GUTTER_MIN）
+                    if seg == 0 {
+                        let num = (line + 1).to_string();
+                        let num_w = num.chars().count() as f32 * char_w * GUTTER_FONT_SCALE;
+                        let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
+                        renderer.fill_text(
+                            core_text::Text {
+                                content: num,
+                                bounds: Size::new(num_w, lh),
+                                size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
+                                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                font: body_font,
+                                align_x: core_text::Alignment::Default,
+                                align_y: alignment::Vertical::Top,
+                                shaping: core_text::Shaping::Basic,
+                                wrapping: core_text::Wrapping::None,
+                            },
+                            Point::new(num_x, y),
+                            colors.gutter_text,
+                            bounds,
+                        );
+                    }
+                    let text = core.line_text(line);
+                    let lens = text.chars().count();
+                    if seg_start >= lens {
+                        continue; // 空行/幻影行：仅首段且无正文
+                    }
+                    let runs = core.highlight_runs(line, &text);
+                    if runs.is_empty() {
+                        let segment: String = text
+                            .chars()
+                            .skip(seg_start)
+                            .take(seg_end - seg_start)
+                            .collect();
+                        if segment.is_empty() {
+                            continue;
+                        }
+                        renderer.fill_text(
+                            core_text::Text {
+                                content: segment,
+                                bounds: Size::new(f32::INFINITY, lh),
+                                size: Pixels(core.font_size()),
+                                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                font: body_font,
+                                align_x: core_text::Alignment::Default,
+                                align_y: alignment::Vertical::Top,
+                                shaping: core_text::Shaping::Advanced,
+                                wrapping: core_text::Wrapping::None,
+                            },
+                            Point::new(
+                                // 段相对：续行从文本区左缘起排（关态首段
+                                // px_of(0)=0，语义一致）
+                                bounds.x + gutter_w - scroll_left,
+                                y,
+                            ),
+                            palette.text,
+                            bounds,
+                        );
+                    } else {
+                        for run in &runs {
+                            let s = run.start_col.max(seg_start);
+                            let e = run.end_col.min(seg_end);
+                            if e <= s {
+                                continue;
+                            }
+                            let segment: String =
+                                text.chars().skip(s).take(e - s).collect();
+                            if segment.is_empty() {
+                                continue;
+                            }
+                            // 段相对：run 起点像素 − 段起点像素
+                            let offset_px = core.px_of(line, &text, s)
+                                - core.px_of(line, &text, seg_start);
+                            let [r, g, b, a] = run.color;
+                            renderer.fill_text(
+                                core_text::Text {
+                                    content: segment,
+                                    bounds: Size::new(f32::INFINITY, lh),
+                                    size: Pixels(core.font_size()),
+                                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                    font: body_font,
+                                    align_x: core_text::Alignment::Default,
+                                    align_y: alignment::Vertical::Top,
+                                    shaping: core_text::Shaping::Advanced,
+                                    wrapping: core_text::Wrapping::None,
+                                },
+                                Point::new(
+                                    bounds.x + gutter_w + offset_px - scroll_left,
+                                    y,
+                                ),
+                                Color::from_rgba8(
+                                    (r * 255.0).round() as u8,
+                                    (g * 255.0).round() as u8,
+                                    (b * 255.0).round() as u8,
+                                    a,
+                                ),
+                                bounds,
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
         let (first, last) = core.visible_range();
         for line in first..=last {
             let y = bounds.y + (line as f32 - core.scroll_top) * lh;
@@ -676,6 +951,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     );
                 }
             }
+        }
         }
 
         // 输入法预编辑串（组字中）：内联显示在光标处。P59：光标行不在
@@ -905,7 +1181,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 {
                     let core = self.core.borrow();
                     let sb = VScrollbar::measure(
-                        core.doc.line_count(),
+                        core.scroll_content_lines(),
                         core.viewport_h,
                         core.line_height(),
                         bounds.height,
@@ -935,7 +1211,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     // P45：行程口径与钳制一致（列模型 ∪ 真实行宽）。
                     // P54：淡出隐藏中同样不拦截点击（与垂直条同款门控）。
                     let hsb = HScrollbar::measure(
-                        core.content_width_px(),
+                        core.hscroll_content_px(),
                         (bounds.width - core.gutter_width()).max(0.0),
                         bounds.width,
                         core.scroll_left,
@@ -978,6 +1254,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         core.anchor = None;
                         core.cursor = hit;
                         core.break_typing(); // P37：点击落点打断组
+                        core.clear_vertical_goal(); // 第 73 轮 ⑯：点击 = 非竖向操作
                     }
                     shell.publish(crate::Message::EditorNavChanged);
                     shell.request_redraw();
@@ -995,14 +1272,14 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 // P54：水平条同款（命中区在下缘窄带）。
                 {
                     let sb = VScrollbar::measure(
-                        core.doc.line_count(),
+                        core.scroll_content_lines(),
                         core.viewport_h,
                         core.line_height(),
                         bounds.height,
                         core.scroll_top,
                     );
                     let hsb = HScrollbar::measure(
-                        core.content_width_px(),
+                        core.hscroll_content_px(),
                         (bounds.width - core.gutter_width()).max(0.0),
                         bounds.width,
                         core.scroll_left,
@@ -1020,7 +1297,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 // 垂直滚动条拖拽中：按抓取偏移反解 scroll_top
                 if let Some(grab) = core.scrollbar_grab {
                     let sb = VScrollbar::measure(
-                        core.doc.line_count(),
+                        core.scroll_content_lines(),
                         core.viewport_h,
                         core.line_height(),
                         bounds.height,
@@ -1038,7 +1315,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 // P45：行程口径与钳制一致（列模型 ∪ 真实行宽）
                 if let Some(grab) = core.hscrollbar_grab {
                     let hsb = HScrollbar::measure(
-                        core.content_width_px(),
+                        core.hscroll_content_px(),
                         (bounds.width - core.gutter_width()).max(0.0),
                         bounds.width,
                         core.scroll_left,
@@ -1213,7 +1490,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         if let Some(pos) = cursor.position_over(bounds) {
             let core = self.core.borrow();
             let sb = VScrollbar::measure(
-                core.doc.line_count(),
+                core.scroll_content_lines(),
                 core.viewport_h,
                 core.line_height(),
                 bounds.height,
@@ -1229,7 +1506,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             }
             // 水平滚动条（P13）同款指针语义（行程口径见拖拽路径）
             let hsb = HScrollbar::measure(
-                core.content_width_px(),
+                core.hscroll_content_px(),
                 (bounds.width - core.gutter_width()).max(0.0),
                 bounds.width,
                 core.scroll_left,

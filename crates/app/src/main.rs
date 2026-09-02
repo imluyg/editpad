@@ -122,6 +122,9 @@ enum Message {
     SettingsShowWhitespaceToggled(bool),
     /// 设置：显示行尾符标记（第 64 轮，外观页）
     SettingsShowLineEndingsToggled(bool),
+    /// 设置：自动换行（软换行）开关（第 73 轮 ⑯，外观页；开启即生效：
+    /// 正文按视口折行、水平滚动隐藏、列块禁用）
+    SettingsWordWrapToggled(bool),
     /// 设置：保存时备份模式循环切换（第 64 轮 ⑭，none→simple→
     /// timestamped→none，仿关窗行为的三态按钮）
     SettingsBackupModeToggled,

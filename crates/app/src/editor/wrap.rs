@@ -115,10 +115,6 @@ impl WrapIndex {
         self.bit_prefix(self.seg_now.len())
     }
 
-    pub(crate) fn gen(&self) -> u64 {
-        self.gen
-    }
-
     fn bit_add(&mut self, i: usize, d: i64) {
         let mut j = i + 1; // 转 1-based
         while j < self.bit.len() {
@@ -138,6 +134,91 @@ impl WrapIndex {
         }
         sum.max(0) as u32
     }
+}
+
+/// 接线态包装（第 73 轮 Phase 1 接线）：把 [`WrapIndex`] 与软换行开关、
+/// 列预算、行数同步绑在一起，供 `EditorCore` 以 `RefCell` 持有。
+///
+/// 同步规则（设计 §3.2 落地）：
+/// * 开关开启 = 整表重置（`enable`）；
+/// * 内容代次失效（`after_edit`）：行数变化 → 整表重置；否则只推 gen，
+///   由下次查询懒惰重算（未查询行 BIT 短暂陈旧随窗口收敛，v1 已披露）；
+/// * 列预算/行数漂移（窗口缩放、字号、gutter 变宽、行数变化漏网）在
+///   每次查询入口 `ensure_synced` 兜底全清。
+pub(crate) struct WrapCache {
+    pub(crate) enabled: bool,
+    /// 最近同步的显示列预算（≥1）。
+    pub(crate) max_cols: usize,
+    pub(crate) index: WrapIndex,
+    /// 最近同步的逻辑行数。
+    last_lines: usize,
+}
+
+impl WrapCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            enabled: false,
+            max_cols: 1,
+            index: WrapIndex {
+                bit: vec![0],
+                seg_now: vec![],
+                memo: HashMap::new(),
+                gen: 0,
+            },
+            last_lines: 0,
+        }
+    }
+
+    /// 开启软换行：整表重置起步（每行暂记 1 段，可见行随查询填充收敛）。
+    pub(crate) fn enable(&mut self, lines: usize, max_cols: usize) {
+        self.enabled = true;
+        self.max_cols = max_cols.max(1);
+        self.index.reset(lines);
+        self.last_lines = lines;
+    }
+
+    /// 关闭软换行：只翻开关，缓存原地保留（重新开启时 enable 全清）。
+    pub(crate) fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    /// 编辑汇点：行数变化 → 整表重置；否则代次失效（memo 全部过期，
+    /// BIT 保留旧计数，由窗口行重算差值收敛——模块注释的 v1 取舍）。
+    pub(crate) fn after_edit(&mut self, lines: usize) {
+        if lines != self.last_lines {
+            self.index.reset(lines);
+            self.last_lines = lines;
+        } else {
+            self.index.bump_gen();
+        }
+    }
+
+    /// 查询入口兜底同步：列预算或行数与现状不符（窗口缩放/字号变更/
+    /// gutter 变宽/行数变化漏网）即整表重置（设计 §3.2「宽 W 变化→全清」）。
+    pub(crate) fn ensure_synced(&mut self, lines: usize, max_cols: usize) {
+        let mc = max_cols.max(1);
+        if mc != self.max_cols {
+            self.max_cols = mc;
+            self.index.reset(lines);
+            self.last_lines = lines;
+        } else if lines != self.last_lines {
+            self.index.reset(lines);
+            self.last_lines = lines;
+        }
+    }
+
+    /// 行 `line` 的当前断点表（memo 同代命中直接返回，否则重算并差值
+    /// 更新 BIT）。调用方需先 `ensure_synced`。
+    pub(crate) fn segments_of(&mut self, line: usize, body: &str) -> Rc<Vec<usize>> {
+        self.index.set_line(line, body, self.max_cols)
+    }
+}
+
+/// 字符列 `col` 所在段序号：断点向量（段首列，恒含 0）中最后一个
+/// `break ≤ col` 的下标；`col` 越界（≥ 行长）时归到末段。
+pub(crate) fn segment_index(breaks: &[usize], col: usize, body_len: usize) -> usize {
+    let c = col.min(body_len);
+    breaks.partition_point(|&b| b <= c).saturating_sub(1)
 }
 
 #[cfg(test)]
@@ -229,5 +310,48 @@ mod tests {
             idx.set_line(i, b, 4);
         }
         assert_eq!(idx.total(), 1 + 2 + 1 + 1);
+    }
+
+    #[test]
+    fn segment_index_maps_col_to_its_visual_segment() {
+        let breaks = [0usize, 4, 8];
+        assert_eq!(segment_index(&breaks, 0, 12), 0);
+        assert_eq!(segment_index(&breaks, 3, 12), 0);
+        assert_eq!(segment_index(&breaks, 4, 12), 1);
+        assert_eq!(segment_index(&breaks, 7, 12), 1);
+        // col 越界（行尾/超界）→ 归末段
+        assert_eq!(segment_index(&breaks, 8, 12), 2);
+        assert_eq!(segment_index(&breaks, 99, 12), 2);
+        // 空正文：只有 [0] 一个断点
+        assert_eq!(segment_index(&[0], 0, 0), 0);
+    }
+
+    #[test]
+    fn wrap_cache_enable_edit_and_ensure_sync_paths() {
+        let mut wc = WrapCache::new();
+        assert!(!wc.enabled);
+        wc.enable(2, 4);
+        assert!(wc.enabled);
+        assert_eq!(wc.index.total(), 2, "开启即整表重置，每行暂记 1 段");
+        wc.segments_of(0, "aaaaaaaa"); // 2 段
+        assert_eq!(wc.index.total(), 3);
+        // 编辑但行数不变：只推代次，同一行重算后 BIT 差值收敛
+        wc.after_edit(2);
+        wc.segments_of(0, "a"); // 缩成 1 段
+        assert_eq!(wc.index.total(), 2);
+        // 行数变化：整表重置
+        wc.after_edit(3);
+        assert_eq!(wc.index.total(), 3);
+        // 列预算变化：兜底全清
+        wc.segments_of(1, "bbbbbbbb"); // max 4 → 2 段 → total 4
+        assert_eq!(wc.index.total(), 4);
+        wc.ensure_synced(3, 9);
+        assert_eq!(wc.index.total(), 3, "预算变化整表重置为 1 段/行");
+        // 关闭开关不影响缓存同步
+        wc.disable();
+        assert!(!wc.enabled);
+        wc.after_edit(3);
+        wc.segments_of(2, "x");
+        assert_eq!(wc.index.total(), 3);
     }
 }

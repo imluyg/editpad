@@ -22,10 +22,9 @@ mod core;
 mod metrics;
 mod scrollbars;
 mod view;
-// 第 72 轮：软换行（候选池⑯ Phase 1）地基组件——折行断点纯函数 +
-// Fenwick 视觉行索引。Phase 1 后续轮接线 draw/hit_test/motion，接线前
-// 生产路径未消费，故整模块暂挂 allow(dead_code)（接线时移除）。
-#[allow(dead_code)]
+// 第 72 轮：软换行（候选池⑯ Phase 1）地基组件；第 73 轮接线完成
+// （EditorCore 视觉映射 / hit_test / motion / 滚动 / draw 全部消费），
+// allow(dead_code) 已移除。
 mod wrap;
 
 pub use core::*;

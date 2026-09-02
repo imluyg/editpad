@@ -1272,6 +1272,11 @@ impl Editpad {
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsShowLineEndingsToggled)
                 .into(),
+            // ---- 第 73 轮 ⑯：自动换行（软换行） ----
+            "自动换行" => checkbox(s.word_wrap)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsWordWrapToggled)
+                .into(),
             "记住最近打开的文件" => checkbox(s.remember_recent_files)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsRememberRecentToggled)
@@ -2282,6 +2287,16 @@ impl Editpad {
                         ),
                         interactive.then_some(Message::SettingsShowLineEndingsToggled(
                             !self.settings.show_line_endings,
+                        )),
+                    ))
+                    // 第 73 轮 ⑯：自动换行开关（查看菜单入口，与设置页同消息）
+                    .push(item(
+                        format!(
+                            "{}自动换行",
+                            if self.settings.word_wrap { "✓ " } else { "" }
+                        ),
+                        interactive.then_some(Message::SettingsWordWrapToggled(
+                            !self.settings.word_wrap,
                         )),
                     ));
             }
