@@ -1822,6 +1822,8 @@ impl Editpad {
         }
 
         let cursor = self.cur_handle.borrow().cursor;
+        // P67：行尾短标签（主导行尾随文档实时读取）
+        let eol = eol_label(self.cur_handle.borrow().doc.line_ending());
         let status_bar = row![
             text(
                 self.tab()
@@ -1833,13 +1835,23 @@ impl Editpad {
             .size(uipx)
             .font(uifont)
             .width(Fill),
-            text(if self.tab().encoding_label.is_empty() {
-                "—".to_owned()
-            } else {
-                self.tab().encoding_label.clone()
-            })
-            .size(uipx)
-            .font(uifont),
+            // P67：编码/行尾为可点标签——点开各自的弹出菜单
+            button(
+                text(if self.tab().encoding_label.is_empty() {
+                    "—".to_owned()
+                } else {
+                    self.tab().encoding_label.clone()
+                })
+                .size(uipx)
+                .font(uifont)
+            )
+            .padding([2, 8])
+            .style(chrome_button_style)
+            .on_press_maybe((!self.busy).then_some(Message::ToggleEncodingMenu)),
+            button(text(eol).size(uipx).font(uifont))
+                .padding([2, 8])
+                .style(chrome_button_style)
+                .on_press_maybe((!self.busy).then_some(Message::ToggleEolMenu)),
             text(format!("{} 行", self.cur_handle.borrow().doc.line_count()))
                 .size(uipx)
                 .font(uifont),
@@ -1866,6 +1878,13 @@ impl Editpad {
         }
         if self.settings_visible {
             layered = layered.push(self.settings_overlay());
+        }
+        // P67：状态栏编码/行尾弹出菜单（互斥，update 层保证）
+        if self.encoding_menu {
+            layered = layered.push(self.encoding_menu_overlay());
+        }
+        if self.eol_menu {
+            layered = layered.push(self.eol_menu_overlay());
         }
         layered.into()
     }
@@ -1910,6 +1929,99 @@ impl Editpad {
         .on_press(Message::TabContextMenuClosed)
         .on_right_press(Message::TabContextMenuClosed)
         .into()
+    }
+
+    /// P67：状态栏弹出菜单的通用浮层骨架——背板点击关闭 + 右下角贴
+    /// 状态栏上缘的定宽卡片（锚点按窗口尺寸现算，无需指针跟踪）。
+    fn status_menu_overlay<'a>(
+        &self,
+        card_w: f32,
+        card_h: f32,
+        panel: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let ax = (self.viewport_size.0 - card_w - 12.0).max(8.0);
+        // 底缘贴状态栏上方（状态栏高 ≈ 32px），小窗口钳到 8px
+        let ay = (self.viewport_size.1 - card_h - 36.0).max(8.0);
+        let card = opaque(
+            container(panel)
+                .width(card_w)
+                .height(card_h)
+                .padding(4)
+                .style(popup_card_style),
+        );
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
+        )
+        .on_press(Message::BarsDismissed)
+        .into()
+    }
+
+    /// P67：编码弹出菜单——三种目标编码，未命名页禁用（无路径可写）。
+    fn encoding_menu_overlay(&self) -> Element<'_, Message> {
+        const W: f32 = 200.0;
+        const ITEM_H: f32 = 32.0;
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let named = self.tab().path.is_some();
+        let item = |label: &str, enc: editpad_core::SaveEncoding| {
+            button(
+                text(label.to_owned())
+                    .size(uipx)
+                    .font(uifont)
+                    .width(Fill),
+            )
+            .width(Fill)
+            .padding([6, 10])
+            .style(chrome_menu_item_style)
+            .on_press_maybe(named.then_some(Message::SaveWithEncoding(enc)))
+        };
+        let panel = column![
+            item("以 UTF-8 保存", editpad_core::SaveEncoding::Utf8),
+            item("以 UTF-8(BOM) 保存", editpad_core::SaveEncoding::Utf8Bom),
+            item("以 GBK 保存", editpad_core::SaveEncoding::Gbk),
+        ]
+        .spacing(2);
+        self.status_menu_overlay(W, ITEM_H * 3.0 + 12.0, panel.into())
+    }
+
+    /// P67：行尾弹出菜单——当前主导行尾标头 + 两个转换项（已是目标
+    /// 则禁用）。转换为可撤销的文档编辑。
+    fn eol_menu_overlay(&self) -> Element<'_, Message> {
+        const W: f32 = 220.0;
+        const ITEM_H: f32 = 32.0;
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let current = self.cur_handle.borrow().doc.line_ending();
+        let item = |label: &str, target: editpad_core::LineEnding| {
+            let disabled = current == target;
+            button(
+                text(label.to_owned())
+                    .size(uipx)
+                    .font(uifont)
+                    .width(Fill),
+            )
+            .width(Fill)
+            .padding([6, 10])
+            .style(chrome_menu_item_style)
+            .on_press_maybe((!disabled).then_some(Message::ConvertEol(target)))
+        };
+        let panel = column![
+            text(format!("当前行尾：{}", eol_label(current)))
+                .size(uipx)
+                .font(uifont),
+            item(
+                "转换为 CRLF（Windows）",
+                editpad_core::LineEnding::CrLf
+            ),
+            item("转换为 LF（Unix）", editpad_core::LineEnding::Lf),
+        ]
+        .spacing(4);
+        self.status_menu_overlay(W, ITEM_H * 2.0 + 28.0, panel.into())
     }
 
     /// P40：设置弹窗浮层——整窗背板（点击关闭）+ 居中卡片。P47 起卡片

@@ -2135,7 +2135,10 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::SaveRequested);
         assert!(app.busy);
         std::fs::write(&path, "our own newer content").unwrap();
-        dispatch(&mut app, Message::Saved(v, Ok(())));
+        dispatch(
+            &mut app,
+            Message::Saved(v, Ok(editpad_core::EncodeNotice::default())),
+        );
         assert!(!app.tab().dirty && !app.busy);
         let fresh_stamp = app.tabs[0].file_stamp;
 
@@ -2165,6 +2168,176 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             Message::TabAutosaved(0, v2, path, AutosaveOutcome::SkippedExternalChange),
         );
         assert_eq!(app.external_change, Some(vec![0]), "真外部改动必须入队裁决");
+    }
+
+    // ---------- P67 编码与行尾控制 ----------
+
+    #[test]
+    fn p67_status_menus_toggle_mutually_and_esc_closes() {
+        let mut app = loaded_txt_app();
+
+        dispatch(&mut app, Message::ToggleEncodingMenu);
+        eprintln!("[P67] after enc-toggle: enc={} eol={}", app.encoding_menu, app.eol_menu);
+        assert!(app.encoding_menu && !app.eol_menu);
+
+        // 互斥：开行尾关编码
+        dispatch(&mut app, Message::ToggleEolMenu);
+        assert!(!app.encoding_menu && app.eol_menu);
+
+        // busy 时不得「打开」菜单（已开的菜单由各项自身守卫兜底）
+        dispatch(&mut app, Message::ToggleEolMenu); // 再 toggle 一次 = 收起
+        assert!(!app.encoding_menu && !app.eol_menu, "两菜单此时应全关");
+        app.busy = true;
+        dispatch(&mut app, Message::ToggleEncodingMenu);
+        assert!(!app.encoding_menu, "busy 时不得开菜单");
+        app.busy = false;
+
+        // Esc（BarsDismissed）一并收起
+        dispatch(&mut app, Message::ToggleEncodingMenu);
+        assert!(app.encoding_menu);
+        dispatch(&mut app, Message::BarsDismissed);
+        assert!(!app.encoding_menu && !app.eol_menu);
+    }
+
+    #[test]
+    fn p67_save_with_encoding_sets_pref_and_enters_save_pipeline() {
+        let (mut app, _path) = loaded_real_file_app("p67-enc-pref");
+
+        dispatch(&mut app, Message::SaveWithEncoding(editpad_core::SaveEncoding::Gbk));
+        assert_eq!(
+            app.tabs[0].save_encoding,
+            Some(editpad_core::SaveEncoding::Gbk),
+            "偏好必须记住（此后每次保存沿用）"
+        );
+        assert!(app.busy, "选择编码后应立即走保存管线");
+    }
+
+    #[test]
+    fn p67_save_with_encoding_rejected_for_untitled() {
+        let mut app = Editpad::default(); // 未命名页
+        dispatch(&mut app, Message::SaveWithEncoding(editpad_core::SaveEncoding::Gbk));
+        assert!(app.tabs[0].save_encoding.is_none(), "无路径不得记偏好");
+        assert!(!app.busy);
+        assert!(app.status.contains("另存为"), "应提示先另存为");
+    }
+
+    #[test]
+    fn p67_saved_reflects_target_label_and_unmappable_warning() {
+        let (mut app, _path) = loaded_real_file_app("p67-saved-label");
+        app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+        // 模拟载入自 GBK 文件（标签为 GBK）
+        app.tabs[0].encoding_label = "GBK".to_owned();
+        let v = app.tab().version;
+
+        // 同编码保存：无转码提示
+        dispatch(
+            &mut app,
+            Message::Saved(v, Ok(editpad_core::EncodeNotice::default())),
+        );
+        assert_eq!(app.tabs[0].encoding_label, "GBK", "标签反映实际落盘编码");
+        assert!(app.status.is_empty(), "同编码不得提示转码，实际 {:?}", app.status);
+
+        // 不可映射：优先告警
+        app.tabs[0].encoding_label = "GBK".to_owned();
+        dispatch(
+            &mut app,
+            Message::Saved(
+                v,
+                Ok(editpad_core::EncodeNotice { unmappable: true }),
+            ),
+        );
+        assert!(app.status.contains("&#"), "应提示数值实体写入：{:?}", app.status);
+
+        // 默认（无偏好）保存 GBK 载入的文件 → 转码提示（P6 语义保持）
+        app.tabs[0].save_encoding = None;
+        app.tabs[0].encoding_label = "GBK".to_owned();
+        dispatch(
+            &mut app,
+            Message::Saved(v, Ok(editpad_core::EncodeNotice::default())),
+        );
+        assert_eq!(app.tabs[0].encoding_label, "UTF-8");
+        assert!(app.status.contains("GBK"), "应提示原编码：{:?}", app.status);
+    }
+
+    #[test]
+    fn p67_convert_eol_rewrites_document_undoably() {
+        let (mut app, _path) = loaded_real_file_app("p67-eol");
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.reset_document(editpad_core::Document::from_str("a\nb\nc\n"));
+        }
+        let v0 = app.tab().version;
+
+        // LF → CRLF：内容改写、置脏、版本推进
+        dispatch(&mut app, Message::ConvertEol(editpad_core::LineEnding::CrLf));
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "a\r\nb\r\nc\r\n",
+            "行尾应统一为 CRLF"
+        );
+        assert!(app.tab().dirty, "行尾转换是真实文档编辑");
+        assert_eq!(app.tab().version, v0 + 1, "版本应推进（自动保存触发依据）");
+        assert_eq!(
+            app.cur_handle.borrow().doc.line_ending(),
+            editpad_core::LineEnding::CrLf
+        );
+
+        // 已是目标：提示且不动文档
+        dispatch(&mut app, Message::ConvertEol(editpad_core::LineEnding::CrLf));
+        assert!(app.status.contains("已是"), "实际 {:?}", app.status);
+        assert_eq!(app.tab().version, v0 + 1, "无变化不得推进版本");
+
+        // CRLF → LF：可撤销（撤销回 LF 原文）
+        dispatch(&mut app, Message::ConvertEol(editpad_core::LineEnding::Lf));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "a\nb\nc\n");
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "a\r\nb\r\nc\r\n",
+            "行尾转换必须可撤销"
+        );
+    }
+
+    #[test]
+    fn p67_loaded_and_save_as_reset_encoding_preference() {
+        // 重新载入同一文件：编码偏好重置为默认 UTF-8
+        // （先派发 FileDropped 建新加载任务，否则 Loaded 会被过期守卫丢弃；
+        // 当前页非空净 → 打开落在新页，断言按路径定位而非固定下标）
+        let (mut app, path) = loaded_real_file_app("p67-pref-reset");
+        app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+
+        dispatch(&mut app, Message::FileDropped(path.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("base"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        // start_loading「打开即聚焦」：活动页 = 刚重载完成的那一页
+        assert_eq!(
+            app.tab().path.as_deref(),
+            Some(path.as_path()),
+            "活动页应为重载的文件"
+        );
+        assert!(
+            app.tab().save_encoding.is_none(),
+            "重载必须重置编码偏好"
+        );
+
+        // 另存为新路径：同样重置（旧偏好属于旧路径）——先给活动页设偏好
+        app.tab_mut().save_encoding = Some(editpad_core::SaveEncoding::Utf8Bom);
+        let target = scratch_dir("p67-pref-reset2").join("new.txt");
+        dispatch(&mut app, Message::SaveTargetChosen(Some(target)));
+        assert!(
+            app.tab().save_encoding.is_none(),
+            "另存为必须重置编码偏好"
+        );
     }
 
     #[test]
@@ -2263,20 +2436,38 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
     #[test]
     fn transcode_notice_covers_all_encoding_labels() {
-        // 纯 UTF-8 / 未打开：无需提示
-        assert_eq!(transcode_notice("UTF-8"), None);
-        assert_eq!(transcode_notice(""), None);
+        use editpad_core::SaveEncoding;
+        // P67 口径：提示按「原标签 vs 实际目标」判定
+        // 纯 UTF-8 → UTF-8 / 未打开：无需提示
+        assert_eq!(transcode_notice("UTF-8", "UTF-8", false), None);
+        assert_eq!(transcode_notice("", "UTF-8", false), None);
+
+        // 用户显式选择 GBK 且原文件就是 GBK：不提示（非意外转码）
+        assert_eq!(
+            transcode_notice("GBK", SaveEncoding::Gbk.label(), false),
+            None
+        );
+
+        // 不可映射字符优先告警
+        let m = transcode_notice("UTF-8", "GBK", true).expect("应有告警");
+        assert!(m.contains("&#"), "应说明数值实体写入：{m}");
 
         // BOM 丢失要提示
-        let bom = transcode_notice("UTF-8(BOM)").expect("BOM 丢失应有提示");
+        let bom = transcode_notice("UTF-8(BOM)", "UTF-8", false).expect("BOM 丢失应有提示");
         assert!(bom.contains("BOM"));
 
-        // 转码要提示且带出原编码名
+        // 转码要提示且带出原编码名与目标
         for label in ["GBK", "UTF-16LE", "UTF-16BE"] {
-            let notice = transcode_notice(label).expect("转码应有提示");
+            let notice =
+                transcode_notice(label, "UTF-8", false).expect("转码应有提示");
             assert!(notice.contains(label), "提示需含原编码 {label}: {notice}");
             assert!(notice.contains("UTF-8"));
         }
+
+        // 反向：UTF-8 → GBK 同样提示
+        let back = transcode_notice("UTF-8", SaveEncoding::Gbk.label(), false)
+            .expect("反向转码应有提示");
+        assert!(back.contains("GBK") && back.contains("UTF-8"));
     }
 
     #[test]

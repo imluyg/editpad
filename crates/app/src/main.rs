@@ -70,14 +70,23 @@ enum Message {
     SaveRequested,
     SaveAsRequested,
     SaveTargetChosen(Option<PathBuf>),
-    /// 保存完成：(落盘内容的内容版本号, 结果)（P18 版本守卫）
-    Saved(u64, Result<(), String>),
+    /// 保存完成：(落盘内容的内容版本号, 结果)（P18 版本守卫；P67 起成功
+    /// 分支携带编码落盘的附带信息，如 GBK 不可映射字符告警）
+    Saved(u64, Result<editpad_core::EncodeNotice, String>),
     /// 标签页保存完成（「保存并关闭」流程用）：(页, 快照版本, 结果)
     TabSaved(usize, u64, Result<(), String>),
     /// 自动保存完成（P63 载荷扩展）：(标签页, 快照版本, 调度时页路径,
     /// 结局)。版本不符 = 期间又有编辑，不清脏；路径不符 = 页集合在防抖
     /// 睡眠期间变动导致下标漂移，整条丢弃；结局三分见 [`AutosaveOutcome`]。
     TabAutosaved(usize, u64, PathBuf, AutosaveOutcome),
+    /// P67：状态栏「编码」标签点开的弹出菜单开关
+    ToggleEncodingMenu,
+    /// P67：状态栏「行尾」标签点开的弹出菜单开关
+    ToggleEolMenu,
+    /// P67：以指定编码保存当前页（记住偏好并立即走保存管线）
+    SaveWithEncoding(editpad_core::SaveEncoding),
+    /// P67：把当前页行尾统一转换为目标风格（可撤销的文档编辑）
+    ConvertEol(editpad_core::LineEnding),
 
     FindToggled,
     FindQueryChanged(String),
@@ -584,15 +593,37 @@ async fn drive_hl_pave<F>(
     }
 }
 
-/// P6 编码知情权：saver 只写 UTF-8，原文件若是其他编码（或带 BOM），
-/// 首次保存即发生不可逆转码 / BOM 丢失。返回需要展示的提示；None 表示无需提示。
-fn transcode_notice(original_encoding: &str) -> Option<String> {
-    match original_encoding {
-        "" | "UTF-8" => None,
-        "UTF-8(BOM)" => {
+/// P6 编码知情权（P67 口径升级）：保存前后编码不一致 = 发生不可逆转换，
+/// 必须告知；用户在状态栏主动选择的目标编码不再视为「意外转码」。
+/// `unmappable` = 有字符无法用目标编码表示（已按 `&#N;` 写入），优先告警。
+/// 返回需要展示的提示；None 表示无需提示。
+fn transcode_notice(
+    original_encoding: &str,
+    target_label: &str,
+    unmappable: bool,
+) -> Option<String> {
+    if unmappable {
+        return Some(
+            "部分字符无法用目标编码表示，已按 &#编号; 形式写入".to_owned(),
+        );
+    }
+    if original_encoding.is_empty() || original_encoding == target_label {
+        return None;
+    }
+    match (original_encoding, target_label) {
+        ("UTF-8(BOM)", "UTF-8") => {
             Some("已按 UTF-8（无 BOM）保存：原文件的 BOM 已丢失".to_owned())
         }
-        other => Some(format!("已按 UTF-8 保存：原编码为 {other}，转码不可逆")),
+        (from, to) => Some(format!("已从 {from} 转码为 {to} 落盘（转码不可逆）")),
+    }
+}
+
+/// P67：行尾风格的短标签（状态栏/提示用）。
+fn eol_label(ending: editpad_core::LineEnding) -> &'static str {
+    match ending {
+        editpad_core::LineEnding::CrLf => "CRLF",
+        editpad_core::LineEnding::Lf => "LF",
+        editpad_core::LineEnding::Cr => "CR",
     }
 }
 
@@ -1102,6 +1133,10 @@ struct Tab {
     /// P50 外部修改检测戳：载入/保存成功时刻的 (mtime, size)。
     /// None = 从未记录（未命名页/会话恢复占位页未落地的），不参与判定。
     file_stamp: Option<(std::time::SystemTime, u64)>,
+    /// P67：本页的保存编码偏好。None = 默认 UTF-8（历史行为）；
+    /// 用户在状态栏「编码」菜单选择后记住，此后每次保存沿用，
+    /// 重新加载/另存为新路径时重置。不入会话快照（v1 取舍）。
+    save_encoding: Option<editpad_core::SaveEncoding>,
 }
 
 impl Tab {
@@ -1118,6 +1153,7 @@ impl Tab {
             heartbeat_snap: None,
             pinned: false,
             file_stamp: None,
+            save_encoding: None,
         }
     }
 
@@ -1195,6 +1231,10 @@ struct Editpad {
     renaming_tab: Option<usize>,
     /// P55：就地重命名的输入内容（预填当前文件名，纯 UI 态）。
     rename_input: String,
+    /// P67：状态栏「编码」弹出菜单可见。
+    encoding_menu: bool,
+    /// P67：状态栏「行尾」弹出菜单可见（与编码菜单互斥）。
+    eol_menu: bool,
     /// P65 双击重命名：标签条上最近一次左键点击的 (页下标, 时刻)。
     /// 同页在 [`TAB_DOUBLE_CLICK_MS`] 窗内再点一次 = 重命名意图。
     /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
@@ -1337,6 +1377,8 @@ impl Default for Editpad {
             external_change: None,
             renaming_tab: None,
             rename_input: String::new(),
+            encoding_menu: false,
+            eol_menu: false,
             last_tab_click: None,
             hotkey_capture: None,
             available_fonts: Vec::new(),

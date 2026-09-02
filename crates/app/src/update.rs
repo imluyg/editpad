@@ -27,6 +27,9 @@ impl Editpad {
     pub(crate) fn enter_busy(&mut self) {
         self.busy = true;
         self.tab_context_menu = None;
+        // P67：状态栏弹出菜单同样会被 busy 互斥挡住，直接收起
+        self.encoding_menu = false;
+        self.eol_menu = false;
     }
 
     /// 当前激活标签页。
@@ -370,6 +373,9 @@ impl Editpad {
                         }
                         tab.path = Some(job.path.clone());
                         tab.encoding_label = encoding;
+                        // P67：新载入的文件回到默认 UTF-8 偏好（旧偏好属于
+                        // 上一次打开的会话上下文）
+                        tab.save_encoding = None;
                         tab.dirty = false;
                         // P50：载入成功即记外部修改比对戳
                         tab.file_stamp = file_stamp(&job.path);
@@ -441,6 +447,8 @@ impl Editpad {
                 tab.path = Some(path.clone());
                 // P25：另存为转正后未命名序号使命完成
                 tab.untitled_num = None;
+                // P67：新路径回到默认 UTF-8 偏好（旧偏好属于旧路径）
+                tab.save_encoding = None;
                 // P63：按目标磁盘现状重记戳（新文件 = None）——用户在
                 // 对话框里显式选中的覆盖目标，不该被自家外部修改守卫拦下
                 tab.file_stamp = file_stamp(&path);
@@ -448,7 +456,7 @@ impl Editpad {
                 self.busy = false;
                 self.save()
             }
-            Message::Saved(version, Ok(())) => {
+            Message::Saved(version, Ok(notice)) => {
                 // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
                 self.tab_mut().dirty = self.tab().version != version;
                 self.busy = false;
@@ -464,14 +472,23 @@ impl Editpad {
                 if let Some(path) = self.tab().path.clone() {
                     self.record_recent(&path);
                 }
-                // P6 编码知情权：发生转码/BOM 丢失时明确告知，而不是静默落盘
-                if let Some(notice) = transcode_notice(&self.tab().encoding_label) {
-                    self.status = notice;
+                // P67：状态栏标签反映实际落盘编码（用户选择的偏好或默认
+                // UTF-8），转码提示按「原标签 vs 实际目标」判定
+                let target_label = self
+                    .tab()
+                    .save_encoding
+                    .unwrap_or(editpad_core::SaveEncoding::Utf8)
+                    .label();
+                let prev_label = self.tab().encoding_label.clone();
+                self.tab_mut().encoding_label = target_label.to_owned();
+                // P6 编码知情权：发生转码/BOM 丢失/不可映射字符时明确告知
+                if let Some(text) =
+                    transcode_notice(&prev_label, target_label, notice.unmappable)
+                {
+                    self.status = text;
                 } else {
                     self.status.clear();
                 }
-                // 落盘后文件已是纯 UTF-8，标签同步归一（避免后续保存重复提示）
-                self.tab_mut().encoding_label = "UTF-8".to_owned();
                 // P50：落盘成功即刷新外部修改比对戳（磁盘内容 = 刚写的内容）
                 if let Some(path) = self.tab().path.clone() {
                     self.tab_mut().file_stamp = file_stamp(&path);
@@ -885,6 +902,83 @@ impl Editpad {
                 Task::none()
             }
 
+            // ---------- 编码与行尾（P67） ----------
+            Message::ToggleEncodingMenu => {
+                if self.busy {
+                    return Task::none();
+                }
+                // 互斥：开一个关另一个
+                self.eol_menu = false;
+                self.encoding_menu = !self.encoding_menu;
+                Task::none()
+            }
+            Message::ToggleEolMenu => {
+                if self.busy {
+                    return Task::none();
+                }
+                self.encoding_menu = false;
+                self.eol_menu = !self.eol_menu;
+                Task::none()
+            }
+            Message::SaveWithEncoding(encoding) => {
+                self.encoding_menu = false;
+                if self.busy {
+                    return Task::none();
+                }
+                if self.tab().path.is_none() {
+                    self.status = "未命名页请先「另存为」取得路径，再选择保存编码".to_owned();
+                    return Task::none();
+                }
+                // 记住偏好：此后本页每次保存（含自动保存）都沿用该编码
+                self.tab_mut().save_encoding = Some(encoding);
+                self.save()
+            }
+            Message::ConvertEol(target) => {
+                self.eol_menu = false;
+                if self.busy || self.active_load.is_some() {
+                    return Task::none();
+                }
+                // 单遍重排是同步操作：超大文档先挡下并提示（FormatJson 同款
+                // 防冻结思路；上限放宽到 800 万字符 ≈ 24MB 文本）
+                const EOL_CONVERT_MAX_CHARS: usize = 8_000_000;
+                let (text, chars, current) = {
+                    let ed = self.cur_handle.borrow();
+                    (ed.doc.to_text(), ed.doc.text_len(), ed.doc.line_ending())
+                };
+                if chars > EOL_CONVERT_MAX_CHARS {
+                    self.status = format!(
+                        "文档过大（{chars} 字符），暂不支持行尾转换（上限 {EOL_CONVERT_MAX_CHARS}）"
+                    );
+                    return Task::none();
+                }
+                if current == target {
+                    self.status = format!("行尾已是 {}", eol_label(target));
+                    return Task::none();
+                }
+                // P9 的归一函数即行尾转换：CRLF/LF/孤立 CR 全部统一到目标
+                let new_text = target.normalize(&text);
+                // replace_whole_document 内部快照 → 可撤销（与全部替换同款）
+                self.cur()
+                    .borrow_mut()
+                    .replace_whole_document(editpad_core::Document::from_str(&new_text));
+                {
+                    let tab = self.tab_mut();
+                    tab.dirty = true;
+                    // P18：内容版本与防抖起点同步推进
+                    tab.note_mutation();
+                }
+                self.status = format!("已转换为 {}", eol_label(target));
+                // 内容变了：命中表过期重扫（查找栏开着才扫）+ 排队自动保存
+                if self.find_visible {
+                    let find_task = self.schedule_find_scan();
+                    return Task::batch([
+                        find_task,
+                        self.maybe_schedule_autosave(),
+                    ]);
+                }
+                self.maybe_schedule_autosave()
+            }
+
             Message::BarsDismissed => {
                 self.find_visible = false;
                 self.goto_visible = false;
@@ -905,6 +999,9 @@ impl Editpad {
                 // P55：Esc 一并取消就地重命名（一切保持原状）
                 self.renaming_tab = None;
                 self.rename_input.clear();
+                // P67：Esc 一并收起状态栏编码/行尾菜单
+                self.encoding_menu = false;
+                self.eol_menu = false;
                 // P10：取消在途扫描 + 清结果（含序号失效）
                 self.cancel_find_scan();
                 Task::none()
@@ -1741,6 +1838,11 @@ impl Editpad {
             }
         }
         self.enter_busy();
+        // P67：按页编码偏好落盘（None = 默认 UTF-8，历史行为）
+        let encoding = self
+            .tab()
+            .save_encoding
+            .unwrap_or(editpad_core::SaveEncoding::Utf8);
         // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
         let doc = self.cur_handle.borrow().doc.clone();
@@ -1748,7 +1850,7 @@ impl Editpad {
         let version = self.tab().version;
         Task::perform(
             async move {
-                let saved = editpad_core::save_document_atomic(&path, &doc)
+                let saved = editpad_core::save_document_encoded(&path, &doc, encoding)
                     .map_err(|e| e.to_string());
                 (version, saved)
             },
