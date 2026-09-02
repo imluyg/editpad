@@ -34,6 +34,11 @@ use editpad_core::{Document, LazyHighlighter, StyledRun};
 // 未实测时回退 字号×0.5625 固定假设），随设置实时变化。
 
 const GUTTER_MIN: f32 = 12.0;
+/// 文本图层四边内缩（P66）：层边界必须严格小于传给 fill_text 的 clip
+/// 参数，上游 Cached 分支的 is_within 快路径才会判假、掩码才强制生效。
+/// 内缩 1 逻辑像素的代价是控件最外圈 1px 不渲染字形——视觉不可感知，
+/// 换来半可见行越界字形的确定性硬裁剪。
+const TEXT_LAYER_INSET: f32 = 1.0;
 /// 默认字号（与 core 设置层的规范默认一致）。
 const FONT_SIZE_DEFAULT: f32 = 16.0;
 /// 行号栏字号相对正文的比例（16px 正文时即原来的 13px）。
@@ -1316,13 +1321,13 @@ impl EditorCore {
     pub fn clamp_scroll(&mut self) {
         self.scroll_top = self.scroll_top.max(0.0);
         let max = (self.doc.line_count() as f32 - self.viewport_h / self.line_height()).max(0.0);
-        // P59：滚动位置整行对齐——iced 0.14 tiny-skia 的文本裁剪对 Cached
-        // 文本不生效（headless_fill_text_clip_bounds_contract 实证），小数
-        // scroll_top 的半可见行会画出控件边界：上压标签条、下压状态栏，
-        // 且越界区域不在损伤区内、部分重绘从不清除，缓慢滚动逐帧叠加成
-        // 重影（用户截图三连）。对齐后每行要么完整可见要么完全不可见，
-        // 配合绘制侧的越界行跳过彻底杜绝越界墨迹。
-        self.scroll_top = self.scroll_top.min(max + 1.0).round().max(0.0);
+        // P66：恢复小数滚动位置。P59 的整行对齐（round）是「tiny-skia 对
+        // Cached 文本无真裁剪」年代的权宜——半可见行会画出控件边界且部分
+        // 重绘清不掉，只能让每行要么完整要么不可见；副作用是滚动永远整行
+        // 瞬跳、行号栏钉死在固定槽位（用户反馈「行号不跟随内容移动」）。
+        // 现绘制侧改用 start_layer 图层掩码在光栅期硬裁剪一切图元（见
+        // draw），半可见行可以安全上屏，滚动回到像素级平滑。
+        self.scroll_top = self.scroll_top.min(max + 1.0).max(0.0);
     }
 
     /// 正文区可视宽度（像素）= 视口宽 − 行号栏宽。
@@ -1382,16 +1387,17 @@ impl EditorCore {
     fn ensure_visible(&mut self) {
         self.poke_caret();
         let first = self.scroll_top;
-        // P59：整行对齐后完整可见行数 = floor(viewport_h / lh)——底缘
-        // 部分行不绘制（见绘制侧跳过），光标必须收敛到完整可见行内，
-        // 否则贴底打字时光标所在行整行不可见
-        let rows_full = (self.viewport_h / self.line_height()).floor().max(1.0);
-        let last = self.scroll_top + rows_full - 1.0;
+        // P66：可见行数按浮点口径（viewport_h / lh）——半可见行现在照常
+        // 绘制，光标收敛目标不再依赖「底缘留白 ≤ 一行」的旧假设；小数
+        // scroll_top 下 last 为小数，光标行（整数）越过它即触发平移，
+        // 收敛结果与整行对齐时代一致且随平滑滚动连续
+        let rows_visible = (self.viewport_h / self.line_height()).max(1.0);
+        let last = self.scroll_top + rows_visible - 1.0;
         let line = self.cursor.line as f32;
         if line < first {
             self.scroll_top = line;
         } else if line > last {
-            self.scroll_top = line - rows_full + 1.0;
+            self.scroll_top = line - rows_visible + 1.0;
         }
         self.clamp_scroll();
         // P53：视口确实随光标移动才点亮滚动条（行内打字不无谓点亮）
@@ -2098,6 +2104,15 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             core.scroll_left,
         );
 
+        // P66：三兄弟图层实现真裁剪。上游 Cached 文本分支用「声明的
+        // 裁剪盒」冒充实际字形范围做 is_within 快路径（engine.rs）——层
+        // 覆盖整控件时恒真、掩码被跳过，半可见行的字形会越界上屏。
+        // 对策：quad 层用全尺寸 bounds（draw_quad 的层掩码可靠）；文本
+        // 层四周内缩 TEXT_LAYER_INSET，迫使快路径判假、强制走掩码路径，
+        // 越界字形被硬裁掉；光标/滚动条压顶层恢复全尺寸。层序 = 绘制序：
+        // 选区(底) → 正文/行号 → 光标/预编辑下划线/滚动条(顶)。
+        renderer.start_layer(bounds);
+
         // 背景与行号栏
         renderer.fill_quad(
             renderer::Quad {
@@ -2161,14 +2176,28 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
+        // A 层（quad）收口
+        renderer.end_layer();
+
+        // B 层：文本专用，四周内缩 TEXT_LAYER_INSET——层边界严格小于
+        // 传入的 clip 参数，上游 is_within 快路径必然判假、掩码强制生效，
+        // 半可见行越出控件边界的字形被硬裁（P66 行号随滚动的根基）
+        let text_layer = Rectangle {
+            x: bounds.x + TEXT_LAYER_INSET,
+            y: bounds.y + TEXT_LAYER_INSET,
+            width: (bounds.width - 2.0 * TEXT_LAYER_INSET).max(0.0),
+            height: (bounds.height - 2.0 * TEXT_LAYER_INSET).max(0.0),
+        };
+        renderer.start_layer(text_layer);
+
         // 文本与行号：只为可见行调用排版（虚拟化的核心）；启用高亮时按语法分色
         let (first, last) = core.visible_range();
         for line in first..=last {
             let y = bounds.y + (line as f32 - core.scroll_top) * lh;
-            // P59：整行完全在控件内才绘制（scroll_top 已整行对齐，唯一的
-            // 部分行是底缘行——视口高非行高整倍数时跳过留白 ≤ 一行，
-            // 换取绝不越界：文字不再压状态栏/水平条，也不再产生重影）
-            if y < bounds.y || y + lh > bounds.y + bounds.height {
+            // P66：只跳过完全在视口外的行；上下缘的半可见行照常绘制，
+            // 越界部分由图层掩码裁掉（P59 时代的「不完整行跳过」退役——
+            // 那是整行对齐的前提，也是行号钉死的共谋）
+            if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                 continue;
             }
 
@@ -2263,27 +2292,16 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
-        // 输入法预编辑串（组字中）：内联显示在光标处，带下划线。
-        // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹
+        // 输入法预编辑串（组字中）：内联显示在光标处。P59：光标行不在
+        // 可视范围（滚轮滚走）时不绘制；P66：半可见行也绘制（与正文行
+        // 同规则），文字归 B 层（掩码裁边），下划线归 C 层压顶
         if let Some(preedit) = core.preedit.clone() {
             if !preedit.is_empty() {
                 let caret = core.caret_rect_relative();
                 let in_view =
-                    caret.y >= 0.0 && caret.y + lh <= core.viewport_h;
+                    caret.y + lh > 0.0 && caret.y < core.viewport_h;
                 if in_view {
                     let width = (display_cols(&preedit) * char_w).max(24.0);
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: bounds.x + caret.x,
-                                y: bounds.y + caret.y + lh - 3.0,
-                                width,
-                                height: 2.0,
-                            },
-                            ..renderer::Quad::default()
-                        },
-                        colors.preedit_underline,
-                    );
                     renderer.fill_text(
                         core_text::Text {
                             content: preedit,
@@ -2304,10 +2322,41 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
+        // B 层（文本）收口
+        renderer.end_layer();
+
+        // C 层：压顶四边形——预编辑下划线、光标竖线、滚动条
+        renderer.start_layer(bounds);
+
+        // 输入法下划线（与上方预编辑文字同门控）
+        if let Some(preedit) = core.preedit.clone() {
+            if !preedit.is_empty() {
+                let caret = core.caret_rect_relative();
+                let in_view =
+                    caret.y + lh > 0.0 && caret.y < core.viewport_h;
+                if in_view {
+                    let width = (display_cols(&preedit) * char_w).max(24.0);
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: bounds.x + caret.x,
+                                y: bounds.y + caret.y + lh - 3.0,
+                                width,
+                                height: 2.0,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        colors.preedit_underline,
+                    );
+                }
+            }
+        }
+
         // 光标竖线（静止期按闪烁相位隐现；活动窗口期内常显）。
-        // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹
+        // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹；
+        // P66：半可见行的光标也绘制，与正文行同规则
         let caret = core.caret_rect_relative();
-        let caret_in_view = caret.y >= 0.0 && caret.y + caret.height <= core.viewport_h;
+        let caret_in_view = caret.y + caret.height > 0.0 && caret.y < core.viewport_h;
         if core.caret_visible() && caret_in_view {
             renderer.fill_quad(
                 renderer::Quad {
@@ -2396,6 +2445,9 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 renderer.fill_quad(thumb_quad, thumb_color);
             }
         }
+
+        // C 层（压顶 quad）收口
+        renderer.end_layer();
     }
 
     fn update(
@@ -4005,12 +4057,143 @@ fn headless_fractional_scroll_paints_no_ink_outside_bounds() {
     );
 }
 
+// ---------- P66 像素级平滑滚动：行号随动 ----------
+
+#[test]
+fn p66_fractional_scroll_top_survives_clamp() {
+    // 触控板像素平滑的核心契约：小数滚动位不被吸附到整数行
+    // （P59 的 round 曾把它钳成整数——用户看到「内容整行瞬跳、
+    // 行号钉死在固定槽位」的直接根因）
+    let mut c = core_with(&"l\n".repeat(200));
+    c.set_viewport_height(220.0);
+
+    c.scroll_by_lines(-2.5);
+    assert!(
+        (c.scroll_top - 2.5).abs() < 1e-4,
+        "小数滚动位必须保留，实际 {}",
+        c.scroll_top
+    );
+
+    c.scroll_by_lines(-0.4);
+    c.clamp_scroll();
+    assert!(
+        (c.scroll_top - 2.9).abs() < 1e-4,
+        "clamp 只钳范围不取整，实际 {}",
+        c.scroll_top
+    );
+
+    // 头部越界仍归零；尾部超界仍钳到行程内（+1 行余量语义不变）
+    c.scroll_top = -7.0;
+    c.clamp_scroll();
+    assert_eq!(c.scroll_top, 0.0);
+}
+
+/// 渲染一帧编辑器画布（P66 对拍脚手架）：全新 Renderer/Tree，
+/// 控件摆在 (50,60) 尺寸 600×300，白色底。
+fn p66_render_frame(core: &EditorHandle, scroll_top: f32) -> tiny_skia::Pixmap {
+    let (w, h) = (700u32, 500u32);
+    {
+        let mut c = core.borrow_mut();
+        c.scroll_top = scroll_top;
+        c.clamp_scroll();
+    }
+    let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+
+    let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(
+        Size::new(600.0, 300.0),
+        Size::new(600.0, 300.0),
+    );
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(50.0, 60.0));
+    let lyt = Layout::new(&node);
+
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    let damage = vec![viewport_rect];
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
+    pixels
+}
+
+#[test]
+fn p66_gutter_ink_moves_with_smooth_scroll() {
+    // 用户报告「行号不跟随内容移动」的像素级对拍：scroll_top=0 与
+    // 2.5 两帧，行号栏（gutter 列）的墨迹必须不同——数字随视口连续
+    // 更新，而不是钉在固定槽位
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        let doc_text: String =
+            (1..=40).map(|i| format!("第{i}行内容\n")).collect();
+        c.reset_document(editpad_core::Document::from_str(&doc_text));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+    }
+
+    let frame_a = p66_render_frame(&core, 0.0);
+    let frame_b = p66_render_frame(&core, 2.5);
+
+    // 对拍有效性：滚动必须真实改变画面（否则下面的比较无意义）
+    let mut total_diff = 0u32;
+    for y in 0..500u32 {
+        for x in 0..700u32 {
+            let da = frame_a.pixel(x, y).map(|p| p.red()).unwrap_or(255);
+            let db = frame_b.pixel(x, y).map(|p| p.red()).unwrap_or(255);
+            if da != db {
+                total_diff += 1;
+            }
+        }
+    }
+    eprintln!("[P66] 全帧差异像素 = {total_diff}");
+    assert!(total_diff > 1000, "两帧画面几乎相同，滚动未生效");
+
+    let (gx0, gx1) = (50u32, 50u32 + core.borrow().gutter_width() as u32);
+    let dark = |px: tiny_skia::PremultipliedColorU8| px.red() < 200;
+    let gutter_ink_rows = |frame: &tiny_skia::Pixmap| -> Vec<bool> {
+        (0..500u32)
+            .map(|y| {
+                (gx0..gx1).any(|x| {
+                    frame.pixel(x, y).map(dark).unwrap_or(false)
+                })
+            })
+            .collect()
+    };
+    let ga = gutter_ink_rows(&frame_a);
+    let gb = gutter_ink_rows(&frame_b);
+    let ink_a = ga.iter().filter(|v| **v).count();
+    let ink_b = gb.iter().filter(|v| **v).count();
+    eprintln!("[P66] gutter 墨迹行 A={ink_a} B={ink_b}");
+    let diff_rows = ga.iter().zip(&gb).filter(|(a, b)| a != b).count();
+    eprintln!("[P66] gutter 行墨迹差异行数 = {diff_rows}");
+    assert!(diff_rows >= 10, "两帧行号栏墨迹几乎相同？行号没有随滚动移动");
+}
+
 /// P59 微实验（钉住上游缺陷）：iced 0.14 tiny-skia 的 `fill_text` 第 4 参
 /// clip_bounds 对 Cached 文本**不裁剪**——flush 掩码快路径
 /// `physical_bounds.is_within(clip)` 的 physical 就是 clip 自身，恒真 →
 /// 整段无掩码绘制。本测试断言逃逸**存在**：升级 iced 后若此断言翻转
-/// （clip 生效、逃逸归零），可重新依赖裁剪并简化 P59 的源头规避
-/// （整行对齐 + 越界行/光标跳过 + 选区求交）。
+/// （clip 生效、逃逸归零），可重新依赖裁剪并简化规避手段。
+/// P66 起的现行规避 = 三兄弟图层（见 draw）：文本层四周内缩迫使快路径
+/// 判假、强制走掩码路径；整行对齐/越界行跳过已随像素平滑滚动退役。
 #[test]
 fn fill_text_clip_bounds_is_not_reliable_upstream() {
     let (w, h) = (400u32, 300u32);
