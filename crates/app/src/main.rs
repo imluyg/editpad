@@ -2,7 +2,7 @@
 // 调试构建保留控制台，便于直接 cargo run 看日志输出。
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
-//! Editpad —— 极简记事本。
+//! Editpad —— 轻量文本编辑器。
 //!
 //! M2 里程碑：自绘虚拟化编辑器接管渲染，ropey Document 成为唯一数据源。
 //!

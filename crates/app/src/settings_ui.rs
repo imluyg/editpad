@@ -165,7 +165,7 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         page: SettingsPage::About,
         key: "名称",
         title: "名称",
-        desc: "Editpad —— 极简记事本。",
+        desc: "Editpad —— 轻量文本编辑器。",
     },
     StaticRow {
         page: SettingsPage::About,

@@ -15,7 +15,7 @@ BEGIN
         BLOCK "080404B0"
         BEGIN
             VALUE "ProductName", "Editpad"
-            VALUE "FileDescription", "Editpad - 极简记事本"
+            VALUE "FileDescription", "Editpad - 轻量文本编辑器"
             VALUE "FileVersion", "0.1.0"
             VALUE "ProductVersion", "0.1.0"
             VALUE "LegalCopyright", "Apache-2.0"

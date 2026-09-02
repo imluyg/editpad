@@ -1,6 +1,6 @@
 [package]
 name = "editpad"
-description = "Editpad 极简记事本 GUI 壳（iced）"
+description = "Editpad 轻量文本编辑器 GUI 壳（iced）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
