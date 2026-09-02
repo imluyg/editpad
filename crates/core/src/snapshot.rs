@@ -117,9 +117,12 @@ pub struct SessionPage {
     pub doc: Document,
 }
 
-/// 默认快照目录；拿不到系统配置目录时返回 None（功能自动降级）。
+/// 默认快照目录；拿不到数据目录时返回 None（功能自动降级）。
+/// P101：便携模式（exe 同目录存在 `portable.txt`）下为 exe 目录内的
+/// `snapshot/`；否则走系统配置目录（Windows `%APPDATA%\editpad`），
+/// 见 [`crate::paths`]。
 pub fn snapshot_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("editpad").join(SNAPSHOT_DIR_NAME))
+    crate::paths::data_root().map(|d| d.join(SNAPSHOT_DIR_NAME))
 }
 
 /// 新代次号：纳秒级时钟。同进程连续多次快照 / 多进程并发都不会撞号。

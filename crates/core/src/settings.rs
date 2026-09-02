@@ -1,8 +1,10 @@
 //! 应用设置持久化：最近打开的文件列表。
 //!
-//! 存储位置由 `dirs::config_dir()` 决定（Windows 上是
-//! `%APPDATA%\editpad\config.toml`）。读写都是尽力而为：
-//! 配置损坏或目录不可写时静默回退默认值，绝不影响编辑器本体。
+//! 存储位置由 [`crate::paths`] 决定：常规模式 = `dirs::config_dir()`
+//! （Windows 上是 `%APPDATA%\editpad\config.toml`）；P101 便携模式
+//! （exe 同目录存在 `portable.txt`）= exe 目录内的 `config.toml`。
+//! 读写都是尽力而为：配置损坏或目录不可写时静默回退默认值，绝不
+//! 影响编辑器本体。
 
 use std::collections::HashMap;
 use std::fs;
@@ -472,9 +474,12 @@ impl Settings {
         crate::saver::write_atomic(path, serialized.as_bytes())
     }
 
-    /// 默认配置文件路径；拿不到系统配置目录时返回 None（功能自动降级）。
+    /// 默认配置文件路径；拿不到数据目录时返回 None（功能自动降级）。
+    /// P101：便携模式（exe 同目录存在 `portable.txt`）下为 exe 目录内的
+    /// `config.toml`；否则走系统配置目录（Windows `%APPDATA%\editpad`），
+    /// 见 [`crate::paths`]。
     pub fn config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("editpad").join("config.toml"))
+        crate::paths::data_root().map(|d| d.join("config.toml"))
     }
 
     pub fn load() -> Self {
