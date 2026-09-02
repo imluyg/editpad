@@ -1407,6 +1407,7 @@ impl Editpad {
                     strip = strip.push(
                         row![
                             text_input("新名称", &self.rename_input)
+                                .id(rename_input_id()) // P64：与聚焦操作同源
                                 .size(uipx)
                                 .font(uifont)
                                 .on_input(Message::TabRenameInputChanged)

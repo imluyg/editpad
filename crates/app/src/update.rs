@@ -920,11 +920,22 @@ impl Editpad {
                 Task::none()
             }
             Message::SwitchTab(i) => {
+                // P65：双击检测——同页在双击窗内连点两次 = 重命名意图。
+                // 第二次点击照常走切换（已在活动页则无操作），随后进入
+                // 就地重命名（内部自带 busy/越界守卫）。正在重命名的页
+                // 其标签按钮已被输入框替换，不会再产生 SwitchTab。
+                let now = std::time::Instant::now();
+                let dbl = is_double_click(self.last_tab_click, i, now);
                 if i < self.tabs.len() && i != self.active_tab {
                     self.set_active_tab(i);
                     self.cancel_find_scan();
                     self.tab_context_menu = None;
                 }
+                if dbl {
+                    self.last_tab_click = None;
+                    return self.update(Message::RenameOrSaveAsTab(i));
+                }
+                self.last_tab_click = Some((i, now));
                 Task::none()
             }
             Message::CloseTabRequest => {
@@ -1155,7 +1166,12 @@ impl Editpad {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        return Task::none();
+                        // P64：聚焦 + 全选——键盘流直达，预填旧名整体可
+                        // 被直接覆盖；操作在下一帧视图含该输入框后生效
+                        return iced::widget::operation::focus(rename_input_id())
+                            .chain(iced::widget::operation::select_all(
+                                rename_input_id(),
+                            ));
                     }
                     return self.save_as_dialog();
                 }

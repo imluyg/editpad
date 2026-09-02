@@ -1195,6 +1195,11 @@ struct Editpad {
     renaming_tab: Option<usize>,
     /// P55：就地重命名的输入内容（预填当前文件名，纯 UI 态）。
     rename_input: String,
+    /// P65 双击重命名：标签条上最近一次左键点击的 (页下标, 时刻)。
+    /// 同页在 [`TAB_DOUBLE_CLICK_MS`] 窗内再点一次 = 重命名意图。
+    /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
+    /// on_double_click（iced 事件流实测），故在 SwitchTab 里记账判定。
+    last_tab_click: Option<(usize, std::time::Instant)>,
     /// P62：热键捕获态——Some(动作 id) = 设置热键页正在等待新组合键。
     hotkey_capture: Option<&'static str>,
 
@@ -1332,6 +1337,7 @@ impl Default for Editpad {
             external_change: None,
             renaming_tab: None,
             rename_input: String::new(),
+            last_tab_click: None,
             hotkey_capture: None,
             available_fonts: Vec::new(),
             active_font_family: None,
@@ -1688,6 +1694,29 @@ fn rename_target_path(old: &Path, new_name: &str) -> Option<PathBuf> {
         return None;
     }
     Some(old.with_file_name(name))
+}
+
+/// 双击判定时间窗（P65）：与 Windows 系统双击时长一致。同页两次左键
+/// 间隔不超过此值即视为双击 → 触发就地重命名。
+pub(crate) const TAB_DOUBLE_CLICK_MS: u64 = 500;
+
+/// 双击判定（纯函数可单测，P65）：同一页、且距上次点击不超过
+/// [`TAB_DOUBLE_CLICK_MS`]。无记录/换页/超时都不算。
+fn is_double_click(
+    last: Option<(usize, std::time::Instant)>,
+    idx: usize,
+    now: std::time::Instant,
+) -> bool {
+    last.is_some_and(|(i, at)| {
+        i == idx && now.duration_since(at).as_millis() as u64 <= TAB_DOUBLE_CLICK_MS
+    })
+}
+
+/// P55/P64：标签就地重命名输入框的唯一 id。视图侧 text_input 挂同一
+/// id；进入重命名态时聚焦 + 全选（iced::widget::operation 对该 id 的
+/// 操作在下一帧视图含输入框后生效），用户可直接键入覆盖预填旧名。
+pub(crate) fn rename_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("editpad-tab-rename")
 }
 
 /// 取外部修改比对戳 (mtime, size)：元数据或 mtime 不可得（文件已被删/

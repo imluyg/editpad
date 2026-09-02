@@ -2078,6 +2078,49 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(app.busy, "另存为应直接进入保存管线而不被拦");
     }
 
+    // ---------- P64/P65 重命名聚焦与双击触发 ----------
+
+    #[test]
+    fn p65_double_click_detector_contract() {
+        let t0 = std::time::Instant::now();
+        // 无记录：单击不算
+        assert!(!is_double_click(None, 0, t0));
+        // 换页：不算
+        assert!(!is_double_click(Some((1, t0)), 0, t0 + std::time::Duration::from_millis(10)));
+        // 同页且在窗内：算
+        let quick = t0 + std::time::Duration::from_millis(TAB_DOUBLE_CLICK_MS);
+        assert!(is_double_click(Some((0, t0)), 0, quick));
+        // 同页但超窗（+1ms）：不算
+        let late = t0 + std::time::Duration::from_millis(TAB_DOUBLE_CLICK_MS)
+            + std::time::Duration::from_millis(1);
+        assert!(!is_double_click(Some((0, t0)), 0, late));
+    }
+
+    #[test]
+    fn p65_second_rapid_click_on_same_tab_enters_rename() {
+        let (mut app, _path) = loaded_real_file_app("p65-dblclick");
+
+        // 单击：只切换，不进重命名态
+        dispatch(&mut app, Message::SwitchTab(0));
+        assert!(app.renaming_tab.is_none(), "单击不得触发重命名");
+        assert!(app.last_tab_click.is_some(), "首次点击应记账");
+
+        // 双击：同页在双击窗内再点一次（测试两次派发间隔远小于 500ms）
+        dispatch(&mut app, Message::SwitchTab(0));
+        assert_eq!(app.renaming_tab, Some(0), "双击应进入就地重命名");
+        assert_eq!(app.rename_input, "note.txt", "预填当前文件名");
+        assert!(!app.busy, "双击重命名不进对话框阶段");
+    }
+
+    #[test]
+    fn p64_rename_input_id_is_stable_for_focus_operation() {
+        // 聚焦操作按 id 查找控件：每次调用必须产出相等的 id（逐帧稳定），
+        // 且与视图侧 text_input 挂载的是同一个值（同源常量函数）
+        let a = rename_input_id();
+        let b = rename_input_id();
+        assert_eq!(a, b, "id 必须逐帧稳定，聚焦操作才能命中输入框");
+    }
+
     #[test]
     fn p63_autosave_must_skip_contract() {
         // 写前判定纯函数契约：期望戳缺失不拦截；期望已知时以差异为准
