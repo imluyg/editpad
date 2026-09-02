@@ -18,6 +18,13 @@ const SCROLLBAR_TRACK_PAD: f32 = 2.0;
 pub(crate) const THUMB_MIN_H: f32 = 32.0;
 /// 命中区总宽（比可视宽度略宽，好点中）。
 pub(crate) const SCROLLBAR_ZONE_W: f32 = SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET * 2.0;
+/// 垂直滚动条占用的**可视**带宽 = 滑块厚 + 右缘间隙（不含命中区扩大，
+/// 命中区多出的 EDGE_INSET 在控件右缘之外，不影响文本排版）。
+/// P99：软换行折行预算在滚动条需要出现时按它让位——折行文本在滑块
+/// 左侧收尾，行尾字符不再被盖住/显得截断（P95 零预留的贴满右缘
+/// 是「被盖住」的直接成因之一，用户复点单后按需预留）。
+pub(crate) const VERTICAL_SCROLLBAR_RESERVE: f32 =
+    SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET;
 
 /// 垂直滚动条几何。全部为**相对控件**的像素坐标；由
 /// [`VScrollbar::measure`] 从当前状态推导——窗口缩放、字号调整、

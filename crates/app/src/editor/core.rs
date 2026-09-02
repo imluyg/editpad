@@ -15,6 +15,7 @@ use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width,
     validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
 };
+use super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
 use super::wrap::{segment_index, WrapCache};
 use super::{BOOKMARK_STRIP, FONT_SIZE_DEFAULT, GUTTER_MIN};
 
@@ -373,6 +374,12 @@ pub struct EditorCore {
     /// Up/Down/PageUp/PageDown 序列时记录当前光标 x，序列内沿用；任一
     /// 非竖向操作（左右移/编辑/点击/跳转/撤销重做）清除（P37 打断口）。
     goal_px: Option<f32>,
+    /// P99：软换行折行预算是否按垂直滚动条可视带宽让位（滚动条需要
+    /// 出现时为 true，由控件层 draw 每帧按 `VScrollbar::measure` 的
+    /// needed 更新）。开态内容超出视口 → 折行文本在滑块左侧收尾，
+    /// 行尾字符不被盖住/显得截断；内容放得下 → 零预留全宽贴边
+    /// （P95 口径保留）。判定稳定性见 [`Self::set_wrap_sb_reserve`]。
+    wrap_sb_reserve: bool,
 }
 
 /// 光标闪烁半周期。
@@ -444,6 +451,7 @@ impl Default for EditorCore {
             block_dragging: false,
             wrap: RefCell::new(WrapCache::new()),
             goal_px: None,
+            wrap_sb_reserve: false,
         }
     }
 }
@@ -2815,25 +2823,55 @@ impl EditorCore {
         self.clamp_scroll();
     }
 
-    /// 软换行可用显示列预算 = 正文区可视宽 ÷ 列宽，≥1。
-    /// P95 用户反馈：开态**不预留任何滚动条槽位**——水平滚动条在软换行
-    /// 下恒隐藏（HScrollbar needed=false），预留的 SCROLLBAR_ZONE_W+2
-    /// 会让折行文本在窗口右缘留下一片可见空白（贴边留白观感）。垂直
-    /// 滚动条是覆盖式（overlay，闲置 900ms 淡出，见 P53），文字被半
-    /// 透明滑块短暂盖住与关态「长行滚到行尾」是同一既有行为。
+    /// P99：设定折行预算是否预留垂直滚动条可视带宽。判定 = 垂直滚动条
+    /// needed（内容超出视口），由控件层 draw 每帧按当前行程测量注入。
     ///
+    /// 稳定性（无逐帧翻转）：折行段宽预算收缩只会**增加**（不会减少）
+    /// 视觉行数——判定「需要滚动条」时预留，预留后行数更多、滚动条仍
+    /// needed，状态自持；判定「放得下」时取消预留，取消后行数更少、
+    /// 依然放得下，同样自持。两个方向各自自洽，仅内容/视口跨越边界
+    /// 时切换一次。
+    ///
+    /// 预算变化经 [`Self::wrap_max_px`] 反映到 WrapCache 同步键 → 整表
+    /// 重置 → 可见行经 draw 惰性收敛（v1 已披露的收敛模型），切换帧
+    /// 内渲染以新预算排布，滚动范围下一帧对齐。
+    pub fn set_wrap_sb_reserve(&mut self, reserve: bool) {
+        self.wrap_sb_reserve = reserve;
+    }
+
+    /// 软换行可用显示列预算 = 折行预算 ÷ 列宽，≥1。
     /// P96 起仅作**列模型回退**用（真实字形布局未注入时，见
     /// [`Self::wrap_line_breaks`]）；有真实布局时按
     /// [`Self::wrap_max_px`] 像素断行。
     fn wrap_max_cols(&self) -> usize {
         let cw = self.char_width().max(0.1);
-        let w = self.text_viewport_w().max(4.0);
+        let w = self.wrap_budget_px();
         (w / cw).floor().max(1.0) as usize
     }
 
-    /// 软换行段宽像素预算 = 正文区可视宽（开态零预留，P95/P96 口径）。
+    /// 软换行段宽像素预算 = 折行预算（来源见 [`Self::wrap_budget_px`]）。
     fn wrap_max_px(&self) -> f32 {
-        self.text_viewport_w().max(4.0)
+        self.wrap_budget_px()
+    }
+
+    /// 折行预算（像素，列模型与像素断行的单一来源）。
+    ///
+    /// P95：开态**不预留水平滚动条槽位**——hscroll 在软换行下恒隐藏
+    /// （HScrollbar needed=false），预留的 SCROLLBAR_ZONE_W+2 会让折行
+    /// 文本在窗口右缘留下一片可见空白（贴边留白观感）。
+    ///
+    /// P99：**垂直**滚动条需要出现（内容超出视口）时按
+    /// [`VERTICAL_SCROLLBAR_RESERVE`] 让位——折行文本在滑块左侧收尾，
+    /// 行尾字符不再被盖住/显得截断；内容放得下（无滚动条）时零预留
+    /// 全宽贴边（P95 口径保留）。判定与稳定性见
+    /// [`Self::set_wrap_sb_reserve`]。
+    fn wrap_budget_px(&self) -> f32 {
+        let full = self.text_viewport_w().max(4.0);
+        if self.wrap_sb_reserve {
+            (full - VERTICAL_SCROLLBAR_RESERVE).max(4.0)
+        } else {
+            full
+        }
     }
 
     /// 总视觉行数（开关关 = 逻辑行数；开 = Fenwick 段数前缀总和）。

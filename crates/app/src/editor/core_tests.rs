@@ -11,7 +11,7 @@ use iced::alignment;
 use iced::{Pixels, Size};
 use super::super::metrics::{is_wide, shape_row_xs, TAB_STOP_COLS};
 use super::super::scrollbars::{
-    HScrollbar, THUMB_MIN_H, THUMB_MIN_W, VScrollbar,
+    HScrollbar, THUMB_MIN_H, THUMB_MIN_W, VERTICAL_SCROLLBAR_RESERVE, VScrollbar,
 };
 
     fn core_with(text: &str) -> EditorCore {
@@ -3594,6 +3594,75 @@ fn p66_fractional_scroll_top_survives_clamp() {
         let gutter = c.gutter_width();
         let hit = c.hit_test(gutter + 28.0 * 5.0, c.line_height() * 1.5);
         assert_eq!((hit.line, hit.col), (0, 39), "段 1 内命中第 5 个字 = 字符 39");
+    }
+
+    #[test]
+    fn wrap_sb_reserve_shrinks_budget_only_when_set() {
+        // P99 用户点单：折行文本贴满右缘后行尾字符被垂直滚动条盖住。
+        // 修复 = 内容超出视口（滚动条 needed）时折行预算扣除滚动条
+        // 可视带宽；放得下（无滚动条）时零预留全宽贴边（P95 口径
+        // 不回归）。
+        let mut c = wrap_core("1234567890\n");
+        wrap_converge(&mut c);
+        assert!(!c.wrap_sb_reserve, "默认零预留（P95 贴边口径）");
+        let full = c.text_viewport_w();
+        assert!((c.wrap_max_px() - full).abs() < 0.01);
+        assert_eq!(
+            c.wrap_max_cols(),
+            (full / c.char_width()).floor().max(1.0) as usize
+        );
+
+        // 需要滚动条：预算 = 可视宽 − 滚动条可视带宽（≥4px 防御不变）
+        c.set_wrap_sb_reserve(true);
+        assert!(c.wrap_sb_reserve);
+        let reserved = (full - VERTICAL_SCROLLBAR_RESERVE).max(4.0);
+        assert!(
+            (c.wrap_max_px() - reserved).abs() < 0.01,
+            "预留后像素预算必须扣除滚动条带宽"
+        );
+        assert_eq!(
+            c.wrap_max_cols(),
+            (reserved / c.char_width()).floor().max(1.0) as usize,
+            "列模型回退与像素预算同口径"
+        );
+    }
+
+    #[test]
+    fn wrap_sb_reserve_rebreaks_at_smaller_budget() {
+        // P99 像素口径：预留后断点按更小预算重算——每段右缘 ≤
+        // 「文本区宽 − 滚动条带」，行尾字符整体在滑块左侧收尾。
+        // （真实字形场景：15.6px 半宽 → 975px 全宽 62 字符/段、
+        // 962px 预留 61 字符/段。）
+        let mut c = core_with(&"a".repeat(100));
+        c.set_viewport_width(1024.0);
+        c.set_viewport_height(600.0);
+        c.set_word_wrap(true);
+        let xs: Vec<f32> = (0..=100).map(|i| i as f32 * 15.6).collect();
+        c.set_row_layout(0, xs.clone());
+        let full = c.text_viewport_w();
+        let breaks_full = c.segments_of_line(0, &c.line_text(0));
+        assert_eq!(breaks_full[1], 62, "全宽预算 62 字符/段（967.2 ≤ 975）");
+        c.set_wrap_sb_reserve(true);
+        let breaks = c.segments_of_line(0, &c.line_text(0));
+        assert!(
+            breaks.len() >= breaks_full.len(),
+            "预留后段宽更小：断点数不得少于全宽"
+        );
+        assert!(breaks[1] <= breaks_full[1], "首段断点不晚于全宽");
+        assert_eq!(breaks[1], 61, "预留预算 61 字符/段（951.6 ≤ 962）");
+        // 每段右缘（含末段）都不越出预留预算
+        let mut prev = 0usize;
+        for &b in breaks.iter().skip(1) {
+            assert!(
+                xs[b] - xs[prev] <= full - VERTICAL_SCROLLBAR_RESERVE + 0.01,
+                "段右缘不得越出预留预算"
+            );
+            prev = b;
+        }
+        assert!(
+            xs[100] - xs[prev] <= full - VERTICAL_SCROLLBAR_RESERVE + 0.01,
+            "末段右缘不得越出预留预算"
+        );
     }
 
     #[test]

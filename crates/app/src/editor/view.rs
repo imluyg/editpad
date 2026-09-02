@@ -334,6 +334,20 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             core.scroll_left,
         );
 
+        // P99：软换行折行预算跟随垂直滚动条 needed——内容超出视口
+        // （滚动条必然出现）时按滚动条可视带宽让位，折行文本在滑块
+        // 左侧收尾，行尾字符不再被盖住/显得截断；放得下（无滚动条）
+        // 时零预留全宽贴边（P95 口径保留）。稳定性双向自持：预算
+        // 收缩只增视觉行数、「预留后仍 needed」与「取消后仍放得下」
+        // 各自成立，不会逐帧翻转（见 core.rs set_wrap_sb_reserve
+        // 注释）。翻转于本帧正文绘制前生效：预算变化经 WrapCache
+        // 同步键整表重置，可见行在下方绘制循环内惰性重算（v1 已
+        // 披露的收敛模型，滚动范围下一帧对齐）。
+        let wrap_reserve = core.wrap_enabled() && sb.needed;
+        drop(core);
+        self.core.borrow_mut().set_wrap_sb_reserve(wrap_reserve);
+        let core = self.core.borrow();
+
         // P66：三兄弟图层实现真裁剪。上游 Cached 文本分支用「声明的
         // 裁剪盒」冒充实际字形范围做 is_within 快路径（engine.rs）——层
         // 覆盖整控件时恒真、掩码被跳过，半可见行的字形会越界上屏。

@@ -1259,3 +1259,87 @@ fn headless_wrap_reaments_after_viewport_grow() {
     // 拉宽后必须重新贴住新右缘（用户点单的适配要求）
     assert!(gap2 <= 12, "扩宽后折行未重算：右缘缺 {gap2}px（断点停在旧宽度）");
 }
+
+/// P99 用户点单（headless 像素级）：折行文本贴满右缘后，行尾字符被
+/// 最右侧垂直滚动条盖住/显得截断——内容超出视口（滚动条 needed）时，
+/// 折行预算必须按滚动条可视带宽让位：滑块带内只允许滚动条自身的
+/// 半透明墨迹（灰 ≈178），不得出现正文纯黑墨迹（旧行为：正文画满到
+/// 控件右缘，带内是纯黑正文与滑块混叠）。两帧渲染：首帧惰性收敛
+/// 行程（v1 模型），次帧 needed 判定生效。
+#[test]
+fn headless_wrap_reserves_scrollbar_band_no_text_ink_under_thumb() {
+    use super::super::CursorPos;
+    use super::super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    // 800 字符：折 ~23 段 ≈ 506px > 260px 视口 → 垂直滚动条需要出现
+    let doc = format!("{}\n", "a".repeat(800));
+
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.set_word_wrap(true);
+    }
+
+    let render = || -> tiny_skia::Pixmap {
+        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    let _ = render(); // 首帧：惰性收敛可见行行程（v1 模型）
+    let px = render(); // 次帧：needed 判定 → 预留生效
+
+    // 滚动条可视带宽内：最暗像素 ≥100（纯滑块 ≈178；正文纯黑混叠 <100）
+    let band_x0 = (ex + ew - VERTICAL_SCROLLBAR_RESERVE).round() as u32;
+    let mut darkest = 255u8;
+    for y in 0..h {
+        for x in band_x0..w {
+            if let Some(p) = px.pixel(x, y) {
+                darkest = darkest.min(p.red().min(p.green()).min(p.blue()));
+            }
+        }
+    }
+    eprintln!("[P99] 滚动条带宽 [{band_x0},{w}) 最暗像素 = {darkest}");
+    assert!(
+        darkest >= 100,
+        "滚动条带宽内出现正文墨迹（最暗 {darkest}）——行尾仍被滑块盖住"
+    );
+    // 对照：预留线左侧必须仍有正文墨迹（折行整体在滑块左侧收尾）
+    let mut text_ink = 0u32;
+    for y in 0..h {
+        for x in (band_x0 - 60)..band_x0 {
+            if let Some(p) = px.pixel(x, y) {
+                if p.red() < 100 && p.green() < 100 && p.blue() < 100 {
+                    text_ink += 1;
+                }
+            }
+        }
+    }
+    assert!(text_ink > 15, "预留线左侧应仍有正文墨迹（仅 {text_ink}px）");
+}
