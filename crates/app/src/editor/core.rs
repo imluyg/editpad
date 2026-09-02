@@ -15,7 +15,6 @@ use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width,
     validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
 };
-use super::scrollbars::SCROLLBAR_ZONE_W;
 use super::wrap::{segment_index, WrapCache};
 use super::{BOOKMARK_STRIP, FONT_SIZE_DEFAULT, GUTTER_MIN};
 
@@ -2815,12 +2814,15 @@ impl EditorCore {
         self.clamp_scroll();
     }
 
-    /// 软换行可用显示列预算 = 正文区可视宽 − 滚动条覆盖区 ÷ 列宽，≥1。
-    /// 除以滚动条覆盖区（SCROLLBAR_ZONE_W）让折行文本不钻到覆盖式
-    /// 滚动条底下（与主流编辑器保留滚动条槽位同款观感）。
+    /// 软换行可用显示列预算 = 正文区可视宽 ÷ 列宽，≥1。
+    /// P95 用户反馈：开态**不预留任何滚动条槽位**——水平滚动条在软换行
+    /// 下恒隐藏（HScrollbar needed=false），预留的 SCROLLBAR_ZONE_W+2
+    /// 会让折行文本在窗口右缘留下一片可见空白（贴边留白观感）。垂直
+    /// 滚动条是覆盖式（overlay，闲置 900ms 淡出，见 P53），文字被半
+    /// 透明滑块短暂盖住与关态「长行滚到行尾」是同一既有行为。
     fn wrap_max_cols(&self) -> usize {
         let cw = self.char_width().max(0.1);
-        let w = (self.text_viewport_w() - SCROLLBAR_ZONE_W - 2.0).max(4.0);
+        let w = self.text_viewport_w().max(4.0);
         (w / cw).floor().max(1.0) as usize
     }
 

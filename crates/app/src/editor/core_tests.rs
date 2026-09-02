@@ -3463,9 +3463,9 @@ fn p66_fractional_scroll_top_survives_clamp() {
 
     // ---------- 第 73 轮 ⑯：软换行（自动换行）接线 ----------
     //
-    // 视口宽 300 → 列预算 = (300 − gutter(≈49) − SCROLLBAR_ZONE_W(16) − 2)/9
-    // ≈ 25 列；行高 = 16×1.375 = 22px。开态后所有断言以 wrap_max_cols()
-    // 实时取值推导，不硬编码字体度量。
+    // 视口宽 300 → 列预算 = (300 − gutter(≈49))/9 ≈ 27 列（P95 起不预留
+    // 滚动条槽位）；行高 = 16×1.375 = 22px。开态后所有断言以
+    // wrap_max_cols() 实时取值推导，不硬编码字体度量。
 
     /// 折行开态 core：两行各 50 字符 + 一行 70 字符（未尾行）。
     fn wrap_core(text: &str) -> EditorCore {
@@ -3527,7 +3527,8 @@ fn p66_fractional_scroll_top_survives_clamp() {
 
     #[test]
     fn wrap_cjk_segments_follow_double_width_columns() {
-        // 中×30 = 60 显示列；预算 25 → 段 [0,12),[12,24),[24,30)
+        // 中×30 = 60 显示列；预算 mc → 双宽段断点 = mc/2 字符处。
+        // 60/mc ≤ 3 → 恰 3 段（mc ∈ 20..=30 恒成立）
         let mut c = wrap_core("中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中\n");
         wrap_converge(&mut c);
         let mc = c.wrap_max_cols();
@@ -3535,10 +3536,23 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(c.line_visual_segments(0), 3, "30 个双宽字符应折 3 段");
         assert_eq!(c.visual_rows_total(), 3 + 1, "3 段 + 幻影行 1 段");
         assert_eq!(c.visual_row_of(0, 0), 0);
-        assert_eq!(c.visual_row_of(0, 20), 1, "第 20 字符在段 1（更宽列）");
+        assert_eq!(c.visual_row_of(0, mc / 2 + 1), 1, "跨过段 1 起点（更宽列）");
         let (line, seg, s0, s1) = c.locate_visual(1);
         assert_eq!((line, seg), (0, 1));
-        assert_eq!((s0, s1), (12, 24), "段 1 覆盖字符 12..24");
+        assert_eq!((s0, s1), (mc / 2, 2 * (mc / 2)), "段 1 覆盖双宽断点区间");
+    }
+
+    #[test]
+    fn wrap_max_cols_fills_viewport_without_hscroll_reservation() {
+        // P95 用户点单：开态**不预留水平滚动条槽位**——列预算 = 正文区
+        // 可视宽 ÷ 列宽（无 SCROLLBAR_ZONE_W+2 扣除），折行文本贴窗右缘，
+        // 不再留出竖直空白带（水平条在软换行下恒隐藏）
+        let mut c = wrap_core("1234567890\n");
+        wrap_converge(&mut c);
+        let mc = c.wrap_max_cols();
+        let expect = (c.text_viewport_w() / c.char_width()).floor().max(1.0) as usize;
+        assert_eq!(mc, expect, "开态列预算不得预留滚动条槽位");
+        assert!(mc >= 20, "300 宽视窗应有充足列数，实际 {mc}");
     }
 
     #[test]
@@ -3679,12 +3693,16 @@ fn p66_fractional_scroll_top_survives_clamp() {
     fn wrap_index_survives_edits_via_shared_invalidation() {
         let mut c = wrap_core(&format!("{}\n{}\n", "a".repeat(50), "a".repeat(50)));
         wrap_converge(&mut c);
+        let mc = c.wrap_max_cols();
+        assert!((20..=30).contains(&mc));
         assert_eq!(c.visual_rows_total(), 2 + 2 + 1, "两行各 2 段 + 幻影 1 段");
-        // 行 1 拉长：50 → 54 字符 → 2 → 3 段（BIT 差值更新，总额收敛 6）
+        // 行 1 拉长：50 → 56 字符（BIT 差值更新，段数随 mc 派生）
         c.cursor = CursorPos { line: 1, col: 46 };
-        c.insert_str("cccc");
-        assert_eq!(c.line_visual_segments(1), 3);
-        assert_eq!(c.visual_rows_total(), 2 + 3 + 1);
+        c.insert_str("cccccc");
+        let segs1 = 56u32.div_ceil(mc as u32);
+        assert!(segs1 > 2, "56 字符在 mc=27 时应折 3 段");
+        assert_eq!(c.line_visual_segments(1), segs1);
+        assert_eq!(c.visual_rows_total(), 2 + segs1 + 1);
         // 撤销（整体换文档，行数不变 → 代次失效；被查询行重算收敛）
         c.undo();
         let line1 = c.line_text(1);
