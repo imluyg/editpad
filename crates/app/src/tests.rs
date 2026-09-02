@@ -2524,6 +2524,51 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         ));
     }
 
+    #[test]
+    fn line_op_hotkeys_dispatch_to_edit_ops() {
+        // 第 57 轮行操作：组合键 → EditOp 映射抽样（全量覆盖见注册表
+        // 分发一致性测试 hotkey_actions_all_dispatch_through_handle_key）
+        use iced::keyboard::{self, Modifiers};
+        let msg = handle_key_defaults(keyboard::Key::Character("d".into()), Modifiers::CTRL)
+            .expect("Ctrl+D 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::DuplicateLines)));
+        let msg = handle_key_defaults(keyboard::Key::Character("l".into()), Modifiers::CTRL)
+            .expect("Ctrl+L 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::DeleteLines)));
+        let msg = handle_key_defaults(
+            keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+Up 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::MoveLinesUp)));
+        let msg = handle_key_defaults(
+            keyboard::Key::Named(iced::keyboard::key::Named::ArrowDown),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+Down 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::MoveLinesDown)));
+    }
+
+    #[test]
+    fn line_ops_flow_through_app_update_marking_dirty() {
+        // 行操作经统一编辑入口：置脏 + 可撤销语义与普通编辑完全一致
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("甲\n乙\n丙丁".into())));
+        assert!(app.any_dirty());
+        // 当前行（第 3 行）上移
+        dispatch(&mut app, Message::Edit(EditOp::MoveLinesUp));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "甲\n丙丁\n乙");
+        // 复制当前行（第 2 行）到其下方
+        dispatch(&mut app, Message::Edit(EditOp::DuplicateLines));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "甲\n丙丁\n丙丁\n乙");
+        // 删除当前行（副本）
+        dispatch(&mut app, Message::Edit(EditOp::DeleteLines));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "甲\n丙丁\n乙");
+        // 行删除可经 Ctrl+Z 撤销
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "甲\n丙丁\n丙丁\n乙");
+    }
+
     // ---------- P6 编码知情权 ----------
 
     #[test]
@@ -3474,6 +3519,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             "Tab" => keyboard::Key::Named(Named::Tab),
             "Home" => keyboard::Key::Named(Named::Home),
             "End" => keyboard::Key::Named(Named::End),
+            // 第 57 轮行操作热键引入方向键组合
+            "Up" => keyboard::Key::Named(Named::ArrowUp),
+            "Down" => keyboard::Key::Named(Named::ArrowDown),
+            "Left" => keyboard::Key::Named(Named::ArrowLeft),
+            "Right" => keyboard::Key::Named(Named::ArrowRight),
+            "PageUp" => keyboard::Key::Named(Named::PageUp),
+            "PageDown" => keyboard::Key::Named(Named::PageDown),
+            "Insert" => keyboard::Key::Named(Named::Insert),
+            "Delete" => keyboard::Key::Named(Named::Delete),
             single if single.chars().count() == 1 => {
                 keyboard::Key::Character(single.to_ascii_lowercase().into())
             }

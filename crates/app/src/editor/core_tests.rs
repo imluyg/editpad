@@ -1783,3 +1783,114 @@ fn p66_fractional_scroll_top_survives_clamp() {
         let (dx_r, _) = probe(792.0, 300.0);
         assert!(dx_r > 0.0, "右缘应向文档尾方向横滚");
     }
+
+    // ---------- 第 57 轮：行操作套件 ----------
+
+    #[test]
+    fn delete_current_line_removes_whole_line_and_is_undoable() {
+        let mut c = core_with("alpha\nbeta\ngamma");
+        c.cursor = CursorPos { line: 1, col: 2 }; // 行中任意列都删整行
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "alpha\ngamma");
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 0 }, "光标落到删除起点");
+        assert!(c.undo(), "行删除必须可撤销");
+        assert_eq!(c.doc.to_text(), "alpha\nbeta\ngamma");
+    }
+
+    #[test]
+    fn delete_current_line_handles_crlf_tail_and_phantom_last_line() {
+        // CRLF 文档按整行（含 \r\n 单元）删除，不留孤立 \r
+        let mut c = core_with("a\r\nb\r\nc");
+        c.cursor = CursorPos { line: 0, col: 0 };
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "b\r\nc");
+        // 尾行无行尾：删除后前一行行尾保持原样
+        c.cursor = CursorPos { line: 1, col: 1 };
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "b\r\n");
+        // 幻影末行（尾随行尾产生的空行）：退化为吃掉前面的换行单元
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "b");
+        // 只剩一行内容：删成空文档（主流编辑器同款手感）
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "");
+    }
+
+    #[test]
+    fn delete_on_empty_document_is_noop() {
+        let mut c = core_with("");
+        assert!(!c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "");
+    }
+
+    #[test]
+    fn delete_selection_spans_lines_and_col0_end_excludes_last_line() {
+        let mut c = core_with("l1\nl2\nl3\nl4");
+        // 选区从 l1 中间拉到 l3 行首：l3 不算触及（选区没盖到它的字符）
+        c.anchor = Some(CursorPos { line: 0, col: 2 });
+        c.cursor = CursorPos { line: 2, col: 0 };
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "l3\nl4");
+    }
+
+    #[test]
+    fn duplicate_line_inserts_copy_below_and_is_undoable() {
+        let mut c = core_with("one\ntwo");
+        c.cursor = CursorPos { line: 0, col: 3 };
+        assert!(c.duplicate_current_lines());
+        assert_eq!(c.doc.to_text(), "one\none\ntwo");
+        assert_eq!(c.cursor.line, 1, "光标落到副本首行");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "one\ntwo");
+    }
+
+    #[test]
+    fn duplicate_tail_line_without_newline_terminates_copy_properly() {
+        // 尾块本身无行尾：副本必须独立成行（先补主导行尾）
+        let mut c = core_with("one\ntail");
+        c.cursor = CursorPos { line: 1, col: 1 };
+        assert!(c.duplicate_current_lines());
+        assert_eq!(c.doc.to_text(), "one\ntail\ntail");
+        // 空文档 / 幻影末行：无内容可复制
+        let mut empty = core_with("");
+        assert!(!empty.duplicate_current_lines());
+    }
+
+    #[test]
+    fn move_line_swaps_with_neighbor_respects_boundaries_and_undo() {
+        let mut c = core_with("a\nb\nc");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        assert!(c.move_current_lines(true));
+        assert_eq!(c.doc.to_text(), "b\na\nc");
+        assert_eq!(c.cursor.line, 0);
+        assert!(!c.move_current_lines(true), "已在顶行不得再动");
+        assert!(c.move_current_lines(false));
+        assert_eq!(c.doc.to_text(), "a\nb\nc");
+        assert!(c.move_current_lines(false));
+        assert_eq!(c.doc.to_text(), "a\nc\nb");
+        assert!(!c.move_current_lines(false), "已在底行不得再动");
+        // 边界 no-op 不产生快照：一步撤销恰好回到三行换位前
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "a\nb\nc");
+    }
+
+    #[test]
+    fn move_multi_line_block_rotates_as_a_unit_preserving_order() {
+        let mut c = core_with("p\nq1\nq2\nr");
+        c.anchor = Some(CursorPos { line: 1, col: 0 });
+        c.cursor = CursorPos { line: 2, col: 1 };
+        assert!(c.move_current_lines(true));
+        assert_eq!(c.doc.to_text(), "q1\nq2\np\nr", "上移=整块与上一行换位");
+        assert!(c.undo());
+        assert!(c.move_current_lines(false));
+        assert_eq!(c.doc.to_text(), "p\nr\nq1\nq2", "下移=整块与下一行换位");
+    }
+
+    #[test]
+    fn move_line_rebuilds_with_dominant_crlf_and_keeps_col() {
+        let mut c = core_with("abcdef\r\nsecond\r\nc");
+        c.cursor = CursorPos { line: 0, col: 3 };
+        assert!(c.move_current_lines(false));
+        assert_eq!(c.doc.to_text(), "second\r\nabcdef\r\nc", "CRLF 文档换位不产生混合行尾");
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 3 }, "光标列尽量保持");
+    }

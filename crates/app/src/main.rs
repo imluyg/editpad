@@ -1531,6 +1531,11 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "copy", default_combo: "Ctrl+C", desc: "复制选区" },
     HotkeyAction { id: "cut", default_combo: "Ctrl+X", desc: "剪切选区" },
     HotkeyAction { id: "paste", default_combo: "Ctrl+V", desc: "粘贴" },
+    // 行操作套件（第 57 轮，仿主流编辑器编辑菜单）
+    HotkeyAction { id: "dup_line", default_combo: "Ctrl+D", desc: "在下方复制当前行" },
+    HotkeyAction { id: "del_line", default_combo: "Ctrl+L", desc: "删除当前行" },
+    HotkeyAction { id: "move_line_up", default_combo: "Ctrl+Shift+Up", desc: "当前行上移" },
+    HotkeyAction { id: "move_line_down", default_combo: "Ctrl+Shift+Down", desc: "当前行下移" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1664,6 +1669,11 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "copy" => Some(Message::CopyRequested),
         "cut" => Some(Message::CutRequested),
         "paste" => Some(Message::PasteRequested),
+        // 行操作套件（第 57 轮）
+        "dup_line" => edit(EditOp::DuplicateLines),
+        "del_line" => edit(EditOp::DeleteLines),
+        "move_line_up" => edit(EditOp::MoveLinesUp),
+        "move_line_down" => edit(EditOp::MoveLinesDown),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),

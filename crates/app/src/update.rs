@@ -1606,6 +1606,11 @@ impl Editpad {
                 editor.delete_forward();
                 true
             }
+            // ---------- 行操作套件（第 57 轮） ----------
+            E::DeleteLines => editor.delete_current_lines(),
+            E::DuplicateLines => editor.duplicate_current_lines(),
+            E::MoveLinesUp => editor.move_current_lines(true),
+            E::MoveLinesDown => editor.move_current_lines(false),
         };
         drop(editor);
 

@@ -82,6 +82,15 @@ pub enum EditOp {
     Redo,
     /// 光标移动；bool = 是否按住 Shift 形成选区
     Motion(Motion, bool),
+    // ---------- 行操作套件（第 57 轮，仿主流编辑器编辑菜单） ----------
+    /// 删除光标/选区触及的所有整行（含行尾）
+    DeleteLines,
+    /// 在触及块正下方复制一份相同内容
+    DuplicateLines,
+    /// 触及块与上一相邻行整体换位（已在顶行时为 no-op）
+    MoveLinesUp,
+    /// 触及块与下一相邻行整体换位（已在底行时为 no-op）
+    MoveLinesDown,
 }
 
 /// 输入法上屏事件的裁决结果（P2 焦点过滤）。
@@ -801,6 +810,143 @@ impl EditorCore {
         let merged = self.cursor.line;
         self.raise_max_line_cols(merged..=merged);
         self.ensure_visible();
+    }
+
+    // ---------- 行操作套件（第 57 轮，仿主流编辑器编辑菜单） ----------
+
+    /// 光标/选区触及的行范围（含首尾）。选区末点落在某行行首（col 0）时
+    /// 该行不算触及——视觉上选区没有盖到它的任何字符。
+    fn touched_lines(&self) -> (usize, usize) {
+        match self.ordered_selection() {
+            Some((start, end)) => {
+                let last =
+                    if end.col == 0 && end.line > start.line { end.line - 1 } else { end.line };
+                (start.line, last)
+            }
+            None => (self.cursor.line, self.cursor.line),
+        }
+    }
+
+    /// 删除光标/选区触及的所有整行（含各自行尾）。返回是否发生删除。
+    ///
+    /// 边界口径：
+    /// - 整个文档只剩一个空行时无事可做；
+    /// - 光标停在文末空行（尾随换行产生的幻影行）时退化为吃掉其前面的
+    ///   换行单元（`\r\n` 整体），与主流编辑器的 Ctrl+L 手感一致；
+    /// - 删除文档末尾若干行后若还剩前文，末尾换行随块一并回收。
+    pub fn delete_current_lines(&mut self) -> bool {
+        let count = self.doc.line_count();
+        let (a, b) = self.touched_lines();
+        let start = self.doc.line_to_char(a);
+        let end =
+            if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        let (start, end) = if start == end {
+            if a == 0 {
+                return false; // 唯一内容为空：无可删
+            }
+            // 幻影末行：改为移除前一行行尾的换行单元（\r\n 整体或 \n）。
+            // start ≥ 1 恒成立（前面至少有一个换行才轮得到空行）。
+            let crlf = self.doc.slice_text(start - 2, start) == "\r\n";
+            let s = start - usize::from(crlf) - 1;
+            (s, start)
+        } else {
+            (start, end)
+        };
+        self.snapshot();
+        self.doc.remove_range(start, end);
+        let at = start.min(self.doc.text_len());
+        let line = self.doc.char_to_line(at);
+        let col = at - self.doc.line_to_char(line);
+        self.cursor = CursorPos { line, col };
+        self.anchor = None;
+        self.invalidate_highlight_from(start);
+        // 行结构整体变化，列高水位可能过估——交惰性收敛（P45/P13 同口径）
+        self.max_cols_stale = true;
+        self.ensure_visible();
+        true
+    }
+
+    /// 在触及块的正下方复制一份相同内容，光标落到副本首行。返回是否复制。
+    pub fn duplicate_current_lines(&mut self) -> bool {
+        let count = self.doc.line_count();
+        let (a, b) = self.touched_lines();
+        let start = self.doc.line_to_char(a);
+        let end =
+            if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        let text = self.doc.slice_text(start, end);
+        if text.is_empty() {
+            return false; // 空文档 / 幻影末行无内容可复制
+        }
+        self.snapshot();
+        let nl = self.doc.line_ending().newline();
+        // 尾部块本身不带行尾时先补一个主导行尾再插到文档末，
+        // 保证副本独立成行而不是拼在原块后面
+        let ins = if end < self.doc.text_len() { text } else { format!("{nl}{text}") };
+        self.doc.insert(end, &ins);
+        self.invalidate_highlight_from(end);
+        self.max_cols_stale = true;
+        self.anchor = None;
+        // 插入点恒为第 b+1 行行首（块内已有行尾 / 已补行尾）
+        self.cursor = CursorPos { line: b + 1, col: 0 };
+        self.ensure_visible();
+        true
+    }
+
+    /// 上移/下移光标触及的行块（与相邻行整体换位）。已在边界时不动并返回
+    /// false（不产生快照）。多行选区整块旋转、内部相对次序保持。
+    pub fn move_current_lines(&mut self, up: bool) -> bool {
+        let count = self.doc.line_count();
+        let (a, b) = self.touched_lines();
+        let (first, last) = if up {
+            if a == 0 {
+                return false;
+            }
+            (a - 1, b)
+        } else {
+            if b + 1 >= count {
+                return false;
+            }
+            (a, b + 1)
+        };
+        // 光标列尽量保持（钳到原行长度；换位后行长可能不同，仅取近似）
+        let keep_col = self.cursor.col.min(self.doc.line_len_chars(self.cursor.line));
+        let rs = self.doc.line_to_char(first);
+        let re =
+            if last + 1 < count { self.doc.line_to_char(last + 1) } else { self.doc.text_len() };
+        // 区域内各行内容按方向旋转一行后以主导行尾重建；原区域以行尾
+        // 结尾则重建串同样收尾（文档末行无行尾的形态保持）。
+        // 混合行尾经此归一到主导行尾——与 P9「编辑不产生混合行尾」同哲学。
+        // 注意 line_str 是 ropey 口径：含行尾，须剥掉再统一 join。
+        let mut lines: Vec<String> = (first..=last)
+            .map(|i| {
+                let mut s = self.doc.line_str(i);
+                if s.ends_with("\r\n") {
+                    s.truncate(s.len() - 2);
+                } else if s.ends_with('\n') || s.ends_with('\r') {
+                    s.pop();
+                }
+                s
+            })
+            .collect();
+        if up {
+            lines.rotate_left(1);
+        } else {
+            lines.rotate_right(1);
+        }
+        let nl = self.doc.line_ending().newline();
+        let mut rebuilt = lines.join(nl);
+        if re < self.doc.text_len() {
+            rebuilt.push_str(nl);
+        }
+        self.snapshot();
+        self.doc.remove_range(rs, re);
+        self.doc.insert(rs, &rebuilt);
+        self.invalidate_highlight_from(rs);
+        self.max_cols_stale = true;
+        self.anchor = None;
+        self.cursor = CursorPos { line: if up { a - 1 } else { b + 1 }, col: keep_col };
+        self.ensure_visible();
+        true
     }
 
     /// 有选区时删除之（含快照）；返回是否发生了删除。零宽选区仅清除标记。

@@ -80,6 +80,8 @@ cargo run --release
 | Ctrl+F / Ctrl+G | 查找替换栏 / 跳转到行 |
 | Ctrl+Z / Ctrl+Y | 撤销 / 重做 |
 | Ctrl+C / Ctrl+X / Ctrl+V | 复制 / 剪切 / 粘贴 |
+| Ctrl+D / Ctrl+L | 在下方复制当前行 / 删除当前行 |
+| Ctrl+Shift+↑ / Ctrl+Shift+↓ | 当前行上移 / 下移（多行选区整块移动） |
 | Ctrl+T / Ctrl+W / Ctrl+Tab | 新建标签页 / 关闭当前页 / 循环切换标签页 |
 | Ctrl+Shift+F | 格式化 JSON（仅 JSON 文件） |
 | Ctrl+Home / Ctrl+End | 跳到文档首 / 尾 |
