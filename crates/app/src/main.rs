@@ -25,7 +25,7 @@ use iced::widget::{button, checkbox, column, container, mouse_area, opaque, prog
 use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
     Font, Padding, Point, Shadow, Subscription, Task, Theme};
 
-use editor::{CaseKind, EditorHandle, EditOp, Motion, SortOrder, TrimMode};
+use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSpaceKind, TrimMode};
 
 fn main() -> iced::Result {
     // iced 0.14：第一个参数是 boot 函数（返回初始状态），title/theme/subscription 走 builder
@@ -102,6 +102,11 @@ enum Message {
     FindScanDone(u64, Vec<editpad_core::MatchPos>),
     /// P70：正则模式开关（开启/关闭都会触发重扫）
     RegexToggled(bool),
+    // ---------- 行操作扩充 + 查找全部（第 62 轮） ----------
+    /// 「查找全部」结果面板开关（数据源 = 既有后台扫描的全量命中表）
+    FindAllToggled,
+    /// 点击结果面板第 `index` 条：选中该命中并滚动到可见
+    FindAllGoto(usize),
 
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
@@ -1282,6 +1287,9 @@ struct Editpad {
     find_seq: u64,
     /// 当前代扫描的取消标志；新任务排队时把旧标志置位（P10 防抖取消）
     find_cancel: Arc<AtomicBool>,
+    /// 「查找全部」结果面板可见（第 62 轮）：数据源 = matches 全量命中表，
+    /// 扫描刷新时自动跟随；仅当查找栏可见时有意义（面板停靠在查找区内）
+    find_all_visible: bool,
 
     // ---------- 高亮后台分批补建（P12） ----------
     /// 在途铺建任务的代次；None = 没有。同代幂等、异代重排
@@ -1405,6 +1413,7 @@ impl Default for Editpad {
             find_scan: None,
             find_seq: 0,
             find_cancel: Arc::default(),
+            find_all_visible: false,
             hl_paving: None,
             hl_pave_cancel: Arc::default(),
             goto_visible: false,
@@ -1559,6 +1568,16 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     // 括号匹配（第 61 轮，仿主流编辑器；M=Matching 助记——主流的 Ctrl+\
     // 因反斜杠非字母/数字不入组合键白名单）
     HotkeyAction { id: "jump_bracket", default_combo: "Ctrl+Shift+M", desc: "跳到配对括号" },
+    // 行操作扩充（第 62 轮；空闲字母键取 I/O/P/J/H/N/R，均可在设置页重映射）
+    HotkeyAction { id: "tabs_to_spaces_leading", default_combo: "Ctrl+Shift+I", desc: "行首制表符转空格（选区行/全文）" },
+    HotkeyAction { id: "tabs_to_spaces_all", default_combo: "Ctrl+Shift+O", desc: "全部制表符转空格（选区行/全文）" },
+    HotkeyAction { id: "spaces_to_tabs_leading", default_combo: "Ctrl+Shift+P", desc: "行首空格转制表符（选区行/全文）" },
+    HotkeyAction { id: "merge_lines", default_combo: "Ctrl+Shift+J", desc: "合并行（触及块合成一行/并入下一行）" },
+    HotkeyAction { id: "split_line", default_combo: "Ctrl+Shift+H", desc: "拆分行（光标处断行/选区独立成行）" },
+    HotkeyAction { id: "del_empty_lines", default_combo: "Ctrl+Shift+N", desc: "删除空行（选区行/全文）" },
+    HotkeyAction { id: "del_blank_lines", default_combo: "Ctrl+Shift+R", desc: "删除空白行（含纯空白行）" },
+    // 查找全部结果面板（A = All matches 助记；数据源复用查找栏的后台扫描命中表）
+    HotkeyAction { id: "find_all_panel", default_combo: "Ctrl+Shift+A", desc: "查找全部结果面板" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1743,6 +1762,20 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "del_marked_lines" => edit(EditOp::RemoveBookmarkedLines),
         // 括号匹配（第 61 轮）
         "jump_bracket" => edit(EditOp::JumpToMatchingBracket),
+        // 行操作扩充（第 62 轮）
+        "tabs_to_spaces_leading" => {
+            edit(EditOp::ConvertTabsSpaces(TabSpaceKind::LeadingTabsToSpaces))
+        }
+        "tabs_to_spaces_all" => edit(EditOp::ConvertTabsSpaces(TabSpaceKind::AllTabsToSpaces)),
+        "spaces_to_tabs_leading" => {
+            edit(EditOp::ConvertTabsSpaces(TabSpaceKind::LeadingSpacesToTabs))
+        }
+        "merge_lines" => edit(EditOp::MergeLines),
+        "split_line" => edit(EditOp::SplitLine),
+        "del_empty_lines" => edit(EditOp::DeleteEmptyLines(BlankKind::Empty)),
+        "del_blank_lines" => edit(EditOp::DeleteEmptyLines(BlankKind::Whitespace)),
+        // 查找全部结果面板（第 62 轮）
+        "find_all_panel" => Some(Message::FindAllToggled),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),

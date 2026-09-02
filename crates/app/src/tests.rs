@@ -2639,6 +2639,102 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         )
         .expect("Ctrl+Shift+M 应产生编辑消息");
         assert!(matches!(msg, Message::Edit(EditOp::JumpToMatchingBracket)));
+        // 第 62 轮：行操作扩充七编辑键 + 一面板键（均可在设置页重映射）
+        let key = |ch: &str| handle_key_defaults(
+            keyboard::Key::Character(ch.into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        );
+        for (ch, want) in [
+            ("i", TabSpaceKind::LeadingTabsToSpaces),
+            ("o", TabSpaceKind::AllTabsToSpaces),
+            ("p", TabSpaceKind::LeadingSpacesToTabs),
+        ] {
+            let msg = key(ch).unwrap_or_else(|| panic!("Ctrl+Shift+{} 应产生消息", ch.to_uppercase()));
+            let Message::Edit(EditOp::ConvertTabsSpaces(got)) = msg else {
+                panic!("Ctrl+Shift+{ch} 应分发 ConvertTabsSpaces");
+            };
+            assert_eq!(got, want, "Ctrl+Shift+{ch} 转换方向不符");
+        }
+        for (ch, want) in [("j", EditOp::MergeLines), ("h", EditOp::SplitLine)] {
+            let msg = key(ch).unwrap_or_else(|| panic!("Ctrl+Shift+{} 应产生消息", ch.to_uppercase()));
+            let Message::Edit(got) = msg else {
+                panic!("Ctrl+Shift+{ch} 应分发编辑消息");
+            };
+            assert_eq!(got, want, "Ctrl+Shift+{ch} 分发不符");
+        }
+        for (ch, want) in [
+            ("n", BlankKind::Empty),
+            ("r", BlankKind::Whitespace),
+        ] {
+            let msg = key(ch).unwrap_or_else(|| panic!("Ctrl+Shift+{} 应产生消息", ch.to_uppercase()));
+            let Message::Edit(EditOp::DeleteEmptyLines(got)) = msg else {
+                panic!("Ctrl+Shift+{ch} 应分发 DeleteEmptyLines");
+            };
+            assert_eq!(got, want, "Ctrl+Shift+{ch} 空行口径不符");
+        }
+        let msg = key("a").expect("Ctrl+Shift+A 应产生消息");
+        assert!(matches!(msg, Message::FindAllToggled));
+    }
+
+    #[test]
+    fn find_all_panel_toggles_and_goto_selects_hit() {
+        // 面板开关只在查找栏可见时有意义；跳转按索引直选命中
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FindAllToggled);
+        assert!(!app.find_all_visible, "查找栏未开时面板开关是 no-op");
+
+        dispatch(&mut app, Message::FindToggled);
+        assert!(app.find_visible);
+        dispatch(&mut app, Message::FindAllToggled);
+        assert!(app.find_all_visible);
+        dispatch(&mut app, Message::FindAllToggled);
+        assert!(!app.find_all_visible);
+
+        // 跳转流：命中表 + 编辑器文档就位后，Goto(i) 选中该命中跨度
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("foo bar\nbaz foo\n".into())));
+        app.matches = vec![
+            editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
+            editpad_core::MatchPos { line: 1, col: 4, len_chars: 3 },
+        ];
+        dispatch(&mut app, Message::FindAllGoto(1));
+        assert_eq!(app.match_idx, Some(1));
+        {
+            let ed = app.cur_handle.borrow();
+            assert_eq!(
+                ed.selected_text(),
+                Some("foo".to_owned()),
+                "Goto 按命中跨度还原选区"
+            );
+        }
+        // 越界索引安全无操作
+        dispatch(&mut app, Message::FindAllGoto(99));
+        assert_eq!(app.match_idx, Some(1), "越界索引不得改变当前命中");
+    }
+
+    #[test]
+    fn match_excerpt_windows_around_hit_column() {
+        assert_eq!(
+            view::match_excerpt("hello world\n", 6, 96),
+            "hello world",
+            "短行剥行尾原样返回"
+        );
+        let long: String = {
+            let mut s = String::new();
+            for i in 0..200 {
+                s.push((b'a' + (i % 26) as u8) as char);
+            }
+            s
+        };
+        // 命中在正中：内窗 19 字符 + 两端省略号 = 总长 21
+        let out = view::match_excerpt(&long, 100, 21);
+        assert!(out.starts_with('…') && out.ends_with('…'));
+        assert_eq!(out.chars().count(), 21, "双端截断总长 = max_cols");
+        // 命中贴近行首：只截尾部，头部不占位（总长 max_cols-1）
+        let head = view::match_excerpt(&long, 2, 11);
+        assert!(!head.starts_with('…') && head.ends_with('…'));
+        assert_eq!(head.chars().count(), 10, "单端截断省一位给内容");
+        // 列越界钳制不 panic
+        let _ = view::match_excerpt("abc", 999, 10);
     }
 
     #[test]

@@ -745,6 +745,22 @@ impl Editpad {
             }
             Message::FindNext => self.step_match(true),
             Message::FindPrev => self.step_match(false),
+            // 第 62 轮：查找全部结果面板——纯 UI 开关，不动命中表；
+            // 查找栏关闭时面板随栏隐藏（停靠在查找区内，无独立生命周期）
+            Message::FindAllToggled => {
+                if self.find_visible {
+                    self.find_all_visible = !self.find_all_visible;
+                }
+                Task::none()
+            }
+            // 点击结果条目：按索引直接选中该命中（与 step_match 同一
+            // select_span 口径）；扫描在途时命中表是过期快照，拒绝跳转
+            Message::FindAllGoto(index) => {
+                if !self.busy && !self.find_scanning() {
+                    self.goto_match_index(index);
+                }
+                Task::none()
+            }
             Message::CaseToggled(value) => {
                 self.case_sensitive = value;
                 self.schedule_find_scan()
@@ -1660,6 +1676,11 @@ impl Editpad {
                 }
                 false
             }
+            // ---------- 行操作扩充（第 62 轮） ----------
+            E::ConvertTabsSpaces(kind) => editor.convert_tabs_spaces(kind),
+            E::MergeLines => editor.merge_lines(),
+            E::SplitLine => editor.split_line(),
+            E::DeleteEmptyLines(kind) => editor.delete_empty_lines(kind),
         };
         drop(editor);
 

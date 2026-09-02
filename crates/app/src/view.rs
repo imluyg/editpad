@@ -675,6 +675,20 @@ impl Editpad {
         }))
     }
 
+    /// 第 62 轮：按索引跳到「查找全部」结果面板中的某一条命中。
+    /// 与 [`Self::step_match`] 同一 select_span 口径（len_chars 自带
+    /// 选区跨度），只是定位方式从光标相对序改为面板行号直选。
+    pub(crate) fn goto_match_index(&mut self, index: usize) {
+        let Some(pos) = self.matches.get(index).copied() else {
+            return;
+        };
+        self.match_idx = Some(index);
+        self.cur_handle
+            .borrow_mut()
+            .select_span(pos.line, pos.col, pos.len_chars);
+        self.status = format!("第 {}/{} 处匹配", index + 1, self.matches.len());
+    }
+
     pub(crate) fn step_match(&mut self, forward: bool) -> Task<Message> {
         if self.busy || self.find_query.is_empty() {
             return Task::none();
@@ -1595,6 +1609,10 @@ impl Editpad {
                         .text_size(uipx)
                         .font(uifont)
                         .on_toggle(Message::RegexToggled),
+                    // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用）
+                    button(text("查找全部").size(uipx).font(uifont))
+                        .style(chrome_button_style)
+                        .on_press_maybe(has_matches.then_some(Message::FindAllToggled)),
                     button(text("×").size(uipx).font(uifont))
                         .style(chrome_button_style)
                         .on_press(Message::FindToggled),
@@ -1630,6 +1648,14 @@ impl Editpad {
                 .align_y(Alignment::Center)
                 .padding([6, 10]),
             );
+
+            // 第 62 轮：查找全部结果面板（停靠在查找区内，栏关即隐；
+            // 数据源 = 后台扫描的全量命中表，重扫刷新时自动跟随）
+            if self.find_all_visible {
+                body = body
+                    .push(rule::horizontal(1))
+                    .push(self.find_all_panel(uipx, uifont));
+            }
         }
 
         if self.goto_visible {
@@ -1965,6 +1991,76 @@ impl Editpad {
         .into()
     }
 
+    /// 第 62 轮：「查找全部」结果面板（停靠式，非浮层）——数据源 =
+    /// 查找后台扫描的全量命中表，重扫刷新自动跟随。渲染行数封顶
+    /// [`FIND_ALL_MAX_ROWS`]：chrome 行按钮无虚拟化，10 万级命中全量
+    /// 渲染会拖垮帧率，超出部分明示截断提示。
+    fn find_all_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
+        let total = self.matches.len();
+        let scanning = self.find_scanning();
+        let shown = total.min(FIND_ALL_MAX_ROWS);
+        // 标题行：文本 width(Fill) 把关闭按钮推到右缘
+        let header = row![
+            text(if scanning {
+                "查找中…".to_owned()
+            } else if total == 0 {
+                "无匹配".to_owned()
+            } else {
+                format!("全部匹配：{total} 处")
+            })
+            .size(uipx)
+            .font(uifont)
+            .width(Fill),
+            button(text("×").size(uipx).font(uifont))
+                .style(chrome_button_style)
+                .on_press(Message::FindAllToggled),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .padding([4, 10]);
+
+        let mut rows = column![].spacing(0).width(Fill);
+        if shown > 0 {
+            let editor = self.cur_handle.borrow();
+            for i in 0..shown {
+                let m = self.matches[i];
+                let raw = editor.line_text(m.line);
+                let excerpt = match_excerpt(&raw, m.col, FIND_ALL_EXCERPT_COLS);
+                rows = rows.push(
+                    button(
+                        text(format!("{}:{}  {}", m.line + 1, m.col + 1, excerpt))
+                            .size(uipx)
+                            .font(uifont)
+                            .width(Fill),
+                    )
+                    .width(Fill)
+                    .padding([3, 10])
+                    .style(chrome_menu_item_style)
+                    .on_press(Message::FindAllGoto(i)),
+                );
+            }
+        }
+        if total > shown {
+            rows = rows.push(
+                text(format!(
+                    "已显示前 {shown} 条（共 {total} 处）——请细化关键词"
+                ))
+                .size(uipx)
+                .font(uifont),
+            );
+        }
+        // 高度按窗口钳制：小窗不溢出、大窗不占满（浮层卡片同策略）
+        let h = (self.viewport_size.1 * 0.35).clamp(120.0, 300.0);
+        container(
+            column![header, rule::horizontal(1), scrollable(rows)]
+                .spacing(0)
+                .width(Fill),
+        )
+        .width(Fill)
+        .height(h)
+        .into()
+    }
+
     /// P67：状态栏弹出菜单的通用浮层骨架——背板点击关闭 + 右下角贴
     /// 状态栏上缘的定宽卡片（锚点按窗口尺寸现算，无需指针跟踪）。
     fn status_menu_overlay<'a>(
@@ -2081,4 +2177,40 @@ impl Editpad {
         .on_press(Message::SettingsToggled)
         .into()
     }
+}
+
+// ---------- 「查找全部」结果面板助手（第 62 轮） ----------
+
+/// 结果面板渲染行数封顶：chrome 行按钮无虚拟化，超出部分在面板尾部
+/// 明示截断（提示细化关键词），避免超大命中集拖垮每帧构建。
+pub(crate) const FIND_ALL_MAX_ROWS: usize = 500;
+/// 单条结果的摘录字符数上限（以命中列为窗心向两侧取半）。
+const FIND_ALL_EXCERPT_COLS: usize = 96;
+
+/// 结果面板行摘录：剥行尾 → 以命中列为窗心取最多 `max_cols` 个字符，
+/// 两端截断处补省略号 `…`。纯函数便于单测。
+pub(crate) fn match_excerpt(line_text: &str, col: usize, max_cols: usize) -> String {
+    let body = line_text.trim_end_matches(['\n', '\r']);
+    let chars: Vec<char> = body.chars().collect();
+    let col = col.min(chars.len());
+    if chars.len() <= max_cols {
+        return chars.into_iter().collect();
+    }
+    // 内窗预算：两端截断各占 1 位省略号（单端截断时另一侧多还 1 位）
+    let take = max_cols - 2;
+    let mut start = col.saturating_sub((take + 1) / 2);
+    let end = (start + take).min(chars.len());
+    if end == chars.len() {
+        // 尾部没截：把省下的右侧预算回填给头部
+        start = start.saturating_sub(take - (end - start));
+    }
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
 }

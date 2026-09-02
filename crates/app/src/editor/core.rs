@@ -13,7 +13,7 @@ use editpad_core::{
 
 use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width,
-    validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN,
+    validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
 };
 use super::{BOOKMARK_STRIP, FONT_SIZE_DEFAULT, GUTTER_MIN};
 
@@ -104,6 +104,15 @@ pub enum EditOp {
     /// 去除重复行（保留首次出现、其余行相对次序不变）：有选区只清触及块，
     /// 无选区清全文档
     RemoveDuplicateLines,
+    // ---------- 行操作扩充（第 62 轮） ----------
+    /// Tab↔空格互转：有选区只转触及块，无选区转全文档
+    ConvertTabsSpaces(TabSpaceKind),
+    /// 合并行：触及块合成一行；无选区 = 当前行并入下一行（末行 no-op）
+    MergeLines,
+    /// 拆分行：无选区在光标处断行（回车等价）；有选区把选区独立成行
+    SplitLine,
+    /// 删除空行/空白行：有选区只清触及块，无选区清全文档（幻影末行不参与）
+    DeleteEmptyLines(BlankKind),
     // ---------- 书签套件（第 60 轮，仿主流编辑器书签导航） ----------
     /// 当前行书签开关（有则摘、无则加；随撤销/重做一并回滚）
     ToggleBookmark,
@@ -143,6 +152,28 @@ pub enum TrimMode {
 pub enum SortOrder {
     Ascending,
     Descending,
+}
+
+/// Tab↔空格转换方向与范围（第 62 轮）。制表位宽度恒等于渲染层
+/// [`super::metrics::TAB_STOP_COLS`]（4），转换结果与绘制对齐严格一致。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabSpaceKind {
+    /// 行首制表符 → 空格（首个非空白字符之前的 Tab 展开）
+    LeadingTabsToSpaces,
+    /// 全部制表符 → 空格
+    AllTabsToSpaces,
+    /// 行首空白段中的空格 → 制表符（行中空格不参与：行中空格常承担
+    /// 对齐语义，收拢会改变视觉列——主流轻量编辑器同口径）
+    LeadingSpacesToTabs,
+}
+
+/// 空行删除口径（第 62 轮）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlankKind {
+    /// 仅删除零字符的空行
+    Empty,
+    /// 「只含空白」的行一并删除（全角空格/NBSP 等 `char::is_whitespace` 口径）
+    Whitespace,
 }
 
 /// 排序/去重的作用域块（第 59 轮）：有选区 = 触及块，无选区 = 全文档。
@@ -1338,6 +1369,248 @@ impl EditorCore {
         true
     }
 
+    // ---------- 行操作扩充（第 62 轮）：Tab↔空格 / 合并拆分 / 删空行 ----------
+
+    /// Tab↔空格互转：有选区只转触及块，无选区转全文档。返回是否改动。
+    ///
+    /// - 制表位宽度 = 渲染层 `TAB_STOP_COLS`，转换与绘制对齐严格一致
+    ///   （宽字符占 2 显示列也计入制表位推进，`中\tX` 的 Tab 落到列 4）；
+    /// - 无变化时不动、不产快照（幂等 no-op）；行数不变 → 恒等映射，
+    ///   书签原位保留。
+    pub fn convert_tabs_spaces(&mut self, kind: TabSpaceKind) -> bool {
+        let blk = self.collect_line_block();
+        let mut changed = false;
+        let lines: Vec<String> = blk
+            .lines
+            .iter()
+            .map(|s| {
+                let t = match kind {
+                    TabSpaceKind::LeadingTabsToSpaces => expand_tabs_in(s, true),
+                    TabSpaceKind::AllTabsToSpaces => expand_tabs_in(s, false),
+                    TabSpaceKind::LeadingSpacesToTabs => entab_leading_ws(s),
+                };
+                // 长度可能碰巧相等（列 3 处的 1 个 Tab ↔ 1 空格），必须按值比对
+                changed |= t != *s;
+                t
+            })
+            .collect();
+        if !changed {
+            return false;
+        }
+        let map: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
+        self.apply_line_block(&blk, &lines, &map);
+        true
+    }
+
+    /// 合并行：触及块合成一行；无选区 = 当前行并入下一行。返回是否改动。
+    ///
+    /// - 连接口径：各行 `trim()` 后以**单个空格**连接，空白行直接消失；
+    ///   全空块合并为一个空行（行数缩减本身就是改动）；
+    /// - 书签：首行内容前缀幸存 → 块内书签全部收敛到合并后的首行；
+    ///   其余行的书签随行并入丢弃（撤销可整体找回）；
+    /// - 无选区且已在末行 / 块内不足两行 → no-op 不产快照。
+    pub fn merge_lines(&mut self) -> bool {
+        let count = self.doc.line_count();
+        let (a, b) = if self.anchor.is_some() {
+            self.touched_lines()
+        } else {
+            let a = self.cursor.line.min(count.saturating_sub(1));
+            if a + 1 >= count {
+                return false; // 末行没有「下一行」可并
+            }
+            (a, a + 1)
+        };
+        let start = self.doc.line_to_char(a);
+        let end = if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        // 区域尾字节是否换行单元（\n / 孤立 \r）：决定重建时是否补回
+        // 块尾换行——选中真实末行（其行尾即文档末尾换行）时同样成立，
+        // 不能只看「块不在文档末尾」
+        let len = self.doc.text_len();
+        let nl_tail =
+            end == len && end > start
+                && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        // 幻影末行排除：仅当 b 本身就是文档最后一行（ropey 在尾随换行后
+        // 多出的空壳行）且区域确以换行收尾。b 是唯一真实行的场景无从回
+        // 退，直接按无可并内容处理。
+        let last = if nl_tail && b == count - 1 {
+            if b > a {
+                b - 1
+            } else {
+                return false;
+            }
+        } else {
+            b
+        };
+        if last <= a {
+            return false; // 触及块实际不足两行
+        }
+        let bodies: Vec<String> =
+            (a..=last).map(|i| self.line_body_without_eol(i)).collect();
+        let mut joined = String::new();
+        for part in &bodies {
+            let t = part.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if !joined.is_empty() {
+                joined.push(' ');
+            }
+            joined.push_str(t);
+        }
+        let blk = LineBlock { a, b, start, end, push_nl: end < len || nl_tail, lines: bodies };
+        let n = last - a + 1;
+        let map: Vec<Option<usize>> =
+            (0..n).map(|rel| if rel == 0 { Some(0) } else { None }).collect();
+        self.apply_line_block(&blk, &[joined], &map);
+        // 块由 n 行并为 1 行：块尾之下的书签整体上移 n-1 行
+        self.shift_bookmarks_below(blk.b, -(n as isize - 1));
+        true
+    }
+
+    /// 拆分行。返回是否改动。
+    ///
+    /// - 无选区：在光标处断行（回车等价的可重映射动作）；
+    /// - 有选区：把选中文本独立成行——选区前后各插一个换行，前后残文
+    ///   各留原行（「摘出片段」语义）；
+    /// - 单次快照、主导行尾重建（选区内混合行尾归一）、书签按行结构
+    ///   下推/保留：首行（残文前缀所在行）书签原位，其余被拆行的书签
+    ///   并入块尾残文行；
+    /// - 断在空行正中（前后皆空）→ 内容不变，no-op 不产快照。
+    pub fn split_line(&mut self) -> bool {
+        let (s, e) = match self.anchor {
+            None => (self.cursor, self.cursor),
+            Some(_) => self.ordered_selection().expect("有锚必有有序选区"),
+        };
+        let ls = s.line;
+        let le = e.line;
+        // 三段重建：pre | 选中文本（内部换行归一为主流行尾再切开）| post
+        // （行尾符号本身由 apply_line_block 按主导行尾统一补回，此处不碰）
+        let off_s = self.doc.line_to_char(ls) + s.col.min(self.line_display_len(ls));
+        let off_e = self.doc.line_to_char(le) + e.col.min(self.line_display_len(le));
+        let pre = {
+            let body = self.line_body_without_eol(ls);
+            let cut = s.col.min(body.chars().count());
+            body.chars().take(cut).collect::<String>()
+        };
+        let post = {
+            let body = self.line_body_without_eol(le);
+            let cut = e.col.min(body.chars().count());
+            body.chars().skip(cut).collect::<String>()
+        };
+        let middle_raw = if off_e > off_s {
+            self.doc.slice_text(off_s, off_e)
+        } else {
+            String::new()
+        };
+        // 选区文本内的行尾统一到主流行尾（P26 口径的逆用：\r\n/\r → \n）
+        let middle_normalized = {
+            let eol = self.doc.line_ending();
+            eol.normalize(&middle_raw)
+        };
+        let middle: Vec<String> = if middle_normalized.is_empty() {
+            Vec::new()
+        } else {
+            middle_normalized
+                .trim_end_matches('\n')
+                .split('\n')
+                .map(|p| p.to_owned())
+                .collect()
+        };
+        // 区域尾形态：与 merge 同一通判——选中真实末行时其行尾即文档
+        // 末尾换行，重建必须补回；无尾随换行的文档则不加
+        let count = self.doc.line_count();
+        let start_off = self.doc.line_to_char(ls);
+        let end_off =
+            if le + 1 < count { self.doc.line_to_char(le + 1) } else { self.doc.text_len() };
+        let len = self.doc.text_len();
+        let nl_tail =
+            end_off == len && end_off > start_off
+                && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let mut new_lines = Vec::with_capacity(middle.len() + 2);
+        new_lines.push(pre);
+        new_lines.extend(middle.iter().cloned());
+        new_lines.push(post);
+        // no-op 守卫：新旧逐行一致（如空行正中断行）
+        let old_lines: Vec<String> = (ls..=le).map(|i| self.line_body_without_eol(i)).collect();
+        if new_lines == old_lines {
+            return false;
+        }
+        // 书签映射：rel0 = pre 行原位；rel k>0 的行内容主体搬到新位置 k
+        // （k ≤ middle.len() 时），越界（单行摘出场景）并入块尾 post 行
+        let n_new = new_lines.len();
+        let span = le - ls;
+        let mut map: Vec<Option<usize>> = Vec::with_capacity(span + 1);
+        for rel in 0..=span {
+            map.push(if rel == 0 {
+                Some(0)
+            } else if rel <= middle.len() {
+                Some(rel)
+            } else {
+                Some(n_new - 1)
+            });
+        }
+        let blk = LineBlock {
+            a: ls,
+            b: le,
+            start: start_off,
+            end: end_off,
+            push_nl: end_off < len || nl_tail,
+            lines: old_lines,
+        };
+        self.apply_line_block(&blk, &new_lines, &map);
+        // 块行数增量 = 新行数 - 原行数：块尾之下的书签整体平移
+        self.shift_bookmarks_below(
+            le,
+            new_lines.len() as isize - blk.lines.len() as isize,
+        );
+        // 光标落到断出的新内容行首（无选区 = 后半段行首；选区 = 摘出行首）
+        let target = (ls + 1).min(self.doc.line_count().saturating_sub(1));
+        self.cursor = CursorPos { line: target, col: 0 };
+        self.ensure_visible();
+        true
+    }
+
+    /// 删除空行/空白行：有选区只清触及块，无选区清全文档。返回是否改动。
+    ///
+    /// - 幻影末行不参与（尾随换行的有无形态保持，P77 教训口径）；
+    /// - 书签随幸存行搬到压缩后的新位置，被删行的书签丢弃（可撤销找回）；
+    /// - 无可删行 → no-op 不产快照。
+    pub fn delete_empty_lines(&mut self, kind: BlankKind) -> bool {
+        let mut blk = self.collect_line_block();
+        let mut kept: Vec<String> = Vec::with_capacity(blk.lines.len());
+        let mut map: Vec<Option<usize>> = Vec::with_capacity(blk.lines.len());
+        for line in &blk.lines {
+            let blank = match kind {
+                BlankKind::Empty => line.is_empty(),
+                BlankKind::Whitespace => line.trim().is_empty(),
+            };
+            if blank {
+                map.push(None);
+            } else {
+                map.push(Some(kept.len()));
+                kept.push(line.clone());
+            }
+        }
+        if kept.len() == blk.lines.len() {
+            return false; // 无可删行：幂等 no-op 不产生撤销快照
+        }
+        let delta = kept.len() as isize - blk.lines.len() as isize;
+        // 全删空的特殊形态学：块内一行不剩时，重建串为空，push_nl 的
+        // 直觉（「补回块尾换行」）不再适用——此时它决定的是**前后内容的
+        // 衔接符**：
+        // * 块在文档头或顶到文档尾：外侧本无另一段内容（或其行尾已在
+        //   块外），多插一个换行就是凭空多出的空行 → 不补；
+        // * 块夹在两段内容中间：左右行各自的换行一个在块前、一个被并进
+        //   了删除区，必须补一个换行否则相邻内容粘连成一行。
+        if kept.is_empty() {
+            blk.push_nl = blk.start > 0 && blk.end < self.doc.text_len();
+        }
+        self.apply_line_block(&blk, &kept, &map);
+        // 净删了若干行：块尾之下的书签整体上移
+        self.shift_bookmarks_below(blk.b, delta);
+        true
+    }
+
     // ---------- 书签套件（第 60 轮，仿主流编辑器书签导航） ----------
     //
     // 状态底座 = [`EditorCore::bookmarks`]（升序 BTreeSet，行号 0 起）。
@@ -1602,6 +1875,28 @@ impl EditorCore {
             out.insert(new_line);
         }
         self.bookmarks = out;
+    }
+
+    /// 第 62 轮：块外书签平移。合并/拆分/删空行经 [`Self::apply_line_block`]
+    /// 改变行数时，块内映射管不到的「块尾之下」行号必须按块的行数增量
+    /// 整体平移（排序/去重行数不变故无此需求）。`boundary` = 块的最后一
+    /// 个原始行号，`delta` 为负即上方净删了行。须在 apply 之后调用
+    /// （apply 内部已先行快照，撤销可整体回滚）。
+    fn shift_bookmarks_below(&mut self, boundary: usize, delta: isize) {
+        if delta == 0 || self.bookmarks.is_empty() {
+            return;
+        }
+        self.bookmarks = self
+            .bookmarks
+            .iter()
+            .map(|&l| {
+                if l > boundary {
+                    (l as isize + delta).max(0) as usize
+                } else {
+                    l
+                }
+            })
+            .collect();
     }
 
     // ---------- 括号匹配（第 61 轮） ----------
@@ -2300,6 +2595,97 @@ impl EditorHandle {
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, EditorCore> {
         self.0.borrow_mut()
     }
+}
+
+// ---------- Tab↔空格纯转换助手（第 62 轮） ----------
+//
+// 与渲染层同源：制表位推进用 `char_cols`（宽字符计 2 显示列、Tab 跳到
+// 下一个 TAB_STOP_COLS 制表位），保证「转换后的对齐」与「转换前的绘制
+// 对齐」逐列一致。独立成自由函数便于纯函数级单测。
+
+/// Tab → 空格展开。`leading_only=true` 只展开首个非空白字符之前的部分；
+/// 其余字符（含宽字符）按真实显示宽度推进制表位列。
+fn expand_tabs_in(s: &str, leading_only: bool) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut col: usize = 0;
+    let mut in_leading = true;
+    for c in s.chars() {
+        if leading_only && in_leading && !c.is_whitespace() {
+            in_leading = false; // 首个非空白之后不再展开
+        }
+        if c == '\t' && (in_leading || !leading_only) {
+            let adv = char_cols(c, col) as usize; // 1..=TAB_STOP_COLS，至少 1 列
+            for _ in 0..adv {
+                out.push(' ');
+            }
+            col += adv;
+        } else {
+            out.push(c);
+            col += char_cols(c, col) as usize;
+        }
+    }
+    out
+}
+
+/// 行首空白段中的空格收拢为制表符（detab/entab）：只有当累积空格恰好
+/// 到达制表位且 ≥2 个时才换成 Tab；既有 Tab 原样保留（其前悬置的零星
+/// 空格不收拢，避免改变既有对齐）；首个非空白之后的空格一律不动。
+fn entab_leading_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut col: usize = 0;
+    let mut run: usize = 0; // 自上次输出以来悬置的空格数
+    let mut in_leading = true;
+    for c in s.chars() {
+        if !in_leading {
+            out.push(c);
+            continue;
+        }
+        match c {
+            ' ' => {
+                run += 1;
+                col += 1;
+                // 恰到制表位且攒够 2 个才值得换（1 空格 ↔ 1 Tab 不划算，
+                // 也保证幂等：输出里不会再出现可收拢段）
+                if run >= 2 && col % TAB_STOP_COLS == 0 {
+                    out.push('\t');
+                    run = 0;
+                }
+            }
+            '\t' => {
+                for _ in 0..run {
+                    out.push(' ');
+                }
+                run = 0;
+                out.push('\t');
+                // 与 char_cols 的 Tab 推进同式：跳到下一制表位（整倍数
+                // 时推进满一档，不是原地不动）
+                col += TAB_STOP_COLS - col % TAB_STOP_COLS;
+            }
+            ws if ws.is_whitespace() => {
+                // 全角空格等其他空白：不参与收拢，原样保留并按显示宽推进
+                for _ in 0..run {
+                    out.push(' ');
+                }
+                run = 0;
+                out.push(ws);
+                col += char_cols(ws, col) as usize;
+            }
+            other => {
+                in_leading = false;
+                for _ in 0..run {
+                    out.push(' ');
+                }
+                run = 0;
+                out.push(other);
+                col += char_cols(other, col) as usize;
+            }
+        }
+    }
+    // 整行全是空白：冲刷悬置空格
+    for _ in 0..run {
+        out.push(' ');
+    }
+    out
 }
 
 

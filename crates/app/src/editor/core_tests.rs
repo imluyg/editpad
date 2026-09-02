@@ -2640,6 +2640,197 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(e.bracket_match(), None, "全部替换后不得吐陈旧配对");
     }
 
+    // ---------- 第 62 轮：行操作扩充（Tab↔空格 / 合并拆分 / 删空行） ----------
+
+    #[test]
+    fn tab_space_pure_helpers_match_render_tab_stops() {
+        // detab：与渲染同源（TAB_STOP_COLS=4、宽字符计 2 显示列）
+        assert_eq!(expand_tabs_in("\t\tX", true), "        X");
+        assert_eq!(
+            expand_tabs_in(" \tX", true),
+            "    X",
+            "悬置空格后的 Tab 补齐到下一制表位"
+        );
+        assert_eq!(expand_tabs_in("a\tb", true), "a\tb", "行首模式不碰行中 Tab");
+        assert_eq!(expand_tabs_in("a\tb", false), "a   b", "全部模式按显示列展开");
+        assert_eq!(
+            expand_tabs_in("中\tX", false),
+            "中  X",
+            "宽字符占 2 列，Tab 只需补 2 格到列 4"
+        );
+        // entab：只有「恰好到制表位且攒够 ≥2 格」才收拢成 Tab
+        assert_eq!(entab_leading_ws("    X"), "\tX");
+        assert_eq!(entab_leading_ws("   X"), "   X", "不足一档保持原样（幂等）");
+        assert_eq!(entab_leading_ws("      X"), "\t  X", "收一档、余两格悬置保留");
+        assert_eq!(
+            entab_leading_ws(" \t X"),
+            " \t X",
+            "既有 Tab 前后的零星空格不收拢（不破坏既有对齐）"
+        );
+        assert_eq!(
+            entab_leading_ws("\u{3000}X"),
+            "\u{3000}X",
+            "全角空格等其他空白不参与收拢"
+        );
+        assert_eq!(entab_leading_ws("  "), "  ", "整行短空白原样");
+    }
+
+    #[test]
+    fn convert_tabs_spaces_scopes_noop_and_bookmarks() {
+        // 有选区只转触及行
+        let mut c = core_with("\tX\nY\tZ\n");
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 0, col: 2 };
+        assert!(c.convert_tabs_spaces(TabSpaceKind::AllTabsToSpaces));
+        assert_eq!(c.doc.to_text(), "    X\nY\tZ\n", "范围外行不被波及");
+        // 无选区转全文
+        assert!(c.convert_tabs_spaces(TabSpaceKind::AllTabsToSpaces));
+        assert_eq!(c.doc.to_text(), "    X\nY   Z\n");
+        // 幂等 no-op 不产快照（第二次已无 Tab）
+        let snaps = c.undo_stack.len();
+        assert!(!c.convert_tabs_spaces(TabSpaceKind::AllTabsToSpaces));
+        assert_eq!(c.undo_stack.len(), snaps, "no-op 不得产快照");
+        // 行数不变的恒等映射：书签原位保留
+        let mut d = core_with("\ta\nb\n");
+        d.cursor = CursorPos { line: 1, col: 0 };
+        d.toggle_bookmark();
+        assert!(d.convert_tabs_spaces(TabSpaceKind::LeadingTabsToSpaces));
+        assert_eq!(d.doc.to_text(), "    a\nb\n");
+        assert_eq!(d.bookmarked_lines(), vec![1], "恒等映射书签不动");
+        // 空格→制表符：整档收拢、不足一档保持
+        let mut e = core_with("    a\n  b\n");
+        assert!(e.convert_tabs_spaces(TabSpaceKind::LeadingSpacesToTabs));
+        assert_eq!(e.doc.to_text(), "\ta\n  b\n");
+    }
+
+    #[test]
+    fn merge_lines_block_next_line_and_phantom() {
+        // 触及块合成一行：各段 trim 后单空格连接，空白行消失
+        let mut c = core_with("alpha\n beta \n\ngamma\ndelta\n");
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 2, col: 1 }; // 触及 0..=2 行
+        assert!(c.merge_lines());
+        assert_eq!(c.doc.to_text(), "alpha beta\ngamma\ndelta\n");
+        // 无选区 = 当前行并入下一行；末行无从并 → no-op
+        let mut d = core_with("one\ntwo\nthree");
+        d.cursor = CursorPos { line: 1, col: 1 };
+        assert!(d.merge_lines());
+        assert_eq!(d.doc.to_text(), "one\ntwo three");
+        assert!(!d.merge_lines(), "末行没有下一行可并");
+        // 幻影末行不参与合并，尾随换行形态保持（光标落行 2 行首才触及
+        // 行 0..=1——选区字节半开口径）
+        let mut e = core_with("x\ny\n");
+        e.anchor = Some(CursorPos { line: 0, col: 0 });
+        e.cursor = CursorPos { line: 2, col: 0 };
+        assert!(e.merge_lines());
+        assert_eq!(e.doc.to_text(), "x y\n");
+        // CRLF 文档：主导行尾重建不产混合尾
+        let mut f = core_with("a\r\nb\r\n");
+        f.cursor = CursorPos { line: 0, col: 0 };
+        assert!(f.merge_lines());
+        assert_eq!(f.doc.to_text(), "a b\r\n");
+    }
+
+    #[test]
+    fn merge_lines_bookmark_collapse_and_below_shift() {
+        // 并入行的书签随内容消失；撤销经快照整体找回
+        let mut c = core_with("a\nbb\nccc\nlow\n");
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.toggle_bookmark(); // 将被并入的行
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 2, col: 3 };
+        assert!(c.merge_lines());
+        assert_eq!(c.doc.to_text(), "a bb ccc\nlow\n");
+        assert!(c.bookmarked_lines().is_empty(), "并入行书签丢弃");
+        // 块外下方行书签随净减行数上移：low 原行 3 → 行 1
+        let mut d = core_with("p\nq\nr\nlow\n");
+        d.cursor = CursorPos { line: 3, col: 0 };
+        d.toggle_bookmark();
+        // 触及块 0..=2（光标列 >0 才「触及」第 2 行——选区字节半开口径）
+        d.anchor = Some(CursorPos { line: 0, col: 0 });
+        d.cursor = CursorPos { line: 2, col: 1 };
+        assert!(d.merge_lines());
+        assert_eq!(d.doc.to_text(), "p q r\nlow\n");
+        assert_eq!(d.bookmarked_lines(), vec![1], "块外书签按行数增量平移");
+        assert!(d.undo());
+        assert_eq!(d.bookmarked_lines(), vec![3], "撤销整体回滚");
+    }
+
+    #[test]
+    fn split_line_cursor_selection_and_noop() {
+        // 无选区：光标处断行，光标落后半段行首
+        let mut c = core_with("abcd\n");
+        c.cursor = CursorPos { line: 0, col: 2 };
+        assert!(c.split_line());
+        assert_eq!(c.doc.to_text(), "ab\ncd\n");
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 0 });
+        // 空行正中断行：与回车同款——凭空多出一个空行（不是 no-op）
+        let mut d = core_with("a\n\nb\n");
+        d.cursor = CursorPos { line: 1, col: 0 };
+        assert!(d.split_line());
+        assert_eq!(d.doc.to_text(), "a\n\n\nb\n", "原尾随换行保持");
+        // 选区独立成行：前后残文各留原行
+        let mut e = core_with("one two three\n");
+        e.anchor = Some(CursorPos { line: 0, col: 4 });
+        e.cursor = CursorPos { line: 0, col: 7 };
+        assert!(e.split_line());
+        assert_eq!(e.doc.to_text(), "one \ntwo\n three\n");
+        assert_eq!(e.cursor, CursorPos { line: 1, col: 0 });
+        // CRLF 文档用主导行尾断行
+        let mut f = core_with("ab\r\ncd\r\n");
+        f.cursor = CursorPos { line: 0, col: 1 };
+        assert!(f.split_line());
+        assert_eq!(f.doc.to_text(), "a\r\nb\r\ncd\r\n");
+    }
+
+    #[test]
+    fn split_line_bookmark_shifts_below_block() {
+        // 摘出行首片段：块 [0..=0] 由 1 行变 3 行，块外 low 书签 +2
+        let mut c = core_with("aXb\nlow\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.toggle_bookmark();
+        c.anchor = Some(CursorPos { line: 0, col: 1 });
+        c.cursor = CursorPos { line: 0, col: 2 };
+        assert!(c.split_line());
+        assert_eq!(c.doc.to_text(), "a\nX\nb\nlow\n");
+        assert_eq!(c.bookmarked_lines(), vec![3], "块外书签随行数增量下移");
+        assert!(c.undo());
+        assert_eq!(c.bookmarked_lines(), vec![1]);
+    }
+
+    #[test]
+    fn delete_empty_lines_modes_scope_and_bookmarks() {
+        // 严格口径只删零字符行；幻影末行不参与、尾随换行保持
+        let mut c = core_with("a\n\nb\n \n\n");
+        assert!(c.delete_empty_lines(BlankKind::Empty));
+        assert_eq!(c.doc.to_text(), "a\nb\n \n", "\" \" 行在严格口径下幸存");
+        // 含空白口径把纯空白行一并删掉（删到文档尾：保留末行行尾形态）
+        let mut d = core_with("a\n\nb\n \n\n");
+        assert!(d.delete_empty_lines(BlankKind::Whitespace));
+        assert_eq!(d.doc.to_text(), "a\nb\n");
+        // 块夹在内容中间且全删空：必须补一个衔接换行，前后不得粘连
+        let mut g = core_with("a\n\n\nb");
+        assert!(g.delete_empty_lines(BlankKind::Empty));
+        assert_eq!(g.doc.to_text(), "a\nb", "中段全删空补一个衔接符");
+        // 选区限定作用域（光标落行 2 行首=字节止于行 1 末，触及 0..=1；
+        // 半开口径：光标在行首不「触及」该行本身）
+        let mut e = core_with("\n\nkeep\n\n\n");
+        e.anchor = Some(CursorPos { line: 0, col: 0 });
+        e.cursor = CursorPos { line: 2, col: 0 };
+        assert!(e.delete_empty_lines(BlankKind::Empty));
+        assert_eq!(e.doc.to_text(), "keep\n\n\n", "文档头空块全删不补衔接符");
+        // 书签跟随幸存行压缩上移；无可删时 no-op
+        let mut f = core_with("x\n\ny\nz\n");
+        f.cursor = CursorPos { line: 2, col: 0 };
+        f.toggle_bookmark(); // y 行
+        assert!(f.delete_empty_lines(BlankKind::Empty));
+        assert_eq!(f.doc.to_text(), "x\ny\nz\n");
+        assert_eq!(f.bookmarked_lines(), vec![1], "幸存行书签随压缩上移");
+        let snaps = f.undo_stack.len();
+        assert!(!f.delete_empty_lines(BlankKind::Whitespace));
+        assert_eq!(f.undo_stack.len(), snaps);
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，
