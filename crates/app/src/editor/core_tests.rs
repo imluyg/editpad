@@ -2831,6 +2831,49 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(f.undo_stack.len(), snaps);
     }
 
+    #[test]
+    fn selection_display_len_matches_len_chars_semantics() {
+        // 单行：纯列差
+        let mut c = core_with("hello world\n");
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 0, col: 5 };
+        assert_eq!(c.selection_display_len(), Some(5));
+        // 跨行 LF：换行计 1——「b+\n + cd+\n + e」= 6
+        let mut d = core_with("ab\ncd\nef\n");
+        d.anchor = Some(CursorPos { line: 0, col: 1 });
+        d.cursor = CursorPos { line: 2, col: 1 };
+        assert_eq!(
+            d.selection_display_len(),
+            Some(6),
+            "与查找命中 len_chars 同口径"
+        );
+        // CRLF：\r\n 整体计 1——「b + \r\n + c」= 3
+        let mut e = core_with("ab\r\ncd\r\n");
+        e.anchor = Some(CursorPos { line: 0, col: 1 });
+        e.cursor = CursorPos { line: 1, col: 1 };
+        assert_eq!(e.selection_display_len(), Some(3));
+        // 无选区 → None
+        let g = core_with("abc");
+        assert_eq!(g.selection_display_len(), None);
+    }
+
+    #[test]
+    fn insert_date_time_format_and_edit_pipeline() {
+        let mut c = core_with("log: \n");
+        c.cursor = CursorPos { line: 0, col: 5 };
+        let stamp = c.insert_date_time();
+        // 格式钉子：YYYY-MM-DD HH:MM（16 字符、分隔符位固定）
+        assert_eq!(stamp.len(), 16, "{stamp}");
+        let b = stamp.as_bytes();
+        assert_eq!((b[4], b[7], b[10], b[13]), (b'-', b'-', b' ', b':'));
+        assert!(stamp.as_bytes()[..16].iter().all(|&x| x.is_ascii_digit() || x == b'-' || x == b' ' || x == b':'));
+        assert_eq!(c.doc.to_text(), format!("log: {stamp}\n"), "插在光标处");
+        assert!(!c.undo_stack.is_empty(), "插入是真实编辑，产快照");
+        // 撤销完整移除时间戳
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "log: \n");
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，

@@ -2674,6 +2674,38 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         }
         let msg = key("a").expect("Ctrl+Shift+A 应产生消息");
         assert!(matches!(msg, Message::FindAllToggled));
+        // 第 63 轮：F5 插入日期时间 + G/Q 复制路径/文件名
+        let msg = key_f5().expect("裸 F5 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::InsertDateTime)));
+        let msg = key("g").expect("Ctrl+Shift+G 应产生消息");
+        assert!(matches!(msg, Message::CopyFilePath(None)), "热键以活动页为目标");
+        let msg = key("q").expect("Ctrl+Shift+Q 应产生消息");
+        assert!(matches!(msg, Message::CopyFileName(None)));
+    }
+
+    /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
+    fn key_f5() -> Option<Message> {
+        use iced::keyboard::{self, key::Named};
+        handle_key_defaults(
+            keyboard::Key::Named(Named::F5),
+            keyboard::Modifiers::empty(),
+        )
+    }
+
+    #[test]
+    fn copy_path_and_name_flow_and_unnamed_guard() {
+        // 未命名页：不写剪贴板，状态栏提示
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::CopyFilePath(None));
+        assert!(app.status.contains("没有路径"), "未命名页应提示而非静默");
+        dispatch(&mut app, Message::CopyFileName(Some(0)));
+        assert!(app.status.contains("没有路径"));
+        // 命名页：状态栏反馈复制内容（Task 由 dispatch 丢弃，无副作用）
+        app.tabs[0].path = Some(std::path::PathBuf::from(r"C:\tmp\note.txt"));
+        dispatch(&mut app, Message::CopyFilePath(Some(0)));
+        assert_eq!(app.status, r"已复制 C:\tmp\note.txt");
+        dispatch(&mut app, Message::CopyFileName(Some(0)));
+        assert_eq!(app.status, "已复制 note.txt");
     }
 
     #[test]

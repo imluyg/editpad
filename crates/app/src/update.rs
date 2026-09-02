@@ -279,6 +279,15 @@ impl Editpad {
                 };
                 iced::clipboard::write(text)
             }
+            // ---------- 复制完整路径 / 文件名（第 63 轮） ----------
+            // None = 活动页（热键），Some(i) = 指定页（标签右键菜单）；
+            // 未命名页无路径可写，给状态栏提示
+            Message::CopyFilePath(target) => {
+                self.copy_tab_ident(target, true)
+            }
+            Message::CopyFileName(target) => {
+                self.copy_tab_ident(target, false)
+            }
             Message::CutRequested => {
                 let Some(text) = self.cur_handle.borrow().selected_text() else {
                     return Task::none();
@@ -1588,7 +1597,9 @@ impl Editpad {
         }
 
         use EditOp as E;
-        let mut hint: Option<&'static str> = None;
+        // 第 63 轮起 hint 升级为 String：插入日期时间等动态反馈不再
+        // 需要 'static（曾用 leak() 属内存泄漏，已纠正）
+        let mut hint: Option<String> = None;
         // P38：撤销/重做后内容是否恰好回到落盘基线（打字/删除路径不查询，
         // 维持保守置脏，避免大文档每键全量比对）
         let mut back_to_saved = false;
@@ -1606,7 +1617,7 @@ impl Editpad {
             E::Undo => {
                 let changed = editor.undo();
                 if !changed {
-                    hint = Some("没有更多撤销历史");
+                    hint = Some("没有更多撤销历史".to_owned());
                 } else {
                     back_to_saved = editor.is_at_saved_content();
                 }
@@ -1615,7 +1626,7 @@ impl Editpad {
             E::Redo => {
                 let changed = editor.redo();
                 if !changed {
-                    hint = Some("已在最新状态");
+                    hint = Some("已在最新状态".to_owned());
                 } else {
                     back_to_saved = editor.is_at_saved_content();
                 }
@@ -1672,7 +1683,7 @@ impl Editpad {
             // 纯光标移动：恒返回 false（不置脏），失败给状态栏提示
             E::JumpToMatchingBracket => {
                 if !editor.jump_to_matching_bracket() {
-                    hint = Some("光标不在括号旁（或未找到配对）");
+                    hint = Some("光标不在括号旁（或未找到配对）".to_owned());
                 }
                 false
             }
@@ -1681,6 +1692,14 @@ impl Editpad {
             E::MergeLines => editor.merge_lines(),
             E::SplitLine => editor.split_line(),
             E::DeleteEmptyLines(kind) => editor.delete_empty_lines(kind),
+            // ---------- 插入日期时间（第 63 轮） ----------
+            // 真编辑：走 insert_str 统一管线（置脏+快照+查找重扫由上层
+            // changed 驱动）；时间戳文本给状态栏反馈
+            E::InsertDateTime => {
+                let stamp = editor.insert_date_time();
+                hint = Some(format!("已插入 {stamp}"));
+                true
+            }
         };
         drop(editor);
 
@@ -1701,7 +1720,7 @@ impl Editpad {
             }
             self.status.clear();
         } else if let Some(hint) = hint {
-            self.status = hint.to_owned();
+            self.status = hint;
         }
         changed
     }

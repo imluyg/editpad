@@ -689,6 +689,29 @@ impl Editpad {
         self.status = format!("第 {}/{} 处匹配", index + 1, self.matches.len());
     }
 
+    /// 第 63 轮：复制某页的完整路径或文件名到剪贴板。
+    /// `target`：None = 活动页（热键），Some(i) = 指定页（右键菜单）；
+    /// 未命名页无路径可写，给状态栏提示不产生剪贴板写入。
+    pub(crate) fn copy_tab_ident(&mut self, target: Option<usize>, full_path: bool) -> Task<Message> {
+        let idx = target.unwrap_or(self.active_tab);
+        let Some(tab) = self.tabs.get(idx) else {
+            return Task::none();
+        };
+        let Some(path) = tab.path.clone() else {
+            self.status = "未命名页没有路径可复制（先保存）".to_owned();
+            return Task::none();
+        };
+        let payload = if full_path {
+            path.display().to_string()
+        } else {
+            path.file_name()
+                .map(|n| n.display().to_string())
+                .unwrap_or_else(|| path.display().to_string())
+        };
+        self.status = format!("已复制 {payload}");
+        iced::clipboard::write(payload)
+    }
+
     pub(crate) fn step_match(&mut self, forward: bool) -> Task<Message> {
         if self.busy || self.find_query.is_empty() {
             return Task::none();
@@ -851,6 +874,24 @@ impl Editpad {
                 .width(Fill)
                 .style(chrome_menu_item_style)
                 .on_press_maybe(interactive.then_some(Message::RenameOrSaveAsTab(idx))),
+        );
+        // 第 63 轮：复制完整路径 / 文件名（未命名页无路径，菜单项灰掉）
+        let named = tab.path.is_some();
+        panel = panel.push(
+            button(container(text("复制完整路径").size(uipx).font(uifont)).width(Fill))
+                .width(Fill)
+                .style(chrome_menu_item_style)
+                .on_press_maybe(
+                    (interactive && named).then_some(Message::CopyFilePath(Some(idx))),
+                ),
+        );
+        panel = panel.push(
+            button(container(text("复制文件名").size(uipx).font(uifont)).width(Fill))
+                .width(Fill)
+                .style(chrome_menu_item_style)
+                .on_press_maybe(
+                    (interactive && named).then_some(Message::CopyFileName(Some(idx))),
+                ),
         );
 
         panel = panel.push(rule::horizontal(1));
@@ -1884,6 +1925,12 @@ impl Editpad {
         let cursor = self.cur_handle.borrow().cursor;
         // P67：行尾短标签（主导行尾随文档实时读取）
         let eol = eol_label(self.cur_handle.borrow().doc.line_ending());
+        // 第 63 轮：状态栏统计——字符数 O(1)（rope 存储长度）；选区显示
+        // 跨度经 EditorCore 键控缓存（P81 同一失效汇点），命中帧零开销
+        let (doc_chars, sel_chars) = {
+            let ed = self.cur_handle.borrow();
+            (ed.doc.text_len(), ed.selection_display_len())
+        };
         let status_bar = row![
             text(
                 self.tab()
@@ -1915,13 +1962,21 @@ impl Editpad {
             text(format!("{} 行", self.cur_handle.borrow().doc.line_count()))
                 .size(uipx)
                 .font(uifont),
-            text(format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1))
-                .size(uipx)
-                .font(uifont),
+            // 第 63 轮：字符数（O(1)，rope 存储长度）
+            text(format!("{} 字符", doc_chars)).size(uipx).font(uifont),
         ]
         .spacing(24)
-        .align_y(Alignment::Center)
-        .padding([6, 10]);
+        .align_y(Alignment::Center);
+        // 选区计数按需插入：有选区才出现（空 text 段会白占一个 24px 间距）
+        let mut status_bar = status_bar;
+        if let Some(n) = sel_chars {
+            status_bar = status_bar.push(
+                text(format!("选 {n} 字符")).size(uipx).font(uifont),
+            );
+        }
+        let status_bar = status_bar
+            .push(text(format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1)).size(uipx).font(uifont))
+            .padding([6, 10]);
 
         body = body.push(rule::horizontal(1)).push(status_bar);
 

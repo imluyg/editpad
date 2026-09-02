@@ -129,6 +129,9 @@ pub enum EditOp {
     // ---------- 括号匹配（第 61 轮） ----------
     /// 跳到配对括号的另一侧（光标须邻接括号；纯光标移动不产快照）
     JumpToMatchingBracket,
+    // ---------- 第 63 轮：插入日期时间 ----------
+    /// 在光标处插入当前本地日期时间（F5，记事本同款）
+    InsertDateTime,
 }
 
 /// 大小写转换方向（第 58 轮）。
@@ -308,6 +311,10 @@ pub struct EditorCore {
     /// 只读的 draw 也能维护缓存（与高亮器同手法）；内容变更经
     /// `invalidate_highlight_from` 统一失效（全部正文突变路径的唯一汇点）。
     bracket_cache: RefCell<Option<(CursorPos, Option<(usize, usize)>)>>,
+    /// 选区显示跨度缓存（第 63 轮状态栏统计）：键 = 选区字节偏移对，
+    /// 值 = 显示字符数（None = 无选区）。跨行精确计数是 O(选区行数)，
+    /// 状态栏每帧查询必须有缓存；失效走同一汇点（P81 口径）。
+    sel_span_cache: RefCell<Option<((usize, usize), Option<usize>)>>,
 }
 
 /// 光标闪烁半周期。
@@ -372,6 +379,7 @@ impl Default for EditorCore {
             max_cols_checked: None,
             bookmarks: BTreeSet::new(),
             bracket_cache: RefCell::new(None),
+            sel_span_cache: RefCell::new(None),
         }
     }
 }
@@ -542,6 +550,8 @@ impl EditorCore {
         // 第 61 轮：本函数是全部正文突变路径的唯一汇点——括号匹配缓存
         // 在此统一失效（光标键控的缓存对「同位异文」不可见，必须显式清）
         self.bracket_cache.borrow_mut().take();
+        // 第 63 轮：选区跨度缓存同汇点失效（偏移键控对「同位异文」同理）
+        self.sel_span_cache.borrow_mut().take();
         if let Some(hl) = &self.highlight {
             let line = self.doc.char_to_line(offset.min(self.doc.text_len()));
             hl.borrow_mut().invalidate_from(line);
@@ -1609,6 +1619,51 @@ impl EditorCore {
         // 净删了若干行：块尾之下的书签整体上移
         self.shift_bookmarks_below(blk.b, delta);
         true
+    }
+
+    // ---------- 第 63 轮：选区统计 + 插入日期时间 ----------
+
+    /// 当前选区的显示字符数（None = 无选区/零宽）。口径与查找命中的
+    /// `len_chars` 一致：行尾 `\r\n` 计 1、每跨一行计 1——可直接与
+    /// 「字符数」相加对账。
+    ///
+    /// 跨行计数是 O(选区行数)，而状态栏每帧都会查询：经偏移对键控缓存
+    /// （sel_span_cache，同一失效汇点），锚点/光标不动时命中帧零开销。
+    pub fn selection_display_len(&self) -> Option<usize> {
+        let (s, e) = self.ordered_selection()?;
+        let key = (
+            self.doc.line_to_char(s.line) + s.col,
+            self.doc.line_to_char(e.line) + e.col,
+        );
+        if let Some(hit) = self.sel_span_cache.borrow().as_ref() {
+            if hit.0 == key {
+                return hit.1;
+            }
+        }
+        let span: Option<usize> = if s.line == e.line {
+            Some(e.col.saturating_sub(s.col))
+        } else if s.line < self.doc.line_count() && e.line < self.doc.line_count() {
+            // 首行余部 + 其换行占 1；中间各行 disp+1；末行前缀 e.col
+            let mut n = self.line_display_len(s.line) - s.col.min(self.line_display_len(s.line)) + 1;
+            for l in (s.line + 1)..e.line {
+                n += self.line_display_len(l) + 1;
+            }
+            Some(n + e.col)
+        } else {
+            None
+        };
+        *self.sel_span_cache.borrow_mut() = Some((key, span));
+        span
+    }
+
+    /// F5：在光标处插入当前本地日期时间（记事本同款）。
+    /// 格式 `YYYY-MM-DD HH:MM`（24 小时制）；本地时区不可得时降级 UTC
+    /// 并在状态栏提示（time 的 now_local 在极端环境可能 Err）。
+    /// 返回插入的时间戳文本（应用层状态栏反馈用）。
+    pub fn insert_date_time(&mut self) -> String {
+        let stamp = local_datetime_stamp();
+        self.insert_str(&stamp);
+        stamp
     }
 
     // ---------- 书签套件（第 60 轮，仿主流编辑器书签导航） ----------
@@ -2686,6 +2741,76 @@ fn entab_leading_ws(s: &str) -> String {
         out.push(' ');
     }
     out
+}
+
+/// F5 时间戳（第 63 轮）：`YYYY-MM-DD HH:MM` 24 小时制，记事本同款
+/// 场景（日志打点）。
+///
+/// 本地时区获取：Windows 上直接 FFI kernel32!GetLocalTime（本应用本就
+/// Windows 专属构建，build.rs 已依赖 SDK 工具链；零新依赖——曾试
+/// time+local-offset 特性，会引入缓存中没有的 num_threads，离线环境
+/// 无法解析，弃）。其他平台回退 UTC 历法换算（Hinnant civil_from_days）。
+fn local_datetime_stamp() -> String {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct SysTime {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            millis: u16,
+        }
+        extern "system" {
+            fn GetLocalTime(lp_system_time: *mut SysTime);
+        }
+        let mut st = SysTime {
+            year: 0,
+            month: 1,
+            day_of_week: 0,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            millis: 0,
+        };
+        unsafe { GetLocalTime(&mut st) };
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            st.year, st.month, st.day, st.hour, st.minute
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        // UTC 兜底：Unix 秒 → 民用日期（Howard Hinnant civil_from_days 算法）
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let days = secs.div_euclid(86_400);
+        let rem = secs.rem_euclid(86_400);
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            y,
+            m,
+            d,
+            rem / 3600,
+            (rem % 3600) / 60
+        )
+    }
 }
 
 

@@ -107,6 +107,12 @@ enum Message {
     FindAllToggled,
     /// 点击结果面板第 `index` 条：选中该命中并滚动到可见
     FindAllGoto(usize),
+    // ---------- 第 63 轮：插入日期时间 / 复制路径与文件名 ----------
+    /// 复制完整路径到剪贴板：None = 活动页（热键），Some(i) = 第 i 页
+    /// （标签右键菜单）。未命名页给状态栏提示不写剪贴板。
+    CopyFilePath(Option<usize>),
+    /// 复制文件名（含扩展名）到剪贴板，作用域口径同上
+    CopyFileName(Option<usize>),
 
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
@@ -1578,6 +1584,11 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "del_blank_lines", default_combo: "Ctrl+Shift+R", desc: "删除空白行（含纯空白行）" },
     // 查找全部结果面板（A = All matches 助记；数据源复用查找栏的后台扫描命中表）
     HotkeyAction { id: "find_all_panel", default_combo: "Ctrl+Shift+A", desc: "查找全部结果面板" },
+    // 第 63 轮：F5 插入日期时间（记事本同款裸功能键）+ 复制路径/文件名
+    // （G/Q 为空闲字母，弱助记但 desc 明示；均可在设置页重映射）
+    HotkeyAction { id: "insert_date_time", default_combo: "F5", desc: "插入日期时间（YYYY-MM-DD HH:MM）" },
+    HotkeyAction { id: "copy_file_path", default_combo: "Ctrl+Shift+G", desc: "复制完整路径（当前页）" },
+    HotkeyAction { id: "copy_file_name", default_combo: "Ctrl+Shift+Q", desc: "复制文件名（当前页）" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1776,6 +1787,11 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "del_blank_lines" => edit(EditOp::DeleteEmptyLines(BlankKind::Whitespace)),
         // 查找全部结果面板（第 62 轮）
         "find_all_panel" => Some(Message::FindAllToggled),
+        // 第 63 轮：热键版复制路径/文件名以活动页为目标（None）；右键
+        // 菜单走同一消息的 Some(idx) 形态
+        "insert_date_time" => edit(EditOp::InsertDateTime),
+        "copy_file_path" => Some(Message::CopyFilePath(None)),
+        "copy_file_name" => Some(Message::CopyFileName(None)),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),
