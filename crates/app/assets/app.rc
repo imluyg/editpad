@@ -15,7 +15,9 @@ BEGIN
         BLOCK "080404B0"
         BEGIN
             VALUE "ProductName", "Editpad"
-            VALUE "FileDescription", "Editpad - 轻量文本编辑器"
+            // P79 用户点单：任务管理器进程组显示的就是 FileDescription，
+            // 「Editpad - 轻量文本编辑器」太长，简化为裸产品名
+            VALUE "FileDescription", "Editpad"
             VALUE "FileVersion", "0.1.0"
             VALUE "ProductVersion", "0.1.0"
             VALUE "LegalCopyright", "Apache-2.0"
