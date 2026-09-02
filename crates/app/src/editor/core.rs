@@ -966,18 +966,9 @@ impl EditorCore {
         // 区域内各行内容按方向旋转一行后以主导行尾重建；原区域以行尾
         // 结尾则重建串同样收尾（文档末行无行尾的形态保持）。
         // 混合行尾经此归一到主导行尾——与 P9「编辑不产生混合行尾」同哲学。
-        // 注意 line_str 是 ropey 口径：含行尾，须剥掉再统一 join。
-        let mut lines: Vec<String> = (first..=last)
-            .map(|i| {
-                let mut s = self.doc.line_str(i);
-                if s.ends_with("\r\n") {
-                    s.truncate(s.len() - 2);
-                } else if s.ends_with('\n') || s.ends_with('\r') {
-                    s.pop();
-                }
-                s
-            })
-            .collect();
+        // 第 59 轮起经共用助手剥行尾（口径：`\r\n`/`\n`/孤立 `\r` 皆换行）。
+        let mut lines: Vec<String> =
+            (first..=last).map(|i| self.line_body_without_eol(i)).collect();
         if up {
             lines.rotate_left(1);
         } else {
@@ -1073,13 +1064,9 @@ impl EditorCore {
         let mut changed = false;
         let mut lines: Vec<String> = Vec::with_capacity(b - a + 1);
         for i in a..=b {
-            // line_str 是 ropey 口径：含行尾，先剥掉再 trim（P73 同款手法）
-            let mut s = self.doc.line_str(i);
-            if s.ends_with("\r\n") {
-                s.truncate(s.len() - 2);
-            } else if s.ends_with('\n') || s.ends_with('\r') {
-                s.pop();
-            }
+            // 第 59 轮起经共用助手剥行尾（ropey 口径：`\r\n`/`\n`/孤立
+            // `\r` 皆换行单元，与 P73 原实现一致）
+            let s = self.line_body_without_eol(i);
             let t = match mode {
                 TrimMode::Leading => s.trim_start(),
                 TrimMode::Trailing => s.trim_end(),
@@ -1114,14 +1101,14 @@ impl EditorCore {
 
     // ---------- 行排序与去重（第 59 轮，仿主流编辑器行操作菜单） ----------
 
-    /// 取第 `i` 行正文：剥掉行尾换行单元。口径注意——只剥 `\r\n` / `\n`
-    /// 这两种 ropey 真正的换行单元；孤立 `\r` 是普通字符（ropey 不视其为
-    /// 换行），必须原样保留。
+    /// 取第 `i` 行正文：剥掉行尾换行单元。ropey 换行口径 = `\r\n`、`\n`、
+    /// **孤立 `\r`** 三者皆是换行（第 59 轮实测钉死），故末尾的 `\r` 同样
+    /// 属换行单元而非内容，必须剥除。
     fn line_body_without_eol(&self, i: usize) -> String {
         let mut s = self.doc.line_str(i);
         if s.ends_with("\r\n") {
             s.truncate(s.len() - 2);
-        } else if s.ends_with('\n') {
+        } else if s.ends_with('\n') || s.ends_with('\r') {
             s.pop();
         }
         s
@@ -1134,10 +1121,13 @@ impl EditorCore {
             if self.anchor.is_some() { self.touched_lines() } else { (0, count.saturating_sub(1)) };
         let start = self.doc.line_to_char(a);
         let end = if b + 1 < count { self.doc.line_to_char(b + 1) } else { len };
-        // 幻影末行检测：块到达文档末尾且原文以 \n 收尾 → 最后一行是空壳。
-        // 仅在块内还有更前面的行时才排除（a == b 时无从回退，交由
-        // 调用方的「不足两行」no-op 兜底，避免下溢）。
-        let phantom_tail = end == len && len > start && self.doc.slice_text(len - 1, len) == "\n";
+        // 幻影末行检测：块到达文档末尾且原文以换行单元收尾（`\n` 或孤立
+        // `\r`，ropey 口径两者皆换行）→ 最后一行是空壳。仅在块内还有
+        // 更前面的行时才排除（a == b 时无从回退，交由调用方的「不足两行」
+        // no-op 兜底，避免下溢）。
+        let phantom_tail = end == len
+            && len > start
+            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
         let last = if phantom_tail && b > a { b - 1 } else { b };
         let lines: Vec<String> = (a..=last).map(|i| self.line_body_without_eol(i)).collect();
         LineBlock {

@@ -2136,6 +2136,33 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(d.doc.to_text(), "x\ny\n");
     }
 
+    #[test]
+    fn lone_carriage_return_is_a_line_break_in_ropey_terms() {
+        // 主线 A（第 59 轮）口径钉子：审查中曾假设「孤立 \r 是内容、行操作
+        // 吞它是缺陷」，实测证伪——ropey 把 `\r\n` / `\n` / 孤立 `\r` 都
+        // 视为换行单元，P73/P75 剥离口径正确。本测试钉死该口径防回退。
+        // ① 文档以孤立 \r 收尾：多出一个幻影空行，排序不得把它当真实
+        //    内容搬到最前；尾随换行形态保持（归一到主导行尾；本文档
+        //    CRLF×2 > 孤立\r×1，主导=CRLF）
+        let mut c = core_with("c\r\nb\r\na\r");
+        assert_eq!(c.doc.line_count(), 4, "孤立 \\r 是换行：其后是幻影空行");
+        assert!(c.sort_lines(SortOrder::Ascending));
+        assert_eq!(c.doc.to_text(), "a\r\nb\r\nc\r\n", "幻影不参与排序，尾随换行保持");
+        // ② 行移动沿用同一剥离口径（P73 原行为不变）
+        let mut d = core_with("p\r\nq\r\nz\r");
+        d.cursor = CursorPos { line: 2, col: 0 };
+        assert!(d.move_current_lines(true));
+        assert_eq!(d.doc.to_text(), "p\r\nz\r\nq", "末行以孤立 \\r 收尾=有行尾的普通行");
+        // ③ 清理：去首只动行首；混合行尾块经主导行尾重建（P9 口径）
+        let mut e = core_with(" x\nabc\r");
+        assert!(e.trim_touched_lines(TrimMode::Leading));
+        assert_eq!(e.doc.to_text(), "x\nabc\n");
+        // ④ 去重逐字节比对行内容（不含换行单元）
+        let mut f = core_with("dup\r\nx\r\ndup");
+        assert!(f.remove_duplicate_lines());
+        assert_eq!(f.doc.to_text(), "dup\r\nx", "去重同样逐字节保留行内容");
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，
