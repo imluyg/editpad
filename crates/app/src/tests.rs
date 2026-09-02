@@ -2137,6 +2137,105 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert_eq!(app.tabs.len(), before + 2, "恢复后继续有效");
     }
 
+    // ---------- P100 勘误：P98 空白双击命中面（P100 收口） ----------
+
+    /// P100 勘误回归（全链路真事件）：P98 把空白双击从 Fill 占位按钮改到
+    /// strip 外层 `mouse_area.on_double_click` 后，strip Row 默认 Shrink
+    /// 宽（iced `Row::from_vec`）——外层鼠标区只盖住标签本身，右侧空白
+    /// 不在命中面内，双击永远收不到 TabStripBlankPressed。修复 =
+    /// view.rs 的 strip 行补 `.width(Fill)`。本测试走**生产 view()**（非
+    /// 手工同构控件）——布局整棵应用树，直接检验两个契约：① 标签条
+    /// 命中面横贯窗口宽（Fill 契约，Shrink 时 ~标签宽，断言即红）；
+    /// ② 在命中面最右缘空白处连按两次左键（iced 双击窗 = 300ms/<6px，
+    /// 测试内两次连发必然成对）必须发出 TabStripBlankPressed。
+    #[test]
+    fn p100_strip_blank_right_edge_double_click_reaches_outer_area() {
+        use iced::advanced::{
+            clipboard::Null as NullClipboard,
+            layout::{self, Layout},
+            widget::Tree,
+            Shell,
+        };
+        use iced::{Event, Font, Pixels, Point, Rectangle, Size};
+
+        fn got_new_tab(messages: &[Message]) -> bool {
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::TabStripBlankPressed))
+        }
+
+        let app = Editpad::default();
+        let mut element = app.view();
+        let mut tree = Tree::new(element.as_widget());
+        let mut renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
+        // min=0：允许 Shrink 收缩（否则强制满宽，测不出命中面缺损）
+        let limits = layout::Limits::new(Size::new(0.0, 0.0), Size::new(1280.0, 800.0));
+        let node = element.as_widget_mut().layout(&mut tree, &mut renderer, &limits);
+        let root = Layout::new(&node);
+        // 树形：Stack → container(base) → body column → [0]=菜单栏 [1]=分隔线
+        // [2]=标签条（strip 外层 mouse_area）
+        let strip_bounds = root.child(0).child(0).child(2).bounds();
+        eprintln!("[P100] 标签条命中面 = {strip_bounds:?}");
+        assert!(
+            strip_bounds.width > 1000.0,
+            "标签条命中面必须横贯窗口（P100 契约：strip 行补 width(Fill)），实际 {}",
+            strip_bounds.width
+        );
+
+        // 命中面最右缘（空白区）连按两次左键
+        let pos = Point::new(
+            strip_bounds.x + strip_bounds.width - 16.0,
+            strip_bounds.y + strip_bounds.height * 0.5,
+        );
+        let cursor = iced::mouse::Cursor::Available(pos);
+        let press = Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        let viewport = Rectangle::with_size(Size::new(1280.0, 800.0));
+        let mut clipboard = NullClipboard;
+
+        // 单击：shell 作用域收口后读消息（Shell 持有 messages 的可变借用）
+        let single_hit = {
+            let mut messages: Vec<Message> = Vec::new();
+            {
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &press,
+                    root,
+                    cursor,
+                    &renderer,
+                    &mut clipboard,
+                    &mut shell,
+                    &viewport,
+                );
+            }
+            got_new_tab(&messages)
+        };
+        assert!(!single_hit, "单击不得触发新建");
+
+        // 双击（同树状态：previous_click 保留，iced 300ms/<6px 窗内成对）
+        let dbl_hit = {
+            let mut messages: Vec<Message> = Vec::new();
+            {
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &press,
+                    root,
+                    cursor,
+                    &renderer,
+                    &mut clipboard,
+                    &mut shell,
+                    &viewport,
+                );
+            }
+            got_new_tab(&messages)
+        };
+        assert!(
+            dbl_hit,
+            "右侧空白双击必须发出 TabStripBlankPressed（命中面未覆盖空白）"
+        );
+    }
+
     #[test]
     fn p76_window_title_icon_decodes_48px_entry() {
         // P71 自定义 ICO 的 48px 条目必须可解析为窗口图标：48×48、

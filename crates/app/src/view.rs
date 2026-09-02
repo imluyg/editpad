@@ -1477,7 +1477,12 @@ impl Editpad {
         // 锚点数据源；只在标签条悬停时产生消息，量级可忽略）。
         let mut body = column![menubar, rule::horizontal(1)];
         {
-            let mut strip = row![].spacing(2).padding([4, 6]);
+            // P100 勘误：P98 把「空白双击」命中面从 Fill 占位按钮改到外层
+            // mouse_area 时，strip Row 默认 Shrink 宽——外层鼠标区只盖住
+            // 标签本身，右侧空白不在命中面内，双击无消息。补 width(Fill)
+            // 让整条标签条横贯窗口（无任何 Fill 高子项，P98 的半窗回归
+            // 不会重现），外层 on_double_click 全覆盖右侧空白。
+            let mut strip = row![].spacing(2).padding([4, 6]).width(Fill);
             // 注：窗口标题栏图标见 [`crate::window_title_icon`]（main.rs）；
             // 标签条保持纯文本前缀（▸ 活动 / ● 置脏 / 📌 固定，P21/P28
             // 语义，用户点名「标签栏黑点保持原样」不动）。
