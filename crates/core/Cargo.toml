@@ -13,3 +13,4 @@ syntect.workspace = true
 serde.workspace = true
 toml.workspace = true
 dirs.workspace = true
+fancy-regex.workspace = true

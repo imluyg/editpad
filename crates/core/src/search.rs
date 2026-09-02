@@ -492,6 +492,107 @@ fn drain_matches(
     count
 }
 
+// ---------- P70 正则查找/替换 ----------
+
+/// 编译正则（P70）：fancy-regex（回溯引擎，支持环视/反向引用等
+/// 主流编辑器级能力；病态模式可能慢——app 侧有后台扫描+防抖兜底）。
+/// 大小写不敏感经 `(?i)` 前缀注入。错误信息原样返回（含模式错误
+/// 位置），调用方直接展示。
+pub fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<fancy_regex::Regex, String> {
+    let wrapped = if case_sensitive {
+        pattern.to_owned()
+    } else {
+        format!("(?i){pattern}")
+    };
+    fancy_regex::Regex::new(&wrapped).map_err(|e| e.to_string())
+}
+
+/// P70：正则查找——对全文单遍扫描（`text` 为 `doc.to_text()` 全文，
+/// 调用方负责在后台线程产生）。命中跨度换算为
+/// [`MatchPos`]（line/col/len_chars），行尾 `\r\n` 计 1 字符（与 P26
+/// 选区跨度口径一致，跨行命中可直接喂 `select_span`）。
+pub fn find_all_regex(
+    text: &str,
+    pattern: &str,
+    case_sensitive: bool,
+) -> Result<Vec<MatchPos>, String> {
+    let re = compile_regex(pattern, case_sensitive)?;
+    let mut spans = Vec::new();
+    for m in re.find_iter(text) {
+        let m = m.map_err(|e| e.to_string())?;
+        spans.push((m.start(), m.end()));
+    }
+    Ok(spans_to_matchpos(text, &spans))
+}
+
+/// P70：正则替换——`replacement` 用 fancy-regex 语法（`$1`/`${1}` 组
+/// 引用，`$$` 为字面 `$；与字面模式的 `\n` 转义不同语法，UI 需提示）。
+/// 返回 `(新文本, 替换次数)`。
+pub fn replace_all_regex(
+    text: &str,
+    pattern: &str,
+    replacement: &str,
+    case_sensitive: bool,
+) -> Result<(String, usize), String> {
+    let re = compile_regex(pattern, case_sensitive)?;
+    let count = re.find_iter(text).filter_map(|m| m.ok()).count();
+    if count == 0 {
+        return Ok((text.to_owned(), 0));
+    }
+    let out = re.replace_all(text, replacement).into_owned();
+    Ok((out, count))
+}
+
+/// 字节跨度序列 → [`MatchPos`]：单遍游标推进（避免每命中一次
+/// `text[..start].chars().count()` 的 O(命中×文档) 复杂度）。
+/// `\r\n` 计 1 字符；命中内容内的换行推进行号、列号回到行首计数。
+fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut byte_pos = 0usize;
+    let mut char_pos = 0usize;
+    let mut line = 0usize;
+    let mut line_start_char = 0usize;
+
+    let advance_to = |text: &str, byte_pos: &mut usize, char_pos: &mut usize,
+                          line: &mut usize, line_start_char: &mut usize, target: usize| {
+        while *byte_pos < target {
+            let c = text[*byte_pos..].chars().next().unwrap_or('\0');
+            *byte_pos += c.len_utf8();
+            if c == '\r' && text[*byte_pos..].starts_with('\n') {
+                *byte_pos += 1;
+                *char_pos += 1;
+                *line += 1;
+                *line_start_char = *char_pos;
+                continue;
+            }
+            *char_pos += 1;
+            if c == '\n' {
+                *line += 1;
+                *line_start_char = *char_pos;
+            }
+        }
+    };
+
+    for &(start, end) in spans {
+        advance_to(text, &mut byte_pos, &mut char_pos, &mut line, &mut line_start_char, start);
+        let col = char_pos - line_start_char;
+        // 命中跨度：同口径计数（\r\n 计 1）
+        let mut len_chars = 0usize;
+        let mut b = start;
+        while b < end {
+            let c = text[b..].chars().next().unwrap_or('\0');
+            b += c.len_utf8();
+            if c == '\r' && text[b..].starts_with('\n') {
+                b += 1;
+            }
+            len_chars += 1;
+        }
+        out.push(MatchPos { line, col, len_chars });
+        advance_to(text, &mut byte_pos, &mut char_pos, &mut line, &mut line_start_char, end);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,5 +1088,69 @@ mod tests {
         let (out, n) = replace_all_document(&doc, &query, "HIT", true);
         assert_eq!(n, 1);
         assert_eq!(out, format!("{}HIT{}", "a".repeat(20_000), "b".repeat(20_000)));
+    }
+
+    // ---------- P70 正则查找/替换 ----------
+
+    #[test]
+    fn regex_find_maps_line_col_and_multiline_span() {
+        // CRLF 文档：命中含跨行（\r\n 计 1 字符，P26 选区跨度口径）
+        let text = "foo 1\r\nbar 22\r\nfoo 333";
+        let hits = find_all_regex(text, r"\d+", false).expect("合法模式");
+        assert_eq!(
+            hits,
+            vec![
+                MatchPos { line: 0, col: 4, len_chars: 1 },
+                MatchPos { line: 1, col: 4, len_chars: 2 },
+                MatchPos { line: 2, col: 4, len_chars: 3 },
+            ]
+        );
+
+        // 跨行命中：\r\n 计 1，行号推进、列号回行首
+        // （'1' + '\r\n'单元 + 'bar' = 5 字符）
+        let hits = find_all_regex(text, r"1\r\nbar", false).expect("合法模式");
+        assert_eq!(
+            hits,
+            vec![MatchPos { line: 0, col: 4, len_chars: 5 }]
+        );
+    }
+
+    #[test]
+    fn regex_case_flag_and_invalid_pattern() {
+        let text = "Foo foo FOO";
+        assert_eq!(find_all_regex(text, "foo", false).unwrap().len(), 3);
+        assert_eq!(find_all_regex(text, "foo", true).unwrap().len(), 1);
+
+        // 非法模式 → Err 带引擎错误信息（调用方直接展示）
+        let err = find_all_regex(text, "(unclosed", true).unwrap_err();
+        assert!(!err.is_empty());
+
+        assert!(compile_regex("(?i)ok", true).is_ok());
+    }
+
+    #[test]
+    fn regex_replace_expands_capture_groups() {
+        // $1 组引用：日期重排
+        let text = "2026-08-25 2026-01-02";
+        let (out, n) =
+            replace_all_regex(text, r"(\d{4})-(\d{2})-(\d{2})", "$3/$2/$1", true).unwrap();
+        assert_eq!(out, "25/08/2026 02/01/2026");
+        assert_eq!(n, 2);
+
+        // 零命中：原文返回、次数 0
+        let (out, n) = replace_all_regex(text, "zzz", "x", true).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(out, text);
+
+        // 非法模式 → Err
+        assert!(replace_all_regex(text, "[", "x", true).is_err());
+    }
+
+    #[test]
+    fn regex_multiline_mode_documented_via_inline_flags() {
+        // ^ $ 默认只锚文本首尾；逐行锚定用 (?m) 内联标志（UI 提示口径）
+        let text = "a1\nb2\na3";
+        assert_eq!(find_all_regex(text, "^a.", false).unwrap().len(), 1);
+        assert_eq!(find_all_regex(text, "(?m)^a.", false).unwrap().len(), 2);
     }
 }

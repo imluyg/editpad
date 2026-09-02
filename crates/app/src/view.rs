@@ -587,18 +587,41 @@ impl Editpad {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.find_cancel = cancelled.clone();
         self.find_seq += 1;
+        // P70：正则模式下反斜杠是正则语法——不做 \n 等转义解析；
+        // 且先编译校验（典型模式微秒级），无效立即提示不排后台任务
+        let effective_query = if self.regex_enabled {
+            self.find_query.clone()
+        } else {
+            // P22 补充：查询做转义解析（\n \r \t \\）后再扫描
+            unescape_query(&self.find_query)
+        };
+        if self.regex_enabled {
+            if let Err(e) = editpad_core::compile_regex(&effective_query, self.case_sensitive) {
+                self.cancel_find_scan();
+                self.status = format!("正则无效：{e}");
+                return Task::none();
+            }
+        }
+        let regex = self.regex_enabled;
         let payload = FindScanPayload {
             seq: self.find_seq,
             doc: self.cur_handle.borrow().doc.clone(),
-            // P22 补充：查询做转义解析（\n \r \t \\）后再扫描
-            query: unescape_query(&self.find_query),
+            query: effective_query,
             case_sensitive: self.case_sensitive,
+            regex,
             cancelled,
             debounce_ms: FIND_DEBOUNCE_MS,
         };
         self.find_scan = Some(self.find_seq);
-        Task::perform(drive_find_scan(payload, |doc, q, cs| {
-            editpad_core::find_all_document(doc, q, cs)
+        Task::perform(drive_find_scan(payload, |doc, q, cs, rx| {
+            if rx {
+                // P70：正则走全文扫描（to_text 拷贝发生在后台线程）；
+                // 编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
+                editpad_core::find_all_regex(&doc.to_text(), q, cs)
+                    .unwrap_or_default()
+            } else {
+                editpad_core::find_all_document(doc, q, cs)
+            }
         }), |message| message)
     }
 
@@ -1566,6 +1589,12 @@ impl Editpad {
                         .text_size(uipx)
                         .font(uifont)
                         .on_toggle(Message::CaseToggled),
+                    // P70：正则模式开关（.* 是各编辑器通用的正则图标语义）
+                    checkbox(self.regex_enabled)
+                        .label(".* 正则")
+                        .text_size(uipx)
+                        .font(uifont)
+                        .on_toggle(Message::RegexToggled),
                     button(text("×").size(uipx).font(uifont))
                         .style(chrome_button_style)
                         .on_press(Message::FindToggled),
@@ -1582,9 +1611,14 @@ impl Editpad {
                         .font(uifont)
                         .on_input(Message::ReplaceQueryChanged)
                         .width(200),
+                    // P70：正则模式替换当前 = 对命中做 $1 展开替换
                     button(text("替换当前").size(uipx).font(uifont))
                         .style(chrome_button_style)
-                        .on_press_maybe(has_matches.then_some(Message::ReplaceCurrent)),
+                        .on_press_maybe(has_matches.then_some(if self.regex_enabled {
+                            Message::ReplaceCurrentRegex
+                        } else {
+                            Message::ReplaceCurrent
+                        })),
                     // 扫描在途时禁用：此刻的全文快照可能是过期的
                     button(text("全部替换").size(uipx).font(uifont))
                         .style(chrome_button_style)

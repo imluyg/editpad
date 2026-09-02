@@ -639,6 +639,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "encoding_rs",
+ "fancy-regex",
  "ropey",
  "serde",
  "syntect",

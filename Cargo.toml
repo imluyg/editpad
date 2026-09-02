@@ -16,6 +16,10 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
+# P70 正则查找/替换：fancy-regex（已在依赖树：syntect default-fancy）。
+# 相比 regex 门面额外支持环视/反向引用（主流编辑器级能力）。
+# 取舍：回溯引擎，病态模式可能慢（UI 有后台扫描+防抖兜底）。
+fancy-regex = "0.16"
 iced = { version = "0.14", default-features = false, features = [
     # P41 内存取舍（用户裁决「可妥协」）：tiny-skia 软渲染为唯一后端，
     # wgpu/GPU 驱动整树出局——GUI 进程内存的最大头（基线实测见 §2 P41）。

@@ -2340,6 +2340,98 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         );
     }
 
+    // ---------- P70 正则查找/替换 ----------
+
+    #[test]
+    fn p70_regex_toggle_rescans_and_invalid_pattern_surfaces_error() {
+        let mut app = loaded_txt_app();
+        dispatch(&mut app, Message::FindToggled); // 打开查找栏（校验在排扫描时进行）
+        dispatch(
+            &mut app,
+            Message::FindQueryChanged("foo".to_owned()),
+        );
+        dispatch(&mut app, Message::RegexToggled(true));
+        assert!(app.regex_enabled);
+        assert!(app.status.contains("$1"), "开启正则应提示替换语法：{:?}", app.status);
+
+        // 无效正则：状态栏报错、不排扫描任务
+        dispatch(&mut app, Message::FindQueryChanged("(unclosed".to_owned()));
+        assert!(
+            app.status.contains("正则无效"),
+            "非法模式应立即报错：{:?}",
+            app.status
+        );
+        assert!(app.find_scan.is_none(), "无效模式不得排队扫描");
+
+        // 关闭开关恢复字面模式
+        dispatch(&mut app, Message::RegexToggled(false));
+        assert!(!app.regex_enabled);
+    }
+
+    #[test]
+    fn p70_regex_replace_all_end_to_end_with_captures() {
+        let (mut app, _path) = loaded_real_file_app("p70-replace-all");
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.reset_document(editpad_core::Document::from_str(
+                "a1 b2\na3 c\nend a4",
+            ));
+        }
+        app.regex_enabled = true;
+        app.find_query = r"a(\d)".to_owned();
+        app.replace_query = "x$1".to_owned();
+
+        dispatch(&mut app, Message::ReplaceAll);
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "x1 b2\nx3 c\nend x4",
+            "正则替换应展开 $1 组引用"
+        );
+        assert!(app.tab().dirty);
+        assert!(app.status.contains("3"), "应报告替换 3 处：{:?}", app.status);
+
+        // 非法模式：文档原封不动
+        app.find_query = "[".to_owned();
+        dispatch(&mut app, Message::ReplaceAll);
+        assert!(
+            app.status.contains("正则无效"),
+            "非法模式应报错：{:?}",
+            app.status
+        );
+        assert!(app.tab().dirty, "文档保持上次替换后的置脏状态");
+    }
+
+    #[test]
+    fn p70_regex_replace_current_expands_single_match() {
+        let (mut app, _path) = loaded_real_file_app("p70-replace-current");
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.reset_document(editpad_core::Document::from_str("a1 b2 a3"));
+        }
+        app.regex_enabled = true;
+        app.find_query = r"a(\d)".to_owned();
+        app.replace_query = "<$1>".to_owned();
+
+        // 命中表直接注入（模拟后台扫描完成）：3 处命中
+        let hits = vec![
+            editpad_core::MatchPos { line: 0, col: 0, len_chars: 2 },
+            editpad_core::MatchPos { line: 0, col: 4, len_chars: 2 },
+            editpad_core::MatchPos { line: 0, col: 7, len_chars: 2 },
+        ];
+        let seq = app.find_seq;
+        app.find_scan = Some(seq); // 登记「在途扫描」：FindScanDone 的守卫条件
+        dispatch(&mut app, Message::FindScanDone(seq, hits));
+
+        // 无当前命中：先跳到第一个（step_match 语义）
+        dispatch(&mut app, Message::ReplaceCurrentRegex);
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "<1> b2 a3",
+            "仅当前命中被展开替换"
+        );
+        assert!(app.tab().dirty, "替换当前是真实文档编辑");
+    }
+
     #[test]
     fn p63_autosave_must_skip_contract() {
         // 写前判定纯函数契约：期望戳缺失不拦截；期望已知时以差异为准
@@ -2569,11 +2661,12 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             doc: editpad_core::Document::from_str("foo\nbar foo\n"),
             query: "foo".to_owned(),
             case_sensitive: true,
+            regex: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             debounce_ms: 10,
         };
         // 恰好一条完成消息（函数直接返回它）
-        let message = block_on(drive_find_scan(payload, |doc, q, cs| {
+        let message = block_on(drive_find_scan(payload, |doc, q, cs, _rx| {
             editpad_core::find_all_document(doc, q, cs)
         }));
         match &message {
@@ -2602,10 +2695,11 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             doc: editpad_core::Document::from_str("target target"),
             query: "target".to_owned(),
             case_sensitive: true,
+            regex: false,
             cancelled: flag,
             debounce_ms: 10,
         };
-        let message = block_on(drive_find_scan(payload, |doc, q, cs| {
+        let message = block_on(drive_find_scan(payload, |doc, q, cs, _rx| {
             editpad_core::find_all_document(doc, q, cs)
         }));
         match message {
@@ -2625,12 +2719,13 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             doc: editpad_core::Document::new(),
             query: "x".to_owned(),
             case_sensitive: false,
+            regex: false,
             cancelled: Arc::new(AtomicBool::new(false)),
             debounce_ms: 10,
         };
         let message = block_on(drive_find_scan(
             payload,
-            |_doc, _q, _cs| -> Vec<editpad_core::MatchPos> { panic!("模拟扫描崩溃") },
+            |_doc, _q, _cs, _rx| -> Vec<editpad_core::MatchPos> { panic!("模拟扫描崩溃") },
         ));
         match &message {
             Message::FindScanDone(seq, hits) => {

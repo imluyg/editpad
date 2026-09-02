@@ -738,15 +738,102 @@ impl Editpad {
                 self.case_sensitive = value;
                 self.schedule_find_scan()
             }
+            Message::RegexToggled(value) => {
+                // P70：查询语义切换（字面转义 ↔ 正则语法），必须重扫
+                self.regex_enabled = value;
+                if value {
+                    self.status = "正则模式：替换支持 $1/${1} 组引用，^$ 逐行锚定用 (?m)".to_owned();
+                }
+                self.schedule_find_scan()
+            }
             Message::ReplaceQueryChanged(query) => {
                 self.replace_query = query;
                 Task::none()
             }
             Message::ReplaceCurrent => self.replace_current(),
+            Message::ReplaceCurrentRegex => {
+                // P70：正则模式的「替换当前」——重选当前命中跨度（命中表
+                // 可能比选区新），用原始命中文本（含真实 \r\n）做单次展开
+                // 替换。无当前命中时先定位第一个（FindScanDone 会清
+                // match_idx，等价「按一次下一个」），与用户直觉一致。
+                if self.busy || self.find_query.is_empty() {
+                    return Task::none();
+                }
+                if self.match_idx.is_none() {
+                    // step_match 恒返回 none，弃置安全
+                    let _ = self.step_match(true);
+                }
+                let Some(pos) = self.match_idx.and_then(|i| self.matches.get(i).copied()) else {
+                    return Task::none();
+                };
+                self.cur_handle
+                    .borrow_mut()
+                    .select_span(pos.line, pos.col, pos.len_chars);
+                let matched = self.cur_handle.borrow().selected_text();
+                let Some(matched) = matched else {
+                    return self.replace_current();
+                };
+                match editpad_core::compile_regex(&self.find_query, self.case_sensitive) {
+                    Ok(re) => {
+                        let expanded = re.replace(&matched, self.replace_query.as_str()).into_owned();
+                        self.cur_handle.borrow_mut().replace_selection(&expanded);
+                        self.tab_mut().dirty = true;
+                        self.tab_mut().note_mutation();
+                        // 命中表已过期：排队重扫（「下一个」等重扫完成）
+                        self.schedule_find_scan()
+                    }
+                    Err(e) => {
+                        self.status = format!("正则无效：{e}");
+                        Task::none()
+                    }
+                }
+            }
             Message::ReplaceAll => {
                 if self.busy || self.find_query.is_empty() || self.find_scanning() {
                     // 扫描在途时禁止全部替换：此刻的全文快照可能是过期的
                     return Task::none();
+                }
+                // P70：正则分支——全文 to_text + fancy-regex 替换（$1 组引用）。
+                // 与 FormatJson 同款防冻结上限（to_text + 结果双份内存）。
+                if self.regex_enabled {
+                    const REGEX_REPLACE_MAX_CHARS: usize = 4_000_000;
+                    let (text, chars) = {
+                        let ed = self.cur_handle.borrow();
+                        (ed.doc.to_text(), ed.doc.text_len())
+                    };
+                    if chars > REGEX_REPLACE_MAX_CHARS {
+                        self.status = format!(
+                            "文档过大（{chars} 字符），正则替换暂不支持（上限 {REGEX_REPLACE_MAX_CHARS}）；可改用字面模式"
+                        );
+                        return Task::none();
+                    }
+                    let mut tasks: Vec<Task<Message>> = Vec::new();
+                    match editpad_core::replace_all_regex(
+                        &text,
+                        &self.find_query,
+                        &self.replace_query,
+                        self.case_sensitive,
+                    ) {
+                        Ok((new_contents, count)) => {
+                            if count > 0 {
+                                self.cur().borrow_mut().replace_whole_document(
+                                    editpad_core::Document::from_str(&new_contents),
+                                );
+                                self.tab_mut().dirty = true;
+                                self.tab_mut().note_mutation();
+                                tasks.push(self.schedule_find_scan());
+                                tasks.push(self.maybe_schedule_autosave());
+                            }
+                            self.status = format!("已替换 {count} 处");
+                        }
+                        Err(e) => {
+                            self.status = format!("正则无效：{e}");
+                        }
+                    }
+                    if tasks.is_empty() {
+                        return Task::none();
+                    }
+                    return Task::batch(tasks);
                 }
                 // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
                 // P22 补充：查询与替换文本先做转义解析（\n \r \t \\）

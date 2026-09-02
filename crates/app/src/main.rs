@@ -95,9 +95,13 @@ enum Message {
     CaseToggled(bool),
     ReplaceQueryChanged(String),
     ReplaceCurrent,
+    /// P70：正则模式的「替换当前」（对当前命中做 $1 展开替换）
+    ReplaceCurrentRegex,
     ReplaceAll,
     /// 后台查找扫描完成：(任务序号, 命中表)。序号过期的结果直接丢弃（P10）
     FindScanDone(u64, Vec<editpad_core::MatchPos>),
+    /// P70：正则模式开关（开启/关闭都会触发重扫）
+    RegexToggled(bool),
 
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
@@ -406,6 +410,8 @@ struct FindScanPayload {
     doc: editpad_core::Document,
     query: String,
     case_sensitive: bool,
+    /// P70：正则模式（query 为原始正则；扫描走全文 to_text + fancy-regex）
+    regex: bool,
     /// 本代任务的取消标志（新任务排队时把上一代置位）
     cancelled: Arc<AtomicBool>,
     /// 防抖窗口毫秒数（生产走 [`FIND_DEBOUNCE_MS`]；测试注入小值）
@@ -421,7 +427,7 @@ async fn drive_find_scan<F>(
     scan: F,
 ) -> Message
 where
-    F: FnOnce(&editpad_core::Document, &str, bool) -> Vec<editpad_core::MatchPos>
+    F: FnOnce(&editpad_core::Document, &str, bool, bool) -> Vec<editpad_core::MatchPos>
         + Send
         + 'static,
 {
@@ -435,7 +441,7 @@ where
         } else {
             // P5 同款兜底：扫描崩溃也要回消息（空表），不能让 UI 永久等待
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                scan(&payload.doc, &payload.query, payload.case_sensitive)
+                scan(&payload.doc, &payload.query, payload.case_sensitive, payload.regex)
             }))
             .unwrap_or_default()
         };
@@ -1235,6 +1241,8 @@ struct Editpad {
     encoding_menu: bool,
     /// P67：状态栏「行尾」弹出菜单可见（与编码菜单互斥）。
     eol_menu: bool,
+    /// P70：正则查找模式（查找栏「.*」开关；会话态不持久化）。
+    regex_enabled: bool,
     /// P65 双击重命名：标签条上最近一次左键点击的 (页下标, 时刻)。
     /// 同页在 [`TAB_DOUBLE_CLICK_MS`] 窗内再点一次 = 重命名意图。
     /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
@@ -1379,6 +1387,7 @@ impl Default for Editpad {
             rename_input: String::new(),
             encoding_menu: false,
             eol_menu: false,
+            regex_enabled: false,
             last_tab_click: None,
             hotkey_capture: None,
             available_fonts: Vec::new(),
