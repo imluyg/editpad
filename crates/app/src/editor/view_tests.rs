@@ -908,3 +908,82 @@ fn headless_combo_scroll_size_theme_ink_stays_in_bounds() {
     }
     eprintln!("[P86] 组合批帧数 = {frames}");
 }
+
+/// 第 67 轮 ⑮（headless 像素级）：列块选区高亮——同一文档关/开块两帧
+/// 差分必须出现足量墨迹（2 行 × 2 列宽的选区 quad），且墨迹全部落在
+/// 控件矩形内。
+#[test]
+fn headless_block_selection_highlight_frame_diff() {
+    use super::super::{BlockSel, CursorPos};
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+
+    let render = |block: bool| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            let mut doc_text = String::from("abcdef\nghijkl\n");
+            doc_text.extend((3..=10).map(|i| format!("第{i}行\n")));
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.cursor = CursorPos { line: 5, col: 0 };
+            if block {
+                c.block_sel = Some(BlockSel {
+                    anchor: CursorPos { line: 0, col: 1 },
+                    head: CursorPos { line: 1, col: 3 },
+                });
+            }
+        }
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    let off = render(false);
+    let on = render(true);
+    let mut diff_in = 0u32;
+    let mut diff_out = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if let (Some(a), Some(b)) = (off.pixel(x, y), on.pixel(x, y)) {
+                let d = (a.red() as i32 - b.red() as i32).abs()
+                    + (a.green() as i32 - b.green() as i32).abs()
+                    + (a.blue() as i32 - b.blue() as i32).abs();
+                if d > 8 {
+                    let inside =
+                        x >= ex as u32 && x < (ex + ew) as u32 && y >= ey as u32 && y < (ey + eh) as u32;
+                    if inside {
+                        diff_in += 1;
+                    } else {
+                        diff_out += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("[P87] 列块高亮差分：块内 {diff_in}px / 越界 {diff_out}px");
+    assert!(diff_in >= 40, "块选区高亮墨迹不足（仅 {diff_in}px）");
+    assert_eq!(diff_out, 0, "高亮不得越出控件矩形");
+}

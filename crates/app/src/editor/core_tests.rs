@@ -2951,6 +2951,111 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(c.doc.to_text(), "\n\n\n\n", "撤销完整还原");
     }
 
+    // ---------- 第 67 轮 ⑮：列块编辑 ----------
+
+    #[test]
+    fn block_select_lifecycle_and_geometry() {
+        let mut c = core_with("abcdef\ngh\nijklm\n");
+        assert!(!c.has_block());
+        // 拖拽起点 = 空块
+        c.begin_block_select(CursorPos { line: 0, col: 2 });
+        assert!(!c.has_block(), "单击不应形成有效块");
+        // 正向拖到 (2,4)：矩形 0..2 行 × 2..4 列
+        c.update_block_select(CursorPos { line: 2, col: 4 });
+        assert!(c.has_block());
+        assert_eq!(c.active_block(), Some((0, 2, 2, 4)));
+        // 反向拖拽归一化：head(1,1) → 行 0..1 × 列 1..2
+        c.begin_block_select(CursorPos { line: 0, col: 2 });
+        c.update_block_select(CursorPos { line: 1, col: 1 });
+        assert_eq!(c.active_block(), Some((0, 1, 1, 2)));
+        // 松开保留有效块；clear 后归零；空块 finish 自动清除
+        assert!(c.finish_block_select());
+        assert!(c.clear_block());
+        assert!(!c.has_block());
+        c.begin_block_select(CursorPos { line: 1, col: 1 });
+        assert!(!c.finish_block_select(), "空块松开自动清除");
+        assert!(!c.has_block());
+    }
+
+    #[test]
+    fn block_copy_delete_insert_oracles() {
+        let doc = "abcdef\ngh\nij";
+        // 复制：行0[1..3)="bc"、行1[1..3) 截到行尾="h"
+        let mut c = core_with(doc);
+        c.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 1 },
+            head: CursorPos { line: 1, col: 3 },
+        });
+        assert_eq!(c.active_block(), Some((0, 1, 1, 3)));
+        assert_eq!(c.block_copy_text(), Some("bc\nh".to_owned()));
+
+        // 删除：行0 去 [1..3)="bc"；行1 长 2，c1 截到行尾 → 只去 "h"
+        assert!(c.delete_block_content());
+        assert_eq!(c.doc.to_text(), "adef\ng\nij");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 1 });
+        // 全区间越行（短于 c0）→ no-op 不产快照
+        let snaps = c.undo_stack.len();
+        c.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 9 },
+            head: CursorPos { line: 1, col: 9 },
+        });
+        assert!(!c.delete_block_content());
+        assert_eq!(c.undo_stack.len(), snaps);
+
+        // 插入：逐行把 [c0,c1) **替换**为「Z」（行1 长 2，c1 截到行尾）
+        let mut e = core_with("abc\nXY\nW");
+        e.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 1 },
+            head: CursorPos { line: 1, col: 2 },
+        });
+        assert!(e.insert_into_block("Z"));
+        assert_eq!(e.doc.to_text(), "aZc\nXZ\nW");
+        assert_eq!(e.cursor, CursorPos { line: 0, col: 2 });
+        assert!(e.undo());
+        assert_eq!(e.doc.to_text(), "abc\nXY\nW", "撤销完整还原");
+
+        // 书签不受影响（行数不变）
+        let mut f = core_with("ab\ncd\n");
+        f.toggle_bookmark(); // 行 0
+        f.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 0 },
+            head: CursorPos { line: 1, col: 1 },
+        });
+        assert!(f.delete_block_content());
+        assert_eq!(f.bookmarked_lines(), vec![0], "恒等结构书签原位");
+    }
+
+    #[test]
+    fn block_cleared_by_nav_undo_and_esc_op() {
+        let mk = || {
+            let mut c = core_with("abcd\n");
+            c.block_sel = Some(BlockSel {
+                anchor: CursorPos { line: 0, col: 1 },
+                head: CursorPos { line: 0, col: 3 },
+            });
+            c
+        };
+        // 键盘移动 / 全选 / select_span（查找跳转）/ undo 各自清块
+        let mut c = mk();
+        c.apply_motion(Motion::Right, false);
+        assert!(!c.has_block(), "键盘移动退出块态");
+        let mut d = mk();
+        d.select_all();
+        assert!(!d.has_block());
+        let mut e = mk();
+        e.select_span(0, 0, 2);
+        assert!(!e.has_block());
+        let mut g = mk();
+        g.insert_str("x"); // 普通插入前 apply_edit 已清（此处直测 core 口径）
+        g.block_sel = mk().block_sel;
+        assert!(g.undo());
+        assert!(!g.has_block(), "撤销清块");
+        // clear_block 返回「原本是否有块」（调用方据此决定是否触发刷新）
+        let mut h = mk();
+        assert!(h.clear_block());
+        assert!(!h.clear_block(), "二次清除返回 false");
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，

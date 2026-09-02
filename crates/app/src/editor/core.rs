@@ -57,6 +57,37 @@ pub struct CursorPos {
     pub col: usize,
 }
 
+/// 列块（矩形）选区（第 67 轮 ⑮ v1）：anchor=按下角、head=当前对角。
+/// 归一化矩形 = 两角的行/列分别取 min/max（含端）；行列全等即空块。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockSel {
+    pub anchor: CursorPos,
+    pub head: CursorPos,
+}
+
+impl BlockSel {
+    /// 归一化 → (r0, r1, c0, c1)，均含端且 r0≤r1、c0≤c1。
+    pub(crate) fn normalized(&self) -> (usize, usize, usize, usize) {
+        let (r0, r1) = if self.anchor.line <= self.head.line {
+            (self.anchor.line, self.head.line)
+        } else {
+            (self.head.line, self.anchor.line)
+        };
+        let (c0, c1) = if self.anchor.col <= self.head.col {
+            (self.anchor.col, self.head.col)
+        } else {
+            (self.head.col, self.anchor.col)
+        };
+        (r0, r1, c0, c1)
+    }
+
+    /// 空块 = 行列区间都为零宽（拖拽未展开/单击）。
+    pub(crate) fn is_empty(&self) -> bool {
+        let (r0, r1, c0, c1) = self.normalized();
+        r0 == r1 && c0 == c1
+    }
+}
+
 /// 光标移动语义（与逻辑行对齐——本编辑器不软换行）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
@@ -136,6 +167,9 @@ pub enum EditOp {
     /// 行注释切换：触及块全部已注释则去掉一层前缀，否则加上；
     /// 前缀按当前语法查表（未知语法默认 `//`），Ctrl+Q
     ToggleLineComment,
+    // ---------- 第 67 轮：列块编辑 ----------
+    /// 取消列块选区（Esc；不入热键注册表，固定语义）
+    CancelBlock,
 }
 
 /// 大小写转换方向（第 58 轮）。
@@ -323,6 +357,13 @@ pub struct EditorCore {
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
     pub(crate) show_line_endings: bool,
+    /// 列块选区（第 67 轮 ⑮）：None = 普通模式。与单选区（anchor/cursor）
+    /// 互斥——建立/存在期间任何普通导航或编辑先清除块态。
+    /// pub(crate) 仅限测试直接构造状态；生产路径走 begin/update/finish。
+    pub(crate) block_sel: Option<BlockSel>,
+    /// 列块拖拽进行中（view 层鼠标状态机的 core 侧镜像）：
+    /// true = Alt+Shift 按下未松开，CursorMoved 持续更新 head。
+    pub(crate) block_dragging: bool,
 }
 
 /// 光标闪烁半周期。
@@ -390,6 +431,8 @@ impl Default for EditorCore {
             sel_span_cache: RefCell::new(None),
             show_whitespace: false,
             show_line_endings: false,
+            block_sel: None,
+            block_dragging: false,
         }
     }
 }
@@ -734,6 +777,7 @@ impl EditorCore {
 
     pub fn undo(&mut self) -> bool {
         self.break_typing(); // P37：撤销本身打断组，防后续输入混入历史组
+        self.clear_block(); // 第 67 轮：列块不参与快照回滚，一并清除
         let Some(snap) = self.undo_stack.pop() else {
             return false;
         };
@@ -757,6 +801,7 @@ impl EditorCore {
 
     pub fn redo(&mut self) -> bool {
         self.break_typing(); // P37 同上
+        self.clear_block(); // 第 67 轮：同 undo
         let Some(snap) = self.redo_stack.pop() else {
             return false;
         };
@@ -779,6 +824,7 @@ impl EditorCore {
 
     pub fn select_all(&mut self) {
         self.break_typing(); // P37：选区变更打断组
+        self.clear_block(); // 第 67 轮：块态与单选区互斥
         let last = self.doc.line_count().saturating_sub(1);
         self.anchor = Some(CursorPos::default());
         self.cursor = CursorPos {
@@ -904,6 +950,7 @@ impl EditorCore {
     /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
     pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
         self.break_typing(); // P37：选区变更打断组（查找跳转/替换当前都经此）
+        self.clear_block(); // 第 67 轮：块态与单选区互斥
         let start = CursorPos { line, col };
         let mut cur = start;
         let mut remain = len_chars;
@@ -1648,6 +1695,140 @@ impl EditorCore {
 
     // ---------- 第 63 轮：选区统计 + 插入日期时间 ----------
 
+    // ---------- 第 67 轮 ⑮：列块（矩形）选区与编辑 ----------
+
+    /// 是否有非空列块选区。
+    pub fn has_block(&self) -> bool {
+        self.block_sel.is_some_and(|b| !b.is_empty())
+    }
+
+    /// 清除列块选区。返回是否原本存在块（调用方据此决定是否刷新）。
+    pub fn clear_block(&mut self) -> bool {
+        self.block_dragging = false;
+        self.block_sel.take().is_some()
+    }
+
+    /// Alt+Shift 按下：以命中点为锚角开始块选拖拽。
+    pub(crate) fn begin_block_select(&mut self, at: CursorPos) {
+        self.block_dragging = true;
+        self.block_sel = Some(BlockSel { anchor: at, head: at });
+        // 块态与单选区互斥
+        self.anchor = None;
+        self.break_typing();
+    }
+
+    /// 拖拽中：更新对角（渲染实时跟随；无效中间态允许存在）。
+    pub(crate) fn update_block_select(&mut self, to: CursorPos) {
+        if let Some(b) = &mut self.block_sel {
+            b.head = to;
+        }
+    }
+
+    /// 松开鼠标：结束拖拽。返回是否留下有效块（空块自动清除——单击
+    /// Alt+Shift 不应残留任何状态）。
+    pub(crate) fn finish_block_select(&mut self) -> bool {
+        self.block_dragging = false;
+        match self.block_sel {
+            Some(b) if !b.is_empty() => true,
+            _ => {
+                self.block_sel = None;
+                false
+            }
+        }
+    }
+
+    /// 归一化块矩形 (r0, r1, c0, c1)；每行的实际右界会被该行长度截断
+    /// （短行自动到行尾——主流编辑器同口径），由消费方各自处理。
+    pub(crate) fn active_block(&self) -> Option<(usize, usize, usize, usize)> {
+        let b = self.block_sel?;
+        let (r0, r1, c0, c1) = b.normalized();
+        (!b.is_empty()).then_some((r0, r1, c0, c1))
+    }
+
+    /// 复制块内容：各行截取片段以 `\n` 连接（不含行尾符；短行取到行尾）。
+    /// 无块 → None。
+    pub fn block_copy_text(&self) -> Option<String> {
+        let (r0, r1, c0, c1) = self.active_block()?;
+        let mut parts: Vec<String> = Vec::with_capacity(r1 - r0 + 1);
+        for line in r0..=r1 {
+            let start = self.doc.line_to_char(line);
+            let len = self.line_display_len(line);
+            let a = start + c0.min(len);
+            let b = start + c1.min(len);
+            if b > a {
+                parts.push(self.doc.slice_text(a, b));
+            } else {
+                parts.push(String::new());
+            }
+        }
+        Some(parts.join("\n"))
+    }
+
+    /// 删除块内容：逐行移除 [c0, c1) 片段（短行无内容则跳过该行），
+    /// 行数不变 → 书签原位。产快照；成功后清块、光标落块左上角。
+    /// 返回是否改动。
+    pub fn delete_block_content(&mut self) -> bool {
+        let Some((r0, r1, c0, c1)) = self.active_block() else {
+            return false;
+        };
+        // 预检是否有任一行确有可删内容，全空则 no-op 不产快照
+        let spans: Vec<(usize, usize, usize)> = (r0..=r1)
+            .filter_map(|line| {
+                let start = self.doc.line_to_char(line);
+                let len = self.line_display_len(line);
+                let a = start + c0.min(len);
+                let b = start + c1.min(len);
+                (b > a).then_some((a, b, len))
+            })
+            .collect();
+        if spans.is_empty() {
+            return false;
+        }
+        self.snapshot();
+        // 从后往前删，前面的偏移不受影响
+        for (a, b, _) in spans.iter().rev() {
+            self.doc.remove_range(*a, *b);
+        }
+        self.invalidate_highlight_from(self.doc.line_to_char(r0));
+        self.max_cols_stale = true;
+        self.block_sel = None;
+        self.cursor = CursorPos { line: r0, col: c0.min(self.line_display_len(r0)) };
+        self.ensure_visible();
+        true
+    }
+
+    /// 向块内插入文本（v1：单行文本；含换行时只取首段，文档披露的
+    /// 简化口径）。逐行把 [c0, c1) 替换为该文本；行数不变 → 书签原位。
+    /// 产快照；成功后清块、光标落首行插入文本之后。返回是否改动。
+    pub fn insert_into_block(&mut self, text: &str) -> bool {
+        let first_line = text.split('\n').next().unwrap_or("");
+        if first_line.is_empty() {
+            return false;
+        }
+        let Some((r0, r1, c0, c1)) = self.active_block() else {
+            return false;
+        };
+        self.snapshot();
+        // 先删旧块内容（从后往前），再从后往前逐行插入新文本
+        for line in (r0..=r1).rev() {
+            let start = self.doc.line_to_char(line);
+            let len = self.line_display_len(line);
+            let a = start + c0.min(len);
+            let b = start + c1.min(len);
+            if b > a {
+                self.doc.remove_range(a, b);
+            }
+            self.doc.insert(a, first_line);
+        }
+        self.invalidate_highlight_from(self.doc.line_to_char(r0));
+        self.max_cols_stale = true;
+        self.block_sel = None;
+        let new_col = c0 + first_line.chars().count();
+        self.cursor = CursorPos { line: r0, col: new_col.min(self.line_display_len(r0)) };
+        self.ensure_visible();
+        true
+    }
+
     /// 下发不可见字符标记开关（设置保存/建页时调用）。
     pub fn set_invisibles(&mut self, whitespace: bool, line_endings: bool) {
         self.show_whitespace = whitespace;
@@ -2198,6 +2379,7 @@ impl EditorCore {
     /// 应用光标移动；`extend` 为 true 时保持锚点形成选区。
     pub fn apply_motion(&mut self, motion: Motion, extend: bool) {
         self.break_typing(); // P37：光标移动打断组
+        self.clear_block(); // 第 67 轮：键盘移动退出块态（块内编辑走专属分支）
         if extend && self.anchor.is_none() {
             self.anchor = Some(self.cursor);
         }

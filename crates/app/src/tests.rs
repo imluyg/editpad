@@ -2815,6 +2815,58 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert_eq!(app.settings.backup_mode, "none");
     }
 
+    #[test]
+    fn block_selection_edit_and_esc_flow() {
+        use editor::BlockSel;
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::Edit(EditOp::InsertText("abcdef\nghijkl\n".into())),
+        );
+        // 直接构造块态（生产路径经 Alt+Shift 拖拽，core 生命周期单测覆盖）
+        app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+            anchor: editor::CursorPos { line: 0, col: 1 },
+            head: editor::CursorPos { line: 1, col: 3 },
+        });
+        // Esc → CancelBlock 编辑臂：清块、不置脏
+        let dirty_before = app.any_dirty();
+        dispatch(
+            &mut app,
+            Message::KeyPressed(
+                keyboard::Key::Named(keyboard::key::Named::Escape),
+                keyboard::Modifiers::empty(),
+            ),
+        );
+        assert!(!app.cur_handle.borrow().has_block(), "Esc 清块");
+        assert_eq!(app.any_dirty(), dirty_before, "取消块不改变置脏");
+
+        // 块态下输入：逐行替换块内容
+        app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+            anchor: editor::CursorPos { line: 0, col: 1 },
+            head: editor::CursorPos { line: 1, col: 3 },
+        });
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("Z".into())));
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "aZdef\ngZjkl\n",
+            "块内逐行替换 [c0,c1)"
+        );
+
+        // 块态下剪切流：Delete 臂删块（剪贴板 Task 被 dispatch 丢弃）。
+        // 行0 此时为 "aZdef"，块 [1..4)="Zde" 被删 → "af"
+        app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+            anchor: editor::CursorPos { line: 0, col: 1 },
+            head: editor::CursorPos { line: 0, col: 4 },
+        });
+        dispatch(&mut app, Message::CutRequested);
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "af\ngZjkl\n",
+            "剪切删除块内容并清块"
+        );
+        assert!(!app.cur_handle.borrow().has_block());
+    }
+
     /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
     fn key_f5() -> Option<Message> {
         use iced::keyboard::{self, key::Named};

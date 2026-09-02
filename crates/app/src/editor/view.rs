@@ -424,6 +424,34 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
+        // 第 67 轮 ⑮：列块高亮——逐行画 [c0, c1) 段 quad，颜色与单选区
+        // 同族（互斥状态不会同帧出现）。短行自动到行尾：x1 取该行实际
+        // 列宽 min(c1) 的像素。
+        if let Some((r0, r1, c0, c1)) = core.active_block() {
+            for line in r0..=r1 {
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                let text = core.line_text(line);
+                let cols = text.chars().count();
+                let x0 = core.px_of(line, &text, c0.min(cols));
+                let x1 = core.px_of(line, &text, c1.min(cols).max(c0.min(cols)));
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + gutter_w + x0 - scroll_left,
+                            y,
+                            width: (x1 - x0).max(char_w * 0.4),
+                            height: lh,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.selection,
+                );
+            }
+        }
+
         // 括号匹配高亮（第 61 轮）：光标邻接括号时，两侧括号各画一条
         // 2px 下划线（A 层 quad，随掩码裁剪；查询带光标键控缓存，
         // 命中帧零扫描）。括号恒 ASCII 单列，宽 = char_w。
@@ -936,6 +964,16 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     {
                         let mut core = self.core.borrow_mut();
                         let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                        // 第 67 轮 ⑮：Alt+Shift+按下 = 列块拖拽建块
+                        if core.mods.contains(iced_mods_alt_shift()) {
+                            core.begin_block_select(hit);
+                            shell.publish(crate::Message::EditorNavChanged);
+                            shell.request_redraw();
+                            shell.capture_event();
+                            return;
+                        }
+                        // 普通点击退出块态（与单选区互斥）
+                        core.clear_block();
                         core.dragging = true;
                         core.anchor = None;
                         core.cursor = hit;
@@ -1013,6 +1051,29 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     return;
                 }
 
+                // 第 67 轮 ⑮：列块拖拽中——更新对角（复用贴缘自动推进），
+                // 与普通拖选互斥，走完即返回
+                if core.block_dragging {
+                    let (dx_cols, dy_lines) = core.edge_scroll_delta(
+                        pos.x - bounds.x,
+                        pos.y - bounds.y,
+                        bounds.width,
+                        bounds.height,
+                    );
+                    if dx_cols != 0.0 {
+                        core.scroll_by_columns(dx_cols);
+                    }
+                    if dy_lines != 0.0 {
+                        core.scroll_by_lines(dy_lines);
+                    }
+                    let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                    core.update_block_select(hit);
+                    drop(core);
+                    shell.publish(crate::Message::EditorNavChanged);
+                    shell.request_redraw();
+                    return;
+                }
+
                 if !core.is_dragging() {
                     return;
                 }
@@ -1046,6 +1107,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 let mut core = self.core.borrow_mut();
+                // 第 67 轮 ⑮：块拖拽收尾——空块自动清除，有效块保留
+                core.finish_block_select();
                 core.dragging = false;
                 core.scrollbar_grab = None;
                 core.hscrollbar_grab = None;
@@ -1185,6 +1248,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             mouse::Interaction::None
         }
     }
+}
+
+/// Alt+Shift 修饰组合（第 67 轮 ⑮ 列块拖拽的触发判定）。
+fn iced_mods_alt_shift() -> iced::keyboard::Modifiers {
+    iced::keyboard::Modifiers::ALT | iced::keyboard::Modifiers::SHIFT
 }
 
 

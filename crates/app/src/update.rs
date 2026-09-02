@@ -297,6 +297,10 @@ impl Editpad {
 
             // ---------- 剪贴板（P4） ----------
             Message::CopyRequested => {
+                // 第 67 轮 ⑮：列块态优先复制块内容（各行 \n 连接）
+                if let Some(text) = self.cur_handle.borrow().block_copy_text() {
+                    return iced::clipboard::write(text);
+                }
                 let Some(text) = self.cur_handle.borrow().selected_text() else {
                     return Task::none();
                 };
@@ -349,6 +353,15 @@ impl Editpad {
                 Task::none()
             }
             Message::CutRequested => {
+                // 第 67 轮 ⑮：列块剪切 = 复制块内容 + 经编辑入口删块
+                // （同步递归 update，置脏/自动保存调度全继承——Pasted 先例）
+                let block_text = self.cur_handle.borrow().block_copy_text();
+                if let Some(text) = block_text {
+                    let write: Task<Message> = iced::clipboard::write(text);
+                    let edit =
+                        self.update(Message::Edit(EditOp::Delete));
+                    return write.chain(edit);
+                }
                 let Some(text) = self.cur_handle.borrow().selected_text() else {
                     return Task::none();
                 };
@@ -682,6 +695,15 @@ impl Editpad {
                         return Task::done(Message::HotkeyCaptureKey(combo));
                     }
                     return Task::none();
+                }
+                // 第 67 轮 ⑮：列块选区时 Esc 先清块并消费按键
+                // （不与热键捕获/状态栏菜单的 Esc 语义叠加）。同步清除 +
+                // CancelBlock 消息幂等兜底（架构惯例走编辑入口）
+                if let keyboard::Key::Named(Named::Escape) = &key {
+                    if self.cur_handle.borrow().has_block() {
+                        self.cur_handle.borrow_mut().clear_block();
+                        return Task::done(Message::Edit(EditOp::CancelBlock));
+                    }
                 }
                 match handle_key(key, modifiers, &self.settings.hotkeys) {
                     Some(message) => Task::done(message),
@@ -1686,6 +1708,14 @@ impl Editpad {
         // 第 63 轮起 hint 升级为 String：插入日期时间等动态反馈不再
         // 需要 'static（曾用 leak() 属内存泄漏，已纠正）
         let mut hint: Option<String> = None;
+        // 第 67 轮 ⑮：列块态只在白名单三臂内存活（输入/退格/删除走块
+        // 分支），其余任何编辑动作先清块——单点收口防漏清
+        if !matches!(
+            op,
+            E::InsertText(_) | E::Backspace | E::Delete | E::CancelBlock
+        ) {
+            self.cur_handle.borrow_mut().clear_block();
+        }
         // P38：撤销/重做后内容是否恰好回到落盘基线（打字/删除路径不查询，
         // 维持保守置脏，避免大文档每键全量比对）
         let mut back_to_saved = false;
@@ -1719,16 +1749,35 @@ impl Editpad {
                 changed
             }
             E::InsertText(text) => {
-                editor.insert_str(&text);
-                true
+                // 第 67 轮 ⑮：列块态下输入 = 逐行替换块内容（v1 单行文本）
+                if editor.has_block() {
+                    editor.insert_into_block(&text)
+                } else {
+                    editor.insert_str(&text);
+                    true
+                }
             }
             E::Backspace => {
-                editor.backspace();
-                true
+                // 列块态下退格 = 删块内容
+                if editor.has_block() {
+                    editor.delete_block_content()
+                } else {
+                    editor.backspace();
+                    true
+                }
             }
             E::Delete => {
-                editor.delete_forward();
-                true
+                if editor.has_block() {
+                    editor.delete_block_content()
+                } else {
+                    editor.delete_forward();
+                    true
+                }
+            }
+            E::CancelBlock => {
+                // 第 67 轮 ⑮：Esc 取消列块（固定语义不入注册表）
+                editor.clear_block();
+                false
             }
             // ---------- 行操作套件（第 57 轮） ----------
             E::DeleteLines => editor.delete_current_lines(),
