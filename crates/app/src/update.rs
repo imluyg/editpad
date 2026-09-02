@@ -672,13 +672,29 @@ impl Editpad {
 
             // ---------- 顶部菜单栏（第 69 轮） ----------
             Message::MenuToggled(idx) => {
-                // 同项再点关闭，异项切换（互斥展开）
+                // 同项再点关闭，异项切换（互斥展开）。
+                // 第 70 轮：打开瞬间**冻结锚点**——悬停位置此后继续变化
+                // （含背板 on_move）不再影响已展开浮层的位置（修「弹窗
+                // 会移动」：旧实现锚点实时读悬停点，展开期间漂移）
+                self.menubar_anchor = self.menubar_pos;
                 self.menu_bar_open =
                     if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
                 Task::none()
             }
             Message::MenubarHovered(pos) => {
                 self.menubar_pos = (pos.x, pos.y);
+                Task::none()
+            }
+            // 背板点击：菜单栏条带内 = 横移切换到目标菜单；条带外 = 收起
+            Message::MenubarPressed => {
+                if self.menubar_pos.1 < MENU_BAR_H {
+                    let idx = menubar_slot_idx(self.menubar_pos.0);
+                    self.menubar_anchor = self.menubar_pos;
+                    self.menu_bar_open =
+                        if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
+                } else {
+                    self.menu_bar_open = None;
+                }
                 Task::none()
             }
 

@@ -1456,35 +1456,9 @@ impl Editpad {
         )
         .on_move(|p| Message::MenubarHovered(p));
 
-        // P57：工具栏换全局中性按钮；第 69 轮精简——另存为/MD 预览/
-        // 跳转到行/最近文件收编进顶部菜单栏，只留最高频四入口 + 置脏指示
-        let toolbar = row![
-            button(text("打开…").size(uipx).font(uifont))
-                .padding([4, 12])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy).then_some(Message::OpenRequested)),
-            button(text("保存").size(uipx).font(uifont))
-                .padding([4, 12])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy && self.tab().dirty)
-                    .then_some(Message::SaveRequested)),
-            button(text("查找/替换").size(uipx).font(uifont))
-                .padding([4, 12])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy).then_some(Message::FindToggled)),
-            // P27：设置弹窗入口（busy 时禁开，与其余工具栏按钮同一守卫）
-            button(text("设置").size(uipx).font(uifont))
-                .padding([4, 12])
-                .style(chrome_button_style)
-                .on_press_maybe((!self.busy).then_some(Message::SettingsToggled)),
-            text(if self.tab().dirty { "● 未保存" } else { "" })
-                .size(uipx)
-                .font(uifont)
-                .color([0.85, 0.55, 0.1]),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .padding([8, 10]);
+        // 第 70 轮：工具栏整体移除——打开/保存/查找/设置全部由顶部菜单
+        // 栏承载（用户裁决：与文件菜单重复）；置脏指示由标签页 ● 前缀
+        // （P21）与标题栏承担。查找/替换快捷入口 = Ctrl+F 与编辑菜单。
 
         // P21 标签条：恒显示（单页也给出「当前文件名」的可见反馈）。
         // 点击切换；置脏页带 ● 前缀；活动页加 ▸ 指示；固定页加 📌（P28）。
@@ -1493,7 +1467,7 @@ impl Editpad {
         // 右键无人捕获，落到 on_right_press。
         // P39：整条标签条再包一层 mouse_area 跟踪指针位置（浮层菜单
         // 锚点数据源；只在标签条悬停时产生消息，量级可忽略）。
-        let mut body = column![menubar, toolbar, rule::horizontal(1)];
+        let mut body = column![menubar, rule::horizontal(1)];
         {
             let mut strip = row![].spacing(2).padding([4, 6]);
             for (i, tab) in self.tabs.iter().enumerate() {
@@ -1965,10 +1939,9 @@ impl Editpad {
         let cursor = self.cur_handle.borrow().cursor;
         // P67：行尾短标签（主导行尾随文档实时读取）
         let eol = eol_label(self.cur_handle.borrow().doc.line_ending());
-        // 第 69 轮：状态栏重构为**固定分区**布局（对齐主流编辑器参考稿）
-        // ——左侧统计组（长度/行数/行/列/位置）与右侧组（选区/行尾/编码）
-        // 槽位固定，中间用弹性路径段吸收余量：选词出现/消失不再推挤任何
-        // 段落（旧布局的痛点）。位置 = 光标全文字符偏移 +1（VS Code 口径）。
+        // 第 70 轮：状态栏再排——文件路径移到**最左**并定宽截断（超长
+        // 加省略号），随后竖线分隔：路径 │ 统计组(弹性吸收) │ 右组
+        // （选区定宽/行尾/编码）。两条竖线位置固定，两侧互不影响。
         let (doc_chars, line_count, sel_chars, cur_off) = {
             let ed = self.cur_handle.borrow();
             (
@@ -1978,23 +1951,32 @@ impl Editpad {
                 ed.cursor_offset(),
             )
         };
+        let path_full = self
+            .tab()
+            .path
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| format!("({})", self.tab().base_name()));
+        let path_show = {
+            const MAX: usize = 40;
+            let chars: Vec<char> = path_full.chars().collect();
+            if chars.len() > MAX {
+                format!("…{}", chars[chars.len() - MAX..].iter().collect::<String>())
+            } else {
+                path_full.clone()
+            }
+        };
         let status_bar = row![
+            text(path_show).size(uipx).font(uifont).width(280),
+            rule::vertical(1),
             text(format!("长度: {doc_chars}")).size(uipx).font(uifont),
             text(format!("行数: {line_count}")).size(uipx).font(uifont),
             text(format!("行: {}", cursor.line + 1)).size(uipx).font(uifont),
             text(format!("列: {}", cursor.col + 1)).size(uipx).font(uifont),
             text(format!("位置: {cur_off}")).size(uipx).font(uifont),
-            // 弹性段：路径（未命名页显示占位名），吸收中部全部余量
-            text(
-                self.tab()
-                    .path
-                    .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| format!("({})", self.tab().base_name()))
-            )
-            .size(uipx)
-            .font(uifont)
-            .width(Fill),
+            // 弹性段吸收中部余量：左右两组竖线位置恒定
+            text("").width(Fill),
+            rule::vertical(1),
             // 选区段：定宽占位（无选区显示占位空白），保证右侧组零推移
             container(
                 text(match sel_chars {
@@ -2023,7 +2005,7 @@ impl Editpad {
             .style(chrome_button_style)
             .on_press_maybe((!self.busy).then_some(Message::ToggleEncodingMenu)),
         ]
-        .spacing(16)
+        .spacing(12)
         .align_y(Alignment::Center)
         .padding([6, 10]);
 
@@ -2101,15 +2083,20 @@ impl Editpad {
 
     // ---------- 第 69 轮：顶部菜单栏浮层 ----------
 
-    /// 菜单栏浮层：整窗透明背板（点击/Esc 经 BarsDismissed 收起）+
-    /// 锚在触发按钮下方的卡片（x 取菜单栏悬停位置、y 固定菜单栏下缘，
-    /// 贴边钳制复用 P39）。卡片高度按窗口钳制 + 内部滚动（P44 同款）。
+    /// 菜单栏浮层：整窗透明背板 + 锚在触发按钮槽位下方的卡片。
+    ///
+    /// 第 70 轮修订（用户反馈「弹窗会移动」）：
+    /// * 锚点读**展开瞬间冻结**的 menubar_anchor，且 x 对齐到按钮槽位
+    ///   左缘（menubar_slot_idx 反推）——同一菜单无论点按钮哪个部位、
+    ///   展开期间鼠标怎么动，浮层位置恒定；
+    /// * 背板 on_move 跟踪指针 + on_press 时若落在菜单栏条带内 → 视为
+    ///   点击另一菜单（MenuToggled 切换，主流横移手感），否则收起。
     fn menubar_overlay(&self, idx: usize) -> Element<'_, Message> {
         const W: f32 = 240.0;
-        const MENU_BAR_H: f32 = 36.0;
         let card_h = ctx_menu_card_h(self.viewport_size.1).min(380.0);
+        let slot_x = MENU_BAR_LEFT + menubar_slot_idx(self.menubar_anchor.0) as f32 * MENU_SLOT_W;
         let (ax, ay) = clamp_menu_anchor(
-            (self.menubar_pos.0 - 12.0, MENU_BAR_H),
+            (slot_x, MENU_BAR_H),
             self.viewport_size,
             W,
             card_h,
@@ -2132,7 +2119,8 @@ impl Editpad {
                 .align_y(iced::alignment::Vertical::Top)
                 .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
         )
-        .on_press(Message::BarsDismissed)
+        .on_move(|p| Message::MenubarHovered(p))
+        .on_press(Message::MenubarPressed)
         .into()
     }
 

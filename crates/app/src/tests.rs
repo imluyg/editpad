@@ -2811,14 +2811,42 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 开 → 同项关 → 异项切换（互斥展开）
         dispatch(&mut app, Message::MenuToggled(0));
         assert_eq!(app.menu_bar_open, Some(0));
+        // 第 70 轮：打开瞬间冻结锚点——此后悬停变化不影响已展开浮层
+        assert_eq!(app.menubar_anchor, (64.0, 10.0));
+        dispatch(&mut app, Message::MenubarHovered(iced::Point::new(200.0, 10.0)));
+        assert_eq!(app.menubar_pos, (200.0, 10.0));
+        assert_eq!(app.menubar_anchor, (64.0, 10.0), "展开期间锚点冻结");
         dispatch(&mut app, Message::MenuToggled(0));
         assert_eq!(app.menu_bar_open, None);
         dispatch(&mut app, Message::MenuToggled(1));
         dispatch(&mut app, Message::MenuToggled(2));
         assert_eq!(app.menu_bar_open, Some(2), "异项直接切换");
-        // 背板收起（BarsDismissed 现有语义覆盖菜单浮层）
+        // 背板点击落在菜单栏条带内（y < 36）→ 横移切换到目标槽位：
+        // 当前开 2，点槽位 0（异项）→ 切到 0；再点槽位 0（同项）→ 关闭
+        dispatch(&mut app, Message::MenubarHovered(iced::Point::new(16.0, 10.0)));
+        dispatch(&mut app, Message::MenubarPressed);
+        assert_eq!(app.menu_bar_open, Some(0), "条带内异项=横移切换");
+        dispatch(&mut app, Message::MenubarHovered(iced::Point::new(16.0, 10.0)));
+        dispatch(&mut app, Message::MenubarPressed);
+        assert_eq!(app.menu_bar_open, None, "条带内同项=关闭");
+        // 背板点击落在条带外（y ≥ 36）→ 收起
+        dispatch(&mut app, Message::MenuToggled(3));
+        dispatch(&mut app, Message::MenubarHovered(iced::Point::new(120.0, 200.0)));
+        dispatch(&mut app, Message::MenubarPressed);
+        assert_eq!(app.menu_bar_open, None, "条带外=收起");
+        // Esc（BarsDismissed）同样收起
+        dispatch(&mut app, Message::MenuToggled(3));
         dispatch(&mut app, Message::BarsDismissed);
         assert_eq!(app.menu_bar_open, None);
+    }
+
+    #[test]
+    fn menubar_slot_idx_math() {
+        // 槽位反推：左缘/中部/越左越右钳制
+        assert_eq!(menubar_slot_idx(MENU_BAR_LEFT), 0);
+        assert_eq!(menubar_slot_idx(MENU_BAR_LEFT + MENU_SLOT_W * 2.5), 2);
+        assert_eq!(menubar_slot_idx(0.0), 0, "越左钳到槽 0");
+        assert_eq!(menubar_slot_idx(9999.0), 4, "越右钳到槽 4");
     }
 
     #[test]

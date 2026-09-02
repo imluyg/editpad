@@ -131,6 +131,9 @@ enum Message {
     MenuToggled(usize),
     /// 指针在菜单栏条上移动（浮层菜单锚点数据源，仿标签条 P39 模式）
     MenubarHovered(Point),
+    /// 菜单浮层背板被点击：落点在菜单栏条带内 = 切换到该菜单（主流
+    /// 横移手感），否则收起（第 70 轮，位置取 MenubarHovered 最近值）
+    MenubarPressed,
 
     /// 可见区高亮缺档超内联预算，请求安排后台分批补建（P12）。
     /// 同代在途时应用层幂等跳过，重复发布无害。
@@ -1453,6 +1456,9 @@ struct Editpad {
     menu_bar_open: Option<usize>,
     /// 菜单栏条上最近指针位置（浮层菜单锚点）
     menubar_pos: (f32, f32),
+    /// 第 70 轮：展开瞬间的冻结锚点（浮层位置只读它——展开期间悬停
+    /// 变化不影响已打开菜单的位置）
+    menubar_anchor: (f32, f32),
 
     // ---------- 外观 ----------
     dark_mode: bool,
@@ -1525,6 +1531,7 @@ impl Default for Editpad {
             closed_stack: Vec::new(),
             menu_bar_open: None,
             menubar_pos: (12.0, 8.0),
+            menubar_anchor: (12.0, 8.0),
             dark_mode: false,
             preview_visible: false,
             // P25：初始页即「未命名1」，下一个新页为「未命名2」
@@ -1558,8 +1565,21 @@ const CTX_MENU_H: f32 = 280.0;
 /// `vh − 16`（上下各留 8px 边距），内容超高时卡片内部滚动；
 /// 窗口高度未知/过小（首帧或极小窗）回退常量估高（仍保证 ≤ 全高，
 /// 永不盖满界面）。纯函数可单测。
-fn ctx_menu_card_h(vh: f32) -> f32 {
-    if vh > 48.0 {
+// ---------- 第 70 轮：菜单栏槽位几何 ----------
+
+/// 菜单栏按钮槽宽与左缘（与 view.rs 菜单栏布局耦合：五按钮同宽 2 字
+/// 文本 + padding [3,12] + 1px 边框 + spacing 2；布局改动需同步）。
+pub(crate) const MENU_SLOT_W: f32 = 54.0;
+pub(crate) const MENU_BAR_LEFT: f32 = 6.0;
+/// 菜单栏条带高度（浮层背板据此判定「点击落在菜单栏上=切换菜单」）。
+pub(crate) const MENU_BAR_H: f32 = 36.0;
+
+/// 悬停 x → 所属菜单槽位序号（0..=4，纯函数可单测）。
+pub(crate) fn menubar_slot_idx(x: f32) -> usize {
+    (((x - MENU_BAR_LEFT) / MENU_SLOT_W).floor().max(0.0) as usize).min(4)
+}
+
+fn ctx_menu_card_h(vh: f32) -> f32 {    if vh > 48.0 {
         (vh - 16.0).min(CTX_MENU_H)
     } else {
         CTX_MENU_H
