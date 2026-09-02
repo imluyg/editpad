@@ -431,3 +431,144 @@ fn ensure_measured_char_width_measures_and_dedups() {
     let w20 = core.measured_char_w.expect("换字号重测不应失败");
     assert!((w20 / 20.0 - w / 16.0).abs() < 0.05, "倍率应守恒 {w20}");
 }
+
+// ---------- P69 渲染帧成本基线（此前无任何帧耗时数据） ----------
+
+#[test]
+fn render_frame_cost_is_bounded_on_large_document() {
+    // 虚拟化契约的帧成本体检（P69）：10 万行文档上**稳态帧**（同一
+    // Renderer/Tree 连续滚动渲染，字形缓存温热——与真实应用渲染循环
+    // 同构）应只随**可见行数**（~20 行）变化，与文档总大小无关。
+    // P42 行级布局注入（每帧对可见行 shaping）与 P66 三层裁剪都作用
+    // 在这条路径上，此处建立首个帧耗时基线。冷启动帧（全新 Renderer、
+    // 字形缓存全冷）单测另测不设上限，只打印供参考。
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        let doc: String = (0..100_000)
+            .map(|i| format!("第{i}行 内容若干 中英混排 token\n"))
+            .collect();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+    }
+
+    let (w, h) = (700u32, 500u32);
+    let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+
+    // 冷启动帧：全新 Renderer（字形缓存全冷），只打印不设限
+    {
+        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut tree = Tree::empty();
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let t = std::time::Instant::now();
+        view.draw(&tree, &mut renderer, &Theme::Light,
+            &iced::advanced::renderer::Style::default(), lyt,
+            mouse::Cursor::Unavailable, &viewport_rect);
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &vec![viewport_rect], Color::WHITE);
+        eprintln!(
+            "[P69] 冷启动帧（全新 Renderer）= {:.2} ms（参考值，不设限）",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    // 稳态帧：同一 Renderer/Tree/视图连续滚动渲染（真实渲染循环同构）
+    let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let mut tree = Tree::empty();
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+
+    // 预热 2 帧让字形缓存温热（每帧先 reset 清层栈——真实渲染循环同款）
+    for k in 0..2 {
+        renderer.reset(viewport_rect);
+        core.borrow_mut().scroll_top = 50_000.0 + k as f32;
+        view.draw(&tree, &mut renderer, &Theme::Light,
+            &iced::advanced::renderer::Style::default(), lyt,
+            mouse::Cursor::Unavailable, &viewport_rect);
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    }
+
+    let mut samples = Vec::new();
+    let mut draw_times = Vec::new();
+    let mut raster_times = Vec::new();
+    for k in 0..5 {
+        renderer.reset(viewport_rect);
+        core.borrow_mut().scroll_top = 50_100.0 + k as f32 * 7.5;
+        let t = std::time::Instant::now();
+        view.draw(&tree, &mut renderer, &Theme::Light,
+            &iced::advanced::renderer::Style::default(), lyt,
+            mouse::Cursor::Unavailable, &viewport_rect);
+        let draw = t.elapsed();
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        draw_times.push(draw);
+        raster_times.push(t.elapsed() - draw);
+        samples.push(t.elapsed());
+    }
+    samples.sort();
+    let median = samples[2];
+    eprintln!(
+        "[P69] 10 万行文档稳态帧中位数 = {:.2} ms（样本 {:?}）",
+        median.as_secs_f64() * 1000.0,
+        samples
+    );
+    eprintln!(
+        "[P69] 分解：view.draw 中位 {:.2} ms / 光栅中位 {:.2} ms",
+        draw_times.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::MAX, f64::min),
+        raster_times.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::MAX, f64::min),
+    );
+    // 虚拟化契约钉住：我们控制的 view.draw 必须 O(可见行)——10 万行文档
+    // 上仍应为亚毫秒级。光栅（renderer.draw）成本在上游 tiny-skia/swash
+    // （忙机器实测 ~6ms/可见行、空帧 ~11ms，与第 52 轮 highlight 2× 同源
+    // 的机器状态敏感），只打印观测不设硬上限，建议安静机器复测建立
+    // 真实基线（P41 CPU 软渲染取舍的量化数据）。
+    let draw_median = {
+        let mut d = draw_times.clone();
+        d.sort();
+        d[2]
+    };
+    eprintln!(
+        "[P69] view.draw 中位 = {:.2} ms（虚拟化契约：10 万行文档上应 <5ms）",
+        draw_median.as_secs_f64() * 1000.0
+    );
+    assert!(
+        draw_median < std::time::Duration::from_millis(5),
+        "view.draw {:?} 超出虚拟化契约（帧成本随文档规模增长？）",
+        draw_median
+    );
+
+    // 判别实验：空文档（1 空行）同管线光栅成本——若与 10 万行相近，
+    // 则成本为每帧结构开销（层/掩码/背景）而非文档规模
+    let tiny = EditorHandle::default();
+    let mut tiny_view = EditorView { core: tiny.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let mut tiny_tree = Tree::empty();
+    let tiny_node = tiny_view.layout(&mut tiny_tree, &renderer, &limits);
+    let tiny_lyt = Layout::new(&tiny_node);
+    let mut tiny_raster = Vec::new();
+    for _ in 0..5 {
+        renderer.reset(viewport_rect);
+        let t = std::time::Instant::now();
+        tiny_view.draw(&tiny_tree, &mut renderer, &Theme::Light,
+            &iced::advanced::renderer::Style::default(), tiny_lyt,
+            mouse::Cursor::Unavailable, &viewport_rect);
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        tiny_raster.push(t.elapsed());
+    }
+    tiny_raster.sort();
+    eprintln!(
+        "[P69] 空文档同管线帧中位 = {:.2} ms（判别：接近大文档 → 结构开销主导；远小 → 字形/文档规模主导）",
+        tiny_raster[2].as_secs_f64() * 1000.0
+    );
+}
