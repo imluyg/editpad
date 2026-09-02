@@ -1857,6 +1857,25 @@ fn p66_fractional_scroll_top_survives_clamp() {
     }
 
     #[test]
+    fn duplicate_last_real_line_of_trailing_newline_doc_no_blank_line() {
+        // P80 勘误（第 60 轮书签测试揪出）：文档以换行收尾时，末真实行
+        // 的块文本自带行尾，旧判定 end<len 误判「块无行尾」误补行尾，
+        // 副本前凭空多出一个空行。钉死正确形态防回退。
+        let mut c = core_with("one\ntwo\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        assert!(c.duplicate_current_lines());
+        assert_eq!(c.doc.to_text(), "one\ntwo\ntwo\n");
+        assert_eq!(c.cursor.line, 2, "光标落到副本首行");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "one\ntwo\n");
+        // 末真实行为空行时同样成立（复制出独立空行，而非两个）
+        let mut d = core_with("x\n\n");
+        d.cursor = CursorPos { line: 1, col: 0 };
+        assert!(d.duplicate_current_lines());
+        assert_eq!(d.doc.to_text(), "x\n\n\n");
+    }
+
+    #[test]
     fn move_line_swaps_with_neighbor_respects_boundaries_and_undo() {
         let mut c = core_with("a\nb\nc");
         c.cursor = CursorPos { line: 1, col: 0 };
@@ -2163,6 +2182,323 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(f.doc.to_text(), "dup\r\nx", "去重同样逐字节保留行内容");
     }
 
+    // ---------- 第 60 轮：书签套件 ----------
+
+    #[test]
+    fn bookmark_toggle_and_query_basics() {
+        let mut c = core_with("alpha\nbeta\ngamma\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        assert!(c.toggle_bookmark());
+        assert!(c.is_bookmarked(1));
+        assert_eq!(c.bookmarked_lines(), vec![1]);
+        // 再按一次 = 摘除
+        assert!(!c.toggle_bookmark());
+        assert!(!c.is_bookmarked(1));
+        assert!(c.bookmarked_lines().is_empty());
+        // 多行标记仍按升序返回
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.toggle_bookmark();
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.toggle_bookmark();
+        assert_eq!(c.bookmarked_lines(), vec![0, 2]);
+    }
+
+    #[test]
+    fn bookmark_next_prev_wrap_and_stay() {
+        let mut c = core_with("l0\nl1\nl2\nl3\nl4\n");
+        // 无书签：跳转 no-op
+        assert!(!c.next_bookmark(true));
+        assert_eq!(c.cursor.line, 0);
+        c.cursor = CursorPos { line: 1, col: 3 };
+        c.toggle_bookmark(); // bm {1}
+        c.cursor = CursorPos { line: 3, col: 0 };
+        c.toggle_bookmark(); // bm {1,3}
+        // 向后：3 → 回绕 1，落行首、清选区
+        assert!(c.next_bookmark(true));
+        assert_eq!(c.cursor.line, 1);
+        assert_eq!(c.cursor.col, 0, "跳转落行首");
+        assert!(c.anchor.is_none());
+        // 再向后：1 → 3（正常前进）
+        assert!(c.next_bookmark(true));
+        assert_eq!(c.cursor.line, 3);
+        // 向前：3 → 1；再向前：1 → 无更前 → 回绕 3
+        assert!(c.next_bookmark(false));
+        assert_eq!(c.cursor.line, 1);
+        assert!(c.next_bookmark(false));
+        assert_eq!(c.cursor.line, 3);
+        // 唯一书签恰为当前行：两个方向都原地不动
+        c.clear_bookmarks();
+        c.cursor = CursorPos { line: 2, col: 1 };
+        c.toggle_bookmark(); // bm {2}，光标就在行 2
+        assert!(!c.next_bookmark(true));
+        assert_eq!(c.cursor.line, 2);
+        assert!(!c.next_bookmark(false));
+        assert_eq!(c.cursor.line, 2);
+        // 清空后再跳 no-op；空集合清除幂等 false
+        assert!(c.clear_bookmarks());
+        assert!(!c.next_bookmark(true));
+        assert!(!c.clear_bookmarks());
+    }
+
+    #[test]
+    fn bookmark_toggle_enters_undo_history() {
+        let mut c = core_with("a\nb\n");
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.toggle_bookmark(); // 快照1 {bm:{}} → bm {0}
+        c.insert_str("x"); // 快照2 {bm:{0}} → "xa\nb\n"
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.toggle_bookmark(); // 快照3 {bm:{0}} → bm {0,1}
+        assert_eq!(c.bookmarked_lines(), vec![0, 1]);
+        // 撤销书签开关：bm 回到 {0}（开关本身可撤销）
+        c.undo();
+        assert_eq!(c.bookmarked_lines(), vec![0]);
+        // 撤销打字：打字快照同样携带书签，bm 保持 {0}
+        c.undo();
+        assert_eq!(c.bookmarked_lines(), vec![0]);
+        assert_eq!(c.doc.to_text(), "a\nb\n");
+        // 撤销第一个开关：bm 回到空
+        c.undo();
+        assert!(c.bookmarked_lines().is_empty());
+        assert!(!c.undo(), "撤销栈已空");
+    }
+
+    #[test]
+    fn copy_marked_lines_order_dominant_eol_and_trailing_newline() {
+        let mut c = core_with("one\r\ntwo\r\nthree\r\n"); // CRLF 主导
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.toggle_bookmark();
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.toggle_bookmark();
+        // 升序输出、主导行尾、每行带行尾（粘贴到他处保持整行语义）
+        assert_eq!(c.copy_bookmarked_lines().unwrap(), "one\r\nthree\r\n");
+        // LF 主导 + emoji/CJK 行正文原样
+        let mut d = core_with("🦀\n中\nx\n");
+        d.cursor = CursorPos { line: 1, col: 0 };
+        d.toggle_bookmark();
+        assert_eq!(d.copy_bookmarked_lines().unwrap(), "中\n");
+        // 无书签 None；空文档唯一空行被标 = 空正文行仍产行尾
+        assert!(core_with("a\n").copy_bookmarked_lines().is_none());
+        let mut e = core_with("");
+        e.toggle_bookmark();
+        assert_eq!(e.copy_bookmarked_lines().unwrap(), "\n");
+    }
+
+    #[test]
+    fn remove_marked_lines_disjoint_runs_and_undo_restores() {
+        let mut c = core_with("a\nb\nc\nd\ne\nf\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.toggle_bookmark(); // 1
+        c.cursor = CursorPos { line: 3, col: 0 };
+        c.toggle_bookmark(); // 3（与 4 连续成段）
+        c.cursor = CursorPos { line: 4, col: 0 };
+        c.toggle_bookmark(); // bm {1,3,4}
+        assert!(c.remove_bookmarked_lines());
+        assert_eq!(c.doc.to_text(), "a\nc\nf\n", "不连续段整段删除");
+        assert!(c.bookmarked_lines().is_empty(), "被删的正是全部书签行");
+        assert_eq!(c.cursor.line, 1, "光标落在首个被删段起点");
+        // 撤销：文本与书签一并找回
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "a\nb\nc\nd\ne\nf\n");
+        assert_eq!(c.bookmarked_lines(), vec![1, 3, 4]);
+        // 无书签 no-op 不产快照
+        assert!(c.clear_bookmarks());
+        let depth = c.undo_stack.len();
+        assert!(!c.remove_bookmarked_lines());
+        assert_eq!(c.undo_stack.len(), depth, "no-op 不得入栈");
+    }
+
+    #[test]
+    fn remove_marked_lines_crlf_last_real_line_and_phantom() {
+        // 末真实行被标：块区间含其行尾，删除后前文的尾随换行保持
+        //（与 Ctrl+L 同区间口径）
+        let mut c = core_with("1\r\n2\r\n3\r\n");
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.toggle_bookmark();
+        assert!(c.remove_bookmarked_lines());
+        assert_eq!(c.doc.to_text(), "1\r\n2\r\n");
+        // 幻影末行单独被标：退化为吃掉前面的换行单元
+        let mut d = core_with("x\ny\n");
+        d.cursor = CursorPos { line: 2, col: 0 };
+        d.toggle_bookmark();
+        assert!(d.remove_bookmarked_lines());
+        assert_eq!(d.doc.to_text(), "x\ny");
+        // 空文档唯一空行被标：无可删
+        let mut e = core_with("");
+        e.toggle_bookmark();
+        assert!(!e.remove_bookmarked_lines());
+        assert_eq!(e.doc.to_text(), "");
+    }
+
+    #[test]
+    fn bookmark_remap_on_typing_newlines_and_selection_replace() {
+        // 上方插行：书签下移
+        let mut c = core_with("a\nb\nc\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.toggle_bookmark(); // bm{1}
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.insert_str("x\n");
+        assert_eq!(c.doc.to_text(), "x\na\nb\nc\n");
+        assert_eq!(c.bookmarked_lines(), vec![2]);
+        // 下方插行：不动
+        c.cursor = CursorPos { line: 4, col: 0 };
+        c.insert_str("\n");
+        assert_eq!(c.bookmarked_lines(), vec![2]);
+        // 跨行选区替换变体 A：选区含终点行首字符（r3 后缀幸存）
+        // → 终点行书签并入结果行，被替换内容（r1）的书签消失
+        let mut d = core_with("r0\nr1\nr2\nr3\nr4\n");
+        d.cursor = CursorPos { line: 1, col: 0 };
+        d.toggle_bookmark(); // r1（将被替换掉的内容）
+        d.cursor = CursorPos { line: 3, col: 0 };
+        d.toggle_bookmark(); // r3（后缀幸存）
+        d.cursor = CursorPos { line: 1, col: 0 };
+        d.anchor = Some(CursorPos { line: 3, col: 1 });
+        d.insert_str("Z");
+        assert_eq!(d.doc.to_text(), "r0\nZ3\nr4\n");
+        assert_eq!(d.bookmarked_lines(), vec![1], "r3 的书签并入结果行，r1 的随内容消失");
+        // 变体 B：选区止于终点行行首（该行不算触及、整行并入结果行）
+        // → 其书签同样并入结果行；起点行整行被吃 → 自身书签丢弃
+        let mut e = core_with("r0\nr1\nr2\nr3\nr4\n");
+        e.cursor = CursorPos { line: 1, col: 0 };
+        e.toggle_bookmark(); // r1
+        e.cursor = CursorPos { line: 3, col: 0 };
+        e.toggle_bookmark(); // r3
+        e.cursor = CursorPos { line: 1, col: 0 };
+        e.anchor = Some(CursorPos { line: 3, col: 0 });
+        e.insert_str("Z");
+        assert_eq!(e.doc.to_text(), "r0\nZr3\nr4\n");
+        assert_eq!(e.bookmarked_lines(), vec![1], "r3 整行并入结果行 → 书签并入行1；r1 随内容消失");
+    }
+
+    #[test]
+    fn bookmark_remap_on_line_suite_ops() {
+        // 删行（选区跨行）：区间内书签消失，下方上移
+        let mut c = core_with("0\n1\n2\n3\n4\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.toggle_bookmark();
+        c.cursor = CursorPos { line: 4, col: 0 };
+        c.toggle_bookmark(); // bm{1,4}
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.anchor = Some(CursorPos { line: 2, col: 1 });
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "3\n4\n");
+        assert_eq!(c.bookmarked_lines(), vec![1], "行1 书签随行消失，行4 上移到行1");
+        // 复制行：下方书签下推，副本不带书签
+        let mut d = core_with("a\nb\nc\n");
+        d.cursor = CursorPos { line: 0, col: 0 };
+        d.toggle_bookmark();
+        d.cursor = CursorPos { line: 2, col: 0 };
+        d.toggle_bookmark(); // bm{0,2}
+        assert!(d.duplicate_current_lines());
+        assert_eq!(d.doc.to_text(), "a\nb\nc\nc\n");
+        assert_eq!(d.bookmarked_lines(), vec![0, 2], "副本不带书签");
+        // 移行：块内书签随内容轮转
+        let mut e = core_with("p\nq\nr\ns\n");
+        e.cursor = CursorPos { line: 2, col: 0 };
+        e.toggle_bookmark(); // bm{2}（r）
+        e.cursor = CursorPos { line: 1, col: 0 };
+        assert!(e.move_current_lines(false)); // q 下移：p r q s
+        assert_eq!(e.doc.to_text(), "p\nr\nq\ns\n");
+        assert_eq!(e.bookmarked_lines(), vec![1], "r 的书签随内容上移");
+        assert!(e.move_current_lines(true)); // r 上移回：p q r s
+        assert_eq!(e.doc.to_text(), "p\nq\nr\ns\n");
+        assert_eq!(e.bookmarked_lines(), vec![2]);
+        // 相邻行书签换入块尾（上移时上行书签落到块尾位置）
+        let mut f = core_with("p\nq\nr\n");
+        f.cursor = CursorPos { line: 0, col: 0 };
+        f.toggle_bookmark(); // bm{0}（p）
+        f.cursor = CursorPos { line: 1, col: 0 };
+        assert!(f.move_current_lines(true)); // q 上移：q p r
+        assert_eq!(f.doc.to_text(), "q\np\nr\n");
+        assert_eq!(f.bookmarked_lines(), vec![1], "p 的书签随内容下移");
+    }
+
+    #[test]
+    fn bookmark_remap_on_sort_and_dedup() {
+        // 排序：书签跟随行内容（稳定排序排列反演映射）
+        let mut c = core_with("c\na\nb\n");
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.toggle_bookmark(); // c 行
+        assert!(c.sort_lines(SortOrder::Ascending));
+        assert_eq!(c.doc.to_text(), "a\nb\nc\n");
+        assert_eq!(c.bookmarked_lines(), vec![2], "书签跟着 c 行走");
+        assert!(c.sort_lines(SortOrder::Descending));
+        assert_eq!(c.doc.to_text(), "c\nb\na\n");
+        assert_eq!(c.bookmarked_lines(), vec![0]);
+        // 去重：重复项的书签随行丢弃；首现保留项书签原位
+        let mut d = core_with("x\ny\nx\nx\n");
+        d.cursor = CursorPos { line: 2, col: 0 };
+        d.toggle_bookmark(); // 第二个 x（重复项）
+        assert!(d.remove_duplicate_lines());
+        assert_eq!(d.doc.to_text(), "x\ny\n");
+        assert!(d.bookmarked_lines().is_empty(), "重复项书签随行丢弃");
+        let mut e = core_with("x\ny\nx\n");
+        e.cursor = CursorPos { line: 0, col: 0 };
+        e.toggle_bookmark(); // 首个 x（保留项）
+        assert!(e.remove_duplicate_lines());
+        assert_eq!(e.doc.to_text(), "x\ny\n");
+        assert_eq!(e.bookmarked_lines(), vec![0], "保留项书签原位");
+        // 幻影末行（块外）书签不受排序影响
+        let mut f = core_with("b\na\n");
+        f.cursor = CursorPos { line: 2, col: 0 };
+        f.toggle_bookmark(); // 幻影行
+        assert!(f.sort_lines(SortOrder::Ascending));
+        assert_eq!(f.doc.to_text(), "a\nb\n");
+        assert_eq!(f.bookmarked_lines(), vec![2], "幻影行号恒不变");
+    }
+
+    #[test]
+    fn bookmark_remap_on_merge_ops_and_replace_all() {
+        // 回退并行：两行书签取并集落在幸存行
+        let mut c = core_with("a\nb\n");
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.toggle_bookmark();
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.toggle_bookmark(); // bm{0,1}
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.backspace();
+        assert_eq!(c.doc.to_text(), "ab\n", "b 并上行 a，幻影末行保持");
+        assert_eq!(c.bookmarked_lines(), vec![0], "并集落在幸存行");
+        // 行尾 Delete 吞换行：下一行书签并入当前行
+        let mut d = core_with("a\nb\n");
+        d.cursor = CursorPos { line: 0, col: 1 };
+        d.toggle_bookmark();
+        d.delete_forward();
+        assert_eq!(d.doc.to_text(), "ab\n");
+        assert_eq!(d.bookmarked_lines(), vec![0]);
+        // 行中 Delete 不改结构：书签不动
+        let mut e = core_with("ab\ncd\n");
+        e.cursor = CursorPos { line: 1, col: 0 };
+        e.toggle_bookmark();
+        e.cursor = CursorPos { line: 0, col: 0 };
+        e.delete_forward();
+        assert_eq!(e.doc.to_text(), "b\ncd\n");
+        assert_eq!(e.bookmarked_lines(), vec![1]);
+        // 全部替换：书签清空，撤销经快照找回
+        let mut f = core_with("a\nb\n");
+        f.cursor = CursorPos { line: 1, col: 0 };
+        f.toggle_bookmark();
+        f.replace_whole_document(editpad_core::Document::from_str("zz\n"));
+        assert!(f.bookmarked_lines().is_empty());
+        assert!(f.undo());
+        assert_eq!(f.bookmarked_lines(), vec![1], "撤销找回整体替换前的书签");
+        // 加载新文档（reset）：书签清空且撤销链已清
+        let mut g = core_with("a\nb\n");
+        g.cursor = CursorPos { line: 1, col: 0 };
+        g.toggle_bookmark();
+        g.reset_document(editpad_core::Document::from_str("q\n"));
+        assert!(g.bookmarked_lines().is_empty());
+    }
+
+    #[test]
+    fn bookmark_gutter_reserves_strip_without_moving_line_numbers() {
+        // 第 60 轮：gutter = 书签条带 + 间距 + 数字宽。条带加在左侧，
+        // 行号右缘 = gutter − GUTTER_MIN 的 P66附 对齐契约不受影响
+        //（数字盒右缘相对 gutter 右缘的偏移公式未动）。
+        let c = core_with("a\nb\nc\n"); // 行数 1 位 → 取 max(3) 位
+        let expect = BOOKMARK_STRIP + GUTTER_MIN + 3.0 * c.char_width();
+        assert!((c.gutter_width() - expect).abs() < 1e-3, "gutter 公式漂移");
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，
@@ -2209,7 +2545,8 @@ fn p66_fractional_scroll_top_survives_clamp() {
         out
     }
 
-    /// 每步必跑的结构不变量：光标/锚点在界内、滚动值有限非负。
+    /// 每步必跑的结构不变量：光标/锚点在界内、滚动值有限非负、
+    /// 书签行号全部落在文档行数域内（第 60 轮）。
     fn assert_structural_invariants(c: &EditorCore) {
         assert!(
             c.cursor.col <= c.line_display_len(c.cursor.line),
@@ -2223,6 +2560,14 @@ fn p66_fractional_scroll_top_survives_clamp() {
             assert!(a.line < c.doc.line_count(), "锚点行越界");
         }
         assert!(c.scroll_top.is_finite() && c.scroll_top >= 0.0, "垂直滚动非法");
+        // 第 60 轮：书签行号界内（任何再映射漂移当场暴露）
+        for &l in &c.bookmarks {
+            assert!(
+                l < c.doc.line_count(),
+                "书签行越界：{l} / 行数 {}",
+                c.doc.line_count()
+            );
+        }
     }
 
     #[test]
@@ -2316,6 +2661,19 @@ fn p66_fractional_scroll_top_survives_clamp() {
                     95..=97 => {
                         let _ = c.undo();
                     }
+                    // 书签套件混入（第 60 轮）：开关/跳转/清除随机三选一，
+                    // 行号界内由结构不变量把关，回滚一致性由收尾对拍把关
+                    98..=98 => match rng.below(3) {
+                        0 => {
+                            c.toggle_bookmark();
+                        }
+                        1 => {
+                            let _ = c.next_bookmark(rng.below(2) == 0);
+                        }
+                        _ => {
+                            let _ = c.clear_bookmarks();
+                        }
+                    },
                     _ => {
                         let _ = c.redo();
                     }
@@ -2324,10 +2682,22 @@ fn p66_fractional_scroll_top_survives_clamp() {
             }
 
             // 撤销到底必须逐字节回到初始文本；重做推进到顶终态一致（可复演性）
+            // 第 60 轮起书签同拍对拍：初始无书签 → 撤销到底必空 → 重放到
+            // 顶与终态书签集一致
             let final_text = c.doc.to_text();
+            let final_marks = c.bookmarked_lines();
             while c.undo() {}
             assert_eq!(c.doc.to_text(), initial, "seed={seed} 撤销到底未回初始态");
+            assert!(
+                c.bookmarked_lines().is_empty(),
+                "seed={seed} 撤销到底书签未随快照清空"
+            );
             while c.redo() {}
             assert_eq!(c.doc.to_text(), final_text, "seed={seed} 重放终态发散");
+            assert_eq!(
+                c.bookmarked_lines(),
+                final_marks,
+                "seed={seed} 重放终态书签发散"
+            );
         }
     }

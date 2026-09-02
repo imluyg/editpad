@@ -210,10 +210,15 @@ const COMBO_NAMED_KEYS: [&str; 23] = [
 
 /// 组合键串归一（纯函数可单测）：`ctrl+shift+f` → `Ctrl+Shift+F`。
 ///
-/// 契约：必须含 Ctrl（热键语义）；不得含 Alt（AltGr 保护——AltGr 在
-/// Windows 上报为 Ctrl+Alt，放行会挤占欧洲键盘字符输入）；键名 = 单个
-/// 字母/数字或 [`COMBO_NAMED_KEYS`] 白名单（大小写不敏感）；修饰键顺序
-/// 规范化为 `Ctrl [+Shift] +键名`。不合法返回 None。
+/// 契约（第 60 轮放宽功能键）：
+/// - **含 Ctrl** 的组合（原有形态）：键名 = 单个字母/数字或
+///   [`COMBO_NAMED_KEYS`] 白名单（大小写不敏感），修饰键顺序规范化为
+///   `Ctrl [+Shift] +键名`；
+/// - **不含 Ctrl** 的组合：仅放行功能键 `F1`~`F12`（修饰键至多 Shift，
+///   规范形 `F2` / `Shift+F2`）——书签导航等主流编辑器同款默认键位所需；
+///   裸字母/数字/其余命名键仍拒绝（裸字母是打字正文，放行会吞输入）；
+/// - Alt 一律拒绝（AltGr 保护——AltGr 在 Windows 上报为 Ctrl+Alt，
+///   放行会挤占欧洲键盘字符输入）。不合法返回 None。
 pub fn normalize_combo(value: &str) -> Option<String> {
     let mut ctrl = false;
     let mut shift = false;
@@ -252,15 +257,28 @@ pub fn normalize_combo(value: &str) -> Option<String> {
             }
         }
     }
-    if !ctrl {
+    let key = key?;
+    if ctrl {
+        let mut out = String::from("Ctrl");
+        if shift {
+            out.push_str("+Shift");
+        }
+        out.push('+');
+        out.push_str(&key);
+        return Some(out);
+    }
+    // 第 60 轮：无 Ctrl 时仅放行功能键 F1~F12（修饰键至多 Shift）。
+    // 键名已过 COMBO_NAMED_KEYS 白名单规范化，这里只再验「F + 1~12」形态。
+    let is_function_key = key.len() >= 2
+        && key.starts_with('F')
+        && key[1..].parse::<u8>().map(|n| (1..=12).contains(&n)).unwrap_or(false);
+    if !is_function_key {
         return None;
     }
-    let key = key?;
-    let mut out = String::from("Ctrl");
+    let mut out = String::new();
     if shift {
-        out.push_str("+Shift");
+        out.push_str("Shift+");
     }
-    out.push('+');
     out.push_str(&key);
     Some(out)
 }
@@ -1229,6 +1247,15 @@ mod tests {
         // 命名键大小写不敏感
         assert_eq!(normalize_combo("ctrl+home"), Some("Ctrl+Home".to_owned()));
         assert_eq!(normalize_combo("ctrl+F12"), Some("Ctrl+F12".to_owned()));
+        // 第 60 轮：裸/Shift 功能键放行（书签导航默认键位）
+        assert_eq!(normalize_combo("f2"), Some("F2".to_owned()));
+        assert_eq!(normalize_combo("shift+f2"), Some("Shift+F2".to_owned()));
+        assert_eq!(normalize_combo("SHIFT + F12"), Some("Shift+F12".to_owned()));
+        // 无 Ctrl 的非功能键仍拒绝（裸字母是打字正文，不能被热键吞掉）
+        assert_eq!(normalize_combo("home"), None);
+        assert_eq!(normalize_combo("insert"), None);
+        // F13 不在白名单
+        assert_eq!(normalize_combo("f13"), None);
     }
 
     #[test]

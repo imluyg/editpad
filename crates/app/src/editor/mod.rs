@@ -30,6 +30,11 @@ pub use view::*;
 
 /// 行号与正文的最小间距。
 pub(crate) const GUTTER_MIN: f32 = 12.0;
+/// 行号栏左侧书签条带宽（第 60 轮）：书签圆点的专属槽位，与行号数字
+/// 互不挤占（行号仍右对齐于条带右侧，gutter 总宽 = 条带 + 间距 + 数字宽）。
+pub(crate) const BOOKMARK_STRIP: f32 = 10.0;
+/// 书签圆点直径（第 60 轮，条带内水平居中、行内垂直居中）。
+pub(crate) const BOOKMARK_DOT: f32 = 6.0;
 /// 文本图层四边内缩（P66）：层边界必须严格小于传给 fill_text 的 clip
 /// 参数，上游 Cached 分支的 is_within 快路径才会判假、掩码才强制生效。
 /// 内缩 1 逻辑像素的代价是控件最外圈 1px 不渲染字形——视觉不可感知。

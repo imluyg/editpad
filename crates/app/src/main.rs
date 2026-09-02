@@ -1547,6 +1547,15 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "sort_lines_asc", default_combo: "Ctrl+Shift+S", desc: "行升序排序（选区行/全文）" },
     HotkeyAction { id: "sort_lines_desc", default_combo: "Ctrl+Shift+D", desc: "行降序排序（选区行/全文）" },
     HotkeyAction { id: "dedupe_lines", default_combo: "Ctrl+Shift+K", desc: "去除重复行（选区行/全文）" },
+    // 书签套件（第 60 轮，仿主流编辑器书签导航）。F2 家族与主流编辑器
+    // 同默认键；Alt 系键位因 AltGr 保护不可用，清除全部取 Ctrl+Shift+F2；
+    // 标记行批量操作无主流默认键，取 C/X 助记 = 复制/删除
+    HotkeyAction { id: "bookmark_toggle", default_combo: "Ctrl+F2", desc: "切换当前行书签" },
+    HotkeyAction { id: "bookmark_next", default_combo: "F2", desc: "跳到下一个书签" },
+    HotkeyAction { id: "bookmark_prev", default_combo: "Shift+F2", desc: "跳到上一个书签" },
+    HotkeyAction { id: "bookmark_clear_all", default_combo: "Ctrl+Shift+F2", desc: "清除全部书签" },
+    HotkeyAction { id: "copy_marked_lines", default_combo: "Ctrl+Shift+C", desc: "复制全部标记行" },
+    HotkeyAction { id: "del_marked_lines", default_combo: "Ctrl+Shift+X", desc: "删除全部标记行" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1581,18 +1590,26 @@ fn sanitize_hotkeys(settings: &mut editpad_core::Settings) {
         .retain(|id, _| HOTKEY_ACTIONS.iter().any(|a| a.id == *id));
 }
 
-/// 按键 → 规范组合串（P62）：`Ctrl [+Shift] +键名`。
+/// 按键 → 规范组合串（P62；第 60 轮放宽功能键）：`Ctrl [+Shift] +键名`。
 ///
-/// 契约：必须含 Ctrl 且不得含 Alt（AltGr 保护，P8 同口径——AltGr 在
-/// Windows 上报为 Ctrl+Alt）；键名 = 单个字母/数字（大写化）或白名单
-/// 命名键；不满足返回 None（该按键不参与热键系统，交回普通编辑路径）。
+/// 契约（与 core `normalize_combo` 同步）：不得含 Alt（AltGr 保护，P8
+/// 同口径——AltGr 在 Windows 上报为 Ctrl+Alt）；
+/// - 含 Ctrl：键名 = 单个字母/数字（大写化）或白名单命名键，形如
+///   `Ctrl+F2`；
+/// - 无 Ctrl：仅放行功能键 F1~F12（修饰键至多 Shift），形如 `F2` /
+///   `Shift+F2`——书签导航的主流默认键位所需；其余无 Ctrl 按键返回
+///   None（该按键不参与热键系统，交回普通编辑路径）。
 fn combo_string(mods: keyboard::Modifiers, key: &keyboard::Key) -> Option<String> {
     use keyboard::Key;
-    if !mods.control() || mods.alt() {
+    if mods.alt() {
         return None;
     }
     let key_name = match key {
         Key::Character(chars) => {
+            // 无 Ctrl 的字符键是打字正文，绝不参与热键
+            if !mods.control() {
+                return None;
+            }
             let mut it = chars.chars();
             match (it.next(), it.next()) {
                 (Some(ch), None) if ch.is_ascii_alphanumeric() => {
@@ -1632,13 +1649,32 @@ fn combo_string(mods: keyboard::Modifiers, key: &keyboard::Key) -> Option<String
         }
         _ => return None,
     };
-    let mut combo = String::from("Ctrl");
-    if mods.shift() {
-        combo.push_str("+Shift");
+    if mods.control() {
+        let mut combo = String::from("Ctrl");
+        if mods.shift() {
+            combo.push_str("+Shift");
+        }
+        combo.push('+');
+        combo.push_str(&key_name);
+        Some(combo)
+    } else if is_function_key_name(&key_name) {
+        // 第 60 轮：无 Ctrl 仅放行 F1~F12（至多带 Shift）
+        let mut combo = String::new();
+        if mods.shift() {
+            combo.push_str("Shift+");
+        }
+        combo.push_str(&key_name);
+        Some(combo)
+    } else {
+        None
     }
-    combo.push('+');
-    combo.push_str(&key_name);
-    Some(combo)
+}
+
+/// 键名是否为功能键 `F1`~`F12`（第 60 轮：无 Ctrl 组合的白名单）。
+fn is_function_key_name(name: &str) -> bool {
+    name.len() >= 2
+        && name.starts_with('F')
+        && name[1..].parse::<u8>().map(|n| (1..=12).contains(&n)).unwrap_or(false)
 }
 
 /// 生效动作查询：精确组合 → 用户重映射优先，其次**未重映射**动作的默认
@@ -1695,6 +1731,13 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "sort_lines_asc" => edit(EditOp::SortLines(SortOrder::Ascending)),
         "sort_lines_desc" => edit(EditOp::SortLines(SortOrder::Descending)),
         "dedupe_lines" => edit(EditOp::RemoveDuplicateLines),
+        // 书签套件（第 60 轮；copy_marked_lines 的剪贴板写入在消息层拦截）
+        "bookmark_toggle" => edit(EditOp::ToggleBookmark),
+        "bookmark_next" => edit(EditOp::BookmarkNext),
+        "bookmark_prev" => edit(EditOp::BookmarkPrev),
+        "bookmark_clear_all" => edit(EditOp::BookmarksClearAll),
+        "copy_marked_lines" => edit(EditOp::CopyBookmarkedLines),
+        "del_marked_lines" => edit(EditOp::RemoveBookmarkedLines),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),
@@ -1736,6 +1779,15 @@ fn handle_key(
             }
         }
         return None;
+    }
+
+    // 第 60 轮：裸功能键热键（书签导航 F2 家族）。combo_string 在无 Ctrl
+    // 时只对 F1~F12 产出组合串，未注册动作的功能键放行（F 键本无编辑
+    // 语义，落到末尾返回 None 与既有行为一致）
+    if let Some(combo) = combo_string(mods, &key) {
+        if let Some(id) = effective_action(&combo, remap) {
+            return dispatch_action(id, mods);
+        }
     }
 
     match &key {

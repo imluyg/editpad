@@ -19,7 +19,9 @@ use super::scrollbars::{
     HScrollbar, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
     VScrollbar,
 };
-use super::{GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET};
+use super::{
+    BOOKMARK_DOT, BOOKMARK_STRIP, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET,
+};
 
 impl super::core::EditorHandle {
     /// 构造可加入视图树的自绘控件。
@@ -198,6 +200,9 @@ const GUTTER_BG: Color = Color::from_rgb8(0xF2, 0xF2, 0xF2);
 const GUTTER_TEXT: Color = Color::from_rgb8(0x99, 0x99, 0x99);
 const PREEDIT_TEXT: Color = Color::from_rgb8(0x33, 0x66, 0xCC);
 const PREEDIT_UNDERLINE: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.6);
+/// 书签圆点（第 60 轮）：琥珀色在浅灰行号栏与深色主题上都醒目，
+/// 深浅主题共用一值（与选区/光标不同，它不承担「正文可读性」职能）。
+const BOOKMARK_COLOR: Color = Color::from_rgb8(0xE0, 0x96, 0x2E);
 
 /// 一次 draw 用到的全部颜色（按当前主题解析）。
 struct EditorColors {
@@ -209,6 +214,7 @@ struct EditorColors {
     preedit_underline: Color,
     scrollbar_track: Color,
     scrollbar_thumb: Color,
+    bookmark: Color,
 }
 
 impl EditorColors {
@@ -229,6 +235,7 @@ impl EditorColors {
                 // 滚动条用前景色低透明度叠加，两种主题都自然成立
                 scrollbar_track: Color::from_rgba8(0x00, 0x00, 0x00, 0.05),
                 scrollbar_thumb: Color::from_rgba8(0x00, 0x00, 0x00, 0.30),
+                bookmark: BOOKMARK_COLOR,
             };
         }
         let text = palette.text;
@@ -241,6 +248,7 @@ impl EditorColors {
             preedit_underline: Color { a: 0.6, ..text },
             scrollbar_track: Color { a: 0.06, ..palette.text },
             scrollbar_thumb: Color { a: 0.38, ..palette.text },
+            bookmark: BOOKMARK_COLOR,
         }
     }
 }
@@ -329,6 +337,36 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             },
             colors.gutter_bg,
         );
+
+        // 书签墨迹（第 60 轮）：左侧条带内的琥珀圆点，只为带书签的可见行
+        // 画（is_bookmarked O(log n)/行）；在 A 层掩码内，半可见行的越界
+        // 半圆被硬裁，与行号/正文同受控件边界约束
+        let (bk_first, bk_last) = core.visible_range();
+        for line in bk_first..=bk_last {
+            if !core.is_bookmarked(line) {
+                continue;
+            }
+            let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+            if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                continue;
+            }
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x + (BOOKMARK_STRIP - BOOKMARK_DOT) * 0.5,
+                        y: y + (lh - BOOKMARK_DOT) * 0.5,
+                        width: BOOKMARK_DOT,
+                        height: BOOKMARK_DOT,
+                    },
+                    border: iced::Border {
+                        radius: Radius::from(BOOKMARK_DOT * 0.5),
+                        ..iced::Border::default()
+                    },
+                    ..renderer::Quad::default()
+                },
+                colors.bookmark,
+            );
+        }
 
         // 选区高亮：只画与视口相交的行（双宽感知）
         if let Some((sel_start, sel_end)) = core.ordered_selection() {

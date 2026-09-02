@@ -242,6 +242,17 @@ impl Editpad {
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             // ---------- 编辑器 ----------
+            // 第 60 轮：复制标记行——只读操作前置拦截，取文本直接写剪贴板
+            //（不置脏、不排自动保存；加载中与普通编辑同口径拒收）
+            Message::Edit(EditOp::CopyBookmarkedLines) => {
+                if self.active_load.is_some() {
+                    return Task::none();
+                }
+                match self.cur_handle.borrow().copy_bookmarked_lines() {
+                    Some(text) => iced::clipboard::write(text),
+                    None => Task::none(),
+                }
+            }
             Message::Edit(op) => {
                 let changed = self.apply_edit(op);
                 let mut tasks: Vec<Task<Message>> = Vec::new();
@@ -1617,6 +1628,30 @@ impl Editpad {
             // ---------- 行排序与去重（第 59 轮） ----------
             E::SortLines(order) => editor.sort_lines(order),
             E::RemoveDuplicateLines => editor.remove_duplicate_lines(),
+            // ---------- 书签套件（第 60 轮） ----------
+            // 开关/跳转/清除不改动文本：恒返回 false（不置脏、不排自动
+            // 保存）；书签状态本身随快照回滚，无需应用层善后
+            E::ToggleBookmark => {
+                editor.toggle_bookmark();
+                false
+            }
+            E::BookmarkNext => {
+                editor.next_bookmark(true);
+                false
+            }
+            E::BookmarkPrev => {
+                editor.next_bookmark(false);
+                false
+            }
+            E::BookmarksClearAll => {
+                editor.clear_bookmarks();
+                false
+            }
+            // 删除标记行是真编辑：照常置脏 + 排自动保存 + 触发查找重扫
+            E::RemoveBookmarkedLines => editor.remove_bookmarked_lines(),
+            // 复制标记行在消息层前置拦截（apply_edit 只返回 bool，带不出
+            // 剪贴板 Task）；本分支仅为 match 穷尽性兜底，正常路径不可达
+            E::CopyBookmarkedLines => false,
         };
         drop(editor);
 

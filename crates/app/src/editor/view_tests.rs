@@ -572,3 +572,96 @@ fn render_frame_cost_is_bounded_on_large_document() {
         tiny_raster[2].as_secs_f64() * 1000.0
     );
 }
+
+/// 第 60 轮（headless 像素级）：书签圆点必须画在行号栏左侧条带内——
+/// 标记行在条带采样区出现琥珀墨迹，摘除后同区归零；且圆点不得污染
+/// 条带右侧的行号数字区（越界即条带几何漂移）。
+#[test]
+fn headless_bookmark_dot_ink_lives_in_gutter_strip() {
+    use super::super::CursorPos;
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    // gutter 公式与 draw 同源（10 行 → 1 位数 → max(3) 位；未注入实测
+    // 列宽 = 默认字号 × 0.5625 固定假设）
+    let char_w = 16.0f32 * 0.5625;
+    let gutter_w = BOOKMARK_STRIP + GUTTER_MIN + 3.0 * char_w;
+
+    let render = |marked: bool| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            let doc_text: String = (1..=10).map(|i| format!("第{i}行\n")).collect();
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.cursor = CursorPos { line: 2, col: 0 }; // 第 3 行
+            if marked {
+                c.toggle_bookmark();
+            }
+        }
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    // 琥珀墨迹判定：接近 BOOKMARK_COLOR(0xE0,0x96,0x2E) 的暖色像素。
+    // ⚠️ 无头 tiny_skia::Pixmap 的 pixel() 通道序为 BGRA（第 60 轮探针
+    // 实测：琥珀圆点读出 (46,150,224)），按倒置通道判定。
+    let amber_ink = |px: &tiny_skia::Pixmap, x0: u32, x1: u32| -> u32 {
+        let mut ink = 0u32;
+        for y in 0..h {
+            for x in x0..x1 {
+                if let Some(p) = px.pixel(x, y) {
+                    if p.blue() > 180 && p.green() > 100 && p.red() < 120 {
+                        ink += 1;
+                    }
+                }
+            }
+        }
+        ink
+    };
+
+    let frame = render(true);
+    let (ex_u, strip_end) = (ex as u32, (ex + BOOKMARK_STRIP) as u32);
+    let gutter_end = (ex + gutter_w) as u32;
+    let strip_ink = amber_ink(&frame, ex_u, strip_end);
+    eprintln!("[P60] 书签条带琥珀墨迹 = {strip_ink}px");
+    assert!(
+        strip_ink >= 8,
+        "标记行的书签圆点未出现在条带采样区（墨迹 {strip_ink}px）"
+    );
+    // 圆点不得越出条带：数字区（条带右缘 → gutter 右缘）无琥珀墨迹
+    let number_zone_ink = amber_ink(&frame, strip_end, gutter_end);
+    assert_eq!(
+        number_zone_ink, 0,
+        "书签圆点墨迹污染行号数字区 {number_zone_ink}px（条带几何漂移）"
+    );
+    // 摘除后条带归零
+    let clean = render(false);
+    assert_eq!(
+        amber_ink(&clean, ex_u, strip_end),
+        0,
+        "无书签时条带不应有任何琥珀墨迹"
+    );
+}

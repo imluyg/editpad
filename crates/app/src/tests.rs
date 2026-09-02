@@ -2595,6 +2595,43 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         )
         .expect("Ctrl+Shift+K 应产生编辑消息");
         assert!(matches!(msg, Message::Edit(EditOp::RemoveDuplicateLines)));
+        // 第 60 轮：书签套件（F2 家族 = 主流编辑器同默认键；裸功能键经
+        // 第 60 轮扩约的 combo_string 进入热键系统；全量覆盖仍由
+        // hotkey_actions_all_dispatch_through_handle_key）
+        use iced::keyboard::key::Named as N;
+        let msg = handle_key_defaults(
+            keyboard::Key::Named(N::F2),
+            Modifiers::CTRL,
+        )
+        .expect("Ctrl+F2 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::ToggleBookmark)));
+        let msg = handle_key_defaults(keyboard::Key::Named(N::F2), Modifiers::empty())
+            .expect("裸 F2 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::BookmarkNext)));
+        let msg = handle_key_defaults(
+            keyboard::Key::Named(N::F2),
+            Modifiers::SHIFT,
+        )
+        .expect("Shift+F2 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::BookmarkPrev)));
+        let msg = handle_key_defaults(
+            keyboard::Key::Named(N::F2),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+F2 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::BookmarksClearAll)));
+        let msg = handle_key_defaults(
+            keyboard::Key::Character("c".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+C 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::CopyBookmarkedLines)));
+        let msg = handle_key_defaults(
+            keyboard::Key::Character("x".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+X 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::RemoveBookmarkedLines)));
     }
 
     #[test]
@@ -2659,6 +2696,81 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert_eq!(app.cur_handle.borrow().doc.to_text(), "Apple\n梨\n苹果\n苹果");
         dispatch(&mut app, Message::Edit(EditOp::Undo));
         assert_eq!(app.cur_handle.borrow().doc.to_text(), "梨\n苹果\nApple\n苹果");
+    }
+
+    #[test]
+    fn bookmark_ops_flow_through_app_update_without_dirtying() {
+        // 第 60 轮：书签开关/跳转/清除是纯状态操作——不置脏、不排自动保存；
+        // 删除标记行是真编辑——置脏 + 可撤销（文本与书签一并找回）
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("甲\n乙\n丙".into())));
+        let dirty_after_typing = app.any_dirty();
+        assert!(dirty_after_typing);
+
+        // 开关当前行（第 3 行）：不置脏
+        dispatch(&mut app, Message::Edit(EditOp::ToggleBookmark));
+        assert_eq!(app.cur_handle.borrow().bookmarked_lines(), vec![2]);
+        // 唯一书签就是当前行：跳转原地不动（主流口径）
+        dispatch(&mut app, Message::Edit(EditOp::BookmarkPrev));
+        assert_eq!(app.cur_handle.borrow().cursor.line, 2);
+        // 移到第 1 行再标记，从第 3 行向上跳 → 落第 1 行
+        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::DocStart, false)));
+        dispatch(&mut app, Message::Edit(EditOp::ToggleBookmark)); // 行0
+        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::Down, false)));
+        dispatch(&mut app, Message::Edit(EditOp::BookmarkPrev));
+        assert_eq!(app.cur_handle.borrow().cursor.line, 0);
+        assert_eq!(app.any_dirty(), dirty_after_typing, "书签操作不得改变置脏态");
+        // 清除全部：同样不置脏
+        dispatch(&mut app, Message::Edit(EditOp::BookmarksClearAll));
+        assert!(app.cur_handle.borrow().bookmarked_lines().is_empty());
+
+        // 标记首尾两行后删除标记行：置脏 + 撤销找回
+        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::DocStart, false)));
+        dispatch(&mut app, Message::Edit(EditOp::ToggleBookmark)); // 行0
+        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::DocEnd, false)));
+        dispatch(&mut app, Message::Edit(EditOp::ToggleBookmark)); // 行2
+        dispatch(&mut app, Message::Edit(EditOp::RemoveBookmarkedLines));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "乙\n", "只删标记行，中间行连同其行尾保留");
+        assert!(app.any_dirty(), "删除标记行是真编辑");
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        {
+            let ed = app.cur_handle.borrow();
+            assert_eq!(ed.doc.to_text(), "甲\n乙\n丙");
+            assert_eq!(ed.bookmarked_lines(), vec![0, 2], "撤销一并找回书签");
+        }
+    }
+
+    #[test]
+    fn combo_string_contract_includes_bare_function_keys() {
+        // 第 60 轮扩约：无 Ctrl 仅放行 F1~F12（至多带 Shift）；Alt 恒拒；
+        // 裸字符键绝不参与热键（打字正文保护）
+        use iced::keyboard::{self, key::Named, Modifiers};
+        let f2 = || keyboard::Key::Named(Named::F2);
+        assert_eq!(
+            combo_string(Modifiers::empty(), &f2()),
+            Some("F2".to_owned())
+        );
+        assert_eq!(
+            combo_string(Modifiers::SHIFT, &f2()),
+            Some("Shift+F2".to_owned())
+        );
+        assert_eq!(
+            combo_string(Modifiers::CTRL, &f2()),
+            Some("Ctrl+F2".to_owned())
+        );
+        assert_eq!(
+            combo_string(Modifiers::CTRL | Modifiers::SHIFT, &f2()),
+            Some("Ctrl+Shift+F2".to_owned())
+        );
+        // Alt 恒拒（AltGr 保护）
+        assert_eq!(combo_string(Modifiers::ALT, &f2()), None);
+        assert_eq!(combo_string(Modifiers::CTRL | Modifiers::ALT, &f2()), None);
+        // 无 Ctrl 的非功能键一律拒绝
+        let home = keyboard::Key::Named(Named::Home);
+        assert_eq!(combo_string(Modifiers::empty(), &home), None);
+        let letter = keyboard::Key::Character("a".into());
+        assert_eq!(combo_string(Modifiers::empty(), &letter), None);
+        assert_eq!(combo_string(Modifiers::SHIFT, &letter), None);
     }
 
     // ---------- P6 编码知情权 ----------
@@ -3620,6 +3732,27 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             "PageDown" => keyboard::Key::Named(Named::PageDown),
             "Insert" => keyboard::Key::Named(Named::Insert),
             "Delete" => keyboard::Key::Named(Named::Delete),
+            // 第 60 轮：书签导航引入裸/Shift 功能键组合
+            name if name.len() >= 2 && name.starts_with('F') => {
+                let n: u8 = name[1..]
+                    .parse()
+                    .unwrap_or_else(|_| panic!("测试解析器未支持的键名 {name:?}"));
+                assert!((1..=12).contains(&n), "测试解析器未支持的键名 {name:?}");
+                keyboard::Key::Named(match n {
+                    1 => Named::F1,
+                    2 => Named::F2,
+                    3 => Named::F3,
+                    4 => Named::F4,
+                    5 => Named::F5,
+                    6 => Named::F6,
+                    7 => Named::F7,
+                    8 => Named::F8,
+                    9 => Named::F9,
+                    10 => Named::F10,
+                    11 => Named::F11,
+                    _ => Named::F12,
+                })
+            }
             single if single.chars().count() == 1 => {
                 keyboard::Key::Character(single.to_ascii_lowercase().into())
             }

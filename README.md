@@ -85,6 +85,8 @@ cargo run --release
 | Ctrl+Shift+U / Ctrl+U | 转为大写 / 小写（有选区只转选区，无选区转全文） |
 | Ctrl+Shift+T / L / B | 去除行尾 / 行首 / 行首尾空白（有选区只清触及行，全角空格/NBSP 也算） |
 | Ctrl+Shift+S / D / K | 行升序 / 降序排序、去除重复行（有选区只处理触及行，无选区全文；码点序大小写敏感，去重保留首次出现） |
+| Ctrl+F2 / F2 / Shift+F2 | 切换当前行书签 / 跳到下一个 / 上一个书签（到文档边缘自动回绕；书签行在行号栏左缘条带显示琥珀圆点） |
+| Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | 清除全部书签 / 复制全部标记行 / 删除全部标记行（删除可整体撤销，书签一并找回；书签为会话内标注，不写入文件） |
 | Ctrl+T / Ctrl+W / Ctrl+Tab | 新建标签页 / 关闭当前页 / 循环切换标签页 |
 | Ctrl+Shift+F | 格式化 JSON（仅 JSON 文件） |
 | Ctrl+Home / Ctrl+End | 跳到文档首 / 尾 |

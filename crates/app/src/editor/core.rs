@@ -2,7 +2,7 @@
 //! （P68 自 editor.rs 拆出，纯移动零行为变更）。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use iced::{Color, Font, Rectangle};
@@ -13,7 +13,7 @@ use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width,
     validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN,
 };
-use super::{FONT_SIZE_DEFAULT, GUTTER_MIN};
+use super::{BOOKMARK_STRIP, FONT_SIZE_DEFAULT, GUTTER_MIN};
 
 const CARET_WIDTH: f32 = 2.0;
 /// 撤销组上限（P37 打字成组后，一组 ≈ 一次连续输入；快照是 rope 结构
@@ -102,6 +102,19 @@ pub enum EditOp {
     /// 去除重复行（保留首次出现、其余行相对次序不变）：有选区只清触及块，
     /// 无选区清全文档
     RemoveDuplicateLines,
+    // ---------- 书签套件（第 60 轮，仿主流编辑器书签导航） ----------
+    /// 当前行书签开关（有则摘、无则加；随撤销/重做一并回滚）
+    ToggleBookmark,
+    /// 跳到下一个书签（光标之后最近者，到文档尾回绕开头）
+    BookmarkNext,
+    /// 跳到上一个书签（光标之前最近者，到文档头回绕末尾）
+    BookmarkPrev,
+    /// 清除全部书签
+    BookmarksClearAll,
+    /// 删除全部标记行（含各自行尾；随撤销一并恢复文本与书签）
+    RemoveBookmarkedLines,
+    /// 复制全部标记行到剪贴板（不改文档、不置脏）
+    CopyBookmarkedLines,
 }
 
 /// 大小写转换方向（第 58 轮）。
@@ -157,6 +170,12 @@ struct Snapshot {
     doc: Document,
     cursor: CursorPos,
     anchor: Option<CursorPos>,
+    /// 第 60 轮：书签集合随快照一并入栈——撤销/重做是「整体换文档」，
+    /// 行号全盘漂移，唯一可靠的还原方式就是把书签当可回滚状态存档。
+    /// 副作用：书签开关/清除也会占用撤销槽（与打字同待遇，见
+    /// `toggle_bookmark` 注释）；`remove_bookmarked_lines` 因此能一次
+    /// 撤销同时找回文本和书签。
+    bookmarks: BTreeSet<usize>,
 }
 
 // ---------- 核心状态 ----------
@@ -241,6 +260,12 @@ pub struct EditorCore {
     max_cols_stale: bool,
     /// 上次全量重算 `max_line_cols` 的时刻（限流用，见上字段）。
     max_cols_checked: Option<std::time::Instant>,
+    /// 书签行集合（0 起行号，升序）。第 60 轮书签套件的状态底座：
+    /// * 会话级标注——不写入文件、不入会话快照（重启即清，主流编辑器
+    ///   同口径），也不参与置脏判定；
+    /// * 行结构编辑同步平移/删除（各编辑路径内的 remap 注释）；
+    /// * 撤销/重做经快照整体回滚（见 `Snapshot::bookmarks`）。
+    bookmarks: BTreeSet<usize>,
 }
 
 /// 光标闪烁半周期。
@@ -303,6 +328,7 @@ impl Default for EditorCore {
             max_row_width_px: 0.0,
             max_cols_stale: false,
             max_cols_checked: None,
+            bookmarks: BTreeSet::new(),
         }
     }
 }
@@ -444,6 +470,8 @@ impl EditorCore {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.typing_run = None; // P37：换文档即一切成组状态作废
+        // 第 60 轮：新文档 = 新坐标系，旧书签一律作废（会话级标注不入快照）
+        self.bookmarks.clear();
         self.recompute_max_line_cols();
         if let Some(hl) = &self.highlight {
             hl.borrow_mut().invalidate_from(0);
@@ -576,6 +604,9 @@ impl EditorCore {
         self.anchor = None;
         self.scroll_top = 0.0;
         self.scroll_left = 0.0;
+        // 第 60 轮：全部替换后行号与旧内容的对应关系不可信，书签整体作废
+        // （撤销仍可经快照找回——书签已随 snapshot() 入栈）
+        self.bookmarks.clear();
         self.recompute_max_line_cols();
         if let Some(hl) = &self.highlight {
             hl.borrow_mut().invalidate_from(0);
@@ -627,6 +658,7 @@ impl EditorCore {
             doc: self.doc.clone(), // rope 克隆是结构共享，廉价
             cursor: self.cursor,
             anchor: self.anchor,
+            bookmarks: self.bookmarks.clone(),
         });
         if self.undo_stack.len() > MAX_UNDO {
             self.undo_stack.remove(0);
@@ -643,6 +675,8 @@ impl EditorCore {
             doc: std::mem::replace(&mut self.doc, snap.doc),
             cursor: self.cursor,
             anchor: self.anchor,
+            // 第 60 轮：书签随快照对换回滚（见 Snapshot::bookmarks 注释）
+            bookmarks: std::mem::replace(&mut self.bookmarks, snap.bookmarks),
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;
@@ -665,6 +699,8 @@ impl EditorCore {
             doc: std::mem::replace(&mut self.doc, snap.doc),
             cursor: self.cursor,
             anchor: self.anchor,
+            // 第 60 轮：重做对称回滚书签（同 undo）
+            bookmarks: std::mem::replace(&mut self.bookmarks, snap.bookmarks),
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;
@@ -744,6 +780,17 @@ impl EditorCore {
         }
         self.typing_run = None; // 插入成功且合格后在本函数末尾重立
 
+        // 第 60 轮：跨行选区将被替换——先记录 (起点行, 起点列>0, 终点行,
+        // 消失行数) 供书签再映射（口径与 touched_lines 一致：末点在行首
+        // 时该行不算触及，其内容整体并入结果行）
+        let replaced_span: Option<(usize, bool, usize, usize)> =
+            self.ordered_selection().and_then(|(s, e)| {
+                (e.line > s.line).then(|| {
+                    let vanished =
+                        if e.col == 0 { e.line - 1 - s.line } else { e.line - s.line };
+                    (s.line, s.col > 0, e.line, vanished)
+                })
+            });
         let start_offset = match self.selection_offsets() {
             Some((start, end)) => {
                 if end > start {
@@ -772,6 +819,13 @@ impl EditorCore {
         }
         // P13：受影响行（插入跨行时含沿途各行）宽度只上调高水位
         self.raise_max_line_cols(first_line..=self.cursor.line);
+        // 第 60 轮：书签再映射——被替换的跨行选区按精化规则搬迁（起点行
+        // 前缀幸存才保留自身书签；终点行内容必有幸存 → 书签恒并入结果
+        // 行；中间整行丢弃）；插入的换行再把变化点之后的行号下推
+        if let Some((sa, keeps, eb, van)) = replaced_span {
+            self.remap_replaced_span(sa, keeps, eb, van);
+        }
+        self.remap_shift_below(first_line, new_lines as isize);
         // P37：合格单字符插入把组延伸到新的结束偏移；换行/粘贴/选区替换
         // 保持 None——下一字符开新组
         self.typing_run = if eligible { Some(start_offset + 1) } else { None };
@@ -831,12 +885,18 @@ impl EditorCore {
             return;
         }
         self.snapshot();
+        // 第 60 轮：col==0 且非首行 = 将删掉换行单元并上一行（书签取并集）
+        let merges_up = self.cursor.col == 0 && self.cursor.line > 0;
         self.move_local(Motion::Left);
         let start = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
         // P9：跨行回退落在 CRLF 上时把 `\r\n` 当一个换行单元整体移除。
         // 旧行为只删一半字符：第一下视觉无反应，第二下才真正并行的两行。
         let end = start + 1 + usize::from(self.is_crlf_at(start));
         self.doc.remove_range(start, end);
+        if merges_up {
+            // 幸存行 = 当前行（move_local 已回退到上一行），被吞行 = 下一行
+            self.remap_merge_pair(self.cursor.line, self.cursor.line + 1);
+        }
         self.invalidate_highlight_from(start);
         // P13：并行后的新行可能更宽（也可能只是收缩——高水位不回退）
         self.raise_max_line_cols(self.cursor.line..=self.cursor.line);
@@ -851,10 +911,17 @@ impl EditorCore {
         if offset >= self.doc.text_len() {
             return;
         }
+        // 第 60 轮：光标已在行尾（显示口径）= 将删掉换行单元并下一行进来
+        let merges_down = self.cursor.col >= self.line_display_len(self.cursor.line);
         self.snapshot();
         // P9：行尾 Delete 同样按 EOL 单元处理，一下删掉整个 `\r\n`
         let end = offset + 1 + usize::from(self.is_crlf_at(offset));
         self.doc.remove_range(offset, end);
+        if merges_down {
+            // 幸存行 = 当前行，被吞行 = 下一行（文档末尾的孤立换行也适用：
+            // 幻影行消失，并集与平移都是无害 no-op）
+            self.remap_merge_pair(self.cursor.line, self.cursor.line + 1);
+        }
         self.invalidate_highlight_from(offset);
         // P13：下一行并入当前行，合并结果可能更宽
         let merged = self.cursor.line;
@@ -890,7 +957,7 @@ impl EditorCore {
         let start = self.doc.line_to_char(a);
         let end =
             if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
-        let (start, end) = if start == end {
+        let (start, end, removed_rows) = if start == end {
             if a == 0 {
                 return false; // 唯一内容为空：无可删
             }
@@ -898,12 +965,15 @@ impl EditorCore {
             // start ≥ 1 恒成立（前面至少有一个换行才轮得到空行）。
             let crlf = self.doc.slice_text(start - 2, start) == "\r\n";
             let s = start - usize::from(crlf) - 1;
-            (s, start)
+            (s, start, 1)
         } else {
-            (start, end)
+            (start, end, b - a + 1)
         };
         self.snapshot();
         self.doc.remove_range(start, end);
+        // 第 60 轮：书签随行消失/上移（幻影分支恒移除 1 行——空壳随其
+        // 换行单元一起消失；常规分支移除触及块 b-a+1 行）
+        self.remap_removed_rows(a, removed_rows);
         let at = start.min(self.doc.text_len());
         let line = self.doc.char_to_line(at);
         let col = at - self.doc.line_to_char(line);
@@ -930,11 +1000,22 @@ impl EditorCore {
         self.snapshot();
         let nl = self.doc.line_ending().newline();
         // 尾部块本身不带行尾时先补一个主导行尾再插到文档末，
-        // 保证副本独立成行而不是拼在原块后面
-        let ins = if end < self.doc.text_len() { text } else { format!("{nl}{text}") };
+        // 保证副本独立成行而不是拼在原块后面。
+        // P80 勘误（第 60 轮书签测试揪出的既有缺陷）：判定依据应为
+        // 「块文本是否已带行尾单元」，而非 end < len——文档以换行收尾时
+        // 末真实行的块文本自带行尾但 end == len，旧条件误补行尾，
+        // 副本前凭空多出一个空行。
+        let ins = if text.ends_with('\n') || text.ends_with('\r') {
+            text
+        } else {
+            format!("{nl}{text}")
+        };
         self.doc.insert(end, &ins);
         self.invalidate_highlight_from(end);
         self.max_cols_stale = true;
+        // 第 60 轮：块副本插入 b-a+1 行，原块之后的书签整体下推；
+        // 副本本身不带书签（主流编辑器同口径——书签标的是旧行）
+        self.remap_shift_below(b, (b - a + 1) as isize);
         self.anchor = None;
         // 插入点恒为第 b+1 行行首（块内已有行尾 / 已补行尾）
         self.cursor = CursorPos { line: b + 1, col: 0 };
@@ -984,6 +1065,23 @@ impl EditorCore {
         self.doc.insert(rs, &rebuilt);
         self.invalidate_highlight_from(rs);
         self.max_cols_stale = true;
+        // 第 60 轮：块内轮转的书签跟随——上移时相邻上行换入块尾、块内
+        // 各上移一位；下移对称（相邻下行换入块头、块内各下移一位）
+        let (enter_from, enter_to, inner) =
+            if up { (a - 1, b, -1i64) } else { (b + 1, a, 1i64) };
+        self.bookmarks = self
+            .bookmarks
+            .iter()
+            .map(|&l| {
+                if l == enter_from {
+                    enter_to
+                } else if l >= a && l <= b {
+                    (l as i64 + inner) as usize
+                } else {
+                    l
+                }
+            })
+            .collect();
         self.anchor = None;
         self.cursor = CursorPos { line: if up { a - 1 } else { b + 1 }, col: keep_col };
         self.ensure_visible();
@@ -1143,10 +1241,15 @@ impl EditorCore {
     /// 用新内容替换收集时的块区域（排序/去重共用的写回路径）：按主导行尾
     /// 重建不产生混合行尾；块尾/文档末尾换行形态保持；光标行列钳回块内，
     /// 选区清空。调用前必须已确认内容确有变化（no-op 不产快照）。
-    fn apply_line_block(&mut self, blk: &LineBlock, lines: &[String]) {
+    ///
+    /// `map[rel]` = 块内原第 rel 行的新块内位置（None = 内容消失）——
+    /// 先快照（携带重排前的书签集）再按映射搬迁书签，最后重写文档字节。
+    fn apply_line_block(&mut self, blk: &LineBlock, lines: &[String], map: &[Option<usize>]) {
         let keep_line = self.cursor.line.clamp(blk.a, blk.b);
         let keep_col = self.cursor.col;
         self.snapshot();
+        // 第 60 轮：书签跟随行内容搬到新位置
+        self.remap_block_mapping(blk.a, map);
         let nl = self.doc.line_ending().newline();
         let mut rebuilt = lines.join(nl);
         if blk.push_nl {
@@ -1168,50 +1271,338 @@ impl EditorCore {
     /// - 比较口径 = UTF-8 字节序（码点序），大小写敏感、稳定排序；
     /// - 空白行是真实内容，正常参与排序（只有幻影末行除外，见
     ///   [`Self::collect_line_block`]）；
-    /// - 已有序 / 块内不足两行时不动、不产快照（幂等 no-op）。
+    /// - 已有序 / 块内不足两行时不动、不产快照（幂等 no-op）；
+    /// - 书签跟随行内容走：按稳定排序的排列反演映射搬迁（第 60 轮）。
     pub fn sort_lines(&mut self, order: SortOrder) -> bool {
         let blk = self.collect_line_block();
         if blk.lines.len() <= 1 {
             return false; // 0/1 行无从排序
         }
-        let mut sorted = blk.lines.clone();
+        let n = blk.lines.len();
+        // perm[new_rel] = old_rel（稳定排序）；反演成旧→新映射供书签搬迁
+        let mut perm: Vec<usize> = (0..n).collect();
         match order {
-            SortOrder::Ascending => sorted.sort(),
-            SortOrder::Descending => sorted.sort_by(|x, y| y.cmp(x)),
+            SortOrder::Ascending => perm.sort_by(|&i, &j| blk.lines[i].cmp(&blk.lines[j])),
+            SortOrder::Descending => perm.sort_by(|&i, &j| blk.lines[j].cmp(&blk.lines[i])),
         }
+        let mut map = vec![None; n];
+        for (new_rel, &old_rel) in perm.iter().enumerate() {
+            map[old_rel] = Some(new_rel);
+        }
+        let sorted: Vec<String> = perm.iter().map(|&i| blk.lines[i].clone()).collect();
         if sorted == blk.lines {
             return false; // 已有序：幂等 no-op 不产生撤销快照
         }
-        self.apply_line_block(&blk, &sorted);
+        self.apply_line_block(&blk, &sorted, &map);
         true
     }
 
     /// 去除重复行：保留首次出现、其余行相对次序不变。返回是否改动。
     ///
     /// - 有选区只清触及块，无选区清全文档；逐字节整行比对（含空白差异）；
-    /// - 无重复 / 块内不足两行时不动、不产快照（幂等 no-op）。
+    /// - 无重复 / 块内不足两行时不动、不产快照（幂等 no-op）；
+    /// - 书签跟随：保留行的书签搬到新位置，重复项的书签随行丢弃。
     pub fn remove_duplicate_lines(&mut self) -> bool {
         let blk = self.collect_line_block();
         if blk.lines.len() <= 1 {
             return false;
         }
-        let mut seen: HashSet<&str> = HashSet::with_capacity(blk.lines.len());
-        let kept: Vec<String> = blk
-            .lines
-            .iter()
-            .filter(|l| seen.insert(l.as_str()))
-            .cloned()
-            .collect();
-        if kept.len() == blk.lines.len() {
+        let n = blk.lines.len();
+        let mut seen: HashSet<&str> = HashSet::with_capacity(n);
+        // 旧块内相对位置 → 新块内位置；None = 该行是重复项，内容消失
+        let mut map: Vec<Option<usize>> = vec![None; n];
+        let mut kept: Vec<String> = Vec::with_capacity(n);
+        for (rel, line) in blk.lines.iter().enumerate() {
+            if seen.insert(line.as_str()) {
+                map[rel] = Some(kept.len());
+                kept.push(line.clone());
+            }
+        }
+        if kept.len() == n {
             return false; // 本就无重复：幂等 no-op 不产生撤销快照
         }
-        self.apply_line_block(&blk, &kept);
+        self.apply_line_block(&blk, &kept, &map);
         true
+    }
+
+    // ---------- 书签套件（第 60 轮，仿主流编辑器书签导航） ----------
+    //
+    // 状态底座 = [`EditorCore::bookmarks`]（升序 BTreeSet，行号 0 起）。
+    // 本节后半是各编辑路径共用的书签再映射助手——约定两条：
+    // 1. 只在「确认要改动」之后调用（no-op 提前返回的路径不碰集合）；
+    // 2. 映射一律从旧集合函数式重建新集合，杜绝逐条 remove/insert 的
+    //    顺序陷阱。
+
+    /// 当前行是否带书签（渲染层逐可见行查询，O(log n)）。
+    pub fn is_bookmarked(&self, line: usize) -> bool {
+        self.bookmarks.contains(&line)
+    }
+
+    /// 全部书签行（升序）。测试与应用层诊断消费。
+    pub fn bookmarked_lines(&self) -> Vec<usize> {
+        self.bookmarks.iter().copied().collect()
+    }
+
+    /// 当前行书签开关。返回切换后的状态（true = 现在带书签）。
+    ///
+    /// 每次实际翻转都先入撤销栈（快照携带翻转前的书签集，见
+    /// [`Snapshot::bookmarks`]）——书签是可回滚状态，代价是开关会打断
+    /// 打字组并清空重做栈，与一切状态变更操作同待遇。
+    pub fn toggle_bookmark(&mut self) -> bool {
+        self.snapshot();
+        let line = self.cursor.line;
+        if !self.bookmarks.remove(&line) {
+            self.bookmarks.insert(line);
+            return true;
+        }
+        false
+    }
+
+    /// 清除全部书签。返回是否有清除动作（空集合为幂等 no-op，不入栈）。
+    pub fn clear_bookmarks(&mut self) -> bool {
+        if self.bookmarks.is_empty() {
+            return false;
+        }
+        self.snapshot();
+        self.bookmarks.clear();
+        true
+    }
+
+    /// 下一个/上一个书签的行号（[`Self::next_bookmark`] 的纯查询半边）：
+    /// 光标之后（前）最近者；没有更近的就回绕到第一个（最后一个）。
+    fn next_bookmark_line(&self, forward: bool) -> Option<usize> {
+        let cur = self.cursor.line;
+        if forward {
+            self.bookmarks
+                .range((std::ops::Bound::Excluded(cur), std::ops::Bound::Unbounded))
+                .next()
+                .or_else(|| self.bookmarks.iter().next())
+                .copied()
+        } else {
+            self.bookmarks
+                .range((std::ops::Bound::Unbounded, std::ops::Bound::Excluded(cur)))
+                .next_back()
+                .or_else(|| self.bookmarks.iter().next_back())
+                .copied()
+        }
+    }
+
+    /// 跳到下一个（`forward`）/上一个书签。唯一书签恰为当前行时原地不动
+    /// 并返回 false；无任何书签同理。纯光标移动：不产生快照，但按 P37
+    /// 口径打断打字组。
+    pub fn next_bookmark(&mut self, forward: bool) -> bool {
+        let Some(target) = self.next_bookmark_line(forward) else {
+            return false;
+        };
+        if target == self.cursor.line {
+            return false;
+        }
+        self.break_typing();
+        self.anchor = None;
+        self.cursor = CursorPos { line: target, col: 0 };
+        self.ensure_visible();
+        true
+    }
+
+    /// 复制全部标记行：按升序取各行正文（剥换行单元）以主导行尾连接，
+    /// 每行末尾都带行尾——粘贴到他处保持整行语义。无书签返回 None。
+    /// 只读操作：不改文档、不置脏、不产快照。
+    pub fn copy_bookmarked_lines(&self) -> Option<String> {
+        if self.bookmarks.is_empty() {
+            return None;
+        }
+        let nl = self.doc.line_ending().newline();
+        let mut out = String::new();
+        for &l in &self.bookmarks {
+            if l >= self.doc.line_count() {
+                continue; // 防御：悬空行号不参与（正常路径不可达）
+            }
+            out.push_str(&self.line_body_without_eol(l));
+            out.push_str(nl);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// 删除全部标记行（含各自行尾）。返回是否发生删除。
+    ///
+    /// * 字节区间按原文档一次算齐、自底向上逐段移除——高地址段先行，
+    ///   低地址偏移全程有效；
+    /// * 连续标记行合并成一段，最小化 remove 次数；
+    /// * 幻影末行（文档以换行收尾时空出的末行）单独被标记时退化为吃掉
+    ///   它前面的换行单元，与 [`Self::delete_current_lines`] 的幻影分支
+    ///   同口径；
+    /// * 成功后书签集合自然清空（删的就是全部书签行）；撤销经快照把
+    ///   文本与书签一并找回。
+    pub fn remove_bookmarked_lines(&mut self) -> bool {
+        if self.bookmarks.is_empty() {
+            return false;
+        }
+        let count = self.doc.line_count();
+        let len = self.doc.text_len();
+        let marked = self.bookmarked_lines();
+
+        // 连续行合并成段 [r0..=r1]
+        let mut runs: Vec<(usize, usize)> = Vec::with_capacity(marked.len());
+        let mut r0 = marked[0];
+        let mut prev = marked[0];
+        for &l in &marked[1..] {
+            if l == prev + 1 {
+                prev = l;
+            } else {
+                runs.push((r0, prev));
+                r0 = l;
+                prev = l;
+            }
+        }
+        runs.push((r0, prev));
+
+        // 段 → 字节区间
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(runs.len());
+        let mut first_deleted_at = usize::MAX;
+        for (a, b) in runs {
+            let start = self.doc.line_to_char(a);
+            let end = if b + 1 < count { self.doc.line_to_char(b + 1) } else { len };
+            if start < end {
+                spans.push((start, end));
+            } else if start > 0 {
+                // 幻影末行空壳单标：改为移除其前面的换行单元（\r\n 整体）
+                let crlf = self.doc.slice_text(start - 2, start) == "\r\n";
+                spans.push((start - usize::from(crlf) - 1, start));
+            }
+            // start == end == 0：空文档唯一空行被标，无可删（跳过）
+            first_deleted_at = first_deleted_at.min(spans.last().map_or(usize::MAX, |r| r.0));
+        }
+        if spans.is_empty() {
+            return false;
+        }
+
+        self.snapshot();
+        spans.sort_unstable_by(|x, y| y.0.cmp(&x.0)); // 自底向上
+        for (s, e) in spans {
+            self.doc.remove_range(s, e);
+        }
+        let at = first_deleted_at.min(self.doc.text_len());
+        let line = self.doc.char_to_line(at);
+        let col = at - self.doc.line_to_char(line);
+        self.cursor = CursorPos { line, col };
+        self.anchor = None;
+        self.invalidate_highlight_from(at);
+        // 行结构整体变化——列高水位交惰性收敛（P45 口径）
+        self.max_cols_stale = true;
+        self.bookmarks.clear();
+        self.ensure_visible();
+        true
+    }
+
+    // ---------- 书签再映射助手（各编辑路径调用） ----------
+
+    /// 变化点之后的书签整体平移 `delta`（行号 > `from_exclusive` 参与；
+    /// 平移出文档范围（≤0）的书签丢弃——防御，正常路径不可达）。
+    fn remap_shift_below(&mut self, from_exclusive: usize, delta: isize) {
+        if delta == 0 || self.bookmarks.is_empty() {
+            return;
+        }
+        self.bookmarks = self
+            .bookmarks
+            .iter()
+            .filter_map(|&l| {
+                let moved =
+                    if l > from_exclusive { l as isize + delta } else { l as isize };
+                usize::try_from(moved).ok()
+            })
+            .collect();
+    }
+
+    /// 删除 `[first, first+count)` 行后的重映射：区间内书签随行消失，
+    /// 其后整体上移 count（[`Self::delete_current_lines`] /
+    /// [`Self::remove_bookmarked_lines`] 幻影分支共用）。
+    fn remap_removed_rows(&mut self, first: usize, count: usize) {
+        let gone_end = first + count;
+        self.bookmarks = self
+            .bookmarks
+            .iter()
+            .filter_map(|&l| match l {
+                _ if l >= gone_end => Some(l - count),
+                _ if l >= first => None,
+                _ => Some(l),
+            })
+            .collect();
+    }
+
+    /// 两行并成一行的重映射（回退删除换行单元 / Delete 吞掉换行单元）：
+    /// 被吞行与幸存行的书签取**并集**落在幸存行上（任一来源有标记即视
+    /// 为合并结果有标记），其后行号整体 −1。
+    fn remap_merge_pair(&mut self, survivor: usize, gone: usize) {
+        let had_gone = self.bookmarks.remove(&gone);
+        if had_gone {
+            self.bookmarks.insert(survivor);
+        }
+        self.remap_shift_below(gone, -1);
+    }
+
+    /// 跨行区域被替换（选区删除/替换、跨行选区粘贴）的重映射：
+    /// * 起点行前缀幸存（`start_keeps` = 选区起点列 > 0）时保留自身书签，
+    ///   整行被吃掉则丢弃；
+    /// * 终点行内容必有幸存部分（终点列 > 0 剩后缀；= 0 则整行并入结果
+    ///   行）→ 其书签恒**并入**结果行；
+    /// * 中间整行内容消失 → 书签丢弃；
+    /// * 其后行按消失行数 `vanished` 上移。
+    fn remap_replaced_span(
+        &mut self,
+        start_line: usize,
+        start_keeps: bool,
+        end_line: usize,
+        vanished: usize,
+    ) {
+        // 结果行书签 = (起点行自身 ∧ 前缀幸存) ∨ 终点行并入——两项独立
+        // 成立即保留，起点行整行被吃不得连坐终点行并进来的书签
+        let had_start = self.bookmarks.contains(&start_line) && start_keeps;
+        let had_end = self.bookmarks.remove(&end_line);
+        if had_start || had_end {
+            self.bookmarks.insert(start_line);
+        } else {
+            self.bookmarks.remove(&start_line);
+        }
+        let interior: Vec<usize> =
+            self.bookmarks.range(start_line + 1..end_line).copied().collect();
+        for l in interior {
+            self.bookmarks.remove(&l);
+        }
+        self.remap_shift_below(end_line, -(vanished as isize));
+    }
+
+    /// 块级重排（排序/去重）的按映射搬迁：`map[rel]` = 块内原第 rel 行的
+    /// 新位置；`None` = 该行内容消失（去重的重复项），书签丢弃。映射表
+    /// 不覆盖的行（如块外的幻影末行）原位保留——排序/去重不改变块前行数
+    /// 与尾随换行的有无，幻影行号恒不变。
+    fn remap_block_mapping(&mut self, start_line: usize, map: &[Option<usize>]) {
+        if self.bookmarks.is_empty() {
+            return;
+        }
+        let mut out = BTreeSet::new();
+        for &l in &self.bookmarks {
+            let new_line = match l.checked_sub(start_line).and_then(|rel| map.get(rel)) {
+                Some(Some(new_rel)) => start_line + new_rel,
+                Some(None) => continue,
+                None => l,
+            };
+            out.insert(new_line);
+        }
+        self.bookmarks = out;
     }
 
     /// 有选区时删除之（含快照）；返回是否发生了删除。零宽选区仅清除标记。
     fn delete_selection(&mut self) -> bool {
         if self.selected_text().is_some() {
+            // 第 60 轮：跨行选区删除 = 多行并一行——先记 (起点行, 起点列>0,
+            // 终点行, 消失行数)，删除后按精化规则再映射书签（同 insert_str）
+            let span = self.ordered_selection().and_then(|(s, e)| {
+                (e.line > s.line).then(|| {
+                    let vanished =
+                        if e.col == 0 { e.line - 1 - s.line } else { e.line - s.line };
+                    (s.line, s.col > 0, e.line, vanished)
+                })
+            });
             self.snapshot();
             if let Some((start, end)) = self.selection_offsets() {
                 self.doc.remove_range(start, end);
@@ -1222,6 +1613,9 @@ impl EditorCore {
                 // P13：跨行删除后首尾两行拼成一行的宽度可能变化
                 let joined = self.cursor.line;
                 self.raise_max_line_cols(joined..=joined);
+                if let Some((sa, keeps, eb, van)) = span {
+                    self.remap_replaced_span(sa, keeps, eb, van);
+                }
             }
             self.anchor = None;
             self.ensure_visible();
@@ -1597,9 +1991,11 @@ impl EditorCore {
     /// 旧系数让右对齐的行号盒比数字窄 ~30%，右对齐向左溢出画出控件左缘
     /// （iced 文本裁剪对 Cached 文本不生效，无法兜底）。盒宽 ≥ 数字宽后
     /// 溢出消失；GUTTER_MIN 继续充当行号与正文的间距。
+    /// 第 60 轮：左侧加 BOOKMARK_STRIP 书签条带（圆点槽位），行号右缘
+    /// 相对条带右缘的位置不变——所有消费方都经本函数取宽，无硬编码。
     pub fn gutter_width(&self) -> f32 {
         let digits = self.doc.line_count().to_string().len().max(3);
-        GUTTER_MIN + digits as f32 * self.char_width()
+        BOOKMARK_STRIP + GUTTER_MIN + digits as f32 * self.char_width()
     }
 
     // ---------- 光标闪烁（打磨项） ----------
