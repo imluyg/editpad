@@ -203,6 +203,9 @@ const PREEDIT_UNDERLINE: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.6);
 /// 书签圆点（第 60 轮）：琥珀色在浅灰行号栏与深色主题上都醒目，
 /// 深浅主题共用一值（与选区/光标不同，它不承担「正文可读性」职能）。
 const BOOKMARK_COLOR: Color = Color::from_rgb8(0xE0, 0x96, 0x2E);
+/// 括号匹配下划线（第 61 轮）：浅色主题用与查找/预编辑同族的蓝，
+/// 深色主题从前景派生（EditorColors::resolve）。
+const BRACKET_LIGHT: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.85);
 
 /// 一次 draw 用到的全部颜色（按当前主题解析）。
 struct EditorColors {
@@ -215,6 +218,7 @@ struct EditorColors {
     scrollbar_track: Color,
     scrollbar_thumb: Color,
     bookmark: Color,
+    bracket: Color,
 }
 
 impl EditorColors {
@@ -236,6 +240,7 @@ impl EditorColors {
                 scrollbar_track: Color::from_rgba8(0x00, 0x00, 0x00, 0.05),
                 scrollbar_thumb: Color::from_rgba8(0x00, 0x00, 0x00, 0.30),
                 bookmark: BOOKMARK_COLOR,
+                bracket: BRACKET_LIGHT,
             };
         }
         let text = palette.text;
@@ -249,6 +254,7 @@ impl EditorColors {
             scrollbar_track: Color { a: 0.06, ..palette.text },
             scrollbar_thumb: Color { a: 0.38, ..palette.text },
             bookmark: BOOKMARK_COLOR,
+            bracket: Color { a: 0.85, ..text },
         }
     }
 }
@@ -408,6 +414,34 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         ..renderer::Quad::default()
                     },
                     colors.selection,
+                );
+            }
+        }
+
+        // 括号匹配高亮（第 61 轮）：光标邻接括号时，两侧括号各画一条
+        // 2px 下划线（A 层 quad，随掩码裁剪；查询带光标键控缓存，
+        // 命中帧零扫描）。括号恒 ASCII 单列，宽 = char_w。
+        if let Some((boff, other)) = core.bracket_match() {
+            for off in [boff, other] {
+                let line = core.doc.char_to_line(off);
+                let col = off - core.doc.line_to_char(line);
+                let text = core.line_text(line);
+                let x = core.px_of(line, &text, col);
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + gutter_w + x - scroll_left,
+                            y: y + lh - 2.0,
+                            width: char_w.max(2.0),
+                            height: 2.0,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.bracket,
                 );
             }
         }

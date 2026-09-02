@@ -1556,6 +1556,9 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "bookmark_clear_all", default_combo: "Ctrl+Shift+F2", desc: "清除全部书签" },
     HotkeyAction { id: "copy_marked_lines", default_combo: "Ctrl+Shift+C", desc: "复制全部标记行" },
     HotkeyAction { id: "del_marked_lines", default_combo: "Ctrl+Shift+X", desc: "删除全部标记行" },
+    // 括号匹配（第 61 轮，仿主流编辑器；M=Matching 助记——主流的 Ctrl+\
+    // 因反斜杠非字母/数字不入组合键白名单）
+    HotkeyAction { id: "jump_bracket", default_combo: "Ctrl+Shift+M", desc: "跳到配对括号" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1738,6 +1741,8 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "bookmark_clear_all" => edit(EditOp::BookmarksClearAll),
         "copy_marked_lines" => edit(EditOp::CopyBookmarkedLines),
         "del_marked_lines" => edit(EditOp::RemoveBookmarkedLines),
+        // 括号匹配（第 61 轮）
+        "jump_bracket" => edit(EditOp::JumpToMatchingBracket),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),

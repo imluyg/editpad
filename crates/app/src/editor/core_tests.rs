@@ -2499,6 +2499,147 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert!((c.gutter_width() - expect).abs() < 1e-3, "gutter 公式漂移");
     }
 
+    // ---------- 第 61 轮：括号匹配 ----------
+
+    #[test]
+    fn bracket_match_adjacency_and_none() {
+        let mut c = core_with("()\nfoo\n");
+        // 光标在 '(' 前：右侧字符优先
+        c.cursor = CursorPos { line: 0, col: 0 };
+        assert_eq!(c.bracket_match(), Some((0, 1)));
+        // 光标在 ')' 后：左侧字符兜底
+        c.cursor = CursorPos { line: 0, col: 2 };
+        assert_eq!(c.bracket_match(), Some((1, 0)));
+        // 光标在两括号之间：右侧 ')' 优先（停在括号前口径）
+        c.cursor = CursorPos { line: 0, col: 1 };
+        assert_eq!(c.bracket_match(), Some((1, 0)));
+        // 无括号邻接
+        c.cursor = CursorPos { line: 1, col: 1 };
+        assert_eq!(c.bracket_match(), None);
+        // 文档尾（光标偏移 == text_len）：左兜底仍可用（']' 配 '['）
+        let mut d = core_with("x[]");
+        d.cursor = CursorPos { line: 0, col: 3 };
+        assert_eq!(d.bracket_match(), Some((2, 1)));
+        // 孤立括号无配对 → None（"x{" 的 { 等不到闭括号，勘误初版用例：
+        // 该场景正确答案就是 None）
+        let mut e = core_with("x{");
+        e.cursor = CursorPos { line: 0, col: 2 };
+        assert_eq!(e.bracket_match(), None);
+        // 空文档
+        assert_eq!(core_with("").bracket_match(), None);
+    }
+
+    #[test]
+    fn bracket_match_multiline_nested_and_crlf() {
+        // 跨行嵌套：外层 ( 配对到最后一行的 )
+        let mut c = core_with("f(\n  g(1)\n)\n");
+        c.cursor = CursorPos { line: 0, col: 2 };
+        // 偏移口径：'f'0 '('1 '\n'2 '  '3,4 'g'5 '('6 '1'7 ')'8 '\n'9 ')'10
+        assert_eq!(c.bracket_match(), Some((1, 10)));
+        // 内层配对不受外层干扰（光标在 ')' 后 → 邻接括号在前：(8,6)）
+        c.cursor = CursorPos { line: 1, col: 6 };
+        assert_eq!(c.bracket_match(), Some((8, 6)));
+        // CRLF 文档：\r 计 1 字符，配对偏移仍精确
+        let mut d = core_with("a(\r\nb)\r\n");
+        // 偏移：'a'0 '('1 '\r'2 '\n'3 'b'4 ')'5
+        d.cursor = CursorPos { line: 0, col: 2 };
+        assert_eq!(d.bracket_match(), Some((1, 5)));
+        d.cursor = CursorPos { line: 1, col: 1 };
+        assert_eq!(d.bracket_match(), Some((5, 1)));
+        // 三种括号各自独立计数
+        let mut e = core_with("([)]"); // 交叉不配平：'(' 向后扫先遇 ')' 归零
+        e.cursor = CursorPos { line: 0, col: 0 };
+        assert_eq!(e.bracket_match(), Some((0, 2)), "同对独立计数（主流朴素口径）");
+    }
+
+    #[test]
+    fn bracket_jump_toggles_sides_and_noop_without_match() {
+        let mut c = core_with("ab(cd)\n");
+        // 光标在 '(' 前 → 跳到 ')' 后
+        c.cursor = CursorPos { line: 0, col: 2 };
+        assert!(c.jump_to_matching_bracket());
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 6 });
+        // 再按：光标在 ')' 后 → 跳回 '(' 前（往返手感）
+        assert!(c.jump_to_matching_bracket());
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+        // 无括号邻接：不动
+        c.cursor = CursorPos { line: 0, col: 0 };
+        assert!(!c.jump_to_matching_bracket());
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 0 });
+        // 未配平：不动
+        let mut d = core_with("(abc\n");
+        d.cursor = CursorPos { line: 0, col: 0 };
+        assert!(!d.jump_to_matching_bracket());
+        // 跳转不产撤销快照（纯光标移动）
+        assert!(c.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn bracket_cache_invalidates_on_content_change_same_cursor() {
+        let mut c = core_with("a()");
+        c.cursor = CursorPos { line: 0, col: 2 }; // ( 与 ) 之间：右邻 ')' 在前
+        assert_eq!(c.bracket_match(), Some((2, 1)));
+        // 选区替换 ')' 为 'x'：光标原地不动、内容已变 → 不得吐陈旧缓存
+        c.cursor = CursorPos { line: 0, col: 2 };
+        c.anchor = Some(CursorPos { line: 0, col: 3 });
+        c.insert_str("x");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 3 });
+        // 光标回到原查询位（替换后列不变），文档已是 "a(x"
+        c.cursor = CursorPos { line: 0, col: 2 };
+        assert_eq!(
+            c.bracket_match(),
+            None,
+            "同光标位内容已变，缓存必须已失效（invalidate 汇点清缓存）"
+        );
+    }
+
+    #[test]
+    fn bracket_cache_invalidates_on_undo_redo_and_doc_replacement() {
+        // 第 61 轮审查发现：undo/redo/reset_document/replace_whole_document
+        // 四条整体换文路径旧实现直接调 highlight 失效、绕过
+        // invalidate_highlight_from 汇点——光标键控的括号匹配缓存对
+        // 「同位异文」吐陈旧结果（撤销落点恰为缓存键时高亮丢失/跳转失灵）。
+        let mut c = core_with("(y)");
+        c.cursor = CursorPos { line: 0, col: 1 };
+        assert_eq!(c.bracket_match(), Some((0, 2)));
+        // 打字改内容（常规路径本就清缓存）→ 移回同位再查（在新内容上重建缓存）
+        c.cursor = CursorPos { line: 0, col: 2 };
+        c.insert_str("z"); // 文档变 "(yz)"，光标落 col3
+        c.cursor = CursorPos { line: 0, col: 2 };
+        assert_eq!(c.bracket_match(), None, "新内容 (yz) 同位无匹配");
+        // 撤销：内容回 "(y)"、快照光标恰落回缓存键 (0,2)——此时右邻恰是
+        // ')' 自身，必须重算出 (2,0) 而非吐缓存里的 None
+        assert!(c.undo());
+        assert_eq!(
+            c.bracket_match(),
+            Some((2, 0)),
+            "撤销后同光标位必须按恢复后的内容重算（缓存已随汇点清空）"
+        );
+        // 重做对称：回到 "(yz)" 同位 → None
+        assert!(c.redo());
+        assert_eq!(c.bracket_match(), None);
+
+        // reset_document（加载文件/静默重载 P50 路径）：光标复位 (0,0)
+        // 恰是常见缓存键
+        let mut d = core_with("()");
+        d.cursor = CursorPos { line: 0, col: 0 };
+        assert_eq!(d.bracket_match(), Some((0, 1)));
+        d.reset_document(editpad_core::Document::from_str("hello"));
+        assert_eq!(d.cursor, CursorPos::default());
+        assert_eq!(
+            d.bracket_match(),
+            None,
+            "静默重载后不得吐旧文档的陈旧配对"
+        );
+
+        // replace_whole_document（全部替换路径）：同样复位到 (0,0)
+        let mut e = core_with("()");
+        e.cursor = CursorPos { line: 0, col: 0 };
+        assert_eq!(e.bracket_match(), Some((0, 1)));
+        e.replace_whole_document(editpad_core::Document::from_str("world"));
+        assert_eq!(e.bracket_match(), None, "全部替换后不得吐陈旧配对");
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，

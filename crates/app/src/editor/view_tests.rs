@@ -665,3 +665,86 @@ fn headless_bookmark_dot_ink_lives_in_gutter_strip() {
         "无书签时条带不应有任何琥珀墨迹"
     );
 }
+
+/// 第 61 轮（headless 像素级）：括号匹配下划线必须落在两侧配对括号所
+/// 在行的底部条带内；光标离开括号后全画布零蓝墨迹（无幽灵下划线）。
+/// 采样口径：BRACKET_LIGHT(0x3366CC@0.85) 叠白底真彩 ≈ (82,125,212)；
+/// ⚠️ 无头 tiny_skia::Pixmap 的 pixel() 通道序为 BGRA（第 60 轮探针
+/// 实测先例），故 red() 读到的是 B 通道——判 red()>180 && blue()<120
+/// && 100<green()<180。正文黑/灰抗锯齿三通道相近不可能同时满足，
+/// 书签琥珀（B 通道≈46）亦不误入。
+#[test]
+fn headless_bracket_underline_ink_at_matched_pair() {
+    use super::super::CursorPos;
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+
+    let render = |cursor: CursorPos| -> (tiny_skia::Pixmap, f32) {
+        let core = EditorHandle::default();
+        let lh = {
+            let mut c = core.borrow_mut();
+            let mut doc_text = String::from("(x)\n");
+            doc_text.extend((2..=10).map(|i| format!("第{i}行\n")));
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.cursor = cursor;
+            c.line_height()
+        };
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        (pixels, lh)
+    };
+
+    // 蓝墨迹计数（通道序注意见上）：[y0,y1) 条带 × 全宽
+    let blue_ink = |px: &tiny_skia::Pixmap, y0: u32, y1: u32| -> u32 {
+        let mut ink = 0u32;
+        for y in y0..y1.min(h) {
+            for x in 0..w {
+                if let Some(p) = px.pixel(x, y) {
+                    if p.red() > 180 && p.blue() < 120 && p.green() > 100 && p.green() < 180 {
+                        ink += 1;
+                    }
+                }
+            }
+        }
+        ink
+    };
+
+    // 光标在 '(' 前：两条 2px 下划线分别落在第 1 行底部的 '(' 与 ')' 下方
+    let (frame, lh) = render(CursorPos { line: 0, col: 0 });
+    let band_y0 = (ey + lh - 4.0) as u32;
+    let band_y1 = (ey + lh + 2.0) as u32;
+    let ink = blue_ink(&frame, band_y0, band_y1);
+    eprintln!("[P81] 括号下划线蓝墨迹 = {ink}px");
+    assert!(ink >= 8, "配对括号行底未见下划线墨迹（仅 {ink}px）");
+
+    // 光标移到无括号邻接的第 2 行：全画布不得有任何蓝色墨迹
+    let (clean, _) = render(CursorPos { line: 1, col: 0 });
+    assert_eq!(
+        blue_ink(&clean, 0, h),
+        0,
+        "无括号邻接时画布出现蓝色墨迹（幽灵下划线/其他越界墨迹）"
+    );
+}

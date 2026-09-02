@@ -2632,6 +2632,13 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         )
         .expect("Ctrl+Shift+X 应产生编辑消息");
         assert!(matches!(msg, Message::Edit(EditOp::RemoveBookmarkedLines)));
+        // 第 61 轮：括号匹配跳转（M=Matching 助记）
+        let msg = handle_key_defaults(
+            keyboard::Key::Character("m".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+M 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::JumpToMatchingBracket)));
     }
 
     #[test]

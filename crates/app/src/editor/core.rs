@@ -7,7 +7,9 @@ use std::rc::Rc;
 
 use iced::{Color, Font, Rectangle};
 
-use editpad_core::{Document, LazyHighlighter, StyledRun};
+use editpad_core::{
+    bracket_kind, scan_forward, Document, LazyHighlighter, StyledRun, MAX_BRACKET_SCAN_CHARS,
+};
 
 use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width,
@@ -115,6 +117,9 @@ pub enum EditOp {
     RemoveBookmarkedLines,
     /// 复制全部标记行到剪贴板（不改文档、不置脏）
     CopyBookmarkedLines,
+    // ---------- 括号匹配（第 61 轮） ----------
+    /// 跳到配对括号的另一侧（光标须邻接括号；纯光标移动不产快照）
+    JumpToMatchingBracket,
 }
 
 /// 大小写转换方向（第 58 轮）。
@@ -266,6 +271,12 @@ pub struct EditorCore {
     /// * 行结构编辑同步平移/删除（各编辑路径内的 remap 注释）；
     /// * 撤销/重做经快照整体回滚（见 `Snapshot::bookmarks`）。
     bookmarks: BTreeSet<usize>,
+    /// 括号匹配查询缓存（第 61 轮）：键 = 光标位置，值 = 该位置的匹配
+    /// 结果（含 None）。draw 每帧查询、命中即零扫描——孤立括号的封顶
+    /// 扫描（MAX_BRACKET_SCAN_CHARS）只在新光标位付一次。RefCell 让
+    /// 只读的 draw 也能维护缓存（与高亮器同手法）；内容变更经
+    /// `invalidate_highlight_from` 统一失效（全部正文突变路径的唯一汇点）。
+    bracket_cache: RefCell<Option<(CursorPos, Option<(usize, usize)>)>>,
 }
 
 /// 光标闪烁半周期。
@@ -329,6 +340,7 @@ impl Default for EditorCore {
             max_cols_stale: false,
             max_cols_checked: None,
             bookmarks: BTreeSet::new(),
+            bracket_cache: RefCell::new(None),
         }
     }
 }
@@ -473,9 +485,9 @@ impl EditorCore {
         // 第 60 轮：新文档 = 新坐标系，旧书签一律作废（会话级标注不入快照）
         self.bookmarks.clear();
         self.recompute_max_line_cols();
-        if let Some(hl) = &self.highlight {
-            hl.borrow_mut().invalidate_from(0);
-        }
+        // 第 61 轮：经唯一汇点失效——顺带清括号匹配缓存（光标复位 (0,0)
+        // 恰是常见缓存键，静默重载后不得吐旧文档的陈旧配对）
+        self.invalidate_highlight_from(0);
         self.preedit = None;
     }
 
@@ -496,6 +508,9 @@ impl EditorCore {
 
     /// 第 `offset` 字符偏移之后的高亮状态失效。
     fn invalidate_highlight_from(&mut self, offset: usize) {
+        // 第 61 轮：本函数是全部正文突变路径的唯一汇点——括号匹配缓存
+        // 在此统一失效（光标键控的缓存对「同位异文」不可见，必须显式清）
+        self.bracket_cache.borrow_mut().take();
         if let Some(hl) = &self.highlight {
             let line = self.doc.char_to_line(offset.min(self.doc.text_len()));
             hl.borrow_mut().invalidate_from(line);
@@ -608,9 +623,9 @@ impl EditorCore {
         // （撤销仍可经快照找回——书签已随 snapshot() 入栈）
         self.bookmarks.clear();
         self.recompute_max_line_cols();
-        if let Some(hl) = &self.highlight {
-            hl.borrow_mut().invalidate_from(0);
-        }
+        // 第 61 轮：经唯一汇点失效——顺带清括号匹配缓存（光标复位 (0,0)，
+        // 全部替换后不得吐旧文档的陈旧配对）
+        self.invalidate_highlight_from(0);
     }
 
     /// P37：打断当前打字组。凡不经过 [`Self::snapshot`] 的状态变更
@@ -680,10 +695,9 @@ impl EditorCore {
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;
-        // 文档被整体替换，高亮状态全量失效
-        if let Some(hl) = &self.highlight {
-            hl.borrow_mut().invalidate_from(0);
-        }
+        // 文档被整体替换，高亮状态全量失效；第 61 轮：经唯一汇点，
+        // 括号匹配缓存一并清（撤销落点恰为缓存键时防陈旧命中）
+        self.invalidate_highlight_from(0);
         // P45：撤销 = 整个文档替换，宽度结构可能缩短——标记惰性收敛
         self.max_cols_stale = true;
         self.ensure_visible();
@@ -704,9 +718,8 @@ impl EditorCore {
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;
-        if let Some(hl) = &self.highlight {
-            hl.borrow_mut().invalidate_from(0);
-        }
+        // 第 61 轮：经唯一汇点失效（同 undo，清括号匹配缓存）
+        self.invalidate_highlight_from(0);
         // P45：重做同样整体替换文档——标记惰性收敛（对称 undo）
         self.max_cols_stale = true;
         self.ensure_visible();
@@ -1589,6 +1602,109 @@ impl EditorCore {
             out.insert(new_line);
         }
         self.bookmarks = out;
+    }
+
+    // ---------- 括号匹配（第 61 轮） ----------
+
+    /// 光标邻接括号与其配对位置（渲染高亮与跳转共用的查询，带缓存）。
+    ///
+    /// 邻接口径：光标**右侧**字符是括号优先（光标停在括号前），否则看
+    /// **左侧**字符（光标停在括号后）。返回 `(括号偏移, 配对偏移)`——
+    /// 全文字符偏移口径（CRLF 的 `\r` 计 1 字符）。无邻接括号 / 扫描
+    /// 超上限 / 未配平 → None。
+    pub fn bracket_match(&self) -> Option<(usize, usize)> {
+        let key = self.cursor;
+        if let Some(hit) = self.bracket_cache.borrow().as_ref() {
+            if hit.0 == key {
+                return hit.1;
+            }
+        }
+        let result = self.bracket_match_uncached();
+        *self.bracket_cache.borrow_mut() = Some((key, result));
+        result
+    }
+
+    /// [`Self::bracket_match`] 的无缓存实现。
+    fn bracket_match_uncached(&self) -> Option<(usize, usize)> {
+        let off = self.doc.line_to_char(self.cursor.line)
+            + self.cursor.col.min(self.line_display_len(self.cursor.line));
+        // 右侧字符优先，其次左侧；char_at 越界返回 None 天然覆盖文档尾
+        let probe = self
+            .char_at(off)
+            .and_then(bracket_kind)
+            .map(|k| (off, k))
+            .or_else(|| {
+                (off > 0)
+                    .then(|| self.char_at(off - 1))
+                    .flatten()
+                    .and_then(bracket_kind)
+                    .map(|k| (off - 1, k))
+            });
+        let (boff, (open, close, is_open)) = probe?;
+        let other = if is_open {
+            boff + scan_forward(open, close, self.doc.chars_from(boff + 1))?
+        } else {
+            boff - self.scan_backward_chunks(boff, open, close)?
+        };
+        Some((boff, other))
+    }
+
+    /// 反向括号扫描（第 61 轮）：`boff` 处是**闭**括号，向文档头找配对
+    /// 开括号，返回**含端字符距离**（`配对偏移 = boff - 返回值`）。
+    ///
+    /// 实现注记：ropey 1.6 的字符迭代器不支持反向（Chars 非
+    /// DoubleEndedIterator），故按 64K 字符分块取切片、块内逆序计数——
+    /// 缓冲有界（块大小 × 1），不产生全文 String；总步数受
+    /// [`MAX_BRACKET_SCAN_CHARS`] 封顶（与正向同口径）。
+    fn scan_backward_chunks(&self, boff: usize, open: char, close: char) -> Option<usize> {
+        const CHUNK: usize = 65536;
+        let mut consumed = 0usize;
+        let mut depth = 1usize;
+        let mut buf: Vec<char> = Vec::with_capacity(CHUNK.min(boff));
+        let mut end = boff;
+        loop {
+            let start = end.saturating_sub(CHUNK);
+            buf.clear();
+            buf.extend(self.doc.slice_text(start, end).chars());
+            for &c in buf.iter().rev() {
+                consumed += 1;
+                if consumed > MAX_BRACKET_SCAN_CHARS {
+                    return None;
+                }
+                if c == close {
+                    depth += 1;
+                } else if c == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(consumed);
+                    }
+                }
+            }
+            if start == 0 {
+                return None;
+            }
+            end = start;
+        }
+    }
+
+    /// 跳到配对括号的另一侧。光标停在括号前 → 落到配对括号后；停在
+    /// 括号后 → 落到配对括号前（保持「相对括号同侧」的手感，来回按即
+    /// 在两侧往返）。无邻接括号/无匹配返回 false 不动。纯光标移动：
+    /// 不产生快照，按 P37 口径打断打字组。
+    pub fn jump_to_matching_bracket(&mut self) -> bool {
+        let Some((boff, other)) = self.bracket_match() else {
+            return false;
+        };
+        let cursor_off = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
+        let target = if cursor_off <= boff { other + 1 } else { other };
+        let target = target.min(self.doc.text_len());
+        let line = self.doc.char_to_line(target);
+        let col = target - self.doc.line_to_char(line);
+        self.break_typing();
+        self.anchor = None;
+        self.cursor = CursorPos { line, col };
+        self.ensure_visible();
+        true
     }
 
     /// 有选区时删除之（含快照）；返回是否发生了删除。零宽选区仅清除标记。

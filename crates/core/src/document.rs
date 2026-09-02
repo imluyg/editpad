@@ -260,6 +260,14 @@ impl Document {
     pub fn line_len_chars(&self, line_idx: usize) -> usize {
         self.rope.line(line_idx).len_chars()
     }
+
+    /// 从 `char_idx`（含）向后的字符迭代器（第 61 轮括号匹配用；
+    /// 零拷贝——rope 叶片级迭代，不产生全文 String）。
+    /// 注：ropey 1.6 的 Chars 不支持 DoubleEndedIterator，反向扫描由
+    /// app 层分块切片实现（见 EditorCore 的括号匹配）。
+    pub fn chars_from(&self, char_idx: usize) -> impl Iterator<Item = char> + '_ {
+        self.rope.chars_at(char_idx.min(self.rope.len_chars()))
+    }
 }
 
 impl Default for Document {

@@ -1652,6 +1652,14 @@ impl Editpad {
             // 复制标记行在消息层前置拦截（apply_edit 只返回 bool，带不出
             // 剪贴板 Task）；本分支仅为 match 穷尽性兜底，正常路径不可达
             E::CopyBookmarkedLines => false,
+            // ---------- 括号匹配（第 61 轮） ----------
+            // 纯光标移动：恒返回 false（不置脏），失败给状态栏提示
+            E::JumpToMatchingBracket => {
+                if !editor.jump_to_matching_bracket() {
+                    hint = Some("光标不在括号旁（或未找到配对）");
+                }
+                false
+            }
         };
         drop(editor);
 
