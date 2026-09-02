@@ -43,6 +43,33 @@ pub(crate) fn wrap_breaks(body: &str, max_cols: usize) -> Vec<usize> {
     breaks
 }
 
+/// 按**真实字形像素宽**断行（P96 用户点单根治）：`xs` = 与绘制同源的
+/// 逐字符起点像素 x（`xs[k]` = 第 k 字符左缘，末项 = 行尾 x，即
+/// `shape_row_xs` 的输出；要求单调非降）。
+///
+/// 断点语义与 [`wrap_breaks`] 一致（段首列向量、恒含 0、恰好压线不产
+/// 空段），但段宽累计用真实 advance——非等宽字体（CJK 全宽 ≠ 2×半宽
+/// 实测列宽、用户自选比例字体）下列模型的「1 列 = char_w」不再成立，
+/// 用列模型断行会在每段尾部留下系统性空白（第 75 轮实测：28px 字号
+/// CJK 文本段尾缺 ~10% ≈ 6 字符）。真实 xs 由控件层每帧注入（与正文
+/// 绘制同段落、同 shaping），无注入时调用方回退列模型 [`wrap_breaks`]。
+///
+/// * `max_px` = 段宽预算（像素）；≤0 防御为 1px；
+/// * 单字符超宽（emoji/超大字）自动自成一格，不产生空段（k==prev 时
+///   强制容纳，下一字符起再判）。
+pub(crate) fn pixel_breaks(xs: &[f32], max_px: f32) -> Vec<usize> {
+    let max_px = max_px.max(1.0);
+    let mut breaks = vec![0usize];
+    let mut prev = 0usize;
+    for k in 0..xs.len().saturating_sub(1) {
+        if k > prev && xs[k + 1] - xs[prev] > max_px {
+            breaks.push(k);
+            prev = k;
+        }
+    }
+    breaks
+}
+
 /// 视觉段计数索引：Fenwick 前缀 + 行断点 memo + 内容代次。
 ///
 /// * `set_line`：重算某行断点并差值更新 BIT（O(行长) + O(log n)）；
@@ -83,18 +110,30 @@ impl WrapIndex {
 
     /// 确保某行按当前代次与内容计入索引：命中同代 memo 直接返回；
     /// 否则重算断点、差值更新 BIT 并写 memo。
+    ///
+    /// * `max_cols` = 列模型预算（`real_xs` 为 None 时使用）；
+    /// * `max_px` = 像素预算（`real_xs` 为 Some 时使用，P96）；
+    /// * `real_xs` = 真实字形逐字符 x（与绘制同源；None = 列模型回退）。
     pub(crate) fn set_line(
         &mut self,
         line: usize,
         body: &str,
         max_cols: usize,
+        max_px: f32,
+        real_xs: Option<&[f32]>,
     ) -> Rc<Vec<usize>> {
         if let Some((g, b)) = self.memo.get(&line) {
             if *g == self.gen {
                 return b.clone();
             }
         }
-        let breaks = Rc::new(wrap_breaks(body, max_cols));
+        let breaks = Rc::new(match real_xs {
+            // P96：真实字形断行——段尾 = xs[段末字符右缘] ≤ max_px，
+            // 非等宽/CJK 字体下也贴满右缘（列模型对非常规字距系统性
+            // 留白：28px 字号 CJK 实测段尾缺 ~10% ≈ 6 字符）
+            Some(xs) => pixel_breaks(xs, max_px),
+            None => wrap_breaks(body, max_cols),
+        });
         let seg = breaks.len() as u32;
         let diff = seg as i64 - self.seg_now[line] as i64;
         if diff != 0 {
@@ -143,12 +182,14 @@ impl WrapIndex {
 /// * 开关开启 = 整表重置（`enable`）；
 /// * 内容代次失效（`after_edit`）：行数变化 → 整表重置；否则只推 gen，
 ///   由下次查询懒惰重算（未查询行 BIT 短暂陈旧随窗口收敛，v1 已披露）；
-/// * 列预算/行数漂移（窗口缩放、字号、gutter 变宽、行数变化漏网）在
-///   每次查询入口 `ensure_synced` 兜底全清。
+/// * 列预算/像素预算/行数漂移（窗口缩放、字号、gutter 变宽、行数变化
+///   漏网）在每次查询入口 `ensure_synced` 兜底全清。
 pub(crate) struct WrapCache {
     pub(crate) enabled: bool,
-    /// 最近同步的显示列预算（≥1）。
+    /// 最近同步的显示列预算（≥1，列模型回退路径用）。
     pub(crate) max_cols: usize,
+    /// 最近同步的段宽像素预算（真实字形断行路径用，P96）。
+    pub(crate) max_px: f32,
     pub(crate) index: WrapIndex,
     /// 最近同步的逻辑行数。
     last_lines: usize,
@@ -159,6 +200,7 @@ impl WrapCache {
         Self {
             enabled: false,
             max_cols: 1,
+            max_px: 100.0,
             index: WrapIndex {
                 bit: vec![0],
                 seg_now: vec![],
@@ -170,9 +212,10 @@ impl WrapCache {
     }
 
     /// 开启软换行：整表重置起步（每行暂记 1 段，可见行随查询填充收敛）。
-    pub(crate) fn enable(&mut self, lines: usize, max_cols: usize) {
+    pub(crate) fn enable(&mut self, lines: usize, max_cols: usize, max_px: f32) {
         self.enabled = true;
         self.max_cols = max_cols.max(1);
+        self.max_px = max_px.max(1.0);
         self.index.reset(lines);
         self.last_lines = lines;
     }
@@ -193,12 +236,14 @@ impl WrapCache {
         }
     }
 
-    /// 查询入口兜底同步：列预算或行数与现状不符（窗口缩放/字号变更/
+    /// 查询入口兜底同步：列/像素预算或行数与现状不符（窗口缩放/字号变更/
     /// gutter 变宽/行数变化漏网）即整表重置（设计 §3.2「宽 W 变化→全清」）。
-    pub(crate) fn ensure_synced(&mut self, lines: usize, max_cols: usize) {
+    pub(crate) fn ensure_synced(&mut self, lines: usize, max_cols: usize, max_px: f32) {
         let mc = max_cols.max(1);
-        if mc != self.max_cols {
+        let mpx = max_px.max(1.0);
+        if mc != self.max_cols || (mpx - self.max_px).abs() > 0.5 {
             self.max_cols = mc;
+            self.max_px = mpx;
             self.index.reset(lines);
             self.last_lines = lines;
         } else if lines != self.last_lines {
@@ -209,8 +254,17 @@ impl WrapCache {
 
     /// 行 `line` 的当前断点表（memo 同代命中直接返回，否则重算并差值
     /// 更新 BIT）。调用方需先 `ensure_synced`。
-    pub(crate) fn segments_of(&mut self, line: usize, body: &str) -> Rc<Vec<usize>> {
-        self.index.set_line(line, body, self.max_cols)
+    ///
+    /// `real_xs` = 该行与绘制同源的真实字形 x（`shape_row_xs` 输出，
+    /// 行字符数 + 1 项）；Some 时按像素预算断行（P96：非等宽字体下
+    /// 段尾贴满真实右缘，杜绝列模型的系统性空白），None 回退列模型。
+    pub(crate) fn segments_of(
+        &mut self,
+        line: usize,
+        body: &str,
+        real_xs: Option<&[f32]>,
+    ) -> Rc<Vec<usize>> {
+        self.index.set_line(line, body, self.max_cols, self.max_px, real_xs)
     }
 }
 
@@ -255,7 +309,7 @@ mod tests {
         idx.reset(bodies.len());
         assert_eq!(idx.total(), 3, "重置后每行暂记 1 段");
         for (i, b) in bodies.iter().enumerate() {
-            idx.set_line(i, b, 12);
+            idx.set_line(i, b, 12, 10.0 * 12.0, None);
         }
         // 段数：short(1) + 长行(?) + x(1)；长行 27 列 / 12 → 3 段
         let long = wrap_breaks(bodies[1], 12).len() as u32;
@@ -276,17 +330,40 @@ mod tests {
             gen: 0,
         };
         idx.reset(1);
-        idx.set_line(0, "aaaa", 2); // 2 段
+        idx.set_line(0, "aaaa", 2, 20.0, None); // 2 段
         assert_eq!(idx.total(), 2);
         idx.bump_gen();
         // 同代 memo 失效：同内容重算 → 结果一致（BIT 差值 0，不重复累加）
-        idx.set_line(0, "aaaa", 2);
+        idx.set_line(0, "aaaa", 2, 20.0, None);
         assert_eq!(idx.total(), 2, "同内容重算不得重复计段");
         // ⚠️ 内容突变必须先推进代次（接线契约：正文突变汇点调用
         // bump_gen）——否则同 gen 命中上次写入的 memo 会读到旧断点
         idx.bump_gen();
-        idx.set_line(0, "aaaaaaa", 2); // 4 段
+        idx.set_line(0, "aaaaaaa", 2, 20.0, None); // 4 段
         assert_eq!(idx.total(), 4, "内容变长：代次推进后重算，段数差值正确更新");
+    }
+
+    #[test]
+    fn pixel_breaks_fills_to_pixel_budget_even_with_nonuniform_advances() {
+        // 模拟非等宽：汉字 28px、半宽 15.6px（第 75 轮真实场景）。
+        // 40 个汉字 = 1120px；max_px=955 → 段 0 应容纳 floor(955/28)=34
+        // 个汉字（段尾 952 ≤ 955），段 1 从第 34 字符起——列模型
+        // （2×15.6=31.2/字 → 30 字/段）会少塞 4 字留下 ~115px 空白，
+        // 像素断行必须按真实 advance 塞满。
+        let xs: Vec<f32> = (0..=40).map(|i| i as f32 * 28.0).collect();
+        let breaks = pixel_breaks(&xs, 955.0);
+        assert_eq!(breaks, vec![0, 34], "段 0 恰容纳 34 汉字（952 ≤ 955）");
+        // 段尾贴满：最后一段也 ≤ 预算（40 汉字全部放进 1 个后续段）
+        assert_eq!(breaks[1], 34);
+        // 恰好压线不产空段：100px 预算 + 每字符 25px → 4 字符/段
+        let xs2: Vec<f32> = (0..=10).map(|i| i as f32 * 25.0).collect();
+        assert_eq!(pixel_breaks(&xs2, 100.0), vec![0, 4, 8]);
+        // 单字符超宽自成一格（emoji）：200px 预算 + 首字符 300px；
+        // 后续两个 1px 字符在预算内共段
+        let xs3 = vec![0.0, 300.0, 301.0, 302.0];
+        assert_eq!(pixel_breaks(&xs3, 200.0), vec![0, 1]);
+        // 空行
+        assert_eq!(pixel_breaks(&[0.0], 100.0), vec![0]);
     }
 
     #[test]
@@ -298,8 +375,8 @@ mod tests {
             gen: 0,
         };
         idx.reset(2);
-        idx.set_line(0, "aaaaaaaa", 4); // 2 段
-        idx.set_line(1, "bb", 4);
+        idx.set_line(0, "aaaaaaaa", 4, 40.0, None); // 2 段
+        idx.set_line(1, "bb", 4, 40.0, None);
         assert_eq!(idx.total(), 3);
         // 行数变化：整表重置（每行 1 段起步）
         idx.reset(4);
@@ -307,7 +384,7 @@ mod tests {
         assert_eq!(idx.prefix_rows(3), 3);
         // 重新填充后收敛
         for (i, b) in ["a", "bbbbbbbb", "", "c"].iter().enumerate() {
-            idx.set_line(i, b, 4);
+            idx.set_line(i, b, 4, 40.0, None);
         }
         assert_eq!(idx.total(), 1 + 2 + 1 + 1);
     }
@@ -330,28 +407,30 @@ mod tests {
     fn wrap_cache_enable_edit_and_ensure_sync_paths() {
         let mut wc = WrapCache::new();
         assert!(!wc.enabled);
-        wc.enable(2, 4);
+        wc.enable(2, 4, 40.0);
         assert!(wc.enabled);
         assert_eq!(wc.index.total(), 2, "开启即整表重置，每行暂记 1 段");
-        wc.segments_of(0, "aaaaaaaa"); // 2 段
+        wc.segments_of(0, "aaaaaaaa", None); // 2 段（列模型）
         assert_eq!(wc.index.total(), 3);
         // 编辑但行数不变：只推代次，同一行重算后 BIT 差值收敛
         wc.after_edit(2);
-        wc.segments_of(0, "a"); // 缩成 1 段
+        wc.segments_of(0, "a", None); // 缩成 1 段
         assert_eq!(wc.index.total(), 2);
         // 行数变化：整表重置
         wc.after_edit(3);
         assert_eq!(wc.index.total(), 3);
-        // 列预算变化：兜底全清
-        wc.segments_of(1, "bbbbbbbb"); // max 4 → 2 段 → total 4
+        // 像素预算路径：与列模型同预算的 xs 应给出贴合结果
+        let xs: Vec<f32> = (0..=8).map(|i| i as f32 * 10.0).collect();
+        wc.segments_of(1, "bbbbbbbb", Some(&xs)); // max_px 40 → 4 字符/段
         assert_eq!(wc.index.total(), 4);
-        wc.ensure_synced(3, 9);
+        // 预算变化：兜底全清
+        wc.ensure_synced(3, 9, 90.0);
         assert_eq!(wc.index.total(), 3, "预算变化整表重置为 1 段/行");
         // 关闭开关不影响缓存同步
         wc.disable();
         assert!(!wc.enabled);
         wc.after_edit(3);
-        wc.segments_of(2, "x");
+        wc.segments_of(2, "x", None);
         assert_eq!(wc.index.total(), 3);
     }
 }

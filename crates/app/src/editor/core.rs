@@ -2806,7 +2806,8 @@ impl EditorCore {
             self.clear_block();
             self.scroll_left = 0.0;
             let (lines, cols) = (self.doc.line_count(), self.wrap_max_cols());
-            self.wrap.borrow_mut().enable(lines, cols);
+            let px = self.wrap_max_px();
+            self.wrap.borrow_mut().enable(lines, cols, px);
         } else {
             self.wrap.borrow_mut().disable();
             self.goal_px = None;
@@ -2820,10 +2821,19 @@ impl EditorCore {
     /// 会让折行文本在窗口右缘留下一片可见空白（贴边留白观感）。垂直
     /// 滚动条是覆盖式（overlay，闲置 900ms 淡出，见 P53），文字被半
     /// 透明滑块短暂盖住与关态「长行滚到行尾」是同一既有行为。
+    ///
+    /// P96 起仅作**列模型回退**用（真实字形布局未注入时，见
+    /// [`Self::wrap_line_breaks`]）；有真实布局时按
+    /// [`Self::wrap_max_px`] 像素断行。
     fn wrap_max_cols(&self) -> usize {
         let cw = self.char_width().max(0.1);
         let w = self.text_viewport_w().max(4.0);
         (w / cw).floor().max(1.0) as usize
+    }
+
+    /// 软换行段宽像素预算 = 正文区可视宽（开态零预留，P95/P96 口径）。
+    fn wrap_max_px(&self) -> f32 {
+        self.text_viewport_w().max(4.0)
     }
 
     /// 总视觉行数（开关关 = 逻辑行数；开 = Fenwick 段数前缀总和）。
@@ -2832,7 +2842,7 @@ impl EditorCore {
             return self.doc.line_count() as u32;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
         w.index.total()
     }
 
@@ -2842,7 +2852,7 @@ impl EditorCore {
             return line as u32;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
         let lines = self.doc.line_count();
         let line = line.min(lines);
         let prefix = w.index.prefix_rows(line);
@@ -2850,7 +2860,8 @@ impl EditorCore {
             return prefix;
         }
         let body = self.line_text(line);
-        let breaks = w.segments_of(line, &body);
+        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        let breaks = w.segments_of(line, &body, real_xs);
         let seg = segment_index(&breaks, col, body.chars().count());
         prefix + seg as u32
     }
@@ -2862,17 +2873,19 @@ impl EditorCore {
             return 1;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
         let body = self.line_text(line);
-        w.segments_of(line, &body).len() as u32
+        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        w.segments_of(line, &body, real_xs).len() as u32
     }
 
     /// 逻辑行 `line` 的段首列向量（调用方常已持有正文，免二次取串；
     /// 内部按需重算并差值更新 BIT）。
     pub(crate) fn segments_of_line(&self, line: usize, body: &str) -> Rc<Vec<usize>> {
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
-        w.segments_of(line, body)
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
+        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        w.segments_of(line, body, real_xs)
     }
 
     /// 视觉行反解：`(逻辑行, 段序, 段首列, 段末列)`。段末列 = 下一段
@@ -2888,7 +2901,7 @@ impl EditorCore {
             return (0, 0, 0, 0);
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(lines, self.wrap_max_cols());
+        w.ensure_synced(lines, self.wrap_max_cols(), self.wrap_max_px());
         let total = w.index.total();
         let v = visual.min(total.saturating_sub(1));
         // 二分：最大 line 使 prefix_rows(line) ≤ v（prefix_rows = 该行
@@ -2905,7 +2918,8 @@ impl EditorCore {
         let line = lo.saturating_sub(1);
         let body = self.line_text(line);
         let lens = body.chars().count();
-        let breaks = w.segments_of(line, &body);
+        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        let breaks = w.segments_of(line, &body, real_xs);
         let off = (v.saturating_sub(w.index.prefix_rows(line))) as usize;
         let seg = off.min(breaks.len().saturating_sub(1));
         let seg_start = breaks[seg];
@@ -2919,7 +2933,7 @@ impl EditorCore {
             return line as u32;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
         w.index.prefix_rows(line.min(self.doc.line_count()))
     }
 
@@ -3046,10 +3060,12 @@ impl EditorCore {
             let text = self.line_text(line);
             let lens = text.chars().count();
             let (s0, s1) = (s0.min(lens), s1.min(lens));
-            // 段相对 x：续行从文本区左缘起排（px_of(s0) = 段起点像素）
-            let rel_abs = (x - gutter + self.scroll_left).max(0.0);
-            let rel =
-                (rel_abs - self.px_of(line, &text, s0)).max(0.0);
+            // 段相对 x：续行从文本区**左缘**起排（P94 左缘模型）——点击
+            // 偏移（x−gutter）即段内偏移，**不得**再减 px_of(seg_start)：
+            // 那会把注入布局的真实 x（如 xs[34]=952px）当段起点，所有
+            // 续行点击全部落回段首（P96 像素测试当场暴露的潜伏 bug，
+            // P94 测试全走列模型回退路径所以未被抓到）
+            let rel = (x - gutter + self.scroll_left).max(0.0);
             let col = self.hit_col_in_range(line, &text, s0, s1, rel);
             return CursorPos { line, col };
         }
@@ -3243,9 +3259,10 @@ impl EditorCore {
         let x_px = self.px_of(self.cursor.line, &text, col);
         let (v, seg_start) = if self.wrap.borrow().enabled {
             let mut w = self.wrap.borrow_mut();
-            w.ensure_synced(self.doc.line_count(), self.wrap_max_cols());
+            w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
             let lens = text.chars().count();
-            let breaks = w.segments_of(self.cursor.line, &text);
+            let real_xs = self.row_layouts.get(&self.cursor.line).map(|x| x.as_slice());
+            let breaks = w.segments_of(self.cursor.line, &text, real_xs);
             let seg = segment_index(&breaks, col, lens);
             let v = w.index.prefix_rows(self.cursor.line) + seg as u32;
             (v, breaks[seg])

@@ -3556,6 +3556,47 @@ fn p66_fractional_scroll_top_survives_clamp() {
     }
 
     #[test]
+    fn wrap_pixel_breaks_fill_right_edge_on_nonuniform_advances() {
+        // P96 用户点单根治：真实场景（探针日志：28px 字号、char_w=15.6）
+        // 的 CJK 文本在列模型下段尾系统性留白 ~10%（汉字真实 28px 但
+        // 列模型按 2×15.6=31.2px 计）——真实字形布局注入后必须按像素
+        // 断行贴满右缘。本测试注入与真实场景同形的 xs（每汉字 28px）。
+        let mut c = core_with(&"汉".repeat(40));
+        c.set_viewport_width(1024.0);
+        c.set_viewport_height(600.0);
+        c.set_word_wrap(true);
+        // 注入「真实字形」行布局：40 汉字 = 1120px，每字 28px
+        let xs: Vec<f32> = (0..=40).map(|i| i as f32 * 28.0).collect();
+        c.set_row_layout(0, xs.clone());
+        let max_px = c.text_viewport_w(); // 1024 − gutter(49) = 975
+        let breaks = c.segments_of_line(0, &c.line_text(0));
+        // 段 0 恰容纳 floor(975/28)=34 个字（952 ≤ 975）
+        assert_eq!(*breaks, vec![0, 34], "像素断行段 0 应到第 34 字符");
+        let seg0_end_px = xs[34] - xs[0];
+        assert!(
+            max_px - seg0_end_px < 28.0,
+            "段尾缺 {}px ≥ 一字符宽——未贴满右缘",
+            max_px - seg0_end_px
+        );
+        // 断点全部尊重像素预算：任一段右缘 ≤ max_px（列模型对 28px 汉字
+        // 按 2×char_w 计会超/欠预算，像素路径不受影响）
+        let mut prev = 0usize;
+        for &b in breaks.iter().skip(1) {
+            assert!(xs[b] - xs[prev] <= max_px);
+            prev = b;
+        }
+        assert!(xs[40] - xs[prev] <= max_px, "末段右缘不得超预算");
+        // 视觉映射与像素断点自洽：40 字 → 2 段（无尾随换行 → 无幻影行）
+        assert_eq!(c.line_visual_segments(0), 2);
+        assert_eq!(c.visual_rows_total(), 2);
+        // 光标/命中按段内真实 x 工作（段 1 起点 = 字符 34 → 像素 x 952）
+        assert_eq!(c.visual_row_of(0, 35), 1);
+        let gutter = c.gutter_width();
+        let hit = c.hit_test(gutter + 28.0 * 5.0, c.line_height() * 1.5);
+        assert_eq!((hit.line, hit.col), (0, 39), "段 1 内命中第 5 个字 = 字符 39");
+    }
+
+    #[test]
     fn wrap_motion_vertical_uses_visual_rows_and_goal_column() {
         // 行 0：50 字符 → 2 段；行 1：70 字符 → 3 段。总视觉行 5。
         let mut c = wrap_core(&format!("{}\n{}\n", "a".repeat(50), "a".repeat(70)));
@@ -3616,11 +3657,12 @@ fn p66_fractional_scroll_top_survives_clamp() {
         // 视觉行 0（逻辑行 0 段 0）段首
         let hit = c.hit_test(gutter, lh * 0.5);
         assert_eq!((hit.line, hit.col), (0, 0));
-        // 视觉行 1 = 逻辑行 0 段 1：x 落在段首与段中
-        let hit = c.hit_test(gutter + mc as f32 * char_w, lh * 1.5);
-        assert_eq!((hit.line, hit.col), (0, mc), "段 1 首字符");
-        let hit = c.hit_test(gutter + (mc + 5) as f32 * char_w, lh * 1.5);
-        assert_eq!((hit.line, hit.col), (0, mc + 5), "段 1 中段");
+        // 视觉行 1 = 逻辑行 0 段 1：续行从文本区**左缘**起排——段首
+        // 点击在 x=gutter（P96 左缘模型），段内第 5 字符在 +5 列
+        let hit = c.hit_test(gutter, lh * 1.5);
+        assert_eq!((hit.line, hit.col), (0, mc), "段 1 首字符（左缘起排）");
+        let hit = c.hit_test(gutter + 5.0 * char_w, lh * 1.5);
+        assert_eq!((hit.line, hit.col), (0, mc + 5), "段 1 中段第 5 字符");
         // 视觉行 2 = 逻辑行 1
         let hit = c.hit_test(gutter, lh * 2.5);
         assert_eq!((hit.line, hit.col), (1, 0));

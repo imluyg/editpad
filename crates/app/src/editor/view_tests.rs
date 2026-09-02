@@ -1177,3 +1177,85 @@ fn headless_wrap_on_combo_ink_stays_in_bounds() {
     }
     eprintln!("[P93] 折行开态组合批帧数 = {frames}");
 }
+
+/// 第 75 轮 用户点单（P96 排查）：窗口缩放后折行必须重新适配——先以
+/// 800 宽渲染，再把视口扩到 1200 重新渲染：新帧墨迹右缘必须贴住新右缘
+/// （旧实现若断点不重算，拉宽后文字停在旧右缘留下整条空白）。
+#[test]
+fn headless_wrap_reaments_after_viewport_grow() {
+    use super::super::CursorPos;
+    let (w, h) = (1280u32, 600u32);
+    let (ex, ey, ew1, eh) = (0.0f32, 0.0f32, 800.0f32, 600.0f32);
+    let doc = format!("{}\n", "a".repeat(220));
+    // 220 字符：800 宽 ~2 段；1200 宽 ~1 段——段数变化证明断点重算
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_height(eh);
+        c.cursor = CursorPos { line: 0, col: 0 };
+    }
+
+    let render = |ew: f32| -> tiny_skia::Pixmap {
+        core.borrow_mut().set_viewport_width(ew);
+        core.borrow_mut().set_word_wrap(true);
+        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    let ink_right = |px: &tiny_skia::Pixmap| -> u32 {
+        let mut max_x = 0u32;
+        for y in 0..h {
+            for x in 0..w {
+                if let Some(p) = px.pixel(x, y) {
+                    if p.red() < 245 || p.green() < 245 || p.blue() < 245 {
+                        if x > max_x {
+                            max_x = x;
+                        }
+                    }
+                }
+            }
+        }
+        max_x
+    };
+
+    let p800 = render(ew1);
+    // 折行段数必须随宽度变化（800 宽 mc≈85 → 3 段；1200 宽 mc≈130 → 2 段）
+    {
+        let c = core.borrow();
+        assert_eq!(c.line_visual_segments(0), 3, "800 宽 220 字符应折 3 段");
+    }
+    let p1200 = render(1200.0);
+    {
+        let c = core.borrow();
+        assert_eq!(c.line_visual_segments(0), 2, "1200 宽应折 2 段——断点已随宽度重算");
+    }
+    let gap1 = (ew1 as u32).saturating_sub(ink_right(&p800) + 1);
+    let gap2 = (1200u32).saturating_sub(ink_right(&p1200) + 1);
+    eprintln!("[P96] 800 宽右gap={gap1}px  1200 宽右gap={gap2}px");
+    assert!(gap1 <= 12, "800 宽折行应贴右缘，缺 {gap1}px");
+    // 拉宽后必须重新贴住新右缘（用户点单的适配要求）
+    assert!(gap2 <= 12, "扩宽后折行未重算：右缘缺 {gap2}px（断点停在旧宽度）");
+}

@@ -4883,9 +4883,11 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 否则全量并发下外部写入可能与加载戳同窗，巡检漏检致偶发失败。
         // 第 74 轮（P95）加宽 25→50ms：软换行像素批等新增测试加重并发
         // 调度抖动后 25ms 仍在全量下偶发（隔离单跑恒绿），50ms 留足余量。
+        // 第 75 轮（P96）再宽 50→150ms：P96 像素断行测试引入更多行布局
+        // 注入与并发压力，50ms 连续三轮全量偶发（隔离单跑恒绿）。
         std::fs::write(&p0, "a2").unwrap();
         std::fs::write(&p1, "b2").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(150));
         dispatch(&mut app, Message::WindowFocused);
         assert!(
             app.active_load.is_some(),
