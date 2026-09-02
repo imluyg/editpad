@@ -2201,25 +2201,30 @@ impl Widget<super::Message, Theme, iced::Renderer> for EditorView {
                 continue;
             }
 
+            // 行号数字：P66附 改「计算左缘 + Default 对齐」。上游把 Cached
+            // 文本的损伤矩形存为 Rectangle::new(position, size)——Right 对齐
+            // 时 position 是右缘、矩形向右展开，而字形实际向左展开 → 损伤区
+            // 永远错位到字形右侧空白带，部分重绘时数字不被重绘（用户截图：
+            // 滚动后行号滞后一帧/序号重复，内容却总是新鲜——Default 对齐的
+            // 内容矩形方向正确）。数字是 ASCII 等宽（P42 实测 char_w，行号
+            // 字号按 GUTTER_FONT_SCALE 线性折算），左缘可精确计算：
+            // num_x + num_w = 行号栏右缘 − GUTTER_MIN，视觉仍是右对齐。
+            let num = (line + 1).to_string();
+            let num_w = num.chars().count() as f32 * char_w * GUTTER_FONT_SCALE;
+            let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
             renderer.fill_text(
                 core_text::Text {
-                    content: (line + 1).to_string(),
-                    bounds: Size::new(gutter_w - GUTTER_MIN, lh),
+                    content: num,
+                    bounds: Size::new(num_w, lh),
                     size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                     line_height: core_text::LineHeight::Absolute(Pixels(lh)),
                     font: body_font,
-                    align_x: core_text::Alignment::Right,
+                    align_x: core_text::Alignment::Default,
                     align_y: alignment::Vertical::Top,
                     shaping: core_text::Shaping::Basic,
                     wrapping: core_text::Wrapping::None,
                 },
-                // P59：Cached 文本的 Right 对齐语义 =「position.x 即右缘」
-                // （tiny-skia draw_cached: x = bounds.x − width）——必须传
-                // 行号盒的右缘，传左缘会把行号整段画到控件左缘之外
-                // （真实应用里行号因此一直不可见）。右缘 = 行号栏宽 −
-                // GUTTER_MIN 间距，数字向左展开且盒宽 ≥ 数字宽（gutter_width
-                // 系数已改 1.0），不再越出控件左缘。
-                Point::new(bounds.x + gutter_w - GUTTER_MIN, y),
+                Point::new(num_x, y),
                 colors.gutter_text,
                 bounds,
             );
@@ -4185,6 +4190,29 @@ fn p66_gutter_ink_moves_with_smooth_scroll() {
     let diff_rows = ga.iter().zip(&gb).filter(|(a, b)| a != b).count();
     eprintln!("[P66] gutter 行墨迹差异行数 = {diff_rows}");
     assert!(diff_rows >= 10, "两帧行号栏墨迹几乎相同？行号没有随滚动移动");
+
+    // P66附 护栏：行号右缘必须贴在「gutter 右缘 − GUTTER_MIN」处（±3px）
+    // ——左对齐位置由 num_w 估算，估算漂移会在这里暴露（损伤矩形依赖
+    // position/size 与真实字形一致，漂移即重蹈 Right 对齐的错位覆辙）
+    let mut x_max = 0u32;
+    for x in gx0..gx1 {
+        let mut col_has_ink = false;
+        for y in 0..500u32 {
+            if frame_a.pixel(x, y).map(dark).unwrap_or(false) {
+                col_has_ink = true;
+                break;
+            }
+        }
+        if col_has_ink {
+            x_max = x;
+        }
+    }
+    let expect_right = gx1 as f32 - GUTTER_MIN;
+    eprintln!("[P66] 行号最右墨迹列 = {x_max}，期望 ≈ {expect_right}");
+    assert!(
+        (x_max as f32 - expect_right).abs() <= 3.0,
+        "行号右缘漂移：实际 {x_max}，期望 ≈ {expect_right}（num_w 估算失准）"
+    );
 }
 
 /// P59 微实验（钉住上游缺陷）：iced 0.14 tiny-skia 的 `fill_text` 第 4 参
