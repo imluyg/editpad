@@ -120,6 +120,11 @@ fn rope_style_lines(s: &str) -> Vec<String> {
 
 /// 生成一条随机编辑序列并同步驱动 Document 与 String 模型，
 /// 每步做全量一致性断言。`rounds` 为操作数。
+///
+/// 第 58 轮扩容：混入撤销/重做交错（双栈模型对拍）——Document 虽无内建
+/// 撤销，应用层（P37/P38）以 `Document::clone` 为快照原语，此处用同一
+/// 原语在模型侧维护 past/future 双栈，验证「任意编辑历史下按快照重建的
+/// 文档与纯文本参照始终一致」。
 fn fuzz_one(seed: u64, rounds: usize) {
     let mut rng = Rng::new(seed);
 
@@ -129,19 +134,23 @@ fn fuzz_one(seed: u64, rounds: usize) {
         model.push_str(rng.pick(TOKENS));
     }
     let mut doc = Document::from_str(&model);
+    let mut past: Vec<String> = Vec::new();
+    let mut future: Vec<String> = Vec::new();
 
     for step in 0..rounds {
         let boundaries = char_boundaries(&model);
         match rng.below(100) {
             // ---- 插入：1~5 个随机 token，落在任意字符边界 ----
-            0..=54 => {
+            0..=44 => {
                 let text: String = (0..rng.below(5) + 1).map(|_| *rng.pick(TOKENS)).collect();
                 let pos = *rng.pick(&boundaries);
                 doc.insert(char_index_of(&model, pos), &text);
+                past.push(model.clone());
+                future.clear();
                 model.insert_str(pos, &text);
             }
             // ---- 区间删除：随机起点，最多删 5 个字符 ----
-            55..=89 => {
+            45..=74 => {
                 let start_idx = rng.below(boundaries.len());
                 let start = boundaries[start_idx];
                 // 终点取「起点后第 k 个边界」（k ∈ [0, max_span]），k=0 为空删
@@ -153,10 +162,12 @@ fn fuzz_one(seed: u64, rounds: usize) {
                     char_index_of(&model, end),
                 );
                 doc.remove_range(cs, ce);
+                past.push(model.clone());
+                future.clear();
                 model.replace_range(start..end, "");
             }
             // ---- 全部替换（大小写敏感；参照 = str::replacen）----
-            _ => {
+            75..=89 => {
                 let query: String = (0..rng.below(4) + 1).map(|_| *rng.pick(TOKENS)).collect();
                 let replacement: String =
                     (0..rng.below(4) + 1).map(|_| *rng.pick(TOKENS)).collect();
@@ -172,9 +183,25 @@ fn fuzz_one(seed: u64, rounds: usize) {
                     model.matches(&query).count(),
                     "seed={seed} step={step} 替换计数不一致"
                 );
+                past.push(model.clone());
+                future.clear();
                 model = new_text;
                 // replace_all 产出的是新文本：按应用层同款语义整体换文档
                 doc = Document::from_str(&model);
+            }
+            // ---- 撤销（第 58 轮）：回退到上一状态并整体重建 rope ----
+            90..=94 => {
+                if let Some(prev) = past.pop() {
+                    future.push(std::mem::replace(&mut model, prev));
+                    doc = Document::from_str(&model);
+                }
+            }
+            // ---- 重做：恢复最近一次撤销掉的状态 ----
+            _ => {
+                if let Some(next) = future.pop() {
+                    past.push(std::mem::replace(&mut model, next));
+                    doc = Document::from_str(&model);
+                }
             }
         }
 
@@ -219,7 +246,7 @@ fn fuzz_one(seed: u64, rounds: usize) {
 
 #[test]
 fn edit_sequence_fuzz_matches_string_model() {
-    // 固定种子集合：任一失败都可用同种子精确复现
+    // 固定种子集合：任一失败都可用同种子精确复现（第 58 轮 8→12 种子）
     let seeds = [
         0xDEAD_BEEF,
         0x5EED_1234,
@@ -229,14 +256,19 @@ fn edit_sequence_fuzz_matches_string_model() {
         0x2545_F491_4F6C_DD1D,
         9_007_199_254_740_993,
         0xABCD_EF01,
+        0x1234_5678_9ABC_DEF0,
+        0xFEDC_BA98_7654_3210,
+        314_159_265_358_979,
+        2_718_281_828_459_045,
     ];
     for seed in seeds {
-        fuzz_one(seed, 120);
+        fuzz_one(seed, 150);
     }
 }
 
 #[test]
 fn heavy_single_seed_long_session() {
     // 单种子长会话：更多步数，考验长期累积下的索引/行元数据一致性
-    fuzz_one(2026_0824, 600);
+    // （第 58 轮 600→900 步，含撤销/重做交错）
+    fuzz_one(2026_0824, 900);
 }

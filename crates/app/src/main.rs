@@ -25,7 +25,7 @@ use iced::widget::{button, checkbox, column, container, mouse_area, opaque, prog
 use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
     Font, Padding, Point, Shadow, Subscription, Task, Theme};
 
-use editor::{EditorHandle, EditOp, Motion};
+use editor::{CaseKind, EditorHandle, EditOp, Motion, TrimMode};
 
 fn main() -> iced::Result {
     // iced 0.14：第一个参数是 boot 函数（返回初始状态），title/theme/subscription 走 builder
@@ -1536,6 +1536,13 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "del_line", default_combo: "Ctrl+L", desc: "删除当前行" },
     HotkeyAction { id: "move_line_up", default_combo: "Ctrl+Shift+Up", desc: "当前行上移" },
     HotkeyAction { id: "move_line_down", default_combo: "Ctrl+Shift+Down", desc: "当前行下移" },
+    // 大小写转换与行首尾清理（第 58 轮；大小写默认键与主流编辑器一致，
+    // Trim 在主流编辑器无默认键——取 Ctrl+Shift+T/L/B 助记：Trim/Leading/Both）
+    HotkeyAction { id: "to_uppercase", default_combo: "Ctrl+Shift+U", desc: "转为大写（选区/全文）" },
+    HotkeyAction { id: "to_lowercase", default_combo: "Ctrl+U", desc: "转为小写（选区/全文）" },
+    HotkeyAction { id: "trim_trailing", default_combo: "Ctrl+Shift+T", desc: "去除行尾空白（选区行/全文）" },
+    HotkeyAction { id: "trim_leading", default_combo: "Ctrl+Shift+L", desc: "去除行首空白（选区行/全文）" },
+    HotkeyAction { id: "trim_both", default_combo: "Ctrl+Shift+B", desc: "去除行首尾空白（选区行/全文）" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1674,6 +1681,12 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "del_line" => edit(EditOp::DeleteLines),
         "move_line_up" => edit(EditOp::MoveLinesUp),
         "move_line_down" => edit(EditOp::MoveLinesDown),
+        // 大小写转换与行首尾清理（第 58 轮）
+        "to_uppercase" => edit(EditOp::ConvertCase(CaseKind::Upper)),
+        "to_lowercase" => edit(EditOp::ConvertCase(CaseKind::Lower)),
+        "trim_leading" => edit(EditOp::TrimLines(TrimMode::Leading)),
+        "trim_trailing" => edit(EditOp::TrimLines(TrimMode::Trailing)),
+        "trim_both" => edit(EditOp::TrimLines(TrimMode::Both)),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),

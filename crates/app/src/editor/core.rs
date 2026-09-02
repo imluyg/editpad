@@ -91,6 +91,26 @@ pub enum EditOp {
     MoveLinesUp,
     /// 触及块与下一相邻行整体换位（已在底行时为 no-op）
     MoveLinesDown,
+    // ---------- 大小写转换与行首尾清理（第 58 轮，仿主流编辑器编辑菜单） ----------
+    /// 转大小写：有选区只转选区字符，无选区转整个文档
+    ConvertCase(CaseKind),
+    /// 去行首/行尾空白：有选区只清触及行，无选区清全文档
+    TrimLines(TrimMode),
+}
+
+/// 大小写转换方向（第 58 轮）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseKind {
+    Upper,
+    Lower,
+}
+
+/// 行首尾清理模式（第 58 轮）：去行首 / 去行尾 / 两端都去。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimMode {
+    Leading,
+    Trailing,
+    Both,
 }
 
 /// 输入法上屏事件的裁决结果（P2 焦点过滤）。
@@ -945,6 +965,119 @@ impl EditorCore {
         self.max_cols_stale = true;
         self.anchor = None;
         self.cursor = CursorPos { line: if up { a - 1 } else { b + 1 }, col: keep_col };
+        self.ensure_visible();
+        true
+    }
+
+    // ---------- 大小写转换与行首尾清理（第 58 轮，仿主流编辑器编辑菜单） ----------
+
+    /// 大小写转换：有选区只转选区字符，无选区转整个文档。返回是否改动。
+    ///
+    /// - Unicode 全量映射（`str::to_uppercase/to_lowercase`）：`ß→SS`、
+    ///   `ﬁ→FI` 一类映射会改变字符数——区域整体重写，光标/选区按新偏移
+    ///   重建（有选区时转换结果保持选中，便于连续操作）；
+    /// - 换行符不在大小写映射表里：行数与主导行尾元数据恒不变；
+    /// - 幂等保护：内容无可转换字符（纯数字/CJK/空白）时不动、不产快照。
+    pub fn convert_case(&mut self, kind: CaseKind) -> bool {
+        let (start, end) = match self.selection_offsets() {
+            Some((s, e)) if s < e => (s, e),
+            _ => (0, self.doc.text_len()),
+        };
+        if start >= end {
+            return false;
+        }
+        let src = self.doc.slice_text(start, end);
+        let out = match kind {
+            CaseKind::Upper => src.to_uppercase(),
+            CaseKind::Lower => src.to_lowercase(),
+        };
+        if out == src {
+            return false; // 无可转换内容：no-op 不产生撤销快照
+        }
+        let had_selection = self.anchor.is_some();
+        // 行号在换行结构不变的前提下保持；列钳到行长防越界
+        let keep = self.cursor;
+        self.snapshot();
+        self.doc.remove_range(start, end);
+        self.doc.insert(start, &out);
+        self.invalidate_highlight_from(start);
+        // ß→SS 一类长度变化让列高水位可能过估——交惰性收敛（P45 口径）
+        self.max_cols_stale = true;
+        if had_selection {
+            // 新文本整体重新选中：起止偏移换算回行列（end 可等于 text_len）
+            let end_off = start + out.chars().count();
+            let sl = self.doc.char_to_line(start);
+            let sc = start - self.doc.line_to_char(sl);
+            let el = self.doc.char_to_line(end_off.min(self.doc.text_len()));
+            let ec = end_off.min(self.doc.text_len()) - self.doc.line_to_char(el);
+            self.anchor = Some(CursorPos { line: sl, col: sc });
+            self.cursor = CursorPos { line: el, col: ec };
+        } else {
+            self.anchor = None;
+            self.cursor = CursorPos {
+                col: keep.col.min(self.line_display_len(keep.line)),
+                ..keep
+            };
+        }
+        self.ensure_visible();
+        true
+    }
+
+    /// 去除行首/行尾空白：有选区只清触及行，无选区清全文档。返回是否改动。
+    ///
+    /// - 空白口径 = `char::is_whitespace`（Unicode White_Space：半角/全角
+    ///   空格、Tab、NBSP 等都算），行尾判定先剥换行单元再 trim；
+    /// - 与 P73 行操作同哲学：触及块按主导行尾重建，不产生混合行尾；
+    ///   文档末行无行尾的形态保持；
+    /// - 无任何行需要清理时不动、不产快照（幂等 no-op）。
+    pub fn trim_touched_lines(&mut self, mode: TrimMode) -> bool {
+        let count = self.doc.line_count();
+        let (a, b) = if self.anchor.is_some() {
+            self.touched_lines()
+        } else {
+            (0, count.saturating_sub(1))
+        };
+        let rs = self.doc.line_to_char(a);
+        let re =
+            if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        let mut changed = false;
+        let mut lines: Vec<String> = Vec::with_capacity(b - a + 1);
+        for i in a..=b {
+            // line_str 是 ropey 口径：含行尾，先剥掉再 trim（P73 同款手法）
+            let mut s = self.doc.line_str(i);
+            if s.ends_with("\r\n") {
+                s.truncate(s.len() - 2);
+            } else if s.ends_with('\n') || s.ends_with('\r') {
+                s.pop();
+            }
+            let t = match mode {
+                TrimMode::Leading => s.trim_start(),
+                TrimMode::Trailing => s.trim_end(),
+                TrimMode::Both => s.trim(),
+            };
+            // trim 只删前后缀，字节数相同即内容未变
+            changed |= t.len() != s.len();
+            lines.push(t.to_owned());
+        }
+        if !changed {
+            return false;
+        }
+        // 光标行钳进触及范围、列钳到清理后的行长（行可能变短）
+        let keep_line = self.cursor.line.clamp(a, b);
+        let keep_col = self.cursor.col;
+        self.snapshot();
+        let nl = self.doc.line_ending().newline();
+        let mut rebuilt = lines.join(nl);
+        if re < self.doc.text_len() {
+            rebuilt.push_str(nl); // 区域不是文档末尾：补回块尾换行
+        }
+        self.doc.remove_range(rs, re);
+        self.doc.insert(rs, &rebuilt);
+        self.invalidate_highlight_from(rs);
+        self.max_cols_stale = true;
+        self.anchor = None;
+        self.cursor =
+            CursorPos { line: keep_line, col: keep_col.min(self.line_display_len(keep_line)) };
         self.ensure_visible();
         true
     }

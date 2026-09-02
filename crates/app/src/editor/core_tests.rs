@@ -1894,3 +1894,273 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(c.doc.to_text(), "second\r\nabcdef\r\nc", "CRLF 文档换位不产生混合行尾");
         assert_eq!(c.cursor, CursorPos { line: 1, col: 3 }, "光标列尽量保持");
     }
+
+    // ---------- 大小写转换与行首尾清理（第 58 轮） ----------
+
+    #[test]
+    fn convert_case_selection_scoped_and_crlf_preserved() {
+        let mut c = core_with("abc\r\nDef G");
+        // 跨行选区：第一行 col2 起盖到第二行 col3（"c\r\nDef"）
+        c.anchor = Some(CursorPos { line: 0, col: 2 });
+        c.cursor = CursorPos { line: 1, col: 3 };
+        assert!(c.convert_case(CaseKind::Upper));
+        // 只有选区内字符变大写；换行单元字节原样保留
+        assert_eq!(c.doc.to_text(), "abC\r\nDEF G");
+        assert_eq!(c.doc.line_ending(), LineEnding::CrLf, "主导行尾元数据不变");
+        // 转换结果保持选中：起点不动、终点按新偏移落位
+        assert_eq!(c.anchor, Some(CursorPos { line: 0, col: 2 }));
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 3 }, "终点=新文本结束处（'DEF'后）");
+        // 撤销逐字节还原
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "abc\r\nDef G");
+    }
+
+    #[test]
+    fn convert_case_without_selection_transforms_whole_document_idempotent_no_snapshot() {
+        let mut c = core_with("abc\n123 中文\nx");
+        c.cursor = CursorPos { line: 1, col: 1 };
+        let depth = c.undo_stack.len();
+        assert!(c.convert_case(CaseKind::Upper));
+        assert_eq!(c.doc.to_text(), "ABC\n123 中文\nX", "数字/CJK 不参与大小写映射");
+        assert_eq!(c.cursor, CursorPos { line: 1, col: 1 }, "光标行列尽量保持");
+        // 幂等 no-op：再转一次不动、不追加快照
+        assert!(!c.convert_case(CaseKind::Upper));
+        assert_eq!(c.undo_stack.len(), depth + 1, "幂等调用不产生撤销快照");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "abc\n123 中文\nx");
+    }
+
+    #[test]
+    fn convert_case_expanding_mapping_keeps_selection_over_result_and_undo_exact() {
+        // ß→SS 是 Unicode 全量映射的加长案例：选区终点必须按新长度重算
+        let mut c = core_with("aß b");
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 0, col: 2 }; // 选区 = "aß"
+        assert!(c.convert_case(CaseKind::Upper));
+        assert_eq!(c.doc.to_text(), "ASS b");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 3 }, "终点按 SS 新长度落位");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "aß b", "加长映射撤销后逐字节还原");
+        // İ→i̇（i+U+0307 组合点）同样加长，且绝不产生换行
+        let mut t = core_with("İX");
+        assert!(t.convert_case(CaseKind::Lower));
+        assert_eq!(t.doc.to_text(), "i\u{307}x");
+        assert_eq!(t.doc.line_count(), 1);
+    }
+
+    #[test]
+    fn trim_modes_strip_unicode_whitespace_on_whole_document() {
+        // 全角空格 U+3000 / NBSP / Tab 都属 Unicode White_Space 口径
+        let mut c = core_with("\u{3000}a b\u{a0}\r\n\t中 文  \r\n  尾无行尾 ");
+        assert!(c.trim_touched_lines(TrimMode::Trailing));
+        assert_eq!(
+            c.doc.to_text(),
+            "\u{3000}a b\r\n\t中 文\r\n  尾无行尾",
+            "去尾不动行首；文档末行无行尾的形态保持"
+        );
+        // 去首：LF 主导文档重建后统一主导行尾（P73 行操作同哲学）
+        let mut c2 = core_with("  x\ty\r\n\t\tz  \n W");
+        assert!(c2.trim_touched_lines(TrimMode::Leading));
+        assert_eq!(c2.doc.to_text(), "x\ty\nz  \nW");
+        // 两端都去
+        let mut c3 = core_with("  a  \r\n\tb\t");
+        assert!(c3.trim_touched_lines(TrimMode::Both));
+        assert_eq!(c3.doc.to_text(), "a\r\nb");
+    }
+
+    #[test]
+    fn trim_selection_scope_only_touched_lines() {
+        let mut c = core_with("  a\r\n  b\r\n  c");
+        // 选区从第 1 行行首拉到第 2 行中间：触及行=0..=1，第 3 行不得波及
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 1, col: 2 };
+        assert!(c.trim_touched_lines(TrimMode::Leading));
+        assert_eq!(c.doc.to_text(), "a\r\nb\r\n  c");
+    }
+
+    #[test]
+    fn trim_noop_empty_and_phantom_edge_cases() {
+        // 空文档：无可清理
+        let mut c = core_with("");
+        assert!(!c.trim_touched_lines(TrimMode::Both));
+        // 全干净文档：no-op 不产快照
+        let mut d = core_with("clean\r\ntoo");
+        let depth = d.undo_stack.len();
+        assert!(!d.trim_touched_lines(TrimMode::Both));
+        assert_eq!(d.undo_stack.len(), depth, "幂等调用不产生撤销快照");
+        // 幻影末行参与清理但「尾随换行」形态保持
+        let mut e = core_with("x  \r\n");
+        assert!(e.trim_touched_lines(TrimMode::Trailing));
+        assert_eq!(e.doc.to_text(), "x\r\n");
+        assert!(e.undo());
+        assert_eq!(e.doc.to_text(), "x  \r\n");
+    }
+
+    // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
+
+    /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，
+    /// 固定种子失败可精确复现）。
+    struct XorShift64(u64);
+
+    impl XorShift64 {
+        fn below(&mut self, n: usize) -> usize {
+            if n == 0 {
+                return 0;
+            }
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x % n as u64) as usize
+        }
+    }
+
+    /// 剥掉全部换行字符——大小写对拍口径（换行不在大小写映射表内）。
+    fn strip_newlines(s: &str) -> String {
+        s.chars().filter(|c| *c != '\r' && *c != '\n').collect()
+    }
+
+    /// ropey 行界口径切行，返回不含行尾的各行内容。
+    fn rope_line_bodies(s: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\n' => out.push(std::mem::take(&mut cur)),
+                '\r' => {
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    out.push(std::mem::take(&mut cur));
+                }
+                other => cur.push(other),
+            }
+        }
+        out.push(cur);
+        out
+    }
+
+    /// 每步必跑的结构不变量：光标/锚点在界内、滚动值有限非负。
+    fn assert_structural_invariants(c: &EditorCore) {
+        assert!(
+            c.cursor.col <= c.line_display_len(c.cursor.line),
+            "光标列越界：{:?} 行长 {}",
+            c.cursor,
+            c.line_display_len(c.cursor.line)
+        );
+        assert!(c.cursor.line < c.doc.line_count(), "光标行越界");
+        if let Some(a) = c.anchor {
+            assert!(a.col <= c.line_display_len(a.line), "锚点列越界");
+            assert!(a.line < c.doc.line_count(), "锚点行越界");
+        }
+        assert!(c.scroll_top.is_finite() && c.scroll_top >= 0.0, "垂直滚动非法");
+    }
+
+    #[test]
+    fn random_mixed_ops_preserve_invariants_undo_replays_exactly() {
+        // 混入三种行尾、CJK、emoji 与加长映射字符（ß），覆盖新旧行为交互
+        const TOKENS: &[&str] = &[
+            "a", "Z", "9", "中", "文", "🚀", "ß", " ", "\t", "  ", "\n", "\r\n",
+        ];
+        let motions = [
+            Motion::Left,
+            Motion::Right,
+            Motion::Up,
+            Motion::Down,
+            Motion::Home,
+            Motion::End,
+        ];
+        for seed in [1u64, 0xDEAD_BEEF, 0x5EED_1234] {
+            let mut rng = XorShift64(seed);
+            let mut init = String::new();
+            for _ in 0..rng.below(20) + 5 {
+                init.push_str(TOKENS[rng.below(TOKENS.len())]);
+            }
+            let initial = init.clone();
+            let mut c = core_with(&init);
+
+            for step in 0..240 {
+                let old_text = c.doc.to_text();
+                match rng.below(100) {
+                    // 插入随机 token（含 CRLF/LF/CJK/emoji/ß）
+                    0..=34 => {
+                        let text: String = (0..rng.below(3) + 1)
+                            .map(|_| TOKENS[rng.below(TOKENS.len())])
+                            .collect();
+                        c.insert_str(&text);
+                    }
+                    35..=49 => c.backspace(),
+                    50..=59 => c.delete_forward(),
+                    60..=74 => {
+                        let m = motions[rng.below(motions.len())];
+                        c.apply_motion(m, rng.below(4) == 0); // 偶尔带 Shift 成选区
+                    }
+                    75..=79 => c.select_all(),
+                    // 大小写转换：先收拢选区 → 全文档口径，oracle 才有全局闭式解
+                    80..=87 => {
+                        if c.anchor.is_some() {
+                            c.apply_motion(Motion::Left, false);
+                        }
+                        let kind =
+                            if rng.below(2) == 0 { CaseKind::Upper } else { CaseKind::Lower };
+                        let expected = match kind {
+                            CaseKind::Upper => strip_newlines(&old_text).to_uppercase(),
+                            CaseKind::Lower => strip_newlines(&old_text).to_lowercase(),
+                        };
+                        let _changed = c.convert_case(kind);
+                        assert_eq!(
+                            strip_newlines(&c.doc.to_text()),
+                            expected,
+                            "seed={seed} step={step} 大小写对拍发散"
+                        );
+                        assert_eq!(
+                            c.doc.line_count(),
+                            rope_line_bodies(&old_text).len(),
+                            "seed={seed} step={step} 大小写转换改变行数"
+                        );
+                    }
+                    // 行首尾清理：同上收拢为全文档口径，逐行闭式对拍
+                    88..=94 => {
+                        if c.anchor.is_some() {
+                            c.apply_motion(Motion::Left, false);
+                        }
+                        let mode = [TrimMode::Leading, TrimMode::Trailing, TrimMode::Both]
+                            [rng.below(3)];
+                        let before = rope_line_bodies(&old_text);
+                        let _changed = c.trim_touched_lines(mode);
+                        let after = rope_line_bodies(&c.doc.to_text());
+                        assert_eq!(
+                            after.len(),
+                            before.len(),
+                            "seed={seed} step={step} 清理改变行数"
+                        );
+                        for (i, (o, n)) in before.iter().zip(after.iter()).enumerate() {
+                            let want = match mode {
+                                TrimMode::Leading => o.trim_start(),
+                                TrimMode::Trailing => o.trim_end(),
+                                TrimMode::Both => o.trim(),
+                            };
+                            assert_eq!(n, want, "seed={seed} step={step} 第 {i} 行清理结果不符");
+                        }
+                    }
+                    // 撤销/重做交错（空栈返回 false 合法）
+                    95..=97 => {
+                        let _ = c.undo();
+                    }
+                    _ => {
+                        let _ = c.redo();
+                    }
+                }
+                assert_structural_invariants(&c);
+            }
+
+            // 撤销到底必须逐字节回到初始文本；重做推进到顶终态一致（可复演性）
+            let final_text = c.doc.to_text();
+            while c.undo() {}
+            assert_eq!(c.doc.to_text(), initial, "seed={seed} 撤销到底未回初始态");
+            while c.redo() {}
+            assert_eq!(c.doc.to_text(), final_text, "seed={seed} 重放终态发散");
+        }
+    }

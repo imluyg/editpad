@@ -82,6 +82,8 @@ cargo run --release
 | Ctrl+C / Ctrl+X / Ctrl+V | 复制 / 剪切 / 粘贴 |
 | Ctrl+D / Ctrl+L | 在下方复制当前行 / 删除当前行 |
 | Ctrl+Shift+↑ / Ctrl+Shift+↓ | 当前行上移 / 下移（多行选区整块移动） |
+| Ctrl+Shift+U / Ctrl+U | 转为大写 / 小写（有选区只转选区，无选区转全文） |
+| Ctrl+Shift+T / L / B | 去除行尾 / 行首 / 行首尾空白（有选区只清触及行，全角空格/NBSP 也算） |
 | Ctrl+T / Ctrl+W / Ctrl+Tab | 新建标签页 / 关闭当前页 / 循环切换标签页 |
 | Ctrl+Shift+F | 格式化 JSON（仅 JSON 文件） |
 | Ctrl+Home / Ctrl+End | 跳到文档首 / 尾 |
@@ -97,9 +99,11 @@ cargo run --release
 自动回到上次关闭该页时的位置（每条记忆随文件走，随最近列表上限修剪；
 「记住最近文件」关闭时光标记录一并清空，不留隐私痕迹）。
 
-测试策略：core 层纯逻辑全部单测覆盖；随机编辑序列（插入/删除/全部替换，
-混排三种行尾、CJK 与 emoji）与 String 参照实现逐步对拍
-（`core/tests/edit_sequence_fuzz.rs`，固定种子可复现）；50MB 性能内存
+测试策略：core 层纯逻辑全部单测覆盖；随机编辑序列（插入/删除/全部替换/
+撤销重做交错，混排三种行尾、CJK 与 emoji）与 String 参照实现逐步对拍
+（`core/tests/edit_sequence_fuzz.rs`，固定种子可复现）；编辑器层另有
+随机混合操作（插入/移动/选区/大小写/清理/撤销重做）的结构不变量与
+「撤销到底回初始、重放到顶终态一致」对拍；50MB 性能内存
 用脚本生成的日志文件做回归基准。
 
 ## 格式适配（M4）

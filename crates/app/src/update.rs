@@ -1611,6 +1611,9 @@ impl Editpad {
             E::DuplicateLines => editor.duplicate_current_lines(),
             E::MoveLinesUp => editor.move_current_lines(true),
             E::MoveLinesDown => editor.move_current_lines(false),
+            // ---------- 大小写转换与行首尾清理（第 58 轮） ----------
+            E::ConvertCase(kind) => editor.convert_case(kind),
+            E::TrimLines(mode) => editor.trim_touched_lines(mode),
         };
         drop(editor);
 

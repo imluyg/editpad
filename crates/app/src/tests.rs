@@ -2547,6 +2547,32 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         )
         .expect("Ctrl+Shift+Down 应产生编辑消息");
         assert!(matches!(msg, Message::Edit(EditOp::MoveLinesDown)));
+        // 第 58 轮：大小写转换与行首尾清理（默认键与主流编辑器对齐的 U 系 +
+        // 助记 T/L/B；全量覆盖仍由 hotkey_actions_all_dispatch_through_handle_key）
+        let msg = handle_key_defaults(
+            keyboard::Key::Character("u".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+U 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::ConvertCase(CaseKind::Upper))));
+        let msg = handle_key_defaults(keyboard::Key::Character("u".into()), Modifiers::CTRL)
+            .expect("Ctrl+U 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::ConvertCase(CaseKind::Lower))));
+        for (ch, mode, combo) in [
+            ("t", TrimMode::Trailing, "Ctrl+Shift+T"),
+            ("l", TrimMode::Leading, "Ctrl+Shift+L"),
+            ("b", TrimMode::Both, "Ctrl+Shift+B"),
+        ] {
+            let msg = handle_key_defaults(
+                keyboard::Key::Character(ch.into()),
+                Modifiers::CTRL | Modifiers::SHIFT,
+            )
+            .unwrap_or_else(|| panic!("{combo} 应产生编辑消息"));
+            assert!(
+                matches!(msg, Message::Edit(EditOp::TrimLines(m)) if m == mode),
+                "{combo} 映射到错误的清理模式"
+            );
+        }
     }
 
     #[test]
@@ -2567,6 +2593,27 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 行删除可经 Ctrl+Z 撤销
         dispatch(&mut app, Message::Edit(EditOp::Undo));
         assert_eq!(app.cur_handle.borrow().doc.to_text(), "甲\n丙丁\n丙丁\n乙");
+    }
+
+    #[test]
+    fn case_convert_and_trim_flow_through_app_update_marking_dirty() {
+        // 第 58 轮：大小写/清理经统一编辑入口——置脏、可撤销与普通编辑一致
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("  hello world  ".into())));
+        dispatch(&mut app, Message::Edit(EditOp::ConvertCase(CaseKind::Upper)));
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "  HELLO WORLD  ",
+            "无选区=整个文档转换"
+        );
+        assert!(app.any_dirty());
+        dispatch(&mut app, Message::Edit(EditOp::TrimLines(TrimMode::Both)));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "HELLO WORLD");
+        // 每步都可撤销，且回退精确
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "  HELLO WORLD  ");
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "  hello world  ");
     }
 
     // ---------- P6 编码知情权 ----------
