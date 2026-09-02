@@ -1,0 +1,29 @@
+// P71：exe 资源——图标 + 版本信息（由 build.rs 调 rc.exe 编译链接）。
+// 图标资源 ID 恒为 1：winit 在未设置窗口图标时会取 exe 内第一个图标
+// 组作为窗口/任务栏图标。
+1 ICON "assets\\app.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0x0804 = 简体中文，1200 = Unicode
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "ProductName", "Editpad"
+            VALUE "FileDescription", "Editpad - 极简记事本"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "ProductVersion", "0.1.0"
+            VALUE "LegalCopyright", "Apache-2.0"
+            VALUE "OriginalFilename", "editpad.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
