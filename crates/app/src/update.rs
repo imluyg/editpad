@@ -1614,6 +1614,9 @@ impl Editpad {
             // ---------- 大小写转换与行首尾清理（第 58 轮） ----------
             E::ConvertCase(kind) => editor.convert_case(kind),
             E::TrimLines(mode) => editor.trim_touched_lines(mode),
+            // ---------- 行排序与去重（第 59 轮） ----------
+            E::SortLines(order) => editor.sort_lines(order),
+            E::RemoveDuplicateLines => editor.remove_duplicate_lines(),
         };
         drop(editor);
 

@@ -2,7 +2,7 @@
 //! （P68 自 editor.rs 拆出，纯移动零行为变更）。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use iced::{Color, Font, Rectangle};
@@ -96,6 +96,12 @@ pub enum EditOp {
     ConvertCase(CaseKind),
     /// 去行首/行尾空白：有选区只清触及行，无选区清全文档
     TrimLines(TrimMode),
+    // ---------- 行排序与去重（第 59 轮，仿主流编辑器行操作菜单） ----------
+    /// 行排序：有选区只排触及块，无选区排全文档（尾随换行的幻影末行不参与）
+    SortLines(SortOrder),
+    /// 去除重复行（保留首次出现、其余行相对次序不变）：有选区只清触及块，
+    /// 无选区清全文档
+    RemoveDuplicateLines,
 }
 
 /// 大小写转换方向（第 58 轮）。
@@ -111,6 +117,30 @@ pub enum TrimMode {
     Leading,
     Trailing,
     Both,
+}
+
+/// 行排序方向（第 59 轮）。比较口径 = UTF-8 字节序（即 Unicode 码点序），
+/// 大小写敏感：`Z` < `a`；排序稳定，相等行保持原相对次序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+/// 排序/去重的作用域块（第 59 轮）：有选区 = 触及块，无选区 = 全文档。
+/// `lines` 为剥掉行尾的各行正文；幻影末行（文档以换行收尾时 ropey 多出的
+/// 末尾空行）不是真实内容——参与排序会把末尾换行挪到文档头、参与去重会
+/// 凭空吃掉尾随换行——故排除之，形态由 `push_nl` 在重建时补回。
+struct LineBlock {
+    /// 光标钳制用的原始触及范围（含被排除的幻影行）
+    a: usize,
+    b: usize,
+    start: usize,
+    end: usize,
+    /// 重建时是否在块尾补主导行尾（块不在文档末尾恒真；在文档末尾
+    /// 时等于「原文档以换行收尾」）
+    push_nl: bool,
+    lines: Vec<String>,
 }
 
 /// 输入法上屏事件的裁决结果（P2 焦点过滤）。
@@ -1079,6 +1109,113 @@ impl EditorCore {
         self.cursor =
             CursorPos { line: keep_line, col: keep_col.min(self.line_display_len(keep_line)) };
         self.ensure_visible();
+        true
+    }
+
+    // ---------- 行排序与去重（第 59 轮，仿主流编辑器行操作菜单） ----------
+
+    /// 取第 `i` 行正文：剥掉行尾换行单元。口径注意——只剥 `\r\n` / `\n`
+    /// 这两种 ropey 真正的换行单元；孤立 `\r` 是普通字符（ropey 不视其为
+    /// 换行），必须原样保留。
+    fn line_body_without_eol(&self, i: usize) -> String {
+        let mut s = self.doc.line_str(i);
+        if s.ends_with("\r\n") {
+            s.truncate(s.len() - 2);
+        } else if s.ends_with('\n') {
+            s.pop();
+        }
+        s
+    }
+
+    fn collect_line_block(&self) -> LineBlock {
+        let count = self.doc.line_count();
+        let len = self.doc.text_len();
+        let (a, b) =
+            if self.anchor.is_some() { self.touched_lines() } else { (0, count.saturating_sub(1)) };
+        let start = self.doc.line_to_char(a);
+        let end = if b + 1 < count { self.doc.line_to_char(b + 1) } else { len };
+        // 幻影末行检测：块到达文档末尾且原文以 \n 收尾 → 最后一行是空壳。
+        // 仅在块内还有更前面的行时才排除（a == b 时无从回退，交由
+        // 调用方的「不足两行」no-op 兜底，避免下溢）。
+        let phantom_tail = end == len && len > start && self.doc.slice_text(len - 1, len) == "\n";
+        let last = if phantom_tail && b > a { b - 1 } else { b };
+        let lines: Vec<String> = (a..=last).map(|i| self.line_body_without_eol(i)).collect();
+        LineBlock {
+            a,
+            b,
+            start,
+            end,
+            push_nl: end < len || phantom_tail,
+            lines,
+        }
+    }
+
+    /// 用新内容替换收集时的块区域（排序/去重共用的写回路径）：按主导行尾
+    /// 重建不产生混合行尾；块尾/文档末尾换行形态保持；光标行列钳回块内，
+    /// 选区清空。调用前必须已确认内容确有变化（no-op 不产快照）。
+    fn apply_line_block(&mut self, blk: &LineBlock, lines: &[String]) {
+        let keep_line = self.cursor.line.clamp(blk.a, blk.b);
+        let keep_col = self.cursor.col;
+        self.snapshot();
+        let nl = self.doc.line_ending().newline();
+        let mut rebuilt = lines.join(nl);
+        if blk.push_nl {
+            rebuilt.push_str(nl);
+        }
+        self.doc.remove_range(blk.start, blk.end);
+        self.doc.insert(blk.start, &rebuilt);
+        self.invalidate_highlight_from(blk.start);
+        // 行结构整体变化 + 行长可能增减——列高水位交惰性收敛（P45 口径）
+        self.max_cols_stale = true;
+        self.anchor = None;
+        self.cursor =
+            CursorPos { line: keep_line, col: keep_col.min(self.line_display_len(keep_line)) };
+        self.ensure_visible();
+    }
+
+    /// 行排序：有选区只排触及块，无选区排全文档。返回是否改动。
+    ///
+    /// - 比较口径 = UTF-8 字节序（码点序），大小写敏感、稳定排序；
+    /// - 空白行是真实内容，正常参与排序（只有幻影末行除外，见
+    ///   [`Self::collect_line_block`]）；
+    /// - 已有序 / 块内不足两行时不动、不产快照（幂等 no-op）。
+    pub fn sort_lines(&mut self, order: SortOrder) -> bool {
+        let blk = self.collect_line_block();
+        if blk.lines.len() <= 1 {
+            return false; // 0/1 行无从排序
+        }
+        let mut sorted = blk.lines.clone();
+        match order {
+            SortOrder::Ascending => sorted.sort(),
+            SortOrder::Descending => sorted.sort_by(|x, y| y.cmp(x)),
+        }
+        if sorted == blk.lines {
+            return false; // 已有序：幂等 no-op 不产生撤销快照
+        }
+        self.apply_line_block(&blk, &sorted);
+        true
+    }
+
+    /// 去除重复行：保留首次出现、其余行相对次序不变。返回是否改动。
+    ///
+    /// - 有选区只清触及块，无选区清全文档；逐字节整行比对（含空白差异）；
+    /// - 无重复 / 块内不足两行时不动、不产快照（幂等 no-op）。
+    pub fn remove_duplicate_lines(&mut self) -> bool {
+        let blk = self.collect_line_block();
+        if blk.lines.len() <= 1 {
+            return false;
+        }
+        let mut seen: HashSet<&str> = HashSet::with_capacity(blk.lines.len());
+        let kept: Vec<String> = blk
+            .lines
+            .iter()
+            .filter(|l| seen.insert(l.as_str()))
+            .cloned()
+            .collect();
+        if kept.len() == blk.lines.len() {
+            return false; // 本就无重复：幂等 no-op 不产生撤销快照
+        }
+        self.apply_line_block(&blk, &kept);
         true
     }
 

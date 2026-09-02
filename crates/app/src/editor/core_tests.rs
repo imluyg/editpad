@@ -1996,6 +1996,146 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(e.doc.to_text(), "x  \r\n");
     }
 
+    // ---------- 第 59 轮：行排序与去重 ----------
+
+    #[test]
+    fn sort_lines_whole_document_both_directions_and_undo() {
+        // 码点序大小写敏感：'B'(0x42) < 'a'(0x61)
+        let mut c = core_with("pear\napple\nBanana");
+        let depth = c.undo_stack.len();
+        assert!(c.sort_lines(SortOrder::Ascending));
+        assert_eq!(c.doc.to_text(), "Banana\napple\npear");
+        assert_eq!(c.doc.line_count(), 3, "行数不变");
+        c.cursor = CursorPos { line: 0, col: 1 };
+        assert!(c.sort_lines(SortOrder::Descending));
+        assert_eq!(c.doc.to_text(), "pear\napple\nBanana", "对已升序文档降序=精确倒转");
+        assert_eq!(
+            c.cursor,
+            CursorPos { line: 0, col: 1 },
+            "光标按索引钳回触及块内、列尽量保持"
+        );
+        // 撤销逐步逐字节还原
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "Banana\napple\npear");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "pear\napple\nBanana");
+        assert_eq!(c.undo_stack.len(), depth);
+    }
+
+    #[test]
+    fn sort_lines_already_sorted_is_idempotent_no_snapshot() {
+        let mut c = core_with("a\nb\nc");
+        let depth = c.undo_stack.len();
+        assert!(!c.sort_lines(SortOrder::Ascending), "已升序不得重复产快照");
+        assert_eq!(c.undo_stack.len(), depth);
+        // 单行 / 空文档 / 纯幻影：无从排序
+        let mut one = core_with("solo");
+        assert!(!one.sort_lines(SortOrder::Descending));
+        let mut empty = core_with("");
+        assert!(!empty.sort_lines(SortOrder::Ascending));
+        let mut blank = core_with("\n");
+        assert!(!blank.sort_lines(SortOrder::Ascending));
+        assert_eq!(blank.doc.to_text(), "\n", "纯幻影文档原样保留");
+    }
+
+    #[test]
+    fn sort_lines_selection_scope_excludes_outside_lines() {
+        let mut c = core_with("zeta\nalpha\nmid\nbeta\nlast");
+        // 选区盖到第 2~4 行（0 起 1..=3）：首尾两行不得波及
+        c.anchor = Some(CursorPos { line: 1, col: 0 });
+        c.cursor = CursorPos { line: 3, col: 2 };
+        assert!(c.sort_lines(SortOrder::Ascending));
+        assert_eq!(c.doc.to_text(), "zeta\nalpha\nbeta\nmid\nlast");
+    }
+
+    #[test]
+    fn sort_lines_preserves_trailing_shape_and_rebuilds_dominant_eol() {
+        // 文档以换行收尾：幻影末行不参与排序，尾随换行仍留在文档末尾
+        let mut c = core_with("b\r\n\r\na\r\n");
+        assert!(c.sort_lines(SortOrder::Ascending));
+        assert_eq!(
+            c.doc.to_text(),
+            "\r\na\r\nb\r\n",
+            "空行为真实内容排到最前，尾随换行形态保持"
+        );
+        // 无尾随换行的文档末行：排序后仍不以换行收尾
+        let mut e = core_with("a\nzz\nb");
+        assert!(e.sort_lines(SortOrder::Descending));
+        assert_eq!(e.doc.to_text(), "zz\nb\na", "末行无换行的形态保持");
+        // 混合行尾经重建归一到主导行尾（P9 同哲学）
+        let mut f = core_with("b\r\nA\na\r\n");
+        assert!(f.sort_lines(SortOrder::Ascending));
+        assert_eq!(f.doc.to_text(), "A\r\na\r\nb\r\n", "混合行尾统一为主导 CRLF");
+        assert_eq!(f.doc.line_ending(), LineEnding::CrLf);
+    }
+
+    #[test]
+    fn sort_orders_by_codepoint_including_emoji_and_cjk() {
+        // 4 字节 emoji（U+1F600）> CJK（U+4E2D）> ASCII，按码点一字节不乱
+        let mut c = core_with("😀\n中\nA\na");
+        assert!(c.sort_lines(SortOrder::Ascending));
+        assert_eq!(c.doc.to_text(), "A\na\n中\n😀");
+        assert!(c.sort_lines(SortOrder::Descending));
+        assert_eq!(c.doc.to_text(), "😀\n中\na\nA");
+    }
+
+    #[test]
+    fn dedupe_keeps_first_occurrence_preserving_order_and_undo() {
+        let mut c = core_with("b\na\nb\nc\na\nb");
+        let depth = c.undo_stack.len();
+        assert!(c.remove_duplicate_lines());
+        assert_eq!(c.doc.to_text(), "b\na\nc", "保留首次出现，其余相对次序不变");
+        assert_eq!(c.cursor.line, 0, "光标钳回块内");
+        assert_eq!(c.undo_stack.len(), depth + 1, "单次去重只产一个快照");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "b\na\nb\nc\na\nb");
+        assert_eq!(c.undo_stack.len(), depth, "撤销后栈深回落");
+        // 文档末尾无换行且重复发生在末行：收尾形态保持
+        let mut d = core_with("x\nx");
+        assert!(d.remove_duplicate_lines());
+        assert_eq!(d.doc.to_text(), "x");
+    }
+
+    #[test]
+    fn dedupe_selection_scope_and_crlf_rebuild() {
+        let mut c = core_with("keep\r\nDUP\r\nDUP\r\nDUP\r\nkeep2");
+        // 选区只盖中间三行 DUP（1..=3）
+        c.anchor = Some(CursorPos { line: 1, col: 1 });
+        c.cursor = CursorPos { line: 3, col: 1 };
+        assert!(c.remove_duplicate_lines());
+        assert_eq!(c.doc.to_text(), "keep\r\nDUP\r\nkeep2", "范围外行不波及，CRLF 整单元重建");
+        assert_eq!(c.doc.line_ending(), LineEnding::CrLf, "主导行尾元数据不变");
+    }
+
+    #[test]
+    fn dedupe_noop_unique_or_single_line_no_snapshot() {
+        let mut c = core_with("one\ntwo\nthree");
+        let depth = c.undo_stack.len();
+        assert!(!c.remove_duplicate_lines(), "无重复不得产快照");
+        assert_eq!(c.undo_stack.len(), depth);
+        let mut one = core_with("only");
+        assert!(!one.remove_duplicate_lines());
+        let mut empty = core_with("");
+        assert!(!empty.remove_duplicate_lines());
+    }
+
+    #[test]
+    fn sort_dedupe_on_phantom_line_selection_is_safe_noop() {
+        // 幻影排除的守卫路径：选区恰好只有幻影末行 / 实线+幻影行首时
+        // 不得整数下溢，一律安全 no-op
+        let mut c = core_with("a\n");
+        c.cursor = CursorPos { line: 1, col: 0 }; // 光标停在幻影行
+        assert!(!c.sort_lines(SortOrder::Ascending));
+        assert!(!c.remove_duplicate_lines());
+        assert_eq!(c.doc.to_text(), "a\n", "文档原样保留");
+        let mut d = core_with("x\ny\n");
+        d.anchor = Some(CursorPos { line: 1, col: 0 });
+        d.cursor = CursorPos { line: 2, col: 0 }; // 触及块=y 行（幻影行首不算触及）
+        assert!(!d.sort_lines(SortOrder::Descending));
+        assert!(!d.remove_duplicate_lines());
+        assert_eq!(d.doc.to_text(), "x\ny\n");
+    }
+
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
 
     /// XorShift64（与 crates/core/tests/edit_sequence_fuzz.rs 同款零依赖 PRNG，

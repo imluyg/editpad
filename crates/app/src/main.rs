@@ -25,7 +25,7 @@ use iced::widget::{button, checkbox, column, container, mouse_area, opaque, prog
 use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
     Font, Padding, Point, Shadow, Subscription, Task, Theme};
 
-use editor::{CaseKind, EditorHandle, EditOp, Motion, TrimMode};
+use editor::{CaseKind, EditorHandle, EditOp, Motion, SortOrder, TrimMode};
 
 fn main() -> iced::Result {
     // iced 0.14：第一个参数是 boot 函数（返回初始状态），title/theme/subscription 走 builder
@@ -1543,6 +1543,10 @@ const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "trim_trailing", default_combo: "Ctrl+Shift+T", desc: "去除行尾空白（选区行/全文）" },
     HotkeyAction { id: "trim_leading", default_combo: "Ctrl+Shift+L", desc: "去除行首空白（选区行/全文）" },
     HotkeyAction { id: "trim_both", default_combo: "Ctrl+Shift+B", desc: "去除行首尾空白（选区行/全文）" },
+    // 行排序与去重（第 59 轮，仿主流编辑器行操作菜单；S/D=升/降序助记，K=去重）
+    HotkeyAction { id: "sort_lines_asc", default_combo: "Ctrl+Shift+S", desc: "行升序排序（选区行/全文）" },
+    HotkeyAction { id: "sort_lines_desc", default_combo: "Ctrl+Shift+D", desc: "行降序排序（选区行/全文）" },
+    HotkeyAction { id: "dedupe_lines", default_combo: "Ctrl+Shift+K", desc: "去除重复行（选区行/全文）" },
     HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
     HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
     HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
@@ -1687,6 +1691,10 @@ fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Message> {
         "trim_leading" => edit(EditOp::TrimLines(TrimMode::Leading)),
         "trim_trailing" => edit(EditOp::TrimLines(TrimMode::Trailing)),
         "trim_both" => edit(EditOp::TrimLines(TrimMode::Both)),
+        // 行排序与去重（第 59 轮）
+        "sort_lines_asc" => edit(EditOp::SortLines(SortOrder::Ascending)),
+        "sort_lines_desc" => edit(EditOp::SortLines(SortOrder::Descending)),
+        "dedupe_lines" => edit(EditOp::RemoveDuplicateLines),
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),

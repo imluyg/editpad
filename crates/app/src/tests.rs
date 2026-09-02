@@ -2573,6 +2573,28 @@ fn ctx_menu_card_h_adapts_to_viewport() {
                 "{combo} 映射到错误的清理模式"
             );
         }
+        // 第 59 轮：行排序与去重（S/D=升/降序助记，K=去重；全量覆盖仍由
+        // hotkey_actions_all_dispatch_through_handle_key）
+        for (ch, order, combo) in [
+            ("s", SortOrder::Ascending, "Ctrl+Shift+S"),
+            ("d", SortOrder::Descending, "Ctrl+Shift+D"),
+        ] {
+            let msg = handle_key_defaults(
+                keyboard::Key::Character(ch.into()),
+                Modifiers::CTRL | Modifiers::SHIFT,
+            )
+            .unwrap_or_else(|| panic!("{combo} 应产生编辑消息"));
+            assert!(
+                matches!(msg, Message::Edit(EditOp::SortLines(o)) if o == order),
+                "{combo} 映射到错误的排序方向"
+            );
+        }
+        let msg = handle_key_defaults(
+            keyboard::Key::Character("k".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        )
+        .expect("Ctrl+Shift+K 应产生编辑消息");
+        assert!(matches!(msg, Message::Edit(EditOp::RemoveDuplicateLines)));
     }
 
     #[test]
@@ -2614,6 +2636,29 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert_eq!(app.cur_handle.borrow().doc.to_text(), "  HELLO WORLD  ");
         dispatch(&mut app, Message::Edit(EditOp::Undo));
         assert_eq!(app.cur_handle.borrow().doc.to_text(), "  hello world  ");
+    }
+
+    #[test]
+    fn sort_and_dedupe_flow_through_app_update_marking_dirty() {
+        // 第 59 轮：排序/去重经统一编辑入口——置脏、可撤销与普通编辑一致
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("梨\n苹果\nApple\n苹果".into())));
+        assert!(app.any_dirty());
+        // 码点序：'A'(0x41) < 梨(U+68A8) < 苹(U+82F9)
+        dispatch(&mut app, Message::Edit(EditOp::SortLines(SortOrder::Ascending)));
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "Apple\n梨\n苹果\n苹果",
+            "无选区=全文档排序"
+        );
+        dispatch(&mut app, Message::Edit(EditOp::RemoveDuplicateLines));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "Apple\n梨\n苹果");
+        assert!(app.any_dirty(), "去重改动必须保持置脏");
+        // 逐步撤销，回退精确
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "Apple\n梨\n苹果\n苹果");
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "梨\n苹果\nApple\n苹果");
     }
 
     // ---------- P6 编码知情权 ----------
@@ -3920,25 +3965,27 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         app.settings_path_override = Some(config.clone());
 
         // 进入捕获 → 提交无冲突组合 → 写映射 + 持久化 + 退出捕获
+        // （第 59 轮注：Ctrl+Shift+S/D/K 已成为排序/去重默认键，本测试
+        //   改用仍无主的 Ctrl+Shift+E 演练重映射流程）
         dispatch(&mut app, Message::HotkeyCaptureStarted("save"));
         assert_eq!(app.hotkey_capture, Some("save"));
-        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+S".into()));
+        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+E".into()));
         assert!(app.hotkey_capture.is_none());
         assert_eq!(
             app.settings.hotkeys.get("save").map(String::as_str),
-            Some("Ctrl+Shift+S")
+            Some("Ctrl+Shift+E")
         );
         assert_eq!(
             editpad_core::Settings::load_from(&config)
                 .hotkeys
                 .get("save")
                 .map(String::as_str),
-            Some("Ctrl+Shift+S"),
+            Some("Ctrl+Shift+E"),
             "重映射必须即时落盘"
         );
 
-        // 重映射后分发走新组合（save → Ctrl+Shift+S；分发读活重映射表）
-        let (mods, key) = parse_combo_for_test("Ctrl+Shift+S");
+        // 重映射后分发走新组合（save → Ctrl+Shift+E；分发读活重映射表）
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+E");
         assert!(matches!(
             handle_key(key, mods, &app.settings.hotkeys),
             Some(Message::SaveRequested)
@@ -3951,7 +3998,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
         // 冲突：把「打开」绑到已被 save 占用的组合 → 拒绝并保持捕获态
         dispatch(&mut app, Message::HotkeyCaptureStarted("open"));
-        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+S".into()));
+        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+E".into()));
         assert_eq!(app.hotkey_capture, Some("open"), "冲突保持捕获态");
         assert!(app.status.contains("占用"));
         assert!(
@@ -3974,10 +4021,10 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             handle_key_defaults(key, mods),
             Some(Message::SaveRequested)
         ), "恢复默认后 Ctrl+S 回归保存");
-        let (mods, key) = parse_combo_for_test("Ctrl+Shift+S");
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+E");
         assert!(
             handle_key_defaults(key, mods).is_none(),
-            "恢复默认后 Ctrl+Shift+S 不再触发保存"
+            "恢复默认后 Ctrl+Shift+E 不再触发保存"
         );
 
         std::fs::remove_dir_all(&dir).ok();
