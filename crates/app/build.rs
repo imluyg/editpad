@@ -22,12 +22,17 @@ fn main() {
     let rc_src = manifest_dir.join("assets").join("app.rc");
     let res = out_dir.join("app.res");
 
-    // 资源产物比源都新 → 跳过 rc.exe 调用（增量构建不重复编译资源）
+    // 资源产物比所有输入（.rc 与其引用的 .ico）都新 → 跳过 rc.exe 调用
+    // （增量构建不重复编译资源）。⚠️ 必须把 .ico 一并纳入：P74 教训——
+    // 只盯 .rc 时，换图标不动 .rc 会导致 .res 永不重编，exe 一直嵌旧图标。
+    let ico_src = manifest_dir.join("assets").join("app.ico");
+    let newest_src = [&rc_src, &ico_src]
+        .into_iter()
+        .filter_map(|p| fs::metadata(p).ok()?.modified().ok())
+        .max();
     let up_to_date = matches!(
-        (fs::metadata(&res), fs::metadata(&rc_src)),
-        (Ok(res_m), Ok(src_m)) if res_m.modified().ok().zip(src_m.modified().ok()).is_some_and(
-            |(r, s)| r >= s
-        )
+        (fs::metadata(&res).ok().and_then(|m| m.modified().ok()), newest_src),
+        (Some(r), Some(s)) if r >= s
     );
     if up_to_date {
         println!("cargo:rustc-link-arg={}", res.display());
