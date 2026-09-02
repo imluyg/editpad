@@ -1336,6 +1336,10 @@ impl EditorCore {
         // 行结构整体变化 + 行长可能增减——列高水位交惰性收敛（P45 口径）
         self.max_cols_stale = true;
         self.anchor = None;
+        // 第 66 轮勘误：keep_line 还要收敛到**新行数域**——块被压缩
+        // （删空行/合并）后旧光标行可能超出新行数（随机对拍当场抓住：
+        // 全删空文档只剩 1 行而 keep_line 仍是旧的大行号）
+        let keep_line = keep_line.min(self.doc.line_count() - 1);
         self.cursor =
             CursorPos { line: keep_line, col: keep_col.min(self.line_display_len(keep_line)) };
         self.ensure_visible();

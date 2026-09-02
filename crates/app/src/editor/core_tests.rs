@@ -2916,8 +2916,7 @@ fn p66_fractional_scroll_top_survives_clamp() {
     }
 
     #[test]
-    fn collect_block_keeps_last_real_row_when_selection_reaches_eof() {
-        // 第 64 轮勘误回归（🟠 既有缺陷，本测试初版当场暴露）：选区触及
+    fn collect_block_keeps_last_real_row_when_selection_reaches_eof() {        // 第 64 轮勘误回归（🟠 既有缺陷，本测试初版当场暴露）：选区触及
         // 「最后一个真实行」且文档以换行收尾时，该行曾被幻影排除误剔——
         // 排序把 a 行整行吞掉、注释切换只处理了首行。守卫 = 幻影只可能
         // 是 b == line_count()-1 那一行。
@@ -2933,6 +2932,23 @@ fn p66_fractional_scroll_top_survives_clamp() {
         d.cursor = CursorPos { line: 1, col: 5 };
         assert!(d.toggle_line_comment());
         assert_eq!(d.doc.to_text(), "# x = 1\n# y = 2\n");
+    }
+
+    #[test]
+    fn apply_line_block_clamps_cursor_into_new_row_count() {
+        // 第 66 轮勘误回归（随机对拍当场抓住）：块被压缩后旧光标行可能
+        // 超出新行数域——全空白文档删空后只剩 1 行，旧光标行号必须收敛
+        let mut c = core_with("\n\n\n\n");
+        c.cursor = CursorPos { line: 3, col: 0 };
+        assert!(c.delete_empty_lines(BlankKind::Empty));
+        assert_eq!(c.doc.to_text(), "", "全空文档删空行 → 空文档");
+        assert_eq!(
+            c.cursor,
+            CursorPos { line: 0, col: 0 },
+            "光标必须收敛进新行数域"
+        );
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "\n\n\n\n", "撤销完整还原");
     }
 
     // ---------- 第 58 轮 主线 A 扩容：随机混合操作不变量 + 撤销重放对拍 ----------
@@ -3094,24 +3110,37 @@ fn p66_fractional_scroll_top_survives_clamp() {
                         }
                     }
                     // 撤销/重做交错（空栈返回 false 合法）
-                    95..=97 => {
+                    95..=96 => {
                         let _ = c.undo();
                     }
                     // 书签套件混入（第 60 轮）：开关/跳转/清除随机三选一，
-                    // 行号界内由结构不变量把关，回滚一致性由收尾对拍把关
-                    98..=98 => match rng.below(3) {
+                    // 行号界内由结构不变量把关，回滚一致性由收尾对拍把关。
+                    // 第 66 轮起并入括号跳转噪声臂（纯光标移动，零文本变化）。
+                    97..=98 => match rng.below(4) {
                         0 => {
                             c.toggle_bookmark();
                         }
                         1 => {
                             let _ = c.next_bookmark(rng.below(2) == 0);
                         }
-                        _ => {
+                        2 => {
                             let _ = c.clear_bookmarks();
                         }
+                        _ => {
+                            let t0 = c.doc.to_text();
+                            let _ = c.jump_to_matching_bracket();
+                            assert_eq!(
+                                c.doc.to_text(),
+                                t0,
+                                "seed={seed} step={step} 括号跳转改变了文本"
+                            );
+                        }
                     },
-                    _ => {
+                    99 => {
                         let _ = c.redo();
+                    }
+                    _ => {
+                        let _ = c.undo();
                     }
                 }
                 assert_structural_invariants(&c);
@@ -3135,5 +3164,178 @@ fn p66_fractional_scroll_top_survives_clamp() {
                 final_marks,
                 "seed={seed} 重放终态书签发散"
             );
+        }
+    }
+
+    /// 第 66 轮 主线 A 手段 2 扩容：P82/P84 行块操作（合并/拆分/删空行/
+    /// 注释切换）纳入随机对拍。
+    ///
+    /// 文档口径 = **LF 纯净**（不含 CRLF/孤立 \r token）：主导行尾恒
+    /// `\n`，四个操作的 oracle 均有闭式解；CRLF 混排下这些操作的结构
+    /// 不变量已由上方主循环把关。每步先按当前光标行构造期望文本再调
+    /// 用实现，逐字节对拍；收尾同样做「撤销到底回初始 / 重放终态一致」。
+    #[test]
+    fn random_line_block_ops_lf_docs_match_oracles() {
+        const TOK: &[&str] = &["a", "Z", "中", " ", "  ", "// x", "# y"];
+        for seed in [7u64, 0xBEEF_5EED, 42] {
+            let mut rng = XorShift64(seed);
+            let rows = rng.below(6) + 2; // 2..=7 行
+            let mut init: Vec<String> = Vec::new();
+            for _ in 0..rows {
+                let mut s = String::new();
+                for _ in 0..rng.below(4) {
+                    s.push_str(TOK[rng.below(TOK.len())]);
+                }
+                init.push(s);
+            }
+            let trailing_nl = rng.below(2) == 0;
+            let mut text = init.join("\n");
+            if trailing_nl {
+                text.push('\n');
+            }
+            let initial = text.clone();
+            let mut c = core_with(&text);
+
+            for step in 0..160 {
+                let cur_text = c.doc.to_text();
+                let bodies = rope_line_bodies(&cur_text);
+                // 幻影末行：以换行收尾时 bodies 多出的最后一个空元素
+                let ends_nl = cur_text.ends_with('\n');
+                let real: &[String] =
+                    if ends_nl && bodies.last().is_some_and(|s| s.is_empty()) {
+                        &bodies[..bodies.len() - 1]
+                    } else {
+                        &bodies[..]
+                    };
+                let cur = c.cursor.line.min(real.len().saturating_sub(1));
+                c.anchor = None; // 本批全部走「无选区」口径，oracle 才闭式
+                c.cursor = CursorPos { line: cur, col: 0 };
+                let join = |b: &[String]| -> String {
+                    let mut t = b.join("\n");
+                    if ends_nl && !t.is_empty() {
+                        t.push('\n');
+                    }
+                    t
+                };
+                match rng.below(100) {
+                    0..=24 => {
+                        // 合并行：当前行并入下一行（末真实行无从并 → 不变）
+                        let expected = if cur + 1 < real.len() {
+                            let merged = [real[cur].trim(), real[cur + 1].trim()]
+                                .iter()
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let mut nb = real[..cur].to_vec();
+                            nb.push(merged);
+                            nb.extend_from_slice(&real[cur + 2..]);
+                            join(&nb)
+                        } else {
+                            cur_text.clone()
+                        };
+                        let _changed = c.merge_lines();
+                        assert_eq!(
+                            c.doc.to_text(),
+                            expected,
+                            "seed={seed} step={step} 合并发散"
+                        );
+                    }
+                    25..=49 => {
+                        // 拆分行：光标处断行（列随机）
+                        let col = rng.below(real[cur].chars().count() + 1);
+                        c.cursor.col = col;
+                        let pre: String = real[cur].chars().take(col).collect();
+                        let post: String = real[cur].chars().skip(col).collect();
+                        let mut nb = real[..cur].to_vec();
+                        nb.push(pre);
+                        nb.push(post);
+                        nb.extend_from_slice(&real[cur + 1..]);
+                        let expected = join(&nb);
+                        assert!(c.split_line());
+                        assert_eq!(
+                            c.doc.to_text(),
+                            expected,
+                            "seed={seed} step={step} 拆分发散"
+                        );
+                    }
+                    50..=74 => {
+                        // 删空行：Empty / Whitespace 两口径（全文档）
+                        let kind = if rng.below(2) == 0 {
+                            BlankKind::Empty
+                        } else {
+                            BlankKind::Whitespace
+                        };
+                        let blank =
+                            |s: &str| kind == BlankKind::Whitespace && s.trim().is_empty()
+                                || s.is_empty();
+                        let kept: Vec<String> = real
+                            .iter()
+                            .filter(|s| !blank(s))
+                            .cloned()
+                            .collect();
+                        let expected = if kept.len() == real.len() {
+                            cur_text.clone() // 无可删 no-op
+                        } else if kept.is_empty() {
+                            String::new() // 全删空且块在文档头 → 衔接符规则不加尾
+                        } else {
+                            join(&kept)
+                        };
+                        let _changed = c.delete_empty_lines(kind);
+                        assert_eq!(
+                            c.doc.to_text(),
+                            expected,
+                            "seed={seed} step={step} 删空行发散（kind={kind:?}）"
+                        );
+                    }
+                    75..=94 => {
+                        // 行注释切换（无语法 → `//`）：独立按规范重算
+                        let nonblank: Vec<bool> =
+                            real.iter().map(|s| !s.trim().is_empty()).collect();
+                        let all_commented = real
+                            .iter()
+                            .zip(nonblank.iter())
+                            .all(|(s, &b)| !b || s.trim_start().starts_with("//"));
+                        let expected_bodies: Vec<String> = real
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| {
+                                if !nonblank[i] {
+                                    return s.clone();
+                                }
+                                let t = s.trim_start();
+                                let ind = &s[..s.len() - t.len()];
+                                if all_commented {
+                                    let rest = &t["//".len()..];
+                                    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                                    format!("{ind}{rest}")
+                                } else {
+                                    format!("{ind}// {t}")
+                                }
+                            })
+                            .collect();
+                        let changed_expected = expected_bodies != real;
+                        let changed = c.toggle_line_comment();
+                        assert_eq!(changed, changed_expected, "seed={seed} step={step} 返回值不符");
+                        assert_eq!(
+                            c.doc.to_text(),
+                            join(&expected_bodies),
+                            "seed={seed} step={step} 注释切换发散"
+                        );
+                    }
+                    _ => {
+                        // 光标噪声：End/Left 移动，仅不变量把关
+                        let m = if rng.below(2) == 0 { Motion::End } else { Motion::Left };
+                        c.apply_motion(m, false);
+                    }
+                }
+                assert_structural_invariants(&c);
+            }
+
+            let final_text = c.doc.to_text();
+            while c.undo() {}
+            assert_eq!(c.doc.to_text(), initial, "seed={seed} 撤销到底未回初始态");
+            while c.redo() {}
+            assert_eq!(c.doc.to_text(), final_text, "seed={seed} 重放终态发散");
         }
     }

@@ -815,3 +815,96 @@ fn headless_invisibles_marks_toggle_frame_diff() {
     eprintln!("[P84] 不可见标记差异墨迹 = {diff}px");
     assert!(diff >= 12, "开/关两帧差异墨迹不足（仅 {diff}px），标记未画出");
 }
+
+/// 第 66 轮 主线 A 手段 4：滚动×字号×主题 组合批——任意组合下，
+/// 控件矩形之外的画布必须保持纯背景色（P59/P66 越界墨迹历史病灶的
+/// 参数化回归网）。文档含长行（水平滚动活动）、书签（gutter 墨迹）、
+/// CJK+emoji 与末行无换行形态。
+#[test]
+fn headless_combo_scroll_size_theme_ink_stays_in_bounds() {
+    use super::super::CursorPos;
+    let (w, h) = (420u32, 320u32);
+    let (ex, ey, ew, eh) = (30.0f32, 24.0f32, 340.0f32, 240.0f32);
+
+    let build = |font_px: f32, dark: bool, scroll: f32| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            let mut doc = String::from("alpha beta gamma\n\tindent 中文 🚀\n");
+            for i in 0..40 {
+                doc.push_str(&format!("row{i} lorem ipsum dolor sit amet\n"));
+            }
+            doc.push_str("wide-末行-without-newline");
+            c.reset_document(editpad_core::Document::from_str(&doc));
+            c.set_font_size(font_px);
+            c.toggle_bookmark(); // 行 0：gutter 琥珀圆点参与越界检查
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.cursor = CursorPos { line: 20, col: 6 };
+            c.scroll_top = scroll;
+            c.clamp_scroll();
+        }
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(font_px));
+        let mut tree = Tree::empty();
+        let limits =
+            layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            if dark { &Theme::Dark } else { &Theme::Light },
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    let mut frames = 0u32;
+    for font_px in [12.0f32, 16.0, 28.0] {
+        for dark in [false, true] {
+            for scroll in [0.0f32, 3.5, 80.0] {
+                let px = build(font_px, dark, scroll);
+                let mut out_of_bounds_ink = 0u32;
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = x >= ex as u32
+                            && x < (ex + ew) as u32
+                            && y >= ey as u32
+                            && y < (ey + eh) as u32;
+                        if inside {
+                            continue;
+                        }
+                        if let Some(p) = px.pixel(x, y) {
+                            // 画布底为纯白：控件外任何非白像素都是越界墨迹
+                            if (p.red() as i32 - 255).abs() > 2
+                                || (p.green() as i32 - 255).abs() > 2
+                                || (p.blue() as i32 - 255).abs() > 2
+                            {
+                                out_of_bounds_ink += 1;
+                            }
+                        }
+                    }
+                }
+                frames += 1;
+                assert_eq!(
+                    out_of_bounds_ink, 0,
+                    "fs={font_px} dark={dark} scroll={scroll}: 越界墨迹 \
+                     {out_of_bounds_ink}px"
+                );
+            }
+        }
+    }
+    eprintln!("[P86] 组合批帧数 = {frames}");
+}
