@@ -1,7 +1,8 @@
 use super::*;
 use iced::widget::column;
 use super::settings_ui::{
-    chrome_button_style, chrome_menu_item_style, chrome_nav_button_style, menubar_text_style,
+    chrome_button_style, chrome_menu_item_style, menubar_text_style, tab_close_style,
+    tab_label_style, tab_pill_style,
 };
 
 impl Editpad {
@@ -1032,20 +1033,51 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 let pin = if tab.pinned { "📌 " } else { "" };
                 // P57：页签换中性样式——活动页淡底描边、非活动透明悬停淡染
                 let active = i == self.active_tab;
-                strip = strip.push(
-                    mouse_area(
-                        button(text(format!(
+                // P112：页签 = 「胶囊容器 + 文字按钮 + × 关闭按钮」。
+                // 胶囊底画在容器上（活动/悬停染色），内部两个按钮全透明
+                // 扁平——若底色由两个按钮各自画会露接缝；悬停数据源 =
+                // 指针进出页签的 TabHovered（纯 UI 态）。× 与右键菜单
+                // 「关闭」同消息同口径（置脏弹确认条、busy 置灰），固定
+                // 页不渲染 ×（豁免口径与菜单一致）；文字按钮仍承接
+                // SwitchTab（含 P65 双击重命名）。
+                let closeable = !tab.pinned;
+                let mut pill = row![
+                    button(
+                        text(format!(
                             "{marker}{pin}{}",
                             tab.display_name()
                         ))
                         .size(uipx)
-                        .font(uifont))
-                        .padding([2, 10])
-                        .style(move |theme, status| {
-                            chrome_nav_button_style(theme, status, active)
-                        })
-                        .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
+                        .font(uifont),
                     )
+                    .padding(Padding {
+                        top: 2.0,
+                        right: if closeable { 4.0 } else { 10.0 },
+                        bottom: 2.0,
+                        left: 10.0,
+                    })
+                    .style(tab_label_style)
+                    .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
+                ]
+                .align_y(Alignment::Center);
+                if closeable {
+                    pill = pill.push(
+                        button(text("×").size(uipx).font(uifont))
+                            .padding([2, 8])
+                            .style(tab_close_style)
+                            .on_press_maybe(
+                                (!self.busy).then_some(Message::CloseTabAt(i)),
+                            ),
+                    );
+                }
+                let hovered = self.hovered_tab == Some(i);
+                strip = strip.push(
+                    mouse_area(
+                        container(pill)
+                            .style(move |theme| tab_pill_style(theme, active, hovered)),
+                    )
+                    .on_enter(Message::TabHovered(Some(i)))
+                    .on_exit(Message::TabHovered(None))
                     .on_right_press(Message::TabContextMenu(i)),
                 );
             }

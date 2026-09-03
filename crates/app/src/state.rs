@@ -51,6 +51,10 @@ pub(crate) struct Editpad {
     /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
     /// on_double_click（iced 事件流实测），故在 SwitchTab 里记账判定。
     pub(crate) last_tab_click: Option<(usize, std::time::Instant)>,
+    /// P112：指针悬停的页签下标（页签胶囊悬停底色的数据源；纯 UI 态，
+    /// 不落盘）。离开页签 = None；页签被关闭/移除时关闭路径清空，
+    /// 越界下标在消息处理层复位为 None（防陈旧悬停染色错页）。
+    pub(crate) hovered_tab: Option<usize>,
     /// P62：热键捕获态——Some(动作 id) = 设置热键页正在等待新组合键。
     pub(crate) hotkey_capture: Option<&'static str>,
 
@@ -213,6 +217,7 @@ impl Default for Editpad {
             eol_menu: false,
             regex_enabled: false,
             last_tab_click: None,
+            hovered_tab: None,
             hotkey_capture: None,
             available_fonts: Vec::new(),
             active_font_family: None,

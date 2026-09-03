@@ -525,6 +525,41 @@ use super::*;
                 tab_active.border.color, tab_idle.border.color,
                 "{label}: 活动页签应有描边指示"
             );
+
+            // P112 页签胶囊样式：胶囊底画在容器上（活动底+描边 / 悬停
+            // 淡染 / 闲置透明），内部「文字」「×」按钮无底扁平
+            let pill_active = tab_pill_style(&theme, true, false);
+            let pill_hover = tab_pill_style(&theme, false, true);
+            let pill_idle = tab_pill_style(&theme, false, false);
+            assert!(pill_active.background.is_some(), "{label}: 活动胶囊应有底色");
+            assert!(pill_hover.background.is_some(), "{label}: 悬停胶囊应有淡染");
+            assert!(pill_idle.background.is_none(), "{label}: 闲置胶囊应透明");
+            assert_ne!(
+                pill_active.border.color, pill_idle.border.color,
+                "{label}: 活动胶囊应有描边指示"
+            );
+            assert_eq!(
+                pill_active.border.radius, pill_idle.border.radius,
+                "{label}: 胶囊圆角应恒定"
+            );
+            let tab_label_btn = tab_label_style(&theme, button::Status::Active);
+            let tab_label_off = tab_label_style(&theme, button::Status::Disabled);
+            assert!(bg_of(&tab_label_btn).is_none(), "{label}: 页签文字按钮必须无底");
+            assert_ne!(
+                tab_label_btn.text_color, tab_label_off.text_color,
+                "{label}: 页签文字禁用降灰"
+            );
+            let tab_close = tab_close_style(&theme, button::Status::Active);
+            let tab_close_hover = tab_close_style(&theme, button::Status::Hovered);
+            let tab_close_off = tab_close_style(&theme, button::Status::Disabled);
+            assert_ne!(
+                bg_of(&tab_close), bg_of(&tab_close_hover),
+                "{label}: × 悬停必须有芯片感"
+            );
+            assert_ne!(
+                tab_close.text_color, tab_close_off.text_color,
+                "{label}: × 禁用降灰"
+            );
         }
     }
 

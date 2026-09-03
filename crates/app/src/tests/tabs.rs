@@ -769,3 +769,52 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ---------- P112 页签 × 关闭按钮与悬停态 ----------
+
+    #[test]
+    fn tab_hover_state_tracks_clears_on_exit_and_on_close() {
+        let mut app = app_with_tabs(2);
+
+        // 进入页 1 → 悬停态置位（纯 UI 态：不改活动页/置脏）
+        dispatch(&mut app, Message::TabHovered(Some(1)));
+        assert_eq!(app.hovered_tab, Some(1));
+        assert_eq!(app.active_tab, 1, "悬停不得改变活动页");
+        assert!(!app.tabs[1].dirty, "悬停不得置脏");
+
+        // 越界下标：复位为 None（防陈旧下标把悬停染色挂到错页）
+        dispatch(&mut app, Message::TabHovered(Some(9)));
+        assert_eq!(app.hovered_tab, None);
+
+        // 离开页签 → None
+        dispatch(&mut app, Message::TabHovered(Some(1)));
+        dispatch(&mut app, Message::TabHovered(None));
+        assert_eq!(app.hovered_tab, None);
+
+        // 单页关闭把悬停页关掉 → 悬停态一并清空
+        dispatch(&mut app, Message::TabHovered(Some(1)));
+        dispatch(&mut app, Message::CloseTabAt(1));
+        assert_eq!(app.hovered_tab, None, "关闭悬停页后悬停态必须清空");
+
+        // 批量关闭含悬停页 → 同样清空
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::TabHovered(Some(1)));
+        dispatch(&mut app, Message::CloseOtherTabs(0));
+        assert_eq!(app.hovered_tab, None, "批量关闭后悬停态必须清空");
+        assert_eq!(app.tabs.len(), 1, "干净页批量关闭直接移除");
+    }
+
+    #[test]
+    fn view_builds_with_pill_tabs_pinned_and_hovered() {
+        // P112 无头冒烟：胶囊页签（文字 + × 双按钮 + 容器悬停底）、
+        // 固定页不渲染 ×、悬停染色态下视图树均可构造（container +
+        // mouse_area + 双按钮的组合在构造期不 panic；× 走 CloseTabAt
+        // 消息已有专用用例覆盖语义）
+        let mut app = app_with_tabs(2);
+        dispatch(&mut app, Message::TabHovered(Some(0)));
+        dispatch(&mut app, Message::TogglePinTab(1));
+        let _ = app.view();
+        // 悬停离开后重建一遍（悬停态 None 分支）
+        dispatch(&mut app, Message::TabHovered(None));
+        let _ = app.view();
+    }
+

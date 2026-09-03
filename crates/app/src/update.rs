@@ -115,6 +115,9 @@ impl Editpad {
         // 第 64 轮：命名页进「上次关闭」栈（恢复入口见 ReopenLastClosedFile）
         self.remember_closed_tab(idx);
         self.tabs.remove(idx);
+        // P112：悬停的页被关掉 → 悬停态清空（下一个指针移动事件会
+        // 按新下标重新置位；不清的话陈旧下标会悬停染色到错页）
+        self.hovered_tab = None;
         if self.tabs.is_empty() {
             let tab = self.fresh_tab();
             self.tabs.push(tab);
@@ -153,6 +156,9 @@ impl Editpad {
         if removed == 0 {
             return 0;
         }
+        // P112：悬停页可能在被移除之列——批量移除后悬停态统一清空
+        // （下一个指针移动事件按新下标重新置位）
+        self.hovered_tab = None;
         if self.tabs.is_empty() {
             let tab = self.fresh_tab();
             self.tabs.push(tab);
@@ -312,6 +318,7 @@ impl Editpad {
         | Message::TabContextMenuClosed | Message::TogglePinTab(..) | Message::SaveTabFromMenu(..) | Message::RenameOrSaveAsTab(..)
         | Message::TabRenameInputChanged(..) | Message::TabRenameCommitted | Message::TabRenameCancelled | Message::CloseTabAt(..)
         | Message::CloseOtherTabs(..) | Message::CloseTabsRight(..) | Message::ConfirmBatchCloseDiscard | Message::CancelBatchCloseTabs
+        | Message::TabHovered(..)
         => self.update_tabs(message),
         // ---------- 设置/字体/热键 ----------
         Message::SettingsShowWhitespaceToggled(..) | Message::SettingsShowLineEndingsToggled(..) | Message::SettingsWordWrapToggled(..) | Message::HotkeyCaptureStarted(..)
@@ -654,6 +661,13 @@ impl Editpad {
                     return self.update(Message::RenameOrSaveAsTab(i));
                 }
                 self.last_tab_click = Some((i, now));
+                Task::none()
+            }
+            Message::TabHovered(target) => {
+                // P112：页签悬停底色数据源。越界下标/离开一律复位为
+                // None——关闭路径虽会清空，但此处再兜一层，防陈旧
+                // 下标把悬停染色挂到错页。
+                self.hovered_tab = target.filter(|&i| i < self.tabs.len());
                 Task::none()
             }
             Message::CloseTabRequest => {
