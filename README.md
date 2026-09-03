@@ -28,7 +28,7 @@
 - [x] 查找 / 替换、跳转到行、最近文件、快捷键
 - [x] **升级 iced 0.14**——解锁系统输入法，中文输入可用
 - [x] **自绘虚拟化编辑器**：ropey Document 成为唯一数据源，
-      只为可见行排版绘制（`crates/app/src/editor.rs`）
+      只为可见行排版绘制（`crates/app/src/editor/`）
 - [x] 鼠标点击定位 / 拖选 / 滚轮滚动；行号栏随行数自适应宽度
 - [x] 撤销/重做（rope 结构共享快照，Ctrl+Z / Ctrl+Y）
 - [x] 光标导航全家桶：方向键/Home/End/PageUp/PageDown/Ctrl+Home/End，Shift 选区
@@ -49,9 +49,45 @@
 cargo run --release
 ```
 
-大文件验收：打开仓库根目录的 `bench-50mb.log`（68MB / 60 万行），
+大文件验收：打开 `dev-assets/bench-50mb.log`（68MB / 60 万行），
 加载期间界面可拖动、进度条实时推进；打开后滚动与编辑不卡顿。
 打开 `.rs`/`.py`/`.md` 等文件可看到语法着色。
+
+## 目录结构（第 86 轮 Phase 4 更新）
+
+```
+editpad/
+├── Cargo.toml                  # workspace：core + app
+├── rust-toolchain.toml         # 工具链锁定；rustfmt.toml + .github/workflows/ci.yml
+├── crates/
+│   ├── core/                   # 纯逻辑层（零 GUI 依赖，可单独测试/复用）
+│   │   ├── src/                # document / search / highlight / loader / saver /
+│   │   │                       # settings / snapshot / json / markdown / brackets /
+│   │   │                       # paths / syntaxes / error
+│   │   ├── tests/              # 边界输入批 + 随机编辑对拍 fuzz
+│   │   └── examples/           # 加载/查找/替换/高亮/内存基准
+│   └── app/                    # iced 界面壳
+│       ├── src/
+│       │   ├── main.rs         # iced 入口 + Message 枚举（114 变体）+ 模块注册
+│       │   ├── update.rs       # update() 分发 + 7 个域方法（editor/file/find/tabs/…）
+│       │   ├── view.rs         # 主视图组装（设置面板已迁出）
+│       │   ├── settings_ui.rs  # 设置弹窗 UI + 中性样式
+│       │   ├── state.rs        # Editpad 状态结构体 + Default
+│       │   ├── load / find_scan / highlight_pave / md_preview / fonts /
+│       │   │   session / tab / autosave / heartbeat / chrome / hotkeys / icon.rs
+│       │   ├── editor/         # 自绘虚拟化编辑器
+│       │   │   ├── core.rs     # EditorCore 结构体 + 几何/布局访问器
+│       │   │   ├── undo / motion / edit / block / highlight.rs   # impl 按域拆分
+│       │   │   ├── view.rs / wrap.rs / metrics.rs / scrollbars.rs
+│       │   │   └── *_tests.rs  # 随实现文件的测试（#[path] 挂子模块）
+│       │   └── tests/          # app 层测试按域拆分（tabs/file/find/session/…）
+│       └── assets/             # app.ico 等资源（build.rs 编入 exe）
+├── docs/                       # 设计文档：soft-wrap-design / structure-optimization-plan / architecture
+├── dev-assets/                 # 大文件验收样本（bench-50mb.log，gitignore）
+└── package.ps1                 # 发布打包（build → stage → zip → SHA256）
+```
+
+架构与消息流总览见 `docs/architecture.md`。
 
 ## 路线图
 
