@@ -298,7 +298,59 @@ impl Editpad {
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
+        match &message {
+        // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
+        Message::Edit(..) | Message::EditorNavChanged | Message::CopyRequested | Message::CutRequested
+        | Message::PasteRequested | Message::Pasted(..) | Message::KeyPressed(..) | Message::HighlightPaveNeeded
+        | Message::FormatJson | Message::HlPaveProgress(..) | Message::HlPaved(..) | Message::CaretTick
+        | Message::PreviewToggled | Message::CursorMoved(..) | Message::ViewportResized(..)
+        => self.update_editor(message),
+        // ---------- 标签页/右键菜单/批关 ----------
+        Message::CopyFilePath(..) | Message::CopyFileName(..) | Message::ReopenLastClosedFile | Message::NewTab
+        | Message::TabStripBlankPressed | Message::SwitchTabNext | Message::SwitchTab(..) | Message::CloseTabRequest
+        | Message::ConfirmCloseTabDiscard(..) | Message::CancelCloseTab | Message::CloseTabSave(..) | Message::TabContextMenu(..)
+        | Message::TabContextMenuClosed | Message::TogglePinTab(..) | Message::SaveTabFromMenu(..) | Message::RenameOrSaveAsTab(..)
+        | Message::TabRenameInputChanged(..) | Message::TabRenameCommitted | Message::TabRenameCancelled | Message::CloseTabAt(..)
+        | Message::CloseOtherTabs(..) | Message::CloseTabsRight(..) | Message::ConfirmBatchCloseDiscard | Message::CancelBatchCloseTabs
+        => self.update_tabs(message),
+        // ---------- 设置/字体/热键 ----------
+        Message::SettingsShowWhitespaceToggled(..) | Message::SettingsShowLineEndingsToggled(..) | Message::SettingsWordWrapToggled(..) | Message::HotkeyCaptureStarted(..)
+        | Message::HotkeyCaptureKey(..) | Message::HotkeyCaptureCancel | Message::HotkeysResetAll | Message::ThemeToggled
+        | Message::FontSizeDelta(..) | Message::SettingsToggled | Message::SettingsPageSelected(..) | Message::SettingsSearchChanged(..)
+        | Message::SettingsAutosaveToggled(..) | Message::SettingsAutosaveDelayDelta(..) | Message::SettingsRememberRecentToggled(..) | Message::SettingsSnapshotsToggled(..)
+        | Message::SettingsBackupModeToggled | Message::SettingsRememberSessionToggled(..) | Message::SettingsExitModeToggled | Message::SettingsIntervalDelta(..)
+        | Message::SettingsFontSelected(..) | Message::SettingsFontReset | Message::FontFilterChanged(..)
+        => self.update_settings(message),
+        // ---------- 文件：打开/保存/编码/行尾/拖放/外部变更 ----------
+        Message::OpenRequested | Message::FileChosen(..) | Message::FileDropped(..) | Message::OpenNextCliFile
+        | Message::LoadProgress(..) | Message::Loaded(..) | Message::SaveRequested | Message::SaveAsRequested
+        | Message::SaveTargetChosen(..) | Message::Saved(..) | Message::TabAutosaved(..) | Message::WindowFocused
+        | Message::ConfirmExternalReload(..) | Message::IgnoreExternalChange(..) | Message::IgnoreAllExternalChanges | Message::ConfirmOpenDiscard
+        | Message::ConfirmOpenCancel | Message::ToggleEncodingMenu | Message::ToggleEolMenu | Message::SaveWithEncoding(..)
+        | Message::ConvertEol(..) | Message::TabSaved(..)
+        => self.update_file(message),
+        // ---------- 菜单栏/最近文件/面板 ----------
+        Message::MenuToggled(..) | Message::MenubarHovered(..) | Message::MenubarPressed | Message::RecentsToggled
+        | Message::RecentSelected(..) | Message::RecentsCleared | Message::BarsDismissed
+        => self.update_menus(message),
+        // ---------- 会话/快照/关窗/窗口 ----------
+        Message::CloseRequested(..) | Message::ConfirmSaveAndClose | Message::DiscardAndClose | Message::CancelClose
+        | Message::SessionRecoverAccepted | Message::SessionRecoverDiscarded | Message::SnapshotHeartbeatTick | Message::HeartbeatDone(..)
+        | Message::WindowMoved(..)
+        => self.update_session(message),
+        // ---------- 查找/替换/跳转/查找全部 ----------
+        Message::FindToggled | Message::FindQueryChanged(..) | Message::FindNext | Message::FindPrev
+        | Message::FindAllToggled | Message::FindAllGoto(..) | Message::CaseToggled(..) | Message::RegexToggled(..)
+        | Message::ReplaceQueryChanged(..) | Message::ReplaceCurrent | Message::ReplaceCurrentRegex | Message::ReplaceAll
+        | Message::FindScanDone(..) | Message::GotoToggled | Message::GotoInputChanged(..) | Message::GotoSubmit
+        => self.update_find(message),
+        }
+    }
+
+    // ---------- 域方法（第 81 轮 Phase 1：update() 拆分） ----------
+    /// 域：编辑器/剪贴板/光标/预览/高亮铺路。臂体自原 update() 逐字搬移，零行为变更。
+    fn update_editor(&mut self, msg: Message) -> Task<Message> {
+        match msg {
             // ---------- 编辑器 ----------
             // 第 60 轮：复制标记行——只读操作前置拦截，取文本直接写剪贴板
             //（不置脏、不排自动保存；加载中与普通编辑同口径拒收）
@@ -328,7 +380,8 @@ impl Editpad {
                     Task::batch(tasks)
                 }
             }
-            Message::EditorNavChanged => Task::none(), // 视图重建即可刷新状态栏
+            Message::EditorNavChanged => Task::none(),
+            // 视图重建即可刷新状态栏
 
             // ---------- 剪贴板（P4） ----------
             Message::CopyRequested => {
@@ -341,6 +394,195 @@ impl Editpad {
                 };
                 iced::clipboard::write(text)
             }
+            Message::CutRequested => {
+                // 第 67 轮 ⑮：列块剪切 = 复制块内容 + 经编辑入口删块
+                // （同步递归 update，置脏/自动保存调度全继承——Pasted 先例）
+                let block_text = self.cur_handle.borrow().block_copy_text();
+                if let Some(text) = block_text {
+                    let write: Task<Message> = iced::clipboard::write(text);
+                    let edit =
+                        self.update(Message::Edit(EditOp::Delete));
+                    return write.chain(edit);
+                }
+                let Some(text) = self.cur_handle.borrow().selected_text() else {
+                    return Task::none();
+                };
+                // 先写剪贴板，再走统一编辑入口删除选区（Delete 在有选区时只删选区）。
+                // clipboard::write 是泛型 Task<T>，直接以 Message 实例化后 chain。
+                let write: Task<Message> = iced::clipboard::write(text);
+                write.chain(Task::done(Message::Edit(EditOp::Delete)))
+            }
+            Message::PasteRequested => {
+                // clipboard::read 返回 Task<Option<String>>
+                iced::clipboard::read()
+                    .map(|content| Message::Pasted(content.unwrap_or_default()))
+            }
+            Message::Pasted(text) => {
+                if text.is_empty() {
+                    Task::none()
+                } else {
+                    self.update(Message::Edit(EditOp::InsertText(text)))
+                }
+            }
+            // ---------- 按键分发与热键捕获（P62） ----------
+            Message::KeyPressed(key, modifiers) => {
+                // 热键捕获态拦截：Esc 直接取消（简单状态清除，无需消息
+                // 往返）；可作热键的按键经 HotkeyCaptureKey 走校验提交
+                if self.hotkey_capture.is_some() {
+                    if let keyboard::Key::Named(Named::Escape) = &key {
+                        self.hotkey_capture = None;
+                        self.status.clear();
+                        return Task::none();
+                    }
+                    if let Some(combo) = combo_string(modifiers, &key) {
+                        return Task::done(Message::HotkeyCaptureKey(combo));
+                    }
+                    return Task::none();
+                }
+                // 第 67 轮 ⑮：列块选区时 Esc 先清块并消费按键
+                // （不与热键捕获/状态栏菜单的 Esc 语义叠加）。同步清除 +
+                // CancelBlock 消息幂等兜底（架构惯例走编辑入口）
+                if let keyboard::Key::Named(Named::Escape) = &key {
+                    if self.cur_handle.borrow().has_block() {
+                        self.cur_handle.borrow_mut().clear_block();
+                        return Task::done(Message::Edit(EditOp::CancelBlock));
+                    }
+                }
+                match handle_key(key, modifiers, &self.settings.hotkeys) {
+                    Some(message) => Task::done(message),
+                    None => Task::none(),
+                }
+            }
+            // ---------- 高亮后台分批补建（P12） ----------
+            Message::HighlightPaveNeeded => self.schedule_highlight_pave(),
+            Message::FormatJson => {
+                const FORMAT_JSON_MAX_CHARS: usize = 4_000_000;
+                // 仅当前语法为 JSON 时生效（P22 第二批：按当前语法判断）
+                if self.cur_handle.borrow().highlight_syntax_name().as_deref() != Some("JSON") {
+                    self.status = "格式化 JSON 仅对 JSON 文件可用（Ctrl+Shift+F）".to_owned();
+                    return Task::none();
+                }
+                let (text, chars) = {
+                    let ed = self.cur_handle.borrow();
+                    (ed.doc.to_text(), ed.doc.text_len())
+                };
+                if chars > FORMAT_JSON_MAX_CHARS {
+                    // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
+                    self.status =
+                        format!("文档过大（{chars} 字符），暂不支持格式化（上限 {FORMAT_JSON_MAX_CHARS}）");
+                    return Task::none();
+                }
+                match editpad_core::format_json(&text) {
+                    Ok(pretty) => {
+                        // replace_whole_document 内部快照 → 可撤销；光标复位到文首
+                        self.cur()
+                            .borrow_mut()
+                            .replace_whole_document(editpad_core::Document::from_str(&pretty));
+                        self.tab_mut().dirty = true;
+                        // P18：内容版本与防抖起点同步推进
+                        self.tab_mut().note_mutation();
+                        self.status = "已格式化 JSON".to_owned();
+                        if self.find_visible {
+                            // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
+                            let find_task = self.schedule_find_scan();
+                            return Task::batch([
+                                find_task,
+                                self.maybe_schedule_autosave(),
+                            ]);
+                        }
+                        self.maybe_schedule_autosave()
+                    }
+                    Err(error) => {
+                        self.status = format!("JSON 格式化失败：{error}");
+                        Task::none()
+                    }
+                }
+            }
+            Message::HlPaveProgress(gen, strides_done) => {
+                // 双重代次检查：任务登记一致且高亮器未换代（换文件后
+                // 旧任务的迟到进度不得污染新会话的状态栏）
+                if self.hl_paving == Some(gen)
+                    && self.cur_handle.borrow().highlight_generation() == Some(gen)
+                {
+                    let total_strides = (self.cur_handle.borrow().doc.line_count()
+                        / editpad_core::highlight::STRIDE)
+                        .max(1);
+                    let pct = (strides_done as usize).min(total_strides) * 100 / total_strides;
+                    self.status = format!("语法分析中…{pct}%（后台）");
+                }
+                Task::none()
+            }
+            Message::HlPaved(gen, paved) => {
+                if self.hl_paving == Some(gen) {
+                    self.hl_paving = None;
+                    // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
+                    // needs_paving 重新评估并续排（从存活检查点出发，代价小）
+                    let installed = self
+                        .cur_handle
+                        .borrow_mut()
+                        .install_highlighter_if_current(gen, paved);
+                    let _ = installed;
+                    if self.status.starts_with("语法分析") {
+                        self.status.clear();
+                    }
+                }
+                Task::none()
+            }
+            Message::CaretTick => {
+                // 打磨项：翻转闪烁相位（update 本身会触发重绘）。
+                // 心跳链在 new() 启动后自我续期，占用一个常驻睡眠节拍。
+                // P53：一条链两用——竖直滚动条淡出动画期间切换 33ms 快拍
+                // 驱动渐变（相位翻转由 tick_blink 按真实间隔门控，不受影响），
+                // 其余时间维持 ~530ms 常规节拍。
+                self.cur_handle.borrow_mut().tick_blink();
+                let next_ms = if self.cur_handle.borrow().scrollbar_fading() {
+                    editor::SCROLLBAR_FADE_TICK_MS
+                } else {
+                    editor::CARET_BLINK_MS
+                };
+                Task::perform(
+                    async move {
+                        std::thread::sleep(std::time::Duration::from_millis(next_ms));
+                    },
+                    |_| Message::CaretTick,
+                )
+            }
+            Message::PreviewToggled => {
+                // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
+                if self.cur_handle.borrow().highlight_syntax_name().as_deref()
+                    == Some("Markdown")
+                {
+                    self.preview_visible = !self.preview_visible;
+                } else {
+                    self.status = "预览仅支持 Markdown 文件".to_owned();
+                }
+                Task::none()
+            }
+            // ---------- 浮层弹窗定位（P39/P40） ----------
+            Message::CursorMoved(p) => {
+                self.cursor_pos = (p.x, p.y);
+                Task::none()
+            }
+            Message::ViewportResized(w, h) => {
+                self.viewport_size = (w, h);
+                // P102：窗口尺寸记忆（0,0 = 未知窗口，跳过；实测正常值
+                // 才记录）。节流：拖动/拉伸每帧事件，2s 才落盘一次，
+                // 关闭路径 handle_close_request 兜底落盘最后状态。
+                if w > 0.0 && h > 0.0 {
+                    self.settings.window_width = Some(w);
+                    self.settings.window_height = Some(h);
+                    self.persist_geometry_if_due();
+                }
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    // ---------- domain methods (round 81 Phase 1: update() split) ----------
+    /// 域：标签页/右键菜单/批关。臂体自原 update() 逐字搬移，零行为变更。
+    fn update_tabs(&mut self, msg: Message) -> Task<Message> {
+        match msg {
             // ---------- 复制完整路径 / 文件名（第 63 轮） ----------
             // None = 活动页（热键），Some(i) = 指定页（标签右键菜单）；
             // 未命名页无路径可写，给状态栏提示
@@ -365,6 +607,235 @@ impl Editpad {
                 self.recents_visible = false;
                 self.start_loading(path, tab)
             }
+            // ---------- 多标签（P21） ----------
+            Message::NewTab => {
+                let tab = self.fresh_tab();
+                self.tabs.push(tab);
+                let last = self.tabs.len() - 1;
+                self.assign_untitled_num(last);
+                self.set_active_tab(last);
+                // 查找态全局：切页即作废旧命中，防串页
+                self.cancel_find_scan();
+                // P28：页集合已变，右键菜单随之下收
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            // 第 76 轮：标签条空白区双击 → 新建标签页。双击判定由控件层完成
+            // （strip 外层 mouse_area 的 on_double_click，iced 内核 Click
+            // 时间+位置窗口）；标签自身点击被 button 消费不会产生本消息，
+            // 与 P65 重命名互不干扰。busy 时忽略（与标签禁用一致）。
+            Message::TabStripBlankPressed => {
+                if self.busy {
+                    return Task::none();
+                }
+                self.update(Message::NewTab)
+            }
+            Message::SwitchTabNext => {
+                let next = (self.active_tab + 1) % self.tabs.len();
+                self.set_active_tab(next);
+                self.cancel_find_scan();
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            Message::SwitchTab(i) => {
+                // P65：双击检测——同页在双击窗内连点两次 = 重命名意图。
+                // 第二次点击照常走切换（已在活动页则无操作），随后进入
+                // 就地重命名（内部自带 busy/越界守卫）。正在重命名的页
+                // 其标签按钮已被输入框替换，不会再产生 SwitchTab。
+                let now = std::time::Instant::now();
+                let dbl = is_double_click(self.last_tab_click, i, now);
+                if i < self.tabs.len() && i != self.active_tab {
+                    self.set_active_tab(i);
+                    self.cancel_find_scan();
+                    self.tab_context_menu = None;
+                }
+                if dbl {
+                    self.last_tab_click = None;
+                    return self.update(Message::RenameOrSaveAsTab(i));
+                }
+                self.last_tab_click = Some((i, now));
+                Task::none()
+            }
+            Message::CloseTabRequest => {
+                let idx = self.active_tab;
+                // P28：固定页对键盘路径（Ctrl+W）同样豁免，与右键菜单一致
+                if self.tabs[idx].pinned {
+                    self.status = "固定标签页需先取消固定再关闭".to_owned();
+                } else if self.tabs[idx].dirty {
+                    // 置脏页先确认（骨架版仅提供「放弃更改」出口）
+                    self.close_tab_confirm = Some(idx);
+                } else if self.close_tab_now(idx) {
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::ConfirmCloseTabDiscard(idx) => {
+                self.close_tab_confirm = None;
+                if idx < self.tabs.len() {
+                    // 关最后一页时槽位会被复用：先清空内容与路径
+                    let tab = &mut self.tabs[idx];
+                    tab.dirty = false;
+                    tab.path = None;
+                    tab.editor
+                        .borrow_mut()
+                        .reset_document(editpad_core::Document::new());
+                }
+                if self.close_tab_now(idx) {
+                    self.cancel_find_scan();
+                }
+                Task::none()
+            }
+            Message::CancelCloseTab => {
+                self.close_tab_confirm = None;
+                Task::none()
+            }
+            Message::CloseTabSave(idx) => {
+                // 「保存并关闭」：已命名的置脏页先落盘，
+                // TabSaved 成功且清脏后再真正移除页面
+                if idx >= self.tabs.len() || self.busy {
+                    return Task::none();
+                }
+                if self.tabs[idx].path.is_none() {
+                    self.status = "未命名标签页请先另存为再关闭".to_owned();
+                    return Task::none();
+                }
+                self.enter_busy();
+                let path = self.tabs[idx].path.clone().expect("上方已确认非空");
+                let doc = self.tabs[idx].editor.borrow().doc.clone();
+                let version = self.tabs[idx].version;
+                self.pending_close_tab = Some(idx);
+                Task::perform(
+                    async move {
+                        let saved = editpad_core::save_document_atomic(&path, &doc)
+                            .map_err(|e| e.to_string());
+                        (version, saved)
+                    },
+                    move |(version, result)| Message::TabSaved(idx, version, result),
+                )
+            }
+            // ---------- 标签右键菜单（P28；P39 起为浮层） ----------
+            Message::TabContextMenu(i) => {
+                // busy（对话框/IO 中）不开菜单；越界下标（页刚被关掉）忽略
+                if !self.busy && i < self.tabs.len() {
+                    // P39：浮层锚点 = 打开那一刻的指针位置（标签条 mouse_area 跟踪）
+                    self.menu_anchor = self.cursor_pos;
+                    self.tab_context_menu = Some(i);
+                }
+                Task::none()
+            }
+            Message::TabContextMenuClosed => {
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            Message::TogglePinTab(i) => {
+                self.tab_context_menu = None;
+                if let Some(tab) = self.tabs.get_mut(i) {
+                    tab.pinned = !tab.pinned;
+                }
+                Task::none()
+            }
+            Message::SaveTabFromMenu(i) => {
+                self.tab_context_menu = None;
+                // v1 决策：右键保存 = 先切到目标页再走既有活动页保存流——
+                // Saved 回报、最近文件记录、转码提示全部复用活动页语义，
+                // 不为后台页另铺一条带 idx 的回报管线。未命名置脏页自动
+                // 落另存为对话框（与 Ctrl+S 同语义）。
+                if !self.busy && i < self.tabs.len() && self.tabs[i].dirty {
+                    self.set_active_tab(i);
+                    return match self.tab().path.clone() {
+                        Some(_) => self.save(),
+                        None => self.save_as_dialog(),
+                    };
+                }
+                Task::none()
+            }
+            Message::RenameOrSaveAsTab(i) => {
+                self.tab_context_menu = None;
+                if !self.busy && i < self.tabs.len() {
+                    self.set_active_tab(i);
+                    // P55：命名页 → 就地重命名输入框（预填当前文件名）；
+                    // 未命名页保留「另存为」对话框兜底（§3 P28 第 2 条）
+                    if let Some(path) = self.tabs[i].path.clone() {
+                        self.renaming_tab = Some(i);
+                        self.rename_input = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        // P64：聚焦 + 全选——键盘流直达，预填旧名整体可
+                        // 被直接覆盖；操作在下一帧视图含该输入框后生效
+                        return iced::widget::operation::focus(rename_input_id())
+                            .chain(iced::widget::operation::select_all(
+                                rename_input_id(),
+                            ));
+                    }
+                    return self.save_as_dialog();
+                }
+                Task::none()
+            }
+            Message::TabRenameInputChanged(value) => {
+                self.rename_input = value;
+                Task::none()
+            }
+            Message::TabRenameCommitted => self.commit_tab_rename(),
+            Message::TabRenameCancelled => {
+                self.renaming_tab = None;
+                self.rename_input.clear();
+                Task::none()
+            }
+            Message::CloseTabAt(idx) => {
+                self.tab_context_menu = None;
+                if !self.busy && idx < self.tabs.len() {
+                    if self.tabs[idx].pinned {
+                        self.status = "固定标签页需先取消固定再关闭".to_owned();
+                    } else if self.tabs[idx].dirty {
+                        // 置脏走既有单页确认条（含「保存并关闭」出口）
+                        self.batch_close_confirm = None;
+                        self.close_tab_confirm = Some(idx);
+                    } else if self.close_tab_now(idx) {
+                        self.cancel_find_scan();
+                    }
+                }
+                Task::none()
+            }
+            Message::CloseOtherTabs(keep) => {
+                self.begin_batch_close(BatchCloseScope::Others(keep));
+                Task::none()
+            }
+            Message::CloseTabsRight(from) => {
+                self.begin_batch_close(BatchCloseScope::RightOf(from));
+                Task::none()
+            }
+            Message::ConfirmBatchCloseDiscard => {
+                if let Some(targets) = self.batch_close_confirm.take() {
+                    // 统一放弃：先清各页置脏与内容（与 ConfirmCloseTabDiscard
+                    // 同款，防「已移除页的 rope 仍被别名引用」的错觉），再移除。
+                    for &idx in &targets {
+                        if let Some(tab) = self.tabs.get_mut(idx) {
+                            tab.dirty = false;
+                            tab.path = None;
+                            tab.editor
+                                .borrow_mut()
+                                .reset_document(editpad_core::Document::new());
+                        }
+                    }
+                    if self.close_tabs_now(&targets) > 0 {
+                        self.cancel_find_scan();
+                    }
+                }
+                Task::none()
+            }
+            Message::CancelBatchCloseTabs => {
+                self.batch_close_confirm = None;
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    // ---------- domain methods (round 81 Phase 1: update() split) ----------
+    /// 域：设置/字体/热键。臂体自原 update() 逐字搬移，零行为变更。
+    fn update_settings(&mut self, msg: Message) -> Task<Message> {
+        match msg {
             Message::SettingsShowWhitespaceToggled(value) => {
                 self.settings.show_whitespace = value;
                 for tab in &self.tabs {
@@ -397,37 +868,182 @@ impl Editpad {
                 self.persist_settings();
                 Task::none()
             }
-            Message::CutRequested => {
-                // 第 67 轮 ⑮：列块剪切 = 复制块内容 + 经编辑入口删块
-                // （同步递归 update，置脏/自动保存调度全继承——Pasted 先例）
-                let block_text = self.cur_handle.borrow().block_copy_text();
-                if let Some(text) = block_text {
-                    let write: Task<Message> = iced::clipboard::write(text);
-                    let edit =
-                        self.update(Message::Edit(EditOp::Delete));
-                    return write.chain(edit);
+            Message::HotkeyCaptureStarted(id) => {
+                self.hotkey_capture = Some(id);
+                self.status = format!(
+                    "为「{}」按下新组合键（Esc 取消）",
+                    HOTKEY_ACTIONS
+                        .iter()
+                        .find(|a| a.id == id)
+                        .map(|a| a.desc)
+                        .unwrap_or("")
+                );
+                Task::none()
+            }
+            Message::HotkeyCaptureKey(combo) => self.commit_hotkey_capture(combo),
+            Message::HotkeyCaptureCancel => {
+                self.hotkey_capture = None;
+                self.status.clear();
+                Task::none()
+            }
+            Message::HotkeysResetAll => {
+                self.settings.hotkeys.clear();
+                self.persist_settings();
+                self.hotkey_capture = None;
+                self.status = "已恢复默认热键".to_owned();
+                Task::none()
+            }
+            // ---------- 外观 ----------
+            Message::ThemeToggled => {
+                self.dark_mode = !self.dark_mode;
+                self.settings.set_theme(self.dark_mode);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::FontSizeDelta(delta) => {
+                let next = editor::normalize_font_size(self.display_font_size() + delta);
+                self.settings.font_size = next;
+                self.persist_settings();
+                self.cur_handle.borrow_mut().set_font_size(next);
+                Task::none()
+            }
+            // ---------- 设置弹窗（P27） ----------
+            Message::SettingsToggled => {
+                // busy（加载/保存中）禁开，与工具栏其余按钮同一守卫语义
+                if !self.busy {
+                    self.settings_visible = !self.settings_visible;
+                    if self.settings_visible {
+                        // 第 64 轮用户点单：每次进入设置默认落在第一分类，
+                        // 不记忆上次浏览位置（P51 撤销）
+                        self.settings_page = SettingsPage::default();
+                    } else {
+                        // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
+                        self.settings_search.clear();
+                    }
                 }
-                let Some(text) = self.cur_handle.borrow().selected_text() else {
-                    return Task::none();
+                Task::none()
+            }
+            // P47：侧栏分类导航——点分类即离开搜索态（同款语义）。
+            // 第 64 轮用户点单：分类位置不再持久化（P51 撤销），每次打开
+            // 设置都回到第一分类；弹窗打开期间导航照常。
+            Message::SettingsPageSelected(page) => {
+                self.settings_page = page;
+                self.settings_search.clear();
+                Task::none()
+            }
+            Message::SettingsSearchChanged(query) => {
+                self.settings_search = query;
+                Task::none()
+            }
+            Message::SettingsAutosaveToggled(value) => {
+                self.settings.autosave_enabled = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsAutosaveDelayDelta(delta) => {
+                let next = (self.settings.autosave_delay_secs as i64 + delta as i64)
+                    .clamp(
+                        editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS as i64,
+                        editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS as i64,
+                    ) as u32;
+                self.settings.autosave_delay_secs = next;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsRememberRecentToggled(value) => {
+                self.settings.remember_recent_files = value;
+                // P20：关闭开关即清空存量列表（只关开关不清数据等于没关）
+                if !value {
+                    self.settings.clear_recent_files();
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsSnapshotsToggled(value) => {
+                self.settings.enable_snapshots = value;
+                self.persist_settings();
+                Task::none()
+            }
+            // 第 64 轮 ⑭：备份模式三态循环（none→simple→timestamped）
+            Message::SettingsBackupModeToggled => {
+                use editpad_core::settings::{
+                    BACKUP_MODE_NONE, BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED,
                 };
-                // 先写剪贴板，再走统一编辑入口删除选区（Delete 在有选区时只删选区）。
-                // clipboard::write 是泛型 Task<T>，直接以 Message 实例化后 chain。
-                let write: Task<Message> = iced::clipboard::write(text);
-                write.chain(Task::done(Message::Edit(EditOp::Delete)))
-            }
-            Message::PasteRequested => {
-                // clipboard::read 返回 Task<Option<String>>
-                iced::clipboard::read()
-                    .map(|content| Message::Pasted(content.unwrap_or_default()))
-            }
-            Message::Pasted(text) => {
-                if text.is_empty() {
-                    Task::none()
+                self.settings.backup_mode = if self.settings.backup_mode == BACKUP_MODE_SIMPLE {
+                    BACKUP_MODE_TIMESTAMPED
+                } else if self.settings.backup_mode == BACKUP_MODE_TIMESTAMPED {
+                    BACKUP_MODE_NONE
                 } else {
-                    self.update(Message::Edit(EditOp::InsertText(text)))
+                    BACKUP_MODE_SIMPLE
                 }
+                .to_owned();
+                self.persist_settings();
+                self.status = match self.settings.backup_mode.as_str() {
+                    BACKUP_MODE_SIMPLE => "保存时备份：同目录 name.bak 覆盖式".to_owned(),
+                    BACKUP_MODE_TIMESTAMPED => {
+                        "保存时备份：name.bak/ 目录按时间戳留存".to_owned()
+                    }
+                    _ => "保存时备份：已关闭".to_owned(),
+                };
+                Task::none()
             }
+            Message::SettingsRememberSessionToggled(value) => {
+                self.settings.remember_session = value;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsExitModeToggled => {
+                use editpad_core::settings::{EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
+                self.settings.exit_mode = if self.settings.exit_mode == EXIT_MODE_SNAPSHOT {
+                    EXIT_MODE_ASK
+                } else {
+                    EXIT_MODE_SNAPSHOT
+                }
+                .to_string();
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsIntervalDelta(delta) => {
+                let next = (self.settings.snapshot_interval_secs as i64 + delta as i64)
+                    .clamp(
+                        editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS as i64,
+                        editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS as i64,
+                    ) as u32;
+                self.settings.snapshot_interval_secs = next;
+                self.persist_settings();
+                Task::none()
+            }
+            // ---------- 字体选择（P34） ----------
+            Message::SettingsFontSelected(name) => {
+                // 名字来自启动期枚举清单，必然可解析；仍走统一解析保持
+                // 「设置值 ↔ 生效值」同源（清单为空的异常环境会回退默认）
+                self.settings.set_font_family(Some(name));
+                self.active_font_family = effective_font_family(
+                    self.settings.font_family.as_deref(),
+                    &self.available_fonts,
+                )
+                .map(leak_font_family);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsFontReset => {
+                self.settings.set_font_family(None);
+                self.active_font_family = None;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::FontFilterChanged(filter) => {
+                self.font_filter = filter;
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
 
+    // ---------- domain methods (round 81 Phase 1: update() split) ----------
+    /// 域：文件（打开/保存/编码/行尾/拖放/外部变更）。臂体自原 update() 逐字搬移，零行为变更。
+    fn update_file(&mut self, msg: Message) -> Task<Message> {
+        match msg {
             // ---------- 打开 ----------
             Message::OpenRequested => {
                 if self.busy {
@@ -470,7 +1086,6 @@ impl Editpad {
                 };
                 self.request_open(path)
             }
-
             Message::LoadProgress(job_id, bytes_read, total_bytes) => {
                 if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {
                     self.progress = Some((bytes_read, total_bytes));
@@ -587,7 +1202,6 @@ impl Editpad {
                     Task::batch(tasks)
                 }
             }
-
             // ---------- 保存 ----------
             Message::SaveRequested => match self.tab().path.clone() {
                 Some(_) => self.save(),
@@ -675,7 +1289,6 @@ impl Editpad {
                 self.status = format!("保存失败:{error}");
                 Task::none()
             }
-
             // ---------- 即时保存（P18，按页路由；P63 结局三分+路径守卫） ----------
             Message::TabAutosaved(idx, version, path, outcome) => {
                 // P63 路由守卫：回报按「下标 + 路径」双重核对。防抖睡眠
@@ -734,98 +1347,9 @@ impl Editpad {
                 }
                 Task::none()
             }
-
-            // ---------- 顶部菜单栏（第 69 轮） ----------
-            Message::MenuToggled(idx) => {
-                // 同项再点关闭，异项切换（互斥展开）。
-                // 第 70 轮：打开瞬间**冻结锚点**——悬停位置此后继续变化
-                // （含背板 on_move）不再影响已展开浮层的位置（修「弹窗
-                // 会移动」：旧实现锚点实时读悬停点，展开期间漂移）
-                self.menubar_anchor = self.menubar_pos;
-                self.menu_bar_open =
-                    if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
-                Task::none()
-            }
-            Message::MenubarHovered(pos) => {
-                self.menubar_pos = (pos.x, pos.y);
-                Task::none()
-            }
-            // 背板点击：菜单栏条带内 = 横移切换到目标菜单；条带外 = 收起
-            Message::MenubarPressed => {
-                if self.menubar_pos.1 < MENU_BAR_H {
-                    let idx = menubar_slot_idx(self.menubar_pos.0);
-                    self.menubar_anchor = self.menubar_pos;
-                    self.menu_bar_open =
-                        if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
-                } else {
-                    self.menu_bar_open = None;
-                }
-                Task::none()
-            }
-
-            // ---------- 关闭确认 ----------
-            Message::CloseRequested(id) => {
-                self.handle_close_request(id, editpad_core::snapshot::snapshot_dir())
-            }
-
             // ---------- 外部修改检测（P50） ----------
             Message::WindowFocused => {
                 self.check_external_changes();
-                Task::none()
-            }
-
-            // ---------- 按键分发与热键捕获（P62） ----------
-            Message::KeyPressed(key, modifiers) => {
-                // 热键捕获态拦截：Esc 直接取消（简单状态清除，无需消息
-                // 往返）；可作热键的按键经 HotkeyCaptureKey 走校验提交
-                if self.hotkey_capture.is_some() {
-                    if let keyboard::Key::Named(Named::Escape) = &key {
-                        self.hotkey_capture = None;
-                        self.status.clear();
-                        return Task::none();
-                    }
-                    if let Some(combo) = combo_string(modifiers, &key) {
-                        return Task::done(Message::HotkeyCaptureKey(combo));
-                    }
-                    return Task::none();
-                }
-                // 第 67 轮 ⑮：列块选区时 Esc 先清块并消费按键
-                // （不与热键捕获/状态栏菜单的 Esc 语义叠加）。同步清除 +
-                // CancelBlock 消息幂等兜底（架构惯例走编辑入口）
-                if let keyboard::Key::Named(Named::Escape) = &key {
-                    if self.cur_handle.borrow().has_block() {
-                        self.cur_handle.borrow_mut().clear_block();
-                        return Task::done(Message::Edit(EditOp::CancelBlock));
-                    }
-                }
-                match handle_key(key, modifiers, &self.settings.hotkeys) {
-                    Some(message) => Task::done(message),
-                    None => Task::none(),
-                }
-            }
-            Message::HotkeyCaptureStarted(id) => {
-                self.hotkey_capture = Some(id);
-                self.status = format!(
-                    "为「{}」按下新组合键（Esc 取消）",
-                    HOTKEY_ACTIONS
-                        .iter()
-                        .find(|a| a.id == id)
-                        .map(|a| a.desc)
-                        .unwrap_or("")
-                );
-                Task::none()
-            }
-            Message::HotkeyCaptureKey(combo) => self.commit_hotkey_capture(combo),
-            Message::HotkeyCaptureCancel => {
-                self.hotkey_capture = None;
-                self.status.clear();
-                Task::none()
-            }
-            Message::HotkeysResetAll => {
-                self.settings.hotkeys.clear();
-                self.persist_settings();
-                self.hotkey_capture = None;
-                self.status = "已恢复默认热键".to_owned();
                 Task::none()
             }
             Message::ConfirmExternalReload(idx) => {
@@ -866,6 +1390,219 @@ impl Editpad {
                 }
                 Task::none()
             }
+            // ---------- 打开确认 ----------
+            Message::ConfirmOpenDiscard => {
+                let Some(path) = self.open_confirm.take() else {
+                    return Task::none();
+                };
+                // 明确放弃：不再触发下一次确认；若关闭确认条还开着，其前提已消失
+                self.tab_mut().dirty = false;
+                self.confirm_visible = false;
+                self.pending_close = false;
+                let tab = self.target_tab_for_open();
+                self.start_loading(path, tab)
+            }
+            Message::ConfirmOpenCancel => {
+                self.open_confirm = None;
+                Task::none()
+            }
+            // ---------- 编码与行尾（P67） ----------
+            Message::ToggleEncodingMenu => {
+                if self.busy {
+                    return Task::none();
+                }
+                // 互斥：开一个关另一个
+                self.eol_menu = false;
+                self.encoding_menu = !self.encoding_menu;
+                Task::none()
+            }
+            Message::ToggleEolMenu => {
+                if self.busy {
+                    return Task::none();
+                }
+                self.encoding_menu = false;
+                self.eol_menu = !self.eol_menu;
+                Task::none()
+            }
+            Message::SaveWithEncoding(encoding) => {
+                self.encoding_menu = false;
+                if self.busy {
+                    return Task::none();
+                }
+                if self.tab().path.is_none() {
+                    self.status = "未命名页请先「另存为」取得路径，再选择保存编码".to_owned();
+                    return Task::none();
+                }
+                // 记住偏好：此后本页每次保存（含自动保存）都沿用该编码
+                self.tab_mut().save_encoding = Some(encoding);
+                self.save()
+            }
+            Message::ConvertEol(target) => {
+                self.eol_menu = false;
+                if self.busy || self.active_load.is_some() {
+                    return Task::none();
+                }
+                // 单遍重排是同步操作：超大文档先挡下并提示（FormatJson 同款
+                // 防冻结思路；上限放宽到 800 万字符 ≈ 24MB 文本）
+                const EOL_CONVERT_MAX_CHARS: usize = 8_000_000;
+                let (text, chars, current) = {
+                    let ed = self.cur_handle.borrow();
+                    (ed.doc.to_text(), ed.doc.text_len(), ed.doc.line_ending())
+                };
+                if chars > EOL_CONVERT_MAX_CHARS {
+                    self.status = format!(
+                        "文档过大（{chars} 字符），暂不支持行尾转换（上限 {EOL_CONVERT_MAX_CHARS}）"
+                    );
+                    return Task::none();
+                }
+                if current == target {
+                    self.status = format!("行尾已是 {}", eol_label(target));
+                    return Task::none();
+                }
+                // P9 的归一函数即行尾转换：CRLF/LF/孤立 CR 全部统一到目标
+                let new_text = target.normalize(&text);
+                // replace_whole_document 内部快照 → 可撤销（与全部替换同款）
+                self.cur()
+                    .borrow_mut()
+                    .replace_whole_document(editpad_core::Document::from_str(&new_text));
+                {
+                    let tab = self.tab_mut();
+                    tab.dirty = true;
+                    // P18：内容版本与防抖起点同步推进
+                    tab.note_mutation();
+                }
+                self.status = format!("已转换为 {}", eol_label(target));
+                // 内容变了：命中表过期重扫（查找栏开着才扫）+ 排队自动保存
+                if self.find_visible {
+                    let find_task = self.schedule_find_scan();
+                    return Task::batch([
+                        find_task,
+                        self.maybe_schedule_autosave(),
+                    ]);
+                }
+                self.maybe_schedule_autosave()
+            }
+            Message::TabSaved(idx, version, result) => {
+                self.busy = false;
+                if idx >= self.tabs.len() {
+                    return Task::none();
+                }
+                match result {
+                    Ok(()) => {
+                        // 版本守卫同款：期间又有编辑则保持置脏、不关闭
+                        let clean = self.tabs[idx].version == version;
+                        if clean {
+                            self.tabs[idx].dirty = false;
+                            // P38：落盘成功且版本守卫通过——内容即磁盘内容。
+                            // 本页通常随即被移除，此处是 close_tab_now 失败
+                            // 等幸存路径的基线兜底
+                            self.tabs[idx].editor.borrow_mut().mark_saved();
+                            if self.pending_close_tab == Some(idx)
+                                && self.close_tab_now(idx)
+                            {
+                                self.cancel_find_scan();
+                            }
+                            self.pending_close_tab = None;
+                        } else {
+                            self.status = "保存后又有新改动，已取消自动关闭".to_owned();
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("保存失败:{error}");
+                        self.pending_close_tab = None;
+                    }
+                }
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    // ---------- domain methods (round 81 Phase 1: update() split) ----------
+    /// 域：菜单栏/最近文件/面板。臂体自原 update() 逐字搬移，零行为变更。
+    fn update_menus(&mut self, msg: Message) -> Task<Message> {
+        match msg {
+            // ---------- 顶部菜单栏（第 69 轮） ----------
+            Message::MenuToggled(idx) => {
+                // 同项再点关闭，异项切换（互斥展开）。
+                // 第 70 轮：打开瞬间**冻结锚点**——悬停位置此后继续变化
+                // （含背板 on_move）不再影响已展开浮层的位置（修「弹窗
+                // 会移动」：旧实现锚点实时读悬停点，展开期间漂移）
+                self.menubar_anchor = self.menubar_pos;
+                self.menu_bar_open =
+                    if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
+                Task::none()
+            }
+            Message::MenubarHovered(pos) => {
+                self.menubar_pos = (pos.x, pos.y);
+                Task::none()
+            }
+            // 背板点击：菜单栏条带内 = 横移切换到目标菜单；条带外 = 收起
+            Message::MenubarPressed => {
+                if self.menubar_pos.1 < MENU_BAR_H {
+                    let idx = menubar_slot_idx(self.menubar_pos.0);
+                    self.menubar_anchor = self.menubar_pos;
+                    self.menu_bar_open =
+                        if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
+                } else {
+                    self.menu_bar_open = None;
+                }
+                Task::none()
+            }
+            // ---------- 最近文件 ----------
+            Message::RecentsToggled => {
+                self.recents_visible = !self.recents_visible;
+                Task::none()
+            }
+            Message::RecentSelected(entry) => self.request_open(PathBuf::from(entry)),
+            Message::RecentsCleared => {
+                // P20 隐私：立即写回空列表，config.toml 不再含历史路径
+                self.settings.clear_recent_files();
+                self.persist_settings();
+                self.status = "已清空最近文件记录".to_owned();
+                Task::none()
+            }
+            Message::BarsDismissed => {
+                self.find_visible = false;
+                self.goto_visible = false;
+                self.recents_visible = false;
+                // P27：Esc 一并关闭设置弹窗
+                self.settings_visible = false;
+                // Esc 同时视作放弃关闭/打开确认
+                self.confirm_visible = false;
+                self.pending_close = false;
+                self.open_confirm = None;
+                // P21：Esc 也取消标签页关闭确认
+                self.close_tab_confirm = None;
+                // P28：Esc 同时收起右键菜单与批量关闭确认
+                self.tab_context_menu = None;
+                self.batch_close_confirm = None;
+                // 第 69 轮：Esc 同时收起顶部菜单栏浮层
+                self.menu_bar_open = None;
+                // P50：Esc 一并收起外部修改提示条
+                self.external_change = None;
+                // P55：Esc 一并取消就地重命名（一切保持原状）
+                self.renaming_tab = None;
+                self.rename_input.clear();
+                // P67：Esc 一并收起状态栏编码/行尾菜单
+                self.encoding_menu = false;
+                self.eol_menu = false;
+                // P10：取消在途扫描 + 清结果（含序号失效）
+                self.cancel_find_scan();
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    // ---------- domain methods (round 81 Phase 1: update() split) ----------
+    /// 域：会话/快照/关窗/窗口。臂体自原 update() 逐字搬移，零行为变更。
+    fn update_session(&mut self, msg: Message) -> Task<Message> {
+        match msg {
+            // ---------- 关闭确认 ----------
+            Message::CloseRequested(id) => {
+                self.handle_close_request(id, editpad_core::snapshot::snapshot_dir())
+            }
             Message::ConfirmSaveAndClose => {
                 self.confirm_visible = false;
                 self.pending_close = true;
@@ -883,7 +1620,6 @@ impl Editpad {
                 self.pending_close = false;
                 Task::none()
             }
-
             // ---------- 启动会话恢复（P30） ----------
             Message::SessionRecoverAccepted => {
                 self.accept_session_recover(editpad_core::snapshot::snapshot_dir())
@@ -891,24 +1627,72 @@ impl Editpad {
             Message::SessionRecoverDiscarded => {
                 self.discard_session_recover(editpad_core::snapshot::snapshot_dir())
             }
-
-            // ---------- 打开确认 ----------
-            Message::ConfirmOpenDiscard => {
-                let Some(path) = self.open_confirm.take() else {
-                    return Task::none();
+            Message::SnapshotHeartbeatTick => {
+                // P31 自我续期：无论本轮是否干活，下一拍恒排队（与光标
+                // 闪烁同一模式；进程退出即销毁，无残留计时器）。间隔取
+                // 加载时已归一的设置值，运行期视为不变。
+                let interval = std::time::Duration::from_secs(u64::from(
+                    self.settings.snapshot_interval_secs,
+                ));
+                let rearm = Task::perform(
+                    async move { std::thread::sleep(interval) },
+                    |_| Message::SnapshotHeartbeatTick,
+                );
+                // 快照底座任一开关关闭 / ask 模式 = 心跳整体停摆：
+                // 清单不写，退出流与启动恢复同样不依赖它（P29/P30 语义）
+                if !session_restore_allowed(
+                    self.settings.enable_snapshots,
+                    self.settings.remember_session,
+                ) || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
+                {
+                    return rearm;
+                }
+                // 至多一个提交在途：本轮巡检跳过（页级账目不受影响）
+                if self.heartbeat_inflight {
+                    return rearm;
+                }
+                // 目录解析走注入点（生产为 None → 系统配置目录）
+                let dir = self
+                    .snapshot_dir_override
+                    .clone()
+                    .or_else(editpad_core::snapshot::snapshot_dir);
+                let Some(dir) = dir else {
+                    return rearm;
                 };
-                // 明确放弃：不再触发下一次确认；若关闭确认条还开着，其前提已消失
-                self.tab_mut().dirty = false;
-                self.confirm_visible = false;
-                self.pending_close = false;
-                let tab = self.target_tab_for_open();
-                self.start_loading(path, tab)
+                match self.prepare_heartbeat_commit(&dir) {
+                    // 无变化且清单不过期：什么都不写（防无谓 IO）
+                    None => rearm,
+                    Some(payload) => {
+                        self.heartbeat_inflight = true;
+                        Task::batch([
+                            rearm,
+                            Task::perform(
+                                async move { drive_heartbeat(payload).await },
+                                |message| message,
+                            ),
+                        ])
+                    }
+                }
             }
-            Message::ConfirmOpenCancel => {
-                self.open_confirm = None;
+            Message::HeartbeatDone(outcome) => {
+                self.heartbeat_apply(outcome);
                 Task::none()
             }
+            Message::WindowMoved(p) => {
+                // P102：窗口位置记忆（逻辑坐标，iced 与建窗 Specific 同空间）
+                self.settings.window_x = Some(p.x as i32);
+                self.settings.window_y = Some(p.y as i32);
+                self.persist_geometry_if_due();
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
 
+    // ---------- domain methods (round 81 Phase 1: update() split) ----------
+    /// 域：查找/替换/跳转/查找全部。臂体自原 update() 逐字搬移，零行为变更。
+    fn update_find(&mut self, msg: Message) -> Task<Message> {
+        match msg {
             // ---------- 查找 / 替换 ----------
             Message::FindToggled => {
                 self.find_visible = !self.find_visible;
@@ -1084,83 +1868,6 @@ impl Editpad {
                 }
                 Task::none()
             }
-
-            // ---------- 高亮后台分批补建（P12） ----------
-            Message::HighlightPaveNeeded => self.schedule_highlight_pave(),
-            Message::FormatJson => {
-                const FORMAT_JSON_MAX_CHARS: usize = 4_000_000;
-                // 仅当前语法为 JSON 时生效（P22 第二批：按当前语法判断）
-                if self.cur_handle.borrow().highlight_syntax_name().as_deref() != Some("JSON") {
-                    self.status = "格式化 JSON 仅对 JSON 文件可用（Ctrl+Shift+F）".to_owned();
-                    return Task::none();
-                }
-                let (text, chars) = {
-                    let ed = self.cur_handle.borrow();
-                    (ed.doc.to_text(), ed.doc.text_len())
-                };
-                if chars > FORMAT_JSON_MAX_CHARS {
-                    // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
-                    self.status =
-                        format!("文档过大（{chars} 字符），暂不支持格式化（上限 {FORMAT_JSON_MAX_CHARS}）");
-                    return Task::none();
-                }
-                match editpad_core::format_json(&text) {
-                    Ok(pretty) => {
-                        // replace_whole_document 内部快照 → 可撤销；光标复位到文首
-                        self.cur()
-                            .borrow_mut()
-                            .replace_whole_document(editpad_core::Document::from_str(&pretty));
-                        self.tab_mut().dirty = true;
-                        // P18：内容版本与防抖起点同步推进
-                        self.tab_mut().note_mutation();
-                        self.status = "已格式化 JSON".to_owned();
-                        if self.find_visible {
-                            // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
-                            let find_task = self.schedule_find_scan();
-                            return Task::batch([
-                                find_task,
-                                self.maybe_schedule_autosave(),
-                            ]);
-                        }
-                        self.maybe_schedule_autosave()
-                    }
-                    Err(error) => {
-                        self.status = format!("JSON 格式化失败：{error}");
-                        Task::none()
-                    }
-                }
-            }
-            Message::HlPaveProgress(gen, strides_done) => {
-                // 双重代次检查：任务登记一致且高亮器未换代（换文件后
-                // 旧任务的迟到进度不得污染新会话的状态栏）
-                if self.hl_paving == Some(gen)
-                    && self.cur_handle.borrow().highlight_generation() == Some(gen)
-                {
-                    let total_strides = (self.cur_handle.borrow().doc.line_count()
-                        / editpad_core::highlight::STRIDE)
-                        .max(1);
-                    let pct = (strides_done as usize).min(total_strides) * 100 / total_strides;
-                    self.status = format!("语法分析中…{pct}%（后台）");
-                }
-                Task::none()
-            }
-            Message::HlPaved(gen, paved) => {
-                if self.hl_paving == Some(gen) {
-                    self.hl_paving = None;
-                    // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
-                    // needs_paving 重新评估并续排（从存活检查点出发，代价小）
-                    let installed = self
-                        .cur_handle
-                        .borrow_mut()
-                        .install_highlighter_if_current(gen, paved);
-                    let _ = installed;
-                    if self.status.starts_with("语法分析") {
-                        self.status.clear();
-                    }
-                }
-                Task::none()
-            }
-
             // ---------- 跳转 ----------
             Message::GotoToggled => {
                 self.goto_visible = !self.goto_visible;
@@ -1185,635 +1892,10 @@ impl Editpad {
                     Task::none()
                 }
             },
-
-            // ---------- 最近文件 ----------
-            Message::RecentsToggled => {
-                self.recents_visible = !self.recents_visible;
-                Task::none()
-            }
-            Message::RecentSelected(entry) => self.request_open(PathBuf::from(entry)),
-            Message::RecentsCleared => {
-                // P20 隐私：立即写回空列表，config.toml 不再含历史路径
-                self.settings.clear_recent_files();
-                self.persist_settings();
-                self.status = "已清空最近文件记录".to_owned();
-                Task::none()
-            }
-
-            // ---------- 编码与行尾（P67） ----------
-            Message::ToggleEncodingMenu => {
-                if self.busy {
-                    return Task::none();
-                }
-                // 互斥：开一个关另一个
-                self.eol_menu = false;
-                self.encoding_menu = !self.encoding_menu;
-                Task::none()
-            }
-            Message::ToggleEolMenu => {
-                if self.busy {
-                    return Task::none();
-                }
-                self.encoding_menu = false;
-                self.eol_menu = !self.eol_menu;
-                Task::none()
-            }
-            Message::SaveWithEncoding(encoding) => {
-                self.encoding_menu = false;
-                if self.busy {
-                    return Task::none();
-                }
-                if self.tab().path.is_none() {
-                    self.status = "未命名页请先「另存为」取得路径，再选择保存编码".to_owned();
-                    return Task::none();
-                }
-                // 记住偏好：此后本页每次保存（含自动保存）都沿用该编码
-                self.tab_mut().save_encoding = Some(encoding);
-                self.save()
-            }
-            Message::ConvertEol(target) => {
-                self.eol_menu = false;
-                if self.busy || self.active_load.is_some() {
-                    return Task::none();
-                }
-                // 单遍重排是同步操作：超大文档先挡下并提示（FormatJson 同款
-                // 防冻结思路；上限放宽到 800 万字符 ≈ 24MB 文本）
-                const EOL_CONVERT_MAX_CHARS: usize = 8_000_000;
-                let (text, chars, current) = {
-                    let ed = self.cur_handle.borrow();
-                    (ed.doc.to_text(), ed.doc.text_len(), ed.doc.line_ending())
-                };
-                if chars > EOL_CONVERT_MAX_CHARS {
-                    self.status = format!(
-                        "文档过大（{chars} 字符），暂不支持行尾转换（上限 {EOL_CONVERT_MAX_CHARS}）"
-                    );
-                    return Task::none();
-                }
-                if current == target {
-                    self.status = format!("行尾已是 {}", eol_label(target));
-                    return Task::none();
-                }
-                // P9 的归一函数即行尾转换：CRLF/LF/孤立 CR 全部统一到目标
-                let new_text = target.normalize(&text);
-                // replace_whole_document 内部快照 → 可撤销（与全部替换同款）
-                self.cur()
-                    .borrow_mut()
-                    .replace_whole_document(editpad_core::Document::from_str(&new_text));
-                {
-                    let tab = self.tab_mut();
-                    tab.dirty = true;
-                    // P18：内容版本与防抖起点同步推进
-                    tab.note_mutation();
-                }
-                self.status = format!("已转换为 {}", eol_label(target));
-                // 内容变了：命中表过期重扫（查找栏开着才扫）+ 排队自动保存
-                if self.find_visible {
-                    let find_task = self.schedule_find_scan();
-                    return Task::batch([
-                        find_task,
-                        self.maybe_schedule_autosave(),
-                    ]);
-                }
-                self.maybe_schedule_autosave()
-            }
-
-            Message::BarsDismissed => {
-                self.find_visible = false;
-                self.goto_visible = false;
-                self.recents_visible = false;
-                // P27：Esc 一并关闭设置弹窗
-                self.settings_visible = false;
-                // Esc 同时视作放弃关闭/打开确认
-                self.confirm_visible = false;
-                self.pending_close = false;
-                self.open_confirm = None;
-                // P21：Esc 也取消标签页关闭确认
-                self.close_tab_confirm = None;
-                // P28：Esc 同时收起右键菜单与批量关闭确认
-                self.tab_context_menu = None;
-                self.batch_close_confirm = None;
-                // 第 69 轮：Esc 同时收起顶部菜单栏浮层
-                self.menu_bar_open = None;
-                // P50：Esc 一并收起外部修改提示条
-                self.external_change = None;
-                // P55：Esc 一并取消就地重命名（一切保持原状）
-                self.renaming_tab = None;
-                self.rename_input.clear();
-                // P67：Esc 一并收起状态栏编码/行尾菜单
-                self.encoding_menu = false;
-                self.eol_menu = false;
-                // P10：取消在途扫描 + 清结果（含序号失效）
-                self.cancel_find_scan();
-                Task::none()
-            }
-
-            // ---------- 多标签（P21） ----------
-            Message::NewTab => {
-                let tab = self.fresh_tab();
-                self.tabs.push(tab);
-                let last = self.tabs.len() - 1;
-                self.assign_untitled_num(last);
-                self.set_active_tab(last);
-                // 查找态全局：切页即作废旧命中，防串页
-                self.cancel_find_scan();
-                // P28：页集合已变，右键菜单随之下收
-                self.tab_context_menu = None;
-                Task::none()
-            }
-            // 第 76 轮：标签条空白区双击 → 新建标签页。双击判定由控件层完成
-            // （strip 外层 mouse_area 的 on_double_click，iced 内核 Click
-            // 时间+位置窗口）；标签自身点击被 button 消费不会产生本消息，
-            // 与 P65 重命名互不干扰。busy 时忽略（与标签禁用一致）。
-            Message::TabStripBlankPressed => {
-                if self.busy {
-                    return Task::none();
-                }
-                self.update(Message::NewTab)
-            }
-            Message::SwitchTabNext => {
-                let next = (self.active_tab + 1) % self.tabs.len();
-                self.set_active_tab(next);
-                self.cancel_find_scan();
-                self.tab_context_menu = None;
-                Task::none()
-            }
-            Message::SwitchTab(i) => {
-                // P65：双击检测——同页在双击窗内连点两次 = 重命名意图。
-                // 第二次点击照常走切换（已在活动页则无操作），随后进入
-                // 就地重命名（内部自带 busy/越界守卫）。正在重命名的页
-                // 其标签按钮已被输入框替换，不会再产生 SwitchTab。
-                let now = std::time::Instant::now();
-                let dbl = is_double_click(self.last_tab_click, i, now);
-                if i < self.tabs.len() && i != self.active_tab {
-                    self.set_active_tab(i);
-                    self.cancel_find_scan();
-                    self.tab_context_menu = None;
-                }
-                if dbl {
-                    self.last_tab_click = None;
-                    return self.update(Message::RenameOrSaveAsTab(i));
-                }
-                self.last_tab_click = Some((i, now));
-                Task::none()
-            }
-            Message::CloseTabRequest => {
-                let idx = self.active_tab;
-                // P28：固定页对键盘路径（Ctrl+W）同样豁免，与右键菜单一致
-                if self.tabs[idx].pinned {
-                    self.status = "固定标签页需先取消固定再关闭".to_owned();
-                } else if self.tabs[idx].dirty {
-                    // 置脏页先确认（骨架版仅提供「放弃更改」出口）
-                    self.close_tab_confirm = Some(idx);
-                } else if self.close_tab_now(idx) {
-                    self.cancel_find_scan();
-                }
-                Task::none()
-            }
-            Message::ConfirmCloseTabDiscard(idx) => {
-                self.close_tab_confirm = None;
-                if idx < self.tabs.len() {
-                    // 关最后一页时槽位会被复用：先清空内容与路径
-                    let tab = &mut self.tabs[idx];
-                    tab.dirty = false;
-                    tab.path = None;
-                    tab.editor
-                        .borrow_mut()
-                        .reset_document(editpad_core::Document::new());
-                }
-                if self.close_tab_now(idx) {
-                    self.cancel_find_scan();
-                }
-                Task::none()
-            }
-            Message::CancelCloseTab => {
-                self.close_tab_confirm = None;
-                Task::none()
-            }
-            Message::CaretTick => {
-                // 打磨项：翻转闪烁相位（update 本身会触发重绘）。
-                // 心跳链在 new() 启动后自我续期，占用一个常驻睡眠节拍。
-                // P53：一条链两用——竖直滚动条淡出动画期间切换 33ms 快拍
-                // 驱动渐变（相位翻转由 tick_blink 按真实间隔门控，不受影响），
-                // 其余时间维持 ~530ms 常规节拍。
-                self.cur_handle.borrow_mut().tick_blink();
-                let next_ms = if self.cur_handle.borrow().scrollbar_fading() {
-                    editor::SCROLLBAR_FADE_TICK_MS
-                } else {
-                    editor::CARET_BLINK_MS
-                };
-                Task::perform(
-                    async move {
-                        std::thread::sleep(std::time::Duration::from_millis(next_ms));
-                    },
-                    |_| Message::CaretTick,
-                )
-            }
-            Message::SnapshotHeartbeatTick => {
-                // P31 自我续期：无论本轮是否干活，下一拍恒排队（与光标
-                // 闪烁同一模式；进程退出即销毁，无残留计时器）。间隔取
-                // 加载时已归一的设置值，运行期视为不变。
-                let interval = std::time::Duration::from_secs(u64::from(
-                    self.settings.snapshot_interval_secs,
-                ));
-                let rearm = Task::perform(
-                    async move { std::thread::sleep(interval) },
-                    |_| Message::SnapshotHeartbeatTick,
-                );
-                // 快照底座任一开关关闭 / ask 模式 = 心跳整体停摆：
-                // 清单不写，退出流与启动恢复同样不依赖它（P29/P30 语义）
-                if !session_restore_allowed(
-                    self.settings.enable_snapshots,
-                    self.settings.remember_session,
-                ) || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
-                {
-                    return rearm;
-                }
-                // 至多一个提交在途：本轮巡检跳过（页级账目不受影响）
-                if self.heartbeat_inflight {
-                    return rearm;
-                }
-                // 目录解析走注入点（生产为 None → 系统配置目录）
-                let dir = self
-                    .snapshot_dir_override
-                    .clone()
-                    .or_else(editpad_core::snapshot::snapshot_dir);
-                let Some(dir) = dir else {
-                    return rearm;
-                };
-                match self.prepare_heartbeat_commit(&dir) {
-                    // 无变化且清单不过期：什么都不写（防无谓 IO）
-                    None => rearm,
-                    Some(payload) => {
-                        self.heartbeat_inflight = true;
-                        Task::batch([
-                            rearm,
-                            Task::perform(
-                                async move { drive_heartbeat(payload).await },
-                                |message| message,
-                            ),
-                        ])
-                    }
-                }
-            }
-            Message::HeartbeatDone(outcome) => {
-                self.heartbeat_apply(outcome);
-                Task::none()
-            }
-            Message::PreviewToggled => {
-                // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
-                if self.cur_handle.borrow().highlight_syntax_name().as_deref()
-                    == Some("Markdown")
-                {
-                    self.preview_visible = !self.preview_visible;
-                } else {
-                    self.status = "预览仅支持 Markdown 文件".to_owned();
-                }
-                Task::none()
-            }
-            Message::CloseTabSave(idx) => {
-                // 「保存并关闭」：已命名的置脏页先落盘，
-                // TabSaved 成功且清脏后再真正移除页面
-                if idx >= self.tabs.len() || self.busy {
-                    return Task::none();
-                }
-                if self.tabs[idx].path.is_none() {
-                    self.status = "未命名标签页请先另存为再关闭".to_owned();
-                    return Task::none();
-                }
-                self.enter_busy();
-                let path = self.tabs[idx].path.clone().expect("上方已确认非空");
-                let doc = self.tabs[idx].editor.borrow().doc.clone();
-                let version = self.tabs[idx].version;
-                self.pending_close_tab = Some(idx);
-                Task::perform(
-                    async move {
-                        let saved = editpad_core::save_document_atomic(&path, &doc)
-                            .map_err(|e| e.to_string());
-                        (version, saved)
-                    },
-                    move |(version, result)| Message::TabSaved(idx, version, result),
-                )
-            }
-            Message::TabSaved(idx, version, result) => {
-                self.busy = false;
-                if idx >= self.tabs.len() {
-                    return Task::none();
-                }
-                match result {
-                    Ok(()) => {
-                        // 版本守卫同款：期间又有编辑则保持置脏、不关闭
-                        let clean = self.tabs[idx].version == version;
-                        if clean {
-                            self.tabs[idx].dirty = false;
-                            // P38：落盘成功且版本守卫通过——内容即磁盘内容。
-                            // 本页通常随即被移除，此处是 close_tab_now 失败
-                            // 等幸存路径的基线兜底
-                            self.tabs[idx].editor.borrow_mut().mark_saved();
-                            if self.pending_close_tab == Some(idx)
-                                && self.close_tab_now(idx)
-                            {
-                                self.cancel_find_scan();
-                            }
-                            self.pending_close_tab = None;
-                        } else {
-                            self.status = "保存后又有新改动，已取消自动关闭".to_owned();
-                        }
-                    }
-                    Err(error) => {
-                        self.status = format!("保存失败:{error}");
-                        self.pending_close_tab = None;
-                    }
-                }
-                Task::none()
-            }
-
-            // ---------- 标签右键菜单（P28；P39 起为浮层） ----------
-            Message::TabContextMenu(i) => {
-                // busy（对话框/IO 中）不开菜单；越界下标（页刚被关掉）忽略
-                if !self.busy && i < self.tabs.len() {
-                    // P39：浮层锚点 = 打开那一刻的指针位置（标签条 mouse_area 跟踪）
-                    self.menu_anchor = self.cursor_pos;
-                    self.tab_context_menu = Some(i);
-                }
-                Task::none()
-            }
-            // ---------- 浮层弹窗定位（P39/P40） ----------
-            Message::CursorMoved(p) => {
-                self.cursor_pos = (p.x, p.y);
-                Task::none()
-            }
-            Message::ViewportResized(w, h) => {
-                self.viewport_size = (w, h);
-                // P102：窗口尺寸记忆（0,0 = 未知窗口，跳过；实测正常值
-                // 才记录）。节流：拖动/拉伸每帧事件，2s 才落盘一次，
-                // 关闭路径 handle_close_request 兜底落盘最后状态。
-                if w > 0.0 && h > 0.0 {
-                    self.settings.window_width = Some(w);
-                    self.settings.window_height = Some(h);
-                    self.persist_geometry_if_due();
-                }
-                Task::none()
-            }
-            Message::WindowMoved(p) => {
-                // P102：窗口位置记忆（逻辑坐标，iced 与建窗 Specific 同空间）
-                self.settings.window_x = Some(p.x as i32);
-                self.settings.window_y = Some(p.y as i32);
-                self.persist_geometry_if_due();
-                Task::none()
-            }
-            Message::TabContextMenuClosed => {
-                self.tab_context_menu = None;
-                Task::none()
-            }
-            Message::TogglePinTab(i) => {
-                self.tab_context_menu = None;
-                if let Some(tab) = self.tabs.get_mut(i) {
-                    tab.pinned = !tab.pinned;
-                }
-                Task::none()
-            }
-            Message::SaveTabFromMenu(i) => {
-                self.tab_context_menu = None;
-                // v1 决策：右键保存 = 先切到目标页再走既有活动页保存流——
-                // Saved 回报、最近文件记录、转码提示全部复用活动页语义，
-                // 不为后台页另铺一条带 idx 的回报管线。未命名置脏页自动
-                // 落另存为对话框（与 Ctrl+S 同语义）。
-                if !self.busy && i < self.tabs.len() && self.tabs[i].dirty {
-                    self.set_active_tab(i);
-                    return match self.tab().path.clone() {
-                        Some(_) => self.save(),
-                        None => self.save_as_dialog(),
-                    };
-                }
-                Task::none()
-            }
-            Message::RenameOrSaveAsTab(i) => {
-                self.tab_context_menu = None;
-                if !self.busy && i < self.tabs.len() {
-                    self.set_active_tab(i);
-                    // P55：命名页 → 就地重命名输入框（预填当前文件名）；
-                    // 未命名页保留「另存为」对话框兜底（§3 P28 第 2 条）
-                    if let Some(path) = self.tabs[i].path.clone() {
-                        self.renaming_tab = Some(i);
-                        self.rename_input = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        // P64：聚焦 + 全选——键盘流直达，预填旧名整体可
-                        // 被直接覆盖；操作在下一帧视图含该输入框后生效
-                        return iced::widget::operation::focus(rename_input_id())
-                            .chain(iced::widget::operation::select_all(
-                                rename_input_id(),
-                            ));
-                    }
-                    return self.save_as_dialog();
-                }
-                Task::none()
-            }
-            Message::TabRenameInputChanged(value) => {
-                self.rename_input = value;
-                Task::none()
-            }
-            Message::TabRenameCommitted => self.commit_tab_rename(),
-            Message::TabRenameCancelled => {
-                self.renaming_tab = None;
-                self.rename_input.clear();
-                Task::none()
-            }
-            Message::CloseTabAt(idx) => {
-                self.tab_context_menu = None;
-                if !self.busy && idx < self.tabs.len() {
-                    if self.tabs[idx].pinned {
-                        self.status = "固定标签页需先取消固定再关闭".to_owned();
-                    } else if self.tabs[idx].dirty {
-                        // 置脏走既有单页确认条（含「保存并关闭」出口）
-                        self.batch_close_confirm = None;
-                        self.close_tab_confirm = Some(idx);
-                    } else if self.close_tab_now(idx) {
-                        self.cancel_find_scan();
-                    }
-                }
-                Task::none()
-            }
-            Message::CloseOtherTabs(keep) => {
-                self.begin_batch_close(BatchCloseScope::Others(keep));
-                Task::none()
-            }
-            Message::CloseTabsRight(from) => {
-                self.begin_batch_close(BatchCloseScope::RightOf(from));
-                Task::none()
-            }
-            Message::ConfirmBatchCloseDiscard => {
-                if let Some(targets) = self.batch_close_confirm.take() {
-                    // 统一放弃：先清各页置脏与内容（与 ConfirmCloseTabDiscard
-                    // 同款，防「已移除页的 rope 仍被别名引用」的错觉），再移除。
-                    for &idx in &targets {
-                        if let Some(tab) = self.tabs.get_mut(idx) {
-                            tab.dirty = false;
-                            tab.path = None;
-                            tab.editor
-                                .borrow_mut()
-                                .reset_document(editpad_core::Document::new());
-                        }
-                    }
-                    if self.close_tabs_now(&targets) > 0 {
-                        self.cancel_find_scan();
-                    }
-                }
-                Task::none()
-            }
-            Message::CancelBatchCloseTabs => {
-                self.batch_close_confirm = None;
-                Task::none()
-            }
-
-            // ---------- 外观 ----------
-            Message::ThemeToggled => {
-                self.dark_mode = !self.dark_mode;
-                self.settings.set_theme(self.dark_mode);
-                self.persist_settings();
-                Task::none()
-            }
-            Message::FontSizeDelta(delta) => {
-                let next = editor::normalize_font_size(self.display_font_size() + delta);
-                self.settings.font_size = next;
-                self.persist_settings();
-                self.cur_handle.borrow_mut().set_font_size(next);
-                Task::none()
-            }
-
-            // ---------- 设置弹窗（P27） ----------
-            Message::SettingsToggled => {
-                // busy（加载/保存中）禁开，与工具栏其余按钮同一守卫语义
-                if !self.busy {
-                    self.settings_visible = !self.settings_visible;
-                    if self.settings_visible {
-                        // 第 64 轮用户点单：每次进入设置默认落在第一分类，
-                        // 不记忆上次浏览位置（P51 撤销）
-                        self.settings_page = SettingsPage::default();
-                    } else {
-                        // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
-                        self.settings_search.clear();
-                    }
-                }
-                Task::none()
-            }
-            // P47：侧栏分类导航——点分类即离开搜索态（同款语义）。
-            // 第 64 轮用户点单：分类位置不再持久化（P51 撤销），每次打开
-            // 设置都回到第一分类；弹窗打开期间导航照常。
-            Message::SettingsPageSelected(page) => {
-                self.settings_page = page;
-                self.settings_search.clear();
-                Task::none()
-            }
-            Message::SettingsSearchChanged(query) => {
-                self.settings_search = query;
-                Task::none()
-            }
-            Message::SettingsAutosaveToggled(value) => {
-                self.settings.autosave_enabled = value;
-                self.persist_settings();
-                Task::none()
-            }
-            Message::SettingsAutosaveDelayDelta(delta) => {
-                let next = (self.settings.autosave_delay_secs as i64 + delta as i64)
-                    .clamp(
-                        editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS as i64,
-                        editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS as i64,
-                    ) as u32;
-                self.settings.autosave_delay_secs = next;
-                self.persist_settings();
-                Task::none()
-            }
-            Message::SettingsRememberRecentToggled(value) => {
-                self.settings.remember_recent_files = value;
-                // P20：关闭开关即清空存量列表（只关开关不清数据等于没关）
-                if !value {
-                    self.settings.clear_recent_files();
-                }
-                self.persist_settings();
-                Task::none()
-            }
-            Message::SettingsSnapshotsToggled(value) => {
-                self.settings.enable_snapshots = value;
-                self.persist_settings();
-                Task::none()
-            }
-            // 第 64 轮 ⑭：备份模式三态循环（none→simple→timestamped）
-            Message::SettingsBackupModeToggled => {
-                use editpad_core::settings::{
-                    BACKUP_MODE_NONE, BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED,
-                };
-                self.settings.backup_mode = if self.settings.backup_mode == BACKUP_MODE_SIMPLE {
-                    BACKUP_MODE_TIMESTAMPED
-                } else if self.settings.backup_mode == BACKUP_MODE_TIMESTAMPED {
-                    BACKUP_MODE_NONE
-                } else {
-                    BACKUP_MODE_SIMPLE
-                }
-                .to_owned();
-                self.persist_settings();
-                self.status = match self.settings.backup_mode.as_str() {
-                    BACKUP_MODE_SIMPLE => "保存时备份：同目录 name.bak 覆盖式".to_owned(),
-                    BACKUP_MODE_TIMESTAMPED => {
-                        "保存时备份：name.bak/ 目录按时间戳留存".to_owned()
-                    }
-                    _ => "保存时备份：已关闭".to_owned(),
-                };
-                Task::none()
-            }
-            Message::SettingsRememberSessionToggled(value) => {
-                self.settings.remember_session = value;
-                self.persist_settings();
-                Task::none()
-            }
-            Message::SettingsExitModeToggled => {
-                use editpad_core::settings::{EXIT_MODE_ASK, EXIT_MODE_SNAPSHOT};
-                self.settings.exit_mode = if self.settings.exit_mode == EXIT_MODE_SNAPSHOT {
-                    EXIT_MODE_ASK
-                } else {
-                    EXIT_MODE_SNAPSHOT
-                }
-                .to_string();
-                self.persist_settings();
-                Task::none()
-            }
-            Message::SettingsIntervalDelta(delta) => {
-                let next = (self.settings.snapshot_interval_secs as i64 + delta as i64)
-                    .clamp(
-                        editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS as i64,
-                        editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS as i64,
-                    ) as u32;
-                self.settings.snapshot_interval_secs = next;
-                self.persist_settings();
-                Task::none()
-            }
-
-            // ---------- 字体选择（P34） ----------
-            Message::SettingsFontSelected(name) => {
-                // 名字来自启动期枚举清单，必然可解析；仍走统一解析保持
-                // 「设置值 ↔ 生效值」同源（清单为空的异常环境会回退默认）
-                self.settings.set_font_family(Some(name));
-                self.active_font_family = effective_font_family(
-                    self.settings.font_family.as_deref(),
-                    &self.available_fonts,
-                )
-                .map(leak_font_family);
-                self.persist_settings();
-                Task::none()
-            }
-            Message::SettingsFontReset => {
-                self.settings.set_font_family(None);
-                self.active_font_family = None;
-                self.persist_settings();
-                Task::none()
-            }
-            Message::FontFilterChanged(filter) => {
-                self.font_filter = filter;
-                Task::none()
-            }
+            _ => Task::none(),
         }
     }
+
 
     // ---------- 编辑分发 ----------
 
