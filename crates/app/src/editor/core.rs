@@ -852,3 +852,21 @@ pub(crate) fn now_local_fields() -> (u16, u16, u16, u16, u16, u16) {
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod tests;
+
+// Phase 3b（第 85 轮）：core_tests 按 2c 域拆出的测试文件（随 undo/motion/edit/
+// block/highlight 拆分同步，纯搬移；共享助手留在 tests 模块并 pub(super) 提升）
+#[cfg(test)]
+#[path = "undo_tests.rs"]
+mod undo_tests;
+#[cfg(test)]
+#[path = "motion_tests.rs"]
+mod motion_tests;
+#[cfg(test)]
+#[path = "edit_tests.rs"]
+mod edit_tests;
+#[cfg(test)]
+#[path = "block_tests.rs"]
+mod block_tests;
+#[cfg(test)]
+#[path = "highlight_tests.rs"]
+mod highlight_tests;
