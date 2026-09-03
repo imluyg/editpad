@@ -1,0 +1,55 @@
+# Editpad CI：test / release 阻断性；clippy 阻断（本地基线已清零）；fmt 信息性。
+#
+# ⚠️ fmt 作业暂为 continue-on-error：仓库当前有 447 处格式偏差（~25000 行 diff，
+# 手写紧凑风格 vs rustfmt 默认），刻意不在单轮全量格式化——后续结构拆分阶段
+# （Phase 1~3）逐文件搬移时顺带收敛，收敛完再接入阻断。
+#
+# clippy 用 `-D warnings`：Phase 0 已本地清零（rustfmt/clippy 组件已装齐）。
+# 注意 channel = "stable" 漂移可能引入新 lint——届时按 CI 红修即可。
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (workspace)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  release-build:
+    name: release build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --workspace
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  fmt:
+    name: fmt (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
