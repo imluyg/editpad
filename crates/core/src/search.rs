@@ -32,7 +32,7 @@ pub fn ascii_case_eq(a: char, b: char, case_sensitive: bool) -> bool {
     if case_sensitive {
         a == b
     } else {
-        a.to_ascii_lowercase() == b.to_ascii_lowercase()
+        a.eq_ignore_ascii_case(&b)
     }
 }
 

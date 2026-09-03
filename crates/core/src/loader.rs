@@ -85,7 +85,7 @@ where
         });
     }
 
-    Ok(reject_binary(path, decode(&buffer))?)
+    reject_binary(path, decode(&buffer))
 }
 
 // ---------- P19 行动项 2：流式加载直入 rope ----------
@@ -345,6 +345,9 @@ impl HeadSample {
 }
 
 /// 把一段解码输出吸收进构建器：rope 推送 + 行尾计数 + 占比统计。
+// 与 build_pass 同款取舍：8 个参数多为管线上下文，打包结构体反而增加
+// 摩擦，维持现状（见下方 build_pass 的 allow 先例）。
+#[allow(clippy::too_many_arguments)]
 fn absorb(
     decoder: &mut encoding_rs::Decoder,
     src: &[u8],
@@ -352,7 +355,7 @@ fn absorb(
     out: &mut String,
     builder: &mut RopeBuilder,
     eol: &mut EolCounter,
-    mut stats: Option<&mut BuildStats>,
+    stats: Option<&mut BuildStats>,
     head: &mut HeadSample,
 ) {
     use encoding_rs::CoderResult;
@@ -374,7 +377,7 @@ fn absorb(
     builder.append(out);
     eol.push(out);
     head.push(out);
-    if let Some(s) = stats.as_deref_mut() {
+    if let Some(s) = stats {
         s.chars += out.chars().count();
         s.replacements += out.matches('\u{FFFD}').count();
     }
@@ -712,9 +715,9 @@ mod tests {
         // 构造恰好让多字节字符与 \r\n 骑在 64KB 边界上的内容：
         // 'a' ×(CHUNK-1) 后接 3 字节 '中'（跨边界）与 CRLF
         let mut content = Vec::new();
-        content.extend(std::iter::repeat(b'a').take(CHUNK_SIZE - 1));
+        content.extend(std::iter::repeat_n(b'a', CHUNK_SIZE - 1));
         content.extend_from_slice("中\r\n文🚀\r\n".as_bytes());
-        content.extend(std::iter::repeat(b'b').take(CHUNK_SIZE));
+        content.extend(std::iter::repeat_n(b'b', CHUNK_SIZE));
 
         let dir = scratch_dir("p19-boundary");
         let (text, encoding) = load_doc_via_stream(&dir, "boundary.txt", &content);

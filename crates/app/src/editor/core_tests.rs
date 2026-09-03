@@ -646,7 +646,7 @@ use super::super::scrollbars::{
             // 文档输出：列模型在此行的偏差（说明「未注入回退」的兜底量级）
             let mut model_cols = 0f32;
             for ch in chars.iter() {
-                let w = char_cols(*ch, model_cols as usize) as f32;
+                let w = char_cols(*ch, model_cols as usize);
                 model_cols += w;
             }
             let model: f32 = model_cols * narrow;
@@ -675,11 +675,11 @@ use super::super::scrollbars::{
         let gutter = c.gutter_width();
 
         // caret：每列起点 x == 注入值（字形画在哪光标就在哪）
-        for col in 0..xs.len() {
+        for (col, x) in xs.iter().enumerate() {
             c.cursor = CursorPos { line: 0, col };
             let caret = c.caret_rect_relative();
             assert!(
-                (caret.x - (gutter + xs[col])).abs() < 1e-3,
+                (caret.x - (gutter + *x)).abs() < 1e-3,
                 "caret col={col} x={} 应为 {}",
                 caret.x,
                 gutter + xs[col]
@@ -1015,8 +1015,9 @@ fn p66_fractional_scroll_top_survives_clamp() {
     assert_eq!(c.scroll_top, 0.0);
 }
 
-/// 渲染一帧编辑器画布（P66 对拍脚手架）：全新 Renderer/Tree，
-/// 控件摆在 (50,60) 尺寸 600×300，白色底。
+// 渲染一帧编辑器画布（P66 对拍脚手架）：控件摆在 (50,60) 尺寸 600×300，
+// 白色底。（注：原为某脚手架函数的文档，函数已随重构移除，降级为普通
+// 注释保留背景信息。）
 
 /// P46 诊断：滚动条出现阈值必须与「当前文档最宽行的真实像素宽」一致——
 /// 实测列宽注入后，90 ASCII 字符（720px）在 800px 视口内**不**出现滚动条；
@@ -1032,9 +1033,8 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert_eq!(c.max_line_cols, 90);
         assert_eq!(c.content_width_px(), 720.0, "实测 8px 下行程=真实宽");
         let view = c.text_viewport_w();
-        assert_eq!(
-            HScrollbar::measure(c.content_width_px(), view, 800.0, 0.0).needed,
-            false,
+        assert!(
+            !HScrollbar::measure(c.content_width_px(), view, 800.0, 0.0).needed,
             "720px 内容在 800px 视口内不得出现滚动条"
         );
         // 同文档注入真实行宽（此处与列模型一致），口径不变
@@ -1046,9 +1046,8 @@ fn p66_fractional_scroll_top_survives_clamp() {
             xs
         });
         assert_eq!(c.content_width_px(), 720.0);
-        assert_eq!(
-            HScrollbar::measure(c.content_width_px(), view, 800.0, 0.0).needed,
-            false
+        assert!(
+            !HScrollbar::measure(c.content_width_px(), view, 800.0, 0.0).needed
         );
         // 超宽行（200 字符 = 1600px > 800）→ 出现
         c.insert_str(&"x".repeat(110)); // 90+110=200 字符
@@ -1062,9 +1061,8 @@ fn p66_fractional_scroll_top_survives_clamp() {
         c2.set_viewport_width(800.0);
         c2.recompute_max_line_cols();
         assert_eq!(c2.content_width_px(), 810.0);
-        assert_eq!(
+        assert!(
             HScrollbar::measure(c2.content_width_px(), c2.text_viewport_w(), 800.0, 0.0).needed,
-            true,
             "9px 假设下 810px > 800px 出现——文档化：实测注入后消失"
         );
     }
@@ -1392,7 +1390,7 @@ fn p66_fractional_scroll_top_survives_clamp() {
         // 内容不超宽 → 不需要水平滚动条
         let fit = HScrollbar::measure(100.0, 400.0, 800.0, 0.0);
         assert!(!fit.needed);
-        assert!(HScrollbar::measure(0.0, 400.0, 800.0, 0.0).needed == false);
+        assert!(!HScrollbar::measure(0.0, 400.0, 800.0, 0.0).needed);
 
         // 超宽 → 出现，滑块宽 ∝ 视口占比（未触底时）
         let sb = HScrollbar::measure(content_px, 400.0, 800.0, 0.0);
@@ -1728,7 +1726,7 @@ fn p66_fractional_scroll_top_survives_clamp() {
         assert!(!sb.needed, "内容装得下就必须隐藏滚动条");
 
         // 命中区只在右侧窄带
-        assert!(sb.hits(798.0, 300.0, 800.0) == false || !sb.needed);
+        assert!(!sb.hits(798.0, 300.0, 800.0) || !sb.needed);
         assert!(!sb.hits(100.0, 300.0, 800.0), "正文区域不得算进滚动条命中区");
     }
 

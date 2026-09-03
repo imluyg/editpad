@@ -105,7 +105,7 @@ fn replace_all_legacy(
         if case_sensitive {
             a == b
         } else {
-            a.to_ascii_lowercase() == b.to_ascii_lowercase()
+            a.eq_ignore_ascii_case(&b)
         }
     };
     let mut out = String::with_capacity(text.len());

@@ -94,12 +94,12 @@
         ] {
             let key = keyboard::Key::Character(letter.into());
             let message = handle_key_defaults(key, ctrl).expect("应产生消息");
-            let ok = match (&message, expected) {
+            let ok = matches!(
+                (&message, expected),
                 (Message::CopyRequested, "copy")
-                | (Message::CutRequested, "cut")
-                | (Message::PasteRequested, "paste") => true,
-                _ => false,
-            };
+                    | (Message::CutRequested, "cut")
+                    | (Message::PasteRequested, "paste")
+            );
             assert!(ok, "{letter} 应映射到剪贴板消息，实际 {message:?}");
         }
     }
@@ -115,7 +115,7 @@
         assert_eq!(crlf.doc.to_text(), "a\r\nbx\r\ny\r\nz");
 
         let mut lf = editor::EditorCore::default();
-        lf.insert_str(&"x\r\ny\rz");
+        lf.insert_str("x\r\ny\rz");
         assert_eq!(lf.doc.to_text(), "x\ny\nz");
     }
 
@@ -2167,10 +2167,10 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         let app = Editpad::default();
         let mut element = app.view();
         let mut tree = Tree::new(element.as_widget());
-        let mut renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
+        let renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
         // min=0：允许 Shrink 收缩（否则强制满宽，测不出命中面缺损）
         let limits = layout::Limits::new(Size::new(0.0, 0.0), Size::new(1280.0, 800.0));
-        let node = element.as_widget_mut().layout(&mut tree, &mut renderer, &limits);
+        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
         let root = Layout::new(&node);
         // 树形：Stack → container(base) → body column → [0]=菜单栏 [1]=分隔线
         // [2]=标签条（strip 外层 mouse_area）
@@ -2262,9 +2262,9 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         );
 
         // 节流：紧随其后的第二次移动（同节流窗内）不得再写盘
-        let before = std::fs::read(&dir.join("config.toml")).unwrap();
+        let before = std::fs::read(dir.join("config.toml")).unwrap();
         dispatch(&mut app, Message::WindowMoved(iced::Point::new(333.0, 188.0)));
-        let after = std::fs::read(&dir.join("config.toml")).unwrap();
+        let after = std::fs::read(dir.join("config.toml")).unwrap();
         assert_eq!(before, after, "节流窗内不得反复写盘");
         // 内存态已更新（关闭路径兜底落盘时带走最后的移动）
         assert_eq!((app.settings.window_x, app.settings.window_y), (Some(333), Some(188)));
@@ -2339,11 +2339,11 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert_eq!((size.width, size.height), (48, 48), "窗口图标应为 48×48");
         assert_eq!(rgba.len(), 48 * 48 * 4);
         assert!(
-            rgba.chunks_exact(4).any(|px| px[3] > 0),
+            rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0),
             "窗口图标不得为全透明位图"
         );
         // 预乘校验：非透明像素的 RGB ≤ alpha（premultiply 不变量）
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             let a = px[3] as u32;
             if a > 0 {
                 assert!(px[0] as u32 <= a && px[1] as u32 <= a && px[2] as u32 <= a);
@@ -4729,7 +4729,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert_eq!(app.hotkey_capture, Some("open"), "冲突保持捕获态");
         assert!(app.status.contains("占用"));
         assert!(
-            app.settings.hotkeys.get("open").is_none(),
+            !app.settings.hotkeys.contains_key("open"),
             "被拒动作不得写入映射"
         );
         dispatch(&mut app, Message::HotkeyCaptureCancel);
@@ -5473,7 +5473,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         // 选择系统字体：设置与生效族名同步更新并落盘
         dispatch(&mut app, Message::SettingsFontSelected("Arial".to_owned()));
         assert_eq!(app.settings.font_family.as_deref(), Some("Arial"));
-        assert_eq!(app.active_font_family.as_deref(), Some("Arial"));
+        assert_eq!(app.active_font_family, Some("Arial"));
         assert_eq!(
             app.body_font().family,
             iced::font::Family::Name("Arial"),
@@ -5511,7 +5511,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
             Message::SettingsFontSelected("noto sans mono cjk sc".to_owned()),
         );
         assert_eq!(
-            app.active_font_family.as_deref(),
+            app.active_font_family,
             Some("Noto Sans Mono CJK SC"),
             "生效值必须是清单里的规范族名"
         );

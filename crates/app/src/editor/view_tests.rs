@@ -472,7 +472,7 @@ fn render_frame_cost_is_bounded_on_large_document() {
         view.draw(&tree, &mut renderer, &Theme::Light,
             &iced::advanced::renderer::Style::default(), lyt,
             mouse::Cursor::Unavailable, &viewport_rect);
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &vec![viewport_rect], Color::WHITE);
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &[viewport_rect], Color::WHITE);
         eprintln!(
             "[P69] 冷启动帧（全新 Renderer）= {:.2} ms（参考值，不设限）",
             t.elapsed().as_secs_f64() * 1000.0
@@ -1230,11 +1230,10 @@ fn headless_wrap_reaments_after_viewport_grow() {
         for y in 0..h {
             for x in 0..w {
                 if let Some(p) = px.pixel(x, y) {
-                    if p.red() < 245 || p.green() < 245 || p.blue() < 245 {
-                        if x > max_x {
+                    if (p.red() < 245 || p.green() < 245 || p.blue() < 245)
+                        && x > max_x {
                             max_x = x;
                         }
-                    }
                 }
             }
         }

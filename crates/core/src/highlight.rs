@@ -365,7 +365,7 @@ impl LazyHighlighter {
                 Some(state) => state.clone(),
                 None => {
                     let mut state = (
-                        ParseState::new(&syntax),
+                        ParseState::new(syntax),
                         HighlightState::new(&highlighter, ScopeStack::new()),
                     );
                     let from = anchor.min(line_idx);
@@ -380,7 +380,7 @@ impl LazyHighlighter {
             }
         } else {
             (
-                ParseState::new(&syntax),
+                ParseState::new(syntax),
                 HighlightState::new(&highlighter, ScopeStack::new()),
             )
         };
@@ -550,8 +550,8 @@ pub fn sniff_language(sample: &str, file_name: Option<&str>) -> Option<String> {
     }
 
     // YAML 文档分隔符开头
-    if trimmed.starts_with("---") {
-        let after = trimmed[3..].chars().next();
+    if let Some(rest) = trimmed.strip_prefix("---") {
+        let after = rest.chars().next();
         if after.is_none() || after == Some('\n') || after == Some('\r') {
             return Some("YAML".to_owned());
         }
@@ -943,7 +943,7 @@ mod tests {
         let runs = hl.styled_line_approx(
             1500,
             1490,
-            &format!("let v1500 = 1500;"),
+            "let v1500 = 1500;",
             total,
             text_of,
         );
@@ -958,7 +958,7 @@ mod tests {
         let runs2 = hl.styled_line_approx(
             1501,
             1490,
-            &format!("let v1501 = 1501;"),
+            "let v1501 = 1501;",
             total,
             text_of,
         );
@@ -997,12 +997,10 @@ mod tests {
     fn approx_state_continues_across_rows() {
         // 跨行块注释：第二行的近似上色应延续第一行的注释态
         // （若无状态延续，第二行按全新状态解析会得到普通代码色）
-        let doc_lines = vec![
-            "let a = 1;".to_owned(),
+        let doc_lines = ["let a = 1;".to_owned(),
             "/* 跨行注释开始".to_owned(),
             "仍然是注释".to_owned(),
-            "let b = 2;".to_owned(),
-        ];
+            "let b = 2;".to_owned()];
         let total = doc_lines.len();
         let text_of = &mut |i: usize| doc_lines[i].clone();
         let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");

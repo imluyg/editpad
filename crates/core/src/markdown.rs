@@ -175,8 +175,8 @@ fn heading(line: &str) -> Option<(usize, &str)> {
     let rest = &line[level..];
     if rest.is_empty() {
         Some((level, ""))
-    } else if rest.starts_with(' ') {
-        Some((level, rest[1..].trim()))
+    } else if let Some(rest) = rest.strip_prefix(' ') {
+        Some((level, rest.trim()))
     } else {
         None
     }

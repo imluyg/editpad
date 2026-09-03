@@ -116,7 +116,7 @@ pub fn pick_cjk_mono_family(available: &[String]) -> Option<&'static str> {
 /// * `Pixels`（触控板）：增量已折算成行数累积，|累积| ≥ 1 行发一步并
 ///   **清零**（保留余量会触控板轻扫连发多步；清零 = 一步一格，与滚轮
 ///   手感一致）。反向增量先抵消同向累积。
-/// 返回 (新累积值, 步数符号；0 = 本帧不发)。
+///   返回 (新累积值, 步数符号；0 = 本帧不发)。
 pub(crate) fn wheel_zoom_step(accum: f32, delta_lines: f32, is_pixels: bool) -> (f32, f32) {
     if is_pixels {
         let accum = accum + delta_lines;

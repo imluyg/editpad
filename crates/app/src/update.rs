@@ -1072,7 +1072,7 @@ impl Editpad {
                     tasks.push(self.maybe_schedule_autosave());
                 }
                 self.status = format!("已替换 {count} 处");
-                return Task::batch(tasks);
+                Task::batch(tasks)
             }
             Message::FindScanDone(seq, found) => {
                 // 过期结果丢弃：只认当前排队中的那次扫描（P10 的 job 序号过滤，
@@ -1122,7 +1122,7 @@ impl Editpad {
                                 self.maybe_schedule_autosave(),
                             ]);
                         }
-                        return self.maybe_schedule_autosave();
+                        self.maybe_schedule_autosave()
                     }
                     Err(error) => {
                         self.status = format!("JSON 格式化失败：{error}");
@@ -2058,6 +2058,7 @@ impl Editpad {
     ///   P52 起队列聚合多页，条上显示总数，可逐个处理或全部忽略。
     /// * 一次聚焦至多发起一个重载（防批量加载风暴）；聚焦即全量重算
     ///   队列——已忽略的页（重记戳）自然不再命中。
+    ///
     /// P62：热键捕获提交——组合串先过 core 归一（防御直接消息调用），
     /// 冲突检测（其他动作已占用该组合则报错并保持捕获态）→ 写重映射表
     /// → 持久化 → 退出捕获态。

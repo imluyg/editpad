@@ -316,12 +316,10 @@ fn gc_stale_pages(dir: &Path, keep_generation: u64, protected: &std::collections
         };
         match parse_page_generation(name) {
             Some(gen) if gen == keep_generation || protected.contains(name) => {}
-            Some(_) => {
-                if fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
-            }
-            None => {}
+            // 守卫内完成删除（clippy collapsible_match 合并形态）：语义与
+            // 「臂体内 if」完全一致——仅删除成功才计数。
+            Some(_) if fs::remove_file(&path).is_ok() => removed += 1,
+            Some(_) | None => {}
         }
     }
     removed

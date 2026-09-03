@@ -94,7 +94,7 @@ impl WrapIndex {
         self.bit = vec![0; n + 1];
         for i in 1..=n {
             self.bit[i] += 1;
-            let j = i + (i & i.wrapping_neg());
+            let j = i + i.isolate_lowest_one();
             if j <= n {
                 self.bit[j] += self.bit[i];
             }
@@ -158,7 +158,7 @@ impl WrapIndex {
         let mut j = i + 1; // 转 1-based
         while j < self.bit.len() {
             self.bit[j] += d;
-            j += j & j.wrapping_neg();
+            j += j.isolate_lowest_one();
         }
     }
 
@@ -169,7 +169,7 @@ impl WrapIndex {
             sum += self.bit[j];
             // ⚠️ 步进是「减去 lowbit」：j &= -j 会停在 lowbit 自身造成
             // 无限循环（第 72 轮实测 3 测试挂起 60s+ 定位）
-            j -= j & j.wrapping_neg();
+            j -= j.isolate_lowest_one();
         }
         sum.max(0) as u32
     }

@@ -164,6 +164,9 @@ impl Document {
         }
     }
 
+    // clippy 豁免：与 std::str::FromStr::from_str 同名易混——但此处解析
+    // 不可失败，FromStr 无从实现（需要 Err 类型），保留固有方法。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Self {
         Self {
             rope: Rope::from_str(text),

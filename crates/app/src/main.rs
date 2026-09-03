@@ -430,13 +430,6 @@ fn build_load_stream(job: &LoadJob) -> impl iced::futures::Stream<Item = Message
 /// * 第一道兜底：线程体包 `catch_unwind`，崩溃也发送 `Done(Err(..))`；
 /// * 第二道兜底：接收端通道关闭仍未收到 Done（线程被强杀等极端情形），
 ///   补发一条失败消息。
-/// 加载任务的事件驱动（P5 重构：loader 可注入以便测试）。
-///
-/// 保证语义：无论加载函数成功、失败还是 **panic**，UI 都必然收到恰好一条
-/// `Message::Loaded`——否则 `busy` 会永久卡死，除主题/字号外全部按钮禁用。
-/// * 第一道兜底：线程体包 `catch_unwind`，崩溃也发送 `Done(Err(..))`；
-/// * 第二道兜底：接收端通道关闭仍未收到 Done（线程被强杀等极端情形），
-///   补发一条失败消息。
 async fn drive_load<L>(
     job_id: u64,
     path: PathBuf,
@@ -850,7 +843,7 @@ fn md_spans_row(
     let mut row = row![].spacing(0);
     if spans.is_empty() {
         row = row.push(text(""));
-        return row.into();
+        return row;
     }
     for span in spans {
         let weight = if bold || span.is_bold() {
@@ -1655,10 +1648,6 @@ const CTX_MENU_W: f32 = 200.0;
 /// 窗口高度未知或极小（≤48px）时作为保守值：钳制与滚动共用。
 const CTX_MENU_H: f32 = 280.0;
 
-/// P43：右键菜单卡片高度适配——窗口高度已知且足够时最高占
-/// `vh − 16`（上下各留 8px 边距），内容超高时卡片内部滚动；
-/// 窗口高度未知/过小（首帧或极小窗）回退常量估高（仍保证 ≤ 全高，
-/// 永不盖满界面）。纯函数可单测。
 // ---------- 第 70 轮：菜单栏槽位几何 ----------
 
 /// 菜单栏按钮槽宽与左缘（与 view.rs 菜单栏布局耦合：五按钮同宽 2 字
@@ -1673,7 +1662,12 @@ pub(crate) fn menubar_slot_idx(x: f32) -> usize {
     (((x - MENU_BAR_LEFT) / MENU_SLOT_W).floor().max(0.0) as usize).min(4)
 }
 
-fn ctx_menu_card_h(vh: f32) -> f32 {    if vh > 48.0 {
+/// P43：右键菜单卡片高度适配——窗口高度已知且足够时最高占
+/// `vh − 16`（上下各留 8px 边距），内容超高时卡片内部滚动；
+/// 窗口高度未知/过小（首帧或极小窗）回退常量估高（仍保证 ≤ 全高，
+/// 永不盖满界面）。纯函数可单测。
+fn ctx_menu_card_h(vh: f32) -> f32 {
+    if vh > 48.0 {
         (vh - 16.0).min(CTX_MENU_H)
     } else {
         CTX_MENU_H
@@ -2196,7 +2190,7 @@ pub(crate) fn window_title_icon() -> Option<iced::window::Icon> {
                 if let Some((w, h, rgba)) = dib_bgra32_to_rgba(e.data) {
                     // sRGB → 预乘 alpha（winit/windows 标题栏渲染要求）
                     let premul: Vec<u8> = rgba
-                        .chunks_exact(4)
+                        .as_chunks::<4>().0.iter()
                         .flat_map(|px| {
                             let a = px[3] as u32;
                             [

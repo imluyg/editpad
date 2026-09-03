@@ -35,3 +35,15 @@ rfd = "0.15"
 
 [profile.release]
 lto = "thin"
+# Phase 0 增补：体积/性能。codegen-units=1 让 thin LTO 更有效；strip 去符号。
+# ⚠️ 刻意不加 panic = "abort"：app 层多处 catch_unwind 兜底（加载/查找扫描/
+# 高亮铺路保证「必然回一条消息」，见 main.rs 注释），abort 会击穿该语义。
+codegen-units = 1
+strip = "symbols"
+
+# Phase 0 clippy 纪律：默认集（clippy::all）已本地清零，CI 以 -D warnings 阻断。
+# 豁免项为既定风格取舍（改代码不如改纪律，均可在今后逐处收紧）：
+# * field_reassign_with_default：本项目（尤其测试脚手架）惯用
+#   Default::default() + 逐字段赋值摆夹具，改结构体字面量反而冗长。
+[workspace.lints]
+clippy.field_reassign_with_default = "allow"

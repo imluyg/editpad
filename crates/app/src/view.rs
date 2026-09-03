@@ -992,7 +992,7 @@ impl Editpad {
     }
 
     /// 左侧栏（P47）：搜索框 + 「选项」小标 + 分类导航。选中项 = 底色
-    /// + 1px 描边高亮（同款）；搜索进行中不高亮（内容区已是
+    /// 加 1px 描边高亮（同款）；搜索进行中不高亮（内容区已是
     /// 跨分类的命中结果）。
     fn settings_sidebar(&self) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
@@ -1185,7 +1185,7 @@ impl Editpad {
 
         // P62 热键行（key = 动作 id）：修改按钮 / 捕获中提示
         if HOTKEY_ACTIONS.iter().any(|a| a.id == key) {
-            if self.hotkey_capture.as_deref() == Some(key) {
+            if self.hotkey_capture == Some(key) {
                 let sc = settings_colors(&self.theme());
                 return Some(
                     text("按下新组合键…（Esc 取消）")
@@ -1468,7 +1468,7 @@ impl Editpad {
         let menubar = mouse_area(
             menubar_inner.padding([0, 4]),
         )
-        .on_move(|p| Message::MenubarHovered(p));
+        .on_move(Message::MenubarHovered);
 
         // 第 70 轮：工具栏整体移除——打开/保存/查找/设置全部由顶部菜单
         // 栏承载（用户裁决：与文件菜单重复）；置脏指示由标签页 ● 前缀
@@ -2173,7 +2173,7 @@ impl Editpad {
                 .align_y(iced::alignment::Vertical::Top)
                 .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
         )
-        .on_move(|p| Message::MenubarHovered(p))
+        .on_move(Message::MenubarHovered)
         .on_press(Message::MenubarPressed)
         .into()
     }
@@ -2576,7 +2576,7 @@ pub(crate) fn match_excerpt(line_text: &str, col: usize, max_cols: usize) -> Str
     }
     // 内窗预算：两端截断各占 1 位省略号（单端截断时另一侧多还 1 位）
     let take = max_cols - 2;
-    let mut start = col.saturating_sub((take + 1) / 2);
+    let mut start = col.saturating_sub(take.div_ceil(2));
     let end = (start + take).min(chars.len());
     if end == chars.len() {
         // 尾部没截：把省下的右侧预算回填给头部

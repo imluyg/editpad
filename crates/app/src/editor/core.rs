@@ -259,6 +259,11 @@ struct Snapshot {
 
 // ---------- 核心状态 ----------
 
+// 两个缓存字段类型较深（clippy type_complexity）：别名让字段声明恢复
+// 可读，语义见下方各字段文档（bracket_cache / sel_span_cache）。
+type BracketCache = RefCell<Option<(CursorPos, Option<(usize, usize)>)>>;
+type SelSpanCache = RefCell<Option<((usize, usize), Option<usize>)>>;
+
 pub struct EditorCore {
     pub doc: Document,
     pub cursor: CursorPos,
@@ -350,11 +355,11 @@ pub struct EditorCore {
     /// 扫描（MAX_BRACKET_SCAN_CHARS）只在新光标位付一次。RefCell 让
     /// 只读的 draw 也能维护缓存（与高亮器同手法）；内容变更经
     /// `invalidate_highlight_from` 统一失效（全部正文突变路径的唯一汇点）。
-    bracket_cache: RefCell<Option<(CursorPos, Option<(usize, usize)>)>>,
+    bracket_cache: BracketCache,
     /// 选区显示跨度缓存（第 63 轮状态栏统计）：键 = 选区字节偏移对，
     /// 值 = 显示字符数（None = 无选区）。跨行精确计数是 O(选区行数)，
     /// 状态栏每帧查询必须有缓存；失效走同一汇点（P81 口径）。
-    sel_span_cache: RefCell<Option<((usize, usize), Option<usize>)>>,
+    sel_span_cache: SelSpanCache,
     /// 不可见字符覆盖标记开关（第 63 轮）：渲染层读取；不影响文档
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
@@ -477,7 +482,7 @@ impl EditorCore {
     /// 累计 +1px 漂移，光标压字/离字（P42）皆源于此，实测后归零。
     pub fn char_width(&self) -> f32 {
         self.measured_char_w
-            .unwrap_or_else(|| self.font_size * 0.5625)
+            .unwrap_or(self.font_size * 0.5625)
     }
 
     // ---------- 行级真实布局（第 40 轮根治） ----------
@@ -2141,7 +2146,7 @@ impl EditorCore {
         }
 
         self.snapshot();
-        spans.sort_unstable_by(|x, y| y.0.cmp(&x.0)); // 自底向上
+        spans.sort_unstable_by_key(|x| std::cmp::Reverse(x.0)); // 自底向上
         for (s, e) in spans {
             self.doc.remove_range(s, e);
         }
@@ -3461,7 +3466,7 @@ fn entab_leading_ws(s: &str) -> String {
                 col += 1;
                 // 恰到制表位且攒够 2 个才值得换（1 空格 ↔ 1 Tab 不划算，
                 // 也保证幂等：输出里不会再出现可收拢段）
-                if run >= 2 && col % TAB_STOP_COLS == 0 {
+                if run >= 2 && col.is_multiple_of(TAB_STOP_COLS) {
                     out.push('\t');
                     run = 0;
                 }
