@@ -19,6 +19,13 @@
 //! 显示；语法高亮以逐行状态缓存接入（M2b 起）。
 
 mod core;
+// Phase 2c: EditorCore impl split by domain into undo/motion/edit/block/highlight (pub(crate) bump)
+mod undo;
+mod motion;
+mod edit;
+mod block;
+mod highlight;
+
 mod metrics;
 mod scrollbars;
 mod view;
