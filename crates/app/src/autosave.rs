@@ -1,0 +1,117 @@
+use super::*;
+
+/// 一次自动保存的结局（P63）：写盘成功 / 撞上外部修改被拒写 / 写盘失败。
+/// 拒写不是失败——磁盘上发生了别人（其他编辑器/同步工具）的改动，
+/// 盲写会覆盖它；裁决权交给 P52 外部修改提示条。
+#[derive(Debug, Clone)]
+pub(crate) enum AutosaveOutcome {
+    Written,
+    SkippedExternalChange,
+    Failed(String),
+}
+
+/// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 写前校验 → 分块原子
+/// 落盘」，结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待
+/// 结果，且按页 inflight 去重保证同一页至多一个这样的线程）。
+///
+/// P63 写前校验：防抖睡眠期间磁盘可能被外部修改（焦点巡检只在窗口
+/// 重聚焦时跑，救不了后台线程）。调度时刻的 `(mtime, size)` 戳随任务
+/// 下发，醒来先比对，不一致即拒写并回报 [`AutosaveOutcome::
+/// SkippedExternalChange`]——原文件绝不盲写覆盖外部内容。期望戳为
+/// None（从未记录，如测试注入的不存在路径）时保持旧语义直接写。
+pub(crate) async fn drive_autosave_once(
+    tab: usize,
+    path: PathBuf,
+    doc: editpad_core::Document,
+    version: u64,
+    expected_stamp: Option<(std::time::SystemTime, u64)>,
+    delay: std::time::Duration,
+    backup_mode: String,
+) -> Message {
+    let (tx, rx) = std_mpsc::channel::<AutosaveOutcome>();
+    let thread_path = path.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        let outcome = if autosave_must_skip(expected_stamp, file_stamp(&path)) {
+            AutosaveOutcome::SkippedExternalChange
+        } else {
+            // 第 64 轮 ⑭：写前备份磁盘旧版（自动保存静默口径——备份
+            // 提示不打扰，失败同样降级不阻断）
+            let _ = perform_backup_before_overwrite(&path, &backup_mode);
+            match editpad_core::save_document_atomic(&path, &doc) {
+                Ok(()) => AutosaveOutcome::Written,
+                Err(e) => AutosaveOutcome::Failed(e.to_string()),
+            }
+        };
+        let _ = tx.send(outcome);
+    });
+    let outcome = rx
+        .recv()
+        .unwrap_or_else(|_| AutosaveOutcome::Failed("自动保存线程意外终止".to_owned()));
+    // 路径本体已随闭包移入写盘线程；回报携带同内容的克隆
+    Message::TabAutosaved(tab, version, thread_path, outcome)
+}
+
+/// 自动保存写前判定（纯函数可单测，P63）：期望戳已知（Some）且与当前
+/// 磁盘戳不一致 = 有外部修改（含文件被删），必须拒写。期望戳 None =
+/// 从未记录（无从比对），不拦截——与 [`file_changed_externally`] 的
+/// 「记录缺失不判定」口径一致，但这里反过来以期望戳为主语。
+pub(crate) fn autosave_must_skip(
+    expected: Option<(std::time::SystemTime, u64)>,
+    current: Option<(std::time::SystemTime, u64)>,
+) -> bool {
+    expected.is_some() && current != expected
+}
+
+// ---------- 第 64 轮 ⑭：保存时备份磁盘旧版 ----------
+
+/// 大文件豁免阈值：源文件超过此字节数跳过备份（复制耗时会拖慢保存，
+/// 且 64MB+ 的日志类文件通常有专门的轮转手段）。取值对齐性能基准
+/// bench-50mb.log 量级再留余量。
+pub(crate) const MAX_BACKUP_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 写前备份磁盘旧版（⑭）。返回状态栏提示文本；None = 无事发生。
+///
+/// 口径：
+/// * 目标文件不存在（新建/另存到新路径）→ 无旧版可备份，None；
+/// * 源超过 [`MAX_BACKUP_SOURCE_BYTES`] → 跳过并提示；
+/// * simple → 同目录 `name.bak` 覆盖式；
+/// * timestamped → 同目录 `name.bak.d/` **目录**内
+///   `name.YYYYMMDD-HHMMSS.bak` 历史留存（`.bak.d` 与 simple 的
+///   `name.bak` 文件不同名，两模式可自由切换互不污染）；
+/// * 任何 IO 失败都**不阻断保存**——降级为状态栏提示（备份是锦上添
+///   花，不能成为丢保存的理由）。
+pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option<String> {
+    use editpad_core::settings::{BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED};
+    if mode == editpad_core::settings::BACKUP_MODE_NONE {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if meta.len() > MAX_BACKUP_SOURCE_BYTES {
+        return Some("文件超过 64MB，按策略跳过备份".to_owned());
+    }
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let report = |r: std::io::Result<PathBuf>| match r {
+        Ok(p) => Some(format!("已备份旧版 → {}", p.display())),
+        Err(e) => Some(format!("备份失败（继续保存）：{e}")),
+    };
+    match mode {
+        BACKUP_MODE_SIMPLE => {
+            let bak = path.with_file_name(format!("{name}.bak"));
+            report(std::fs::copy(path, &bak).map(|_| bak))
+        }
+        BACKUP_MODE_TIMESTAMPED => {
+            let dir = path.with_file_name(format!("{name}.bak.d"));
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return Some(format!("备份失败（继续保存）：{e}"));
+            }
+            let stamp = editor::local_datetime_stamp_compact();
+            let target = dir.join(format!("{name}.{stamp}.bak"));
+            report(std::fs::copy(path, &target).map(|_| target))
+        }
+        _ => None,
+    }
+}
