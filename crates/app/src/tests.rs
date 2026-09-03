@@ -5534,3 +5534,126 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::BarsDismissed);
         assert_eq!(app.settings.font_family, None);
     }
+
+    // ---------- P103：命令行参数打开（双击文件 / 「打开方式」） ----------
+
+    #[test]
+    fn cli_file_args_skips_exe_and_options_honors_dashdash() {
+        use std::ffi::OsString;
+        // 模拟资源管理器调用：exe 路径 + 两个真实文件 + 一个未知选项 +
+        // `--` 后以 `-` 开头的合法文件名
+        let args: Vec<OsString> = [
+            "E:\\Tools\\editpad.exe",
+            "C:/notes/a.txt",
+            "-fullscreen",
+            "--",
+            "-dash-name.md",
+            "D:/logs/app.log",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(
+            parse_cli_file_args(args),
+            vec![
+                PathBuf::from("C:/notes/a.txt"),
+                PathBuf::from("-dash-name.md"),
+                PathBuf::from("D:/logs/app.log"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_file_args_without_files_is_empty() {
+        use std::ffi::OsString;
+        // 无参数（直接双击 exe）：空清单 = 走会话恢复原行为
+        assert!(
+            parse_cli_file_args(vec![OsString::from("editpad.exe")]).is_empty(),
+            "仅有程序自身参数时应无可打开文件"
+        );
+        // 纯选项启动（未来预留）：同样不开文件
+        assert!(
+            parse_cli_file_args(vec![
+                OsString::from("editpad.exe"),
+                OsString::from("--help"),
+            ])
+            .is_empty(),
+            "未知选项一律忽略"
+        );
+    }
+
+    #[test]
+    fn cli_files_open_sequentially_via_pending_queue() {
+        let mut app = Editpad::default();
+        // 模拟 boot 注入的待开文件清单（无参数时该队列为空）
+        app.pending_cli =
+            vec![PathBuf::from("C:/cli/a.txt"), PathBuf::from("C:/cli/b.md")].into();
+
+        // 首发（boot 的 OpenNextCliFile 任务）：弹出第一个 → 登记加载任务
+        dispatch(&mut app, Message::OpenNextCliFile);
+        assert_eq!(app.job_seq, 1, "首发应登记第一个文件的加载任务");
+        assert_eq!(app.pending_cli.len(), 1, "队列应弹出第一个文件");
+        assert!(app.busy, "加载进行中应置 busy，防止并发任务");
+
+        // 第一个加载完成 → busy 结算、队列非空 → 自动续排第二个
+        let seq1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq1,
+                Ok((
+                    editpad_core::Document::from_str("first"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.job_seq, 2, "Loaded 结算后应自动弹出下一个 CLI 文件");
+        assert_eq!(app.active_tab, 1, "第二个文件应落新页并聚焦（打开即聚焦）");
+        assert!(
+            app.pending_cli.is_empty(),
+            "第二个文件已弹出在途，队列应清空"
+        );
+        assert!(app.busy, "第二个文件加载中");
+
+        // 第二个加载完成：两页内容各自就位，队列清空
+        let seq2 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq2,
+                Ok((
+                    editpad_core::Document::from_str("second"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert!(app.pending_cli.is_empty(), "队列应随最后一个文件清空");
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "first");
+        assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "second");
+    }
+
+    #[test]
+    fn cli_open_failure_does_not_block_the_rest_of_queue() {
+        let mut app = Editpad::default();
+        // 第一个文件不存在：加载失败应只提示，不阻断后续文件
+        app.pending_cli = vec![
+            PathBuf::from("C:/cli/missing.txt"),
+            PathBuf::from("C:/cli/ok.txt"),
+        ]
+        .into();
+        dispatch(&mut app, Message::OpenNextCliFile);
+        let seq1 = app.job_seq;
+        dispatch(&mut app, Message::Loaded(seq1, Err("文件不存在".to_owned())));
+        assert_eq!(
+            app.job_seq, 2,
+            "单个文件打开失败不得阻断队列里后续文件"
+        );
+        assert!(
+            app.pending_cli.is_empty(),
+            "失败结算后队列应继续弹出下一个文件"
+        );
+        assert!(app.busy, "下一个文件已开始加载（失败不中断排队链）");
+    }

@@ -12,7 +12,7 @@
 
 mod editor;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,7 +35,13 @@ fn main() -> iced::Result {
     // 默认尺寸居中；配置损坏等异常均回退，不影响启动）
     let geometry = editpad_core::Settings::load();
     let (window_size, window_position) = restore_window_geometry(&geometry);
-    iced::application(Editpad::new, Editpad::update, Editpad::view)
+    // P103：命令行参数 = 待打开文件。资源管理器「双击文件」/右键
+    // 「打开方式」/多选右键「打开」都会把文件路径作为 argv 传给本程序
+    // （拖动进窗口走 FileDropped 事件，是另一条路）。iced boot 函数
+    // 不收参数，用闭包捕获文件清单传入——boot 仅在事件循环启动时调用
+    // 一次，clone 开销可忽略。
+    let cli_files = parse_cli_file_args(std::env::args_os());
+    iced::application(move || Editpad::new(cli_files.clone()), Editpad::update, Editpad::view)
         .title(Editpad::title)
         .theme(Editpad::theme)
         .subscription(Editpad::subscription)
@@ -49,6 +55,38 @@ fn main() -> iced::Result {
         // 不显式关掉的话点 X 会直接退进程，永远轮不到未保存确认）
         .exit_on_close_request(false)
         .run()
+}
+
+/// 收集命令行传入的待打开文件路径（P103：双击文件 / 「打开方式」/
+/// 多选右键「打开」时资源管理器把全部路径作为 argv 传给本程序）。
+///
+/// 约定（纯函数便于单测）：
+/// * 第 0 个参数是程序自身路径，跳过；
+/// * `--` 之后全部视为文件路径（让以 `-` 开头的合法文件名也能打开）；
+/// * 其余以 `-` 开头的参数按未知选项忽略（本程序尚无任何命令行选项）；
+/// * 其余按文件路径原样收集——用 `args_os` 全程不经 UTF-8 转换，
+///   非 Unicode 文件名（GBK 等）也能无损打开。
+fn parse_cli_file_args<I>(args: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let mut files = Vec::new();
+    let mut options_done = false;
+    for arg in args.into_iter().skip(1) {
+        if options_done {
+            files.push(PathBuf::from(arg));
+            continue;
+        }
+        let lossy = arg.to_string_lossy();
+        if lossy == "--" {
+            options_done = true;
+        } else if lossy.starts_with('-') {
+            // 未知选项：忽略并继续（无选项可解析，任何 `-x` 都不可能是文件）
+        } else if !lossy.is_empty() {
+            files.push(PathBuf::from(arg));
+        }
+    }
+    files
 }
 
 /// P102：把配置里的窗口几何换算成 iced 建窗参数。值域钳制防坏配置
@@ -281,6 +319,10 @@ enum Message {
     CancelClose,
     /// 文件拖入窗口：按打开流程加载
     FileDropped(PathBuf),
+    /// P103：弹出命令行排队中的下一个文件并按打开流程加载（boot 首发，
+    /// 每次 Loaded 结算后续排——加载管线同一时刻只承接一个任务，多个
+    /// 命令行文件必须串行；队列见 [`Editpad::pending_cli`]）
+    OpenNextCliFile,
     /// 打开确认条「放弃更改并打开」：丢弃未保存修改并加载暂存路径
     ConfirmOpenDiscard,
     /// 打开确认条「取消」：留在当前文档
@@ -1401,6 +1443,9 @@ struct Editpad {
     active_load: Option<LoadJob>,
     /// (已读字节, 总字节)
     progress: Option<(u64, u64)>,
+    /// P103：命令行传入的待打开文件队列（双击/「打开方式」）。boot 注入，
+    /// [`Message::OpenNextCliFile`] 逐个弹出；加载管线单任务承接，故串行。
+    pending_cli: VecDeque<PathBuf>,
 
     // ---------- 查找 / 替换 ----------
     find_visible: bool,
@@ -1546,6 +1591,7 @@ impl Default for Editpad {
             job_seq: 0,
             active_load: None,
             progress: None,
+            pending_cli: VecDeque::new(),
             find_visible: false,
             find_query: String::new(),
             replace_query: String::new(),

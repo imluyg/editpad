@@ -197,7 +197,7 @@ impl Editpad {
         }
     }
 
-    pub(crate) fn new() -> (Self, Task<Message>) {
+    pub(crate) fn new(cli_files: Vec<PathBuf>) -> (Self, Task<Message>) {
         // P33：先把 Family::Monospace 的解析目标钉到 CJK 等宽候选（幂等、
         // 进程内一次）——必须发生在首帧排版之前，否则排版缓存里已固化的
         // 逐字回退不会重排
@@ -257,12 +257,22 @@ impl Editpad {
         );
         // P30：启动会话恢复——读清单重建标签；命名干净页经加载管线回填。
         // 开关判定在 boot_restore 内部（关闭 = 空白启动 + 存量清场）。
-        let restore_task = state.boot_restore();
+        // P103：命令行文件（资源管理器双击 / 「打开方式」/ 多选打开）——
+        // 用户意图优先于会话恢复：跳过恢复（快照原封留存，下次无参数
+        // 启动仍可恢复），文件逐个经既有打开管线加载（OpenNextCliFile
+        // 链式续排，与 Loaded 结算联动）。
+        let (state, boot_task) = if cli_files.is_empty() {
+            let task = state.boot_restore();
+            (state, task)
+        } else {
+            state.pending_cli = cli_files.into();
+            (state, Task::done(Message::OpenNextCliFile))
+        };
         // 注：窗口标题栏图标（第 76 轮用户点单）在 main() 的
         // `.window(Settings { icon })` 声明期下发（见 window_title_icon）
         (
             state,
-            Task::batch([caret_chain, heartbeat_chain, restore_task]),
+            Task::batch([caret_chain, heartbeat_chain, boot_task]),
         )
     }
 
@@ -426,6 +436,19 @@ impl Editpad {
             // 拖拽文件进窗口 = 打开；同一路径重复拖拽也允许重新加载
             // （每次 job_seq 递增，无路径去重；dirty/busy 保护在 request_open 内）
             Message::FileDropped(path) => self.request_open(path),
+            // P103：命令行排队打开的下一个文件。boot 首发；每次 Loaded
+            // 结算（busy 归零）后续排，直到队列清空。request_open 的
+            // dirty/busy 守卫照常生效——期间用户若编辑了当前页，后续
+            // 文件改走打开确认条，与拖拽语义完全一致。
+            Message::OpenNextCliFile => {
+                if self.busy {
+                    return Task::none();
+                }
+                let Some(path) = self.pending_cli.pop_front() else {
+                    return Task::none();
+                };
+                self.request_open(path)
+            }
 
             Message::LoadProgress(job_id, bytes_read, total_bytes) => {
                 if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {
@@ -529,6 +552,13 @@ impl Editpad {
                 // 返回的 Task 恒为 none，无需借道批处理。
                 if is_restore && self.settle_restore_step() {
                     let _ = self.begin_restore_load();
+                }
+                // P103：CLI 排队续排——同上的同步调用语义：每个命令行文件
+                // 结算（busy 归零）后立即弹出下一个；加载流由 subscription
+                // 依据 active_load 重建自动接管，无需借道 Task。
+                // （restore 与 CLI 两条链不可能同时存在——boot 二者取一）
+                if !self.pending_cli.is_empty() && !self.busy {
+                    let _ = self.update(Message::OpenNextCliFile);
                 }
                 if tasks.is_empty() {
                     Task::none()
