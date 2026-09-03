@@ -32,3 +32,7 @@ HANDOFF_ARCHIVE.md
 # ===== 发布打包产物 =====
 # package.ps1 的输出目录（zip 与暂存区），可随时重建
 dist/
+
+# ===== 开发辅助资产 =====
+# 大文件验收样本等（bench-50mb.log 等），Phase 4 起移入此目录
+dev-assets/

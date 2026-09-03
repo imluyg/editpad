@@ -1,0 +1,4 @@
+# 工具链锁定：stable 通道（离线环境唯一已装 toolchain，勿改为未安装的
+# 版本号——rustup 会触发联网下载导致构建失败）。
+[toolchain]
+channel = "stable"

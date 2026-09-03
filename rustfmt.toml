@@ -1,0 +1,4 @@
+# 格式纪律：当前保持 rustfmt 默认风格（仅显式写出 max_width）。
+# 注：本机离线未装 rustfmt 组件，基线尚未用 rustfmt 全量校验——
+# CI 的 fmt 作业接入前需先 `rustup component add rustfmt` 本地跑通。
+max_width = 100
