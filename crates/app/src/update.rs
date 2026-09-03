@@ -259,14 +259,19 @@ impl Editpad {
         // 开关判定在 boot_restore 内部（关闭 = 空白启动 + 存量清场）。
         // P103：命令行文件（资源管理器双击 / 「打开方式」/ 多选打开）——
         // 用户意图优先于会话恢复：跳过恢复（快照原封留存，下次无参数
-        // 启动仍可恢复），文件逐个经既有打开管线加载（OpenNextCliFile
-        // 链式续排，与 Loaded 结算联动）。
+        // 启动仍可恢复），文件经打开管线加载。首个文件在 boot 期同步
+        // 登记（只改状态，加载流由 subscription 依据 active_load 重建
+        // 接管——与拖拽同一条已验证通路）；其余文件留 pending_cli，
+        // 每个 Loaded 结算后由 update 内的同步续排弹出下一个。全程不
+        // 依赖 boot 任务的消息投递（iced 0.14 实测：boot 任务「立即
+        // 输出」在窗口创建初期丢失，CaretTick 类延时输出正常；详见
+        // 归档第 79 轮）。
         let (state, boot_task) = if cli_files.is_empty() {
             let task = state.boot_restore();
             (state, task)
         } else {
-            state.pending_cli = cli_files.into();
-            (state, Task::done(Message::OpenNextCliFile))
+            state.boot_cli_kickoff(cli_files);
+            (state, Task::none())
         };
         // 注：窗口标题栏图标（第 76 轮用户点单）在 main() 的
         // `.window(Settings { icon })` 声明期下发（见 window_title_icon）
@@ -274,6 +279,22 @@ impl Editpad {
             state,
             Task::batch([caret_chain, heartbeat_chain, boot_task]),
         )
+    }
+
+    /// P103：boot 期把命令行文件清单转成打开链路的初始状态——
+    /// 首个文件**同步登记**加载任务（active_load/busy 只是状态变更，
+    /// 加载流由 boot 后的 subscription 依据 active_load 重建自动接管，
+    /// 与拖拽同一通路）；其余文件进 pending_cli 队列，由每个 Loaded
+    /// 结算后的同步续排（[`Message::OpenNextCliFile`]）串行弹出。
+    /// 纯状态操作，可在事件循环启动前安全调用。
+    pub(crate) fn boot_cli_kickoff(&mut self, cli_files: Vec<PathBuf>) {
+        debug_assert!(!cli_files.is_empty(), "空清单不应走到本函数");
+        let mut rest = cli_files;
+        let first = rest.remove(0);
+        let tab = self.target_tab_for_open();
+        // start_loading 返回恒为 none（登记即完成；加载流归订阅接管）
+        let _ = self.start_loading(first, tab);
+        self.pending_cli = rest.into();
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {

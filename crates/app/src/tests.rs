@@ -5583,6 +5583,34 @@ fn ctx_menu_card_h_adapts_to_viewport() {
     }
 
     #[test]
+    fn boot_cli_kickoff_registers_first_file_and_queues_rest() {
+        let mut app = Editpad::default();
+        // boot 分支语义：首个文件同步登记加载任务（状态变更），其余排队
+        app.boot_cli_kickoff(vec![
+            PathBuf::from("C:/cli/a.txt"),
+            PathBuf::from("C:/cli/b.txt"),
+            PathBuf::from("C:/cli/c.txt"),
+        ]);
+        assert_eq!(app.job_seq, 1, "首个文件应立即登记加载任务");
+        assert_eq!(app.active_tab, 0, "首个文件落入初始空净页（打开即聚焦）");
+        assert!(app.busy, "登记后应置 busy（单任务承接）");
+        assert_eq!(
+            app.active_load.as_ref().map(|j| j.path.clone()),
+            Some(PathBuf::from("C:/cli/a.txt")),
+            "在途任务必须是首个文件"
+        );
+        assert_eq!(app.pending_cli.len(), 2, "其余文件应留在队列串行续排");
+        assert_eq!(
+            app.pending_cli,
+            VecDeque::from(vec![
+                PathBuf::from("C:/cli/b.txt"),
+                PathBuf::from("C:/cli/c.txt"),
+            ]),
+            "队列顺序必须保持命令行顺序"
+        );
+    }
+
+    #[test]
     fn cli_files_open_sequentially_via_pending_queue() {
         let mut app = Editpad::default();
         // 模拟 boot 注入的待开文件清单（无参数时该队列为空）
