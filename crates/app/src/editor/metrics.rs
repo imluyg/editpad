@@ -1,8 +1,8 @@
 //! CJK 双宽字符的列宽换算 + 列宽运行时实测（P42）
 //! （P68 自 editor.rs 拆出，纯移动零行为变更）。
 
-use iced::advanced::text::{self as core_text, Paragraph as _};
-use iced::{alignment, Font, Pixels, Size};
+use iced::advanced::text::{self as core_text, Renderer as _, Paragraph as _};
+use iced::{alignment, Color, Font, Pixels, Point, Rectangle, Size};
 
 // ---------- CJK 双宽字符的列宽换算 ----------
 //
@@ -228,5 +228,67 @@ pub(crate) fn shape_row_xs(font: Font, size: f32, text: &str) -> Option<Vec<f32>
         }
     }
     Some(xs)
+}
+
+/// 字形墨迹在行盒内的上边距（px，P88 残影根治）。
+///
+/// 光标/选区等「行盒装饰」矩形按行盒顶（y = 视觉行 × 行高）绘制，而
+/// 字形墨迹在行盒（行高 = 字号 × 1.375）内按字体度量下浮 1~6px——
+/// 实测（经完整绘制链路）：CJK 等宽钉字 ≈ 4px、拉丁等宽 ≈ 6px、无
+/// 钉字回退字体更高。行盒顶对齐时装饰的顶部悬墨落在首行上方空带，
+/// 即用户截图的「黑点/色带残影」（P88 根因，headless 测试因字体
+/// 管线差异测不出——此前 P42 只实测了列宽，漏了纵轴）。
+///
+/// 本函数用与正文绘制**完全同源**的渲染管线（同 font/字号/行高/
+/// Shaping::Advanced + tiny-skia 光栅化）把采样行画到离屏像素图，
+/// 扫描字形墨迹的最高行，返回「行盒顶 → 墨迹顶」的偏移。采样串用
+/// CJK 字符：捕获钉字/回退后的 CJK 字形度量（正文混排的主字体）；
+/// 渲染失败/参数无效返回 None（调用方保持 0 = 旧行为，恒安全）。
+pub(crate) fn measure_ink_offset(font: Font, size: f32) -> Option<f32> {
+    if !(size.is_finite() && size > 0.0) {
+        return None;
+    }
+    let (w, h) = (160u32, 48u32);
+    let mut renderer = iced::Renderer::new(font, Pixels(size));
+    renderer.fill_text(
+        core_text::Text {
+            content: "中中中中中中中中".to_string(),
+            bounds: Size::new(f32::INFINITY, f32::INFINITY),
+            size: Pixels(size),
+            line_height: core_text::LineHeight::Absolute(Pixels(size * 1.375)),
+            font,
+            align_x: core_text::Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: core_text::Shaping::Advanced,
+            wrapping: core_text::Wrapping::None,
+        },
+        Point::ORIGIN,
+        Color::BLACK,
+        Rectangle::with_size(Size::new(w as f32, h as f32)),
+    );
+    let mut pixels = tiny_skia::Pixmap::new(w, h)?;
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h)?;
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![Rectangle::with_size(Size::new(w as f32, h as f32))];
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
+    // 只扫行盒高度内的墨迹；超出视为异常（字体未就绪 → 0 保守回退）
+    let scan_rows = ((size * 1.375) as i32).clamp(1, h as i32);
+    for y in 0..scan_rows {
+        for x in 0..w as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                if p.red() < 250 || p.green() < 250 || p.blue() < 250 {
+                    return Some(y as f32);
+                }
+            }
+        }
+    }
+    Some(0.0)
 }
 

@@ -15,6 +15,11 @@ path = "src/main.rs"
 iced.workspace = true
 rfd.workspace = true
 editpad-core.workspace = true
+# P88 残影根治：字形墨迹偏移实测（measure_ink_offset）需把采样行渲染到
+# 离屏像素图扫描墨迹行——tiny-skia/iced_graphics 本就在 iced tiny-skia
+# 特性的依赖树里（发布构建已编译），此处仅补直连边，零新增体积。
+tiny-skia = "0.11.4"
+iced_graphics = "0.14"
 # 第 63 轮 F5 插入日期时间：曾尝试直连 time+local-offset 特性——该特性
 # 会拉新的可选依赖 num_threads，离线环境（SSL 代理限制）无法解析，
 # 故改为 core 层直接 FFI kernel32!GetLocalTime（见 editor/core.rs）。
@@ -23,8 +28,6 @@ editpad-core.workspace = true
 # 与 iced 主依赖同版本，不进入发布构建
 [dev-dependencies]
 iced_tiny_skia = "0.14"
-iced_graphics = "0.14"
-tiny-skia = "0.11.4"
 
 [lints]
 workspace = true

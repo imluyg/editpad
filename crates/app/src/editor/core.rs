@@ -325,6 +325,12 @@ pub struct EditorCore {
     /// P42 实测列宽（真实字形 advance，像素/列）：控件层用排版段落实测
     /// 后注入。None = 未实测或测值无效，[`Self::char_width`] 回退固定假设。
     pub(crate) measured_char_w: Option<f32>,
+    /// P88 字形墨迹在行盒内的上边距（px）：光标/选区等行盒装饰矩形的
+    /// 纵向对齐基准——字形在行盒（行高 = 字号 × 1.375）内按字体度量
+    /// 下浮 1~6px（实测 CJK 等宽钉字 ≈ 4px），行盒顶对齐会让装饰墨迹
+    /// 悬在首行上方空带（用户截图「黑点/色带残影」根因）。控件层按
+    /// (字体, 字号) 用同源渲染管线实测注入；未测量保持 0（旧行为）。
+    pub(crate) ink_offset: f32,
     /// P42 度量键：最近一次实测尝试的 (字体, 字号)。与上字段配对去重——
     /// 键相同即「已按当前字体/字号测过（无论成败）」，避免每帧重测；
     /// 字体切换（P34）/字号变更（set_font_size 折算后仍会重测校准）时换键。
@@ -444,6 +450,7 @@ impl Default for EditorCore {
             saved_baseline: Some(Document::new()),
             // P42：默认未实测，走 0.5625 固定假设（既有契约不变）
             measured_char_w: None,
+            ink_offset: 0.0,
             metric_key: None,
             row_layouts: HashMap::new(),
             max_row_width_px: 0.0,
@@ -564,6 +571,22 @@ impl EditorCore {
             }
             None => false,
         }
+    }
+
+    /// P88：字形墨迹在行盒内的上边距（见字段注释）。校验失败保持现状。
+    pub fn set_ink_offset(&mut self, offset: f32) -> bool {
+        let max = (self.font_size * 0.75).max(1.0);
+        if offset.is_finite() && (0.0..=max).contains(&offset) {
+            self.ink_offset = offset;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// P88：字形墨迹上边距（px，默认 0 = 行盒顶对齐，旧行为）。
+    pub fn ink_offset(&self) -> f32 {
+        self.ink_offset
     }
 
     /// 设置字号：clamp 到合法区间后让滚动/可见性按新度量重新收敛

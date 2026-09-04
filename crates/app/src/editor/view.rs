@@ -14,7 +14,9 @@ use iced::{alignment, border::Radius, mouse, window, Color, Element, Font, Lengt
 use super::core::{
     luminance, lighten, EditOp, EditorHandle, ImeCommit, SCROLL_LINES_PER_NOTCH,
 };
-use super::metrics::{char_cols, display_cols, measure_char_width, shape_row_xs};
+use super::metrics::{
+    char_cols, display_cols, measure_char_width, measure_ink_offset, shape_row_xs,
+};
 use super::scrollbars::{
     HScrollbar, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
     VScrollbar,
@@ -161,6 +163,11 @@ impl EditorView {
         self.core.borrow_mut().metric_key = Some(key);
         if let Some(w) = measure_char_width(self.font, key.1) {
             self.core.borrow_mut().set_measured_char_width(w);
+        }
+        // P88：同键顺带实测字形墨迹上边距（光标/选区纵向对齐基准）。
+        // 失败保持 0（恒安全，与旧行为一致）。
+        if let Some(off) = measure_ink_offset(self.font, key.1) {
+            self.core.borrow_mut().set_ink_offset(off);
         }
     }
 
@@ -442,9 +449,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         let x0 = core.px_of(line, &text, cs.min(lens)) - seg_base;
                         let x1 = core.px_of(line, &text, ce.min(lens)) - seg_base;
                         // P59：选区矩形与控件边界求交（quad 无任何裁剪）
+                        // P88：y 下移字形墨迹上边距——行盒顶对齐会让选区
+                        // 带顶悬在首行上方空带（用户截图「色带残影」）
                         let Some(rect) = Rectangle {
                             x: bounds.x + gutter_w + x0 - scroll_left,
-                            y: bounds.y + (row - core.scroll_top) * lh,
+                            y: bounds.y + (row - core.scroll_top) * lh + core.ink_offset(),
                             width: (x1 - x0).max(char_w),
                             height: lh,
                         }
@@ -474,7 +483,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 // （quad 无任何裁剪，越界部分会压标签条/状态栏）
                 let Some(rect) = Rectangle {
                     x: bounds.x + gutter_w + x0 - scroll_left,
-                    y: bounds.y + (row - core.scroll_top) * lh,
+                    // P88：与折行分支同款——y 下移字形墨迹上边距
+                    y: bounds.y + (row - core.scroll_top) * lh + core.ink_offset(),
                     width: (x1 - x0).max(char_w),
                     height: lh,
                 }
@@ -497,7 +507,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 列宽 min(c1) 的像素。
         if let Some((r0, r1, c0, c1)) = core.active_block() {
             for line in r0..=r1 {
-                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh + core.ink_offset();
                 if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                     continue;
                 }

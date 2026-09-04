@@ -2,6 +2,141 @@
 //! view 子模块）。全部只走公开 API 构造状态。
 use super::*;
 
+/// P88 残影根治回归：光标/选区等「行盒装饰」与字形墨迹纵向对齐——
+/// 字体度量让字形在行盒（行高 = 字号 × 1.375）内下浮（实测 CJK 等宽
+/// 字体 ≈ 4px），旧实现按行盒顶画装饰，顶部的悬墨落在首行上方空带
+/// （用户截图「黑点/色带残影」）。本测试用显式 CJK 字体名（NSimSun，
+/// Windows 自带；等价于 GUI 启动 P33 钉字后的字体解析结果）渲染
+/// 540 字长行，断言：首行墨迹上方的空带内（行号栏外）零墨迹——光标
+/// 与选区两个状态分别验证。用显式字体名而非进程级钉字，避免污染
+/// 全局 font_system（钉字是一次性全局变更，会改写其它像素测试的
+/// 字体解析结果）。
+#[test]
+fn headless_caret_and_selection_never_ink_above_first_row() {
+    use super::super::CursorPos;
+    // 显式 CJK 等宽字体：与 GUI 启动 P33 钉字后的正文字体解析一致
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (500u32, 220u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 460.0f32, 190.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&"中文折行测试".repeat(90)));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.set_word_wrap(true);
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    let gutter = {
+        let c = core.borrow();
+        c.gutter_width()
+    };
+    // 首行墨迹最顶行：逐行扫描（含光标列——光标此时已与墨迹对齐）
+    let mut first_ink_row = i32::MAX;
+    for y in ey as i32..(ey + 2.0 * 22.0) as i32 {
+        let mut row_ink = 0u32;
+        for x in (ex + gutter) as i32..(ex + ew) as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                let v = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                if v < 200 {
+                    row_ink += 1;
+                }
+            }
+        }
+        if row_ink > 0 {
+            first_ink_row = y;
+            break;
+        }
+    }
+    assert_ne!(first_ink_row, i32::MAX, "首行应有墨迹（渲染管线失效？）");
+    // P88：光标矩形顶必须与墨迹顶对齐（±2px 抗锯齿/层裁剪容差）——
+    // 修前 = 行盒顶（悬墨 4px，必然超差），修后 = 墨迹顶（零空带）
+    let caret_top = {
+        let c = core.borrow();
+        ey + c.caret_rect_relative().y
+    };
+    assert!(
+        (caret_top - first_ink_row as f32).abs() <= 2.0,
+        "光标顶应贴合字形墨迹顶（行盒装饰悬墨未根治）：caret={caret_top} ink={first_ink_row}"
+    );
+    // 空带 [ey, 首墨行)：正文字形/光标一律不得出现（行号栏除外）
+    let mut strip_ink = 0u32;
+    for y in ey as i32..first_ink_row {
+        for x in (ex + gutter) as i32..(ex + ew) as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                let v = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                if v < 200 {
+                    strip_ink += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(strip_ink, 0, "光标态：首行上方空带出现墨迹（行盒装饰悬墨）");
+    // 选区态复测：跨首段起点选区同样不得在空带留墨
+    {
+        let mut c = core.borrow_mut();
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 0, col: 2 };
+    }
+    let mut renderer2 = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree2 = Tree::empty();
+    let node2 = view.layout(&mut tree2, &renderer2, &limits);
+    let node2 = node2.translate(iced::Vector::new(ex, ey));
+    let lyt2 = Layout::new(&node2);
+    let mut pixels2 = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels2.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask2 = tiny_skia::Mask::new(w, h).expect("mask");
+    view.draw(
+        &tree2,
+        &mut renderer2,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt2,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer2.draw(&mut pixels2.as_mut(), &mut mask2, &viewport, &damage, Color::WHITE);
+    let mut sel_strip = 0u32;
+    for y in ey as i32..first_ink_row {
+        for x in (ex + gutter) as i32..(ex + ew) as i32 {
+            if let Some(p) = pixels2.pixel(x as u32, y as u32) {
+                let v = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                if v < 200 {
+                    sel_strip += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(sel_strip, 0, "选区态：首行上方空带出现墨迹（选区带悬墨）");
+}
+
+
     /// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
 /// tiny-skia 光栅化）下，41 汉字行 + 水平滚动（scroll_left=80），
 /// 「第 40/41 字」区域必须有墨迹。视口宽 bounds（旧版形态）与
