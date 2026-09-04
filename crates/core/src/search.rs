@@ -535,11 +535,22 @@ pub fn replace_all_regex(
     case_sensitive: bool,
 ) -> Result<(String, usize), String> {
     let re = compile_regex(pattern, case_sensitive)?;
-    let count = re.find_iter(text).filter_map(|m| m.ok()).count();
+    // 计数走错误传播：find_iter 的运行期错误不得静默吞掉（否则计数
+    // 为 0 时会误报「无替换」），也不得与替换趟的结果口径不一致。
+    let mut count = 0usize;
+    for m in re.find_iter(text) {
+        m.map_err(|e| e.to_string())?;
+        count += 1;
+    }
     if count == 0 {
         return Ok((text.to_owned(), 0));
     }
-    let out = re.replace_all(text, replacement).into_owned();
+    // 不可用 replace_all：其内部 unwrap 会把运行期错误（如回溯超限）
+    // 直接 panic（UI 线程调用即整应用崩溃），必须走 try_replacen 上抛。
+    let out = re
+        .try_replacen(text, 0, replacement)
+        .map_err(|e| e.to_string())?
+        .into_owned();
     Ok((out, count))
 }
 
@@ -1144,6 +1155,21 @@ mod tests {
 
         // 非法模式 → Err
         assert!(replace_all_regex(text, "[", "x", true).is_err());
+    }
+
+    #[test]
+    fn regex_replace_propagates_runtime_errors_instead_of_panic() {
+        // fancy-regex 存在编译期拦不住的运行期错误（回溯超限，默认上限
+        // 100 万步）。替换路径必须上抛 Err 而非 panic——旧实现走
+        // replace_all（内部 unwrap），在 UI 线程调用即整应用崩溃。
+        // 触发构造取自 fancy-regex 官方超限用例的模式加长文本：歧义
+        // 分割（a/b/ab）无法被引擎专项优化消除，120 字节即确定性触限
+        // （实测约 17ms，耗时被封顶）。
+        let text = "ab".repeat(60);
+        let err = replace_all_regex(&text, "(a|b|ab)*(?>c)", "x", true).unwrap_err();
+        assert!(!err.is_empty());
+        // 查找路径同一口径：运行期错误同样上抛，不静默吞
+        assert!(find_all_regex(&text, "(a|b|ab)*(?>c)", true).is_err());
     }
 
     #[test]

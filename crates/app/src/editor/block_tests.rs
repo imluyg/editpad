@@ -41,6 +41,25 @@ use super::tests::*;
     }
 
     #[test]
+    fn delete_current_line_on_single_newline_document_no_underflow() {
+        // 文档恰为一个换行符（唯一内容就是行尾）：光标在幻影末行时
+        // start == 1，旧实现直接回看 start-2 触发 usize 下溢崩溃。
+        // 钉死正确形态：退化为吃掉这唯一的换行单元，删成空文档。
+        let mut c = core_with("\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        assert!(c.delete_current_lines());
+        assert_eq!(c.doc.to_text(), "");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 0 }, "光标归零");
+        assert!(c.undo(), "必须可撤销");
+        assert_eq!(c.doc.to_text(), "\n");
+        // 孤立 \r 同口径（ropey unicode_lines 把它当行界）
+        let mut d = core_with("\r");
+        d.cursor = CursorPos { line: 1, col: 0 };
+        assert!(d.delete_current_lines());
+        assert_eq!(d.doc.to_text(), "");
+    }
+
+    #[test]
     fn delete_selection_spans_lines_and_col0_end_excludes_last_line() {
         let mut c = core_with("l1\nl2\nl3\nl4");
         // 选区从 l1 中间拉到 l3 行首：l3 不算触及（选区没盖到它的字符）
@@ -544,6 +563,13 @@ use super::tests::*;
         e.toggle_bookmark();
         assert!(!e.remove_bookmarked_lines());
         assert_eq!(e.doc.to_text(), "");
+        // 文档恰为一个换行符：幻影末行被标时 start == 1，不得回看
+        // start-2（旧实现 usize 下溢崩溃），退化为吃掉唯一换行单元
+        let mut f = core_with("\n");
+        f.cursor = CursorPos { line: 1, col: 0 };
+        f.toggle_bookmark();
+        assert!(f.remove_bookmarked_lines());
+        assert_eq!(f.doc.to_text(), "");
     }
 
     #[test]

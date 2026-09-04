@@ -32,8 +32,10 @@ impl EditorCore {
                 return false; // 唯一内容为空：无可删
             }
             // 幻影末行：改为移除前一行行尾的换行单元（\r\n 整体或 \n）。
-            // start ≥ 1 恒成立（前面至少有一个换行才轮得到空行）。
-            let crlf = self.doc.slice_text(start - 2, start) == "\r\n";
+            // start ≥ 1 恒成立（前面至少有一个换行才轮得到空行）；start == 1
+            // 时前面只有这 1 字节、必非 CRLF——须先判 start ≥ 2 再回看 2 字节，
+            // 否则文档恰为一个换行符且光标在幻影行时 usize 下溢崩溃。
+            let crlf = start >= 2 && self.doc.slice_text(start - 2, start) == "\r\n";
             let s = start - usize::from(crlf) - 1;
             (s, start, 1)
         } else {
@@ -987,8 +989,10 @@ impl EditorCore {
             if start < end {
                 spans.push((start, end));
             } else if start > 0 {
-                // 幻影末行空壳单标：改为移除其前面的换行单元（\r\n 整体）
-                let crlf = self.doc.slice_text(start - 2, start) == "\r\n";
+                // 幻影末行空壳单标：改为移除其前面的换行单元（\r\n 整体）。
+                // 同 delete_current_lines：start == 1 时必非 CRLF，先判 ≥ 2
+                // 再回看，防文档恰为一个换行符时下溢。
+                let crlf = start >= 2 && self.doc.slice_text(start - 2, start) == "\r\n";
                 spans.push((start - usize::from(crlf) - 1, start));
             }
             // start == end == 0：空文档唯一空行被标，无可删（跳过）
