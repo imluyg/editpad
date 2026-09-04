@@ -571,6 +571,158 @@ fn headless_mid_line_preedit_pushes_tail_text() {
     assert_eq!(tail_after, 0, "行尾字符右缘之后出现墨迹（右移量异常）");
 }
 
+/// P115 勘误回归：空行组字必须渲染（headless 像素级）。三段式把组字
+/// 嵌进行绘制后，空行（`text.is_empty()` / `seg_start >= lens`）被整行
+/// 跳过——新文档/空白行输入中文时组字整条消失（用户复报「组字直接
+/// 没了」；老浮层实现不依赖行循环，空行照常显示）。折行开/关两态各
+/// 验：空文档单行、光标 (0,0)、组字 `zhongguo`——断言行首组字区有墨。
+#[test]
+fn headless_preedit_on_empty_line_renders() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (400u32, 120u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 360.0f32, 100.0f32);
+    let pre_w = shape_row_xs(font, 16.0, "zhongguo")
+        .expect("shape 失败")
+        .last()
+        .copied()
+        .unwrap();
+    for wrap in [false, true] {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str(""));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.set_word_wrap(wrap);
+            c.cursor = CursorPos { line: 0, col: 0 };
+            assert!(c.ime_preedit("zhongguo".to_owned()));
+        }
+        let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        let gutter = core.borrow().gutter_width();
+        let x0 = (ex + gutter) as i32;
+        let mut ink = 0u32;
+        for y in ey as i32..(ey + 22.0) as i32 {
+            for x in x0..(x0 + pre_w as i32) {
+                if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                    if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
+                        ink += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[P115勘误] wrap={wrap} 空行组字区墨px={ink} (pre_w={pre_w:.1})"
+        );
+        assert!(ink > 0, "空行组字未渲染（wrap={wrap}）：修前整行跳过必挂");
+    }
+}
+
+/// P115 勘误回归：折行开态**行尾**组字必须渲染（headless 像素级）。
+/// 段条件 `col_p < seg_end` 把行尾（末段 col==seg_end==lens）排除，
+/// 光标推进到行尾后组字消失。行 `中`×20（折 2 段）、光标行尾
+/// col=20、组字 `zhongguo`——末段 [15,20) 内命中：B 画在段内
+/// 80px 处，可显示宽 = min(pre_w, 预算 − rel)。断言第二视觉行
+/// 段内 [预算 区间] 有组字墨。
+#[test]
+fn headless_preedit_at_wrapped_line_end_renders() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (400u32, 140u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 300.0f32, 120.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&"中".repeat(20)));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.set_word_wrap(true);
+        c.cursor = CursorPos { line: 0, col: 20 };
+        assert!(c.ime_preedit("zhongguo".to_owned()));
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    let gutter = core.borrow().gutter_width();
+    let pre_w = shape_row_xs(font, 16.0, "zhongguo")
+        .expect("shape 失败")
+        .last()
+        .copied()
+        .unwrap();
+    // 末段 [15,20)：段内 rel = px(20)-px(15) = 80；B 起点段内 80px；
+    // 可显示 = min(pre_w, 预算 − 80)。第二视觉行（y = ey + 22）
+    let rel = 80.0f32;
+    let budget = {
+        let c = core.borrow();
+        c.wrap_max_px()
+    };
+    let vis = pre_w.min(budget - rel);
+    assert!(vis > 20.0, "测试前提失效：可显示宽太小（{vis:.1}）");
+    let x0 = (ex + gutter) as i32;
+    let mut ink = 0u32;
+    for y in (ey + 22.0) as i32..(ey + 44.0) as i32 {
+        for x in (x0 + rel as i32)..(x0 + (rel + vis) as i32) {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
+                    ink += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[P115勘误] 行尾组字：rel={rel:.0} budget={budget:.1} vis={vis:.1} 墨px={ink}"
+    );
+    assert!(ink > 0, "折行开态行尾组字未渲染（修前段条件排除行尾必挂）");
+}
+
 
     /// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
 /// tiny-skia 光栅化）下，41 汉字行 + 水平滚动（scroll_left=80），

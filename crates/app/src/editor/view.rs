@@ -911,14 +911,10 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     }
                     let text = core.line_text(line);
                     let lens = text.chars().count();
-                    if seg_start >= lens {
-                        continue; // 空行/幻影行：仅首段且无正文
-                    }
-                    let runs = core.highlight_runs(line, &text);
-                    // P115：本段含组字插入点 → 三段式：前文原样 + 组字
-                    // （正文同色，clip 到折行边界）+ 后文右移组字可显示
-                    // 宽（开态组字画到段尾为止、下段从段首原样起排；组字
-                    // 挤出的尾部由 B 层掩码硬裁，组字是瞬态可接受）
+                    // P115 勘误：插槽判断须在空行检查**之前**——空行
+                    // （新文档/空白行输入）与行尾组字是老浮层实现本可
+                    // 显示、三段式嵌入行绘制后会被整行跳过（用户复报
+                    // 「组字直接没了」）；空行只有段 0 且无正文
                     let pre_slot: Option<(&str, usize, f32)> =
                         preedit_text.as_deref().and_then(|p| {
                             (core.cursor.line == line && core.cursor.col <= lens).then(|| {
@@ -929,13 +925,52 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                                 )
                             })
                         });
+                    if seg_start >= lens {
+                        // 空行/幻影行：仅首段且无正文——组字画在段首，
+                        // 可显示宽 = 整段预算（子层硬裁到折行边界）
+                        if let Some((p, _, w)) = pre_slot {
+                            let zone = Rectangle {
+                                x: text_x0,
+                                y: bounds.y,
+                                width: (display_right_edge - text_x0).max(0.0),
+                                height: bounds.height,
+                            };
+                            renderer.start_layer(zone);
+                            if w > 0.0 {
+                                renderer.fill_text(
+                                    core_text::Text {
+                                        content: p.to_owned(),
+                                        bounds: Size::new(f32::INFINITY, lh),
+                                        size: Pixels(core.font_size()),
+                                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                        font: body_font,
+                                        align_x: core_text::Alignment::Default,
+                                        align_y: alignment::Vertical::Top,
+                                        shaping: core_text::Shaping::Advanced,
+                                        wrapping: core_text::Wrapping::None,
+                                    },
+                                    Point::new(text_x0, y),
+                                    colors.preedit_text,
+                                    bounds,
+                                );
+                            }
+                            renderer.end_layer();
+                        }
+                        continue;
+                    }
+                    let runs = core.highlight_runs(line, &text);
                     if let Some((p, col_p, w)) = pre_slot {
-                        if seg_start <= col_p && col_p < seg_end {
+                        // 段内命中：col_p 在本段 [seg_start, seg_end)；行尾
+                        // （末段 col==seg_end==lens）也在本段画——中间段尾
+                        // col==seg_end 由下一段段首处理（避免双画）
+                        let hit = seg_start <= col_p
+                            && (col_p < seg_end || (col_p == seg_end && seg_end == lens));
+                        if hit {
                             let rel = core.px_of(line, &text, col_p)
                                 - core.px_of(line, &text, seg_start);
-                            let remain = (core.px_of(line, &text, seg_end)
-                                - core.px_of(line, &text, col_p))
-                            .max(0.0);
+                            // 段尾可用 = 折行预算 − 段内起点（段末字符右缘
+                            // ≤ 预算不贴满，P96；空行/段尾整宽按预算计）
+                            let remain = (display_right_edge - text_x0 - rel).max(0.0);
                             let vis = w.min(remain);
                             paint_text_slice(
                                 renderer, &core, body_font, text_x0, y, line, seg_start, &text,
@@ -1026,13 +1061,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             );
 
             let text = core.line_text(line);
-            if text.is_empty() {
-                continue;
-            }
             let lens = text.chars().count();
-            let runs = core.highlight_runs(line, &text);
-            // P115：本行含组字插入点 → 三段式（关态无折行约束，后文整体
-            // 右移组字实测宽；超视口部分由 B 层掩码硬裁，可水平滚动查看）
+            // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
+            // 同款注释——新文档/空白行输入是老浮层的常见场景）
             let pre_slot: Option<(&str, usize, f32)> =
                 preedit_text.as_deref().and_then(|p| {
                     (core.cursor.line == line && core.cursor.col <= lens).then(|| {
@@ -1043,6 +1074,34 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         )
                     })
                 });
+            if text.is_empty() {
+                // 空行：组字画在行首（col 必 0；clip = 控件右缘，关态
+                // 无折行边界，超视口部分由掩码硬裁、可水平滚动）
+                if let Some((p, _, w)) = pre_slot {
+                    if w > 0.0 {
+                        renderer.fill_text(
+                            core_text::Text {
+                                content: p.to_owned(),
+                                bounds: Size::new(f32::INFINITY, lh),
+                                size: Pixels(core.font_size()),
+                                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                font: body_font,
+                                align_x: core_text::Alignment::Default,
+                                align_y: alignment::Vertical::Top,
+                                shaping: core_text::Shaping::Advanced,
+                                wrapping: core_text::Wrapping::None,
+                            },
+                            Point::new(text_x0, y),
+                            colors.preedit_text,
+                            preedit_clip,
+                        );
+                    }
+                }
+                continue;
+            }
+            let runs = core.highlight_runs(line, &text);
+            // P115：本行含组字插入点 → 三段式（关态无折行约束，后文整体
+            // 右移组字实测宽；超视口部分由 B 层掩码硬裁，可水平滚动查看）
             if let Some((p, col_p, w)) = pre_slot {
                 let rel = core.px_of(line, &text, col_p);
                 paint_text_slice(

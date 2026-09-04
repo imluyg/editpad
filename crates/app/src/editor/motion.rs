@@ -1007,10 +1007,12 @@ impl EditorCore {
         }
     }
 
-    /// P115：组字串在光标处的**可显示宽**（px）——软换行开态钳到段尾
-    /// 剩余像素（P114 裁剪口径：preedit 画到本段段尾为止、下段从段首
-    /// 原样起排，不重叠）；关态 = 原宽。`w` = 组字串实测宽（调用方量度）。
-    /// 供组字占位（后文右移/C 段起点）与光标/下划线偏移共用同一口径。
+    /// P115：组字串在光标处的**可显示宽**（px）——软换行开态钳到
+    /// 「折行预算 − 段内起点」（段末字符右缘 ≤ 预算不贴满，P96；空行/
+    /// 段尾按整段预算计——修前用段末字符右缘作段尾，空行段 [0,0)
+    /// 剩余被算成 0 → 空行/行尾组字整条消失）；关态 = 原宽。
+    /// `w` = 组字串实测宽（调用方量度）。供组字占位（后文右移/C 段
+    /// 起点）与光标/下划线偏移共用同一口径。
     pub(crate) fn preedit_visual_w(&self, col: usize, w: f32) -> f32 {
         if !self.wrap.borrow().enabled {
             return w;
@@ -1021,9 +1023,9 @@ impl EditorCore {
         let col = col.min(lens);
         let breaks = self.segments_of_line(line, &text);
         let seg = segment_index(&breaks, col, lens);
-        let seg_end = breaks.get(seg + 1).copied().unwrap_or(lens);
-        let remain =
-            (self.px_of(line, &text, seg_end) - self.px_of(line, &text, col)).max(0.0);
+        let seg_start = breaks[seg];
+        let rel = self.px_of(line, &text, col) - self.px_of(line, &text, seg_start);
+        let remain = (self.wrap_max_px() - rel).max(0.0);
         w.min(remain)
     }
 
