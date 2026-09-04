@@ -23,19 +23,31 @@ use super::metrics::char_cols;
 /// 按显示列把逻辑行正文切为视觉段。返回**段首列**向量（恒含 0）。
 ///
 /// * `max_cols` = 视口可用显示列数（整数化）；0 视作 1（防御，单字符段）；
-/// * 断点为字符级（词边界优先与行首禁则回避留 v2，设计 §1 非目标）；
+/// * 断点优选（v2，设计 §3.1）：溢出时先在本段内回找**断行机会**
+///   （空白后 / 连字符后 / 宽字符后——CJK 逐字可断、拉丁按词保持），
+///   找不到再回退字符级断点；新段首字符属行首禁则集合时再回退
+///   （见 [`choose_break`]）；
 /// * 与渲染同源：宽度累计用 `char_cols`（宽字符 2、Tab 跳制表位），
 ///   保证「折行位置」与「关闭软换行时的像素列」逐列一致。
 pub(crate) fn wrap_breaks(body: &str, max_cols: usize) -> Vec<usize> {
     let max_cols = max_cols.max(1);
+    let chars: Vec<char> = body.chars().collect();
     let mut breaks = vec![0usize];
     let mut w: usize = 0;
-    for (i, ch) in body.chars().enumerate() {
-        let cw = char_cols(ch, w) as usize;
+    for i in 0..chars.len() {
+        let cw = char_cols(chars[i], w) as usize;
         if w > 0 && w + cw > max_cols {
-            // 当前字符放不进本段：从它开始新段（至少占它自身宽度）
-            breaks.push(i);
-            w = cw;
+            // 当前字符放不进本段：从优选断点（回退至多到段首+1，至少
+            // 占它自身宽度）起新段；新段宽按段首重算——Tab 的制表位
+            // 展开依赖段内列，断点前移后宽度必须逐字符重新累计
+            let seg_start = breaks[breaks.len() - 1];
+            let b = choose_break(&chars, seg_start, i);
+            breaks.push(b);
+            let mut w2 = 0usize;
+            for &c in &chars[b..=i] {
+                w2 += char_cols(c, w2) as usize;
+            }
+            w = w2;
         } else {
             w += cw;
         }
@@ -43,9 +55,46 @@ pub(crate) fn wrap_breaks(body: &str, max_cols: usize) -> Vec<usize> {
     breaks
 }
 
+/// 断点优选（v2，设计 §3.1 词边界优先 + 行首禁则回避）。
+///
+/// 在 `[seg_start+1, i]` 内**自右向左**找最后一个断行机会——前一字符
+/// 是空白 / 连字符 / 宽字符（CJK 逐字可断），或当前字符是宽字符
+/// （拉丁→CJK 边界，CJK 词整体不被拆进上一段）；`i` 自身即机会时
+/// 保持字符级断点，全无机会（如纯拉丁长词）同样回退 `i`。
+/// 选定后做行首禁则回避：新段首字符属 [`HEAD_FORBIDDEN`] 时逐字符
+/// 回退，直到段首合法或退无可退（段内至少保留 1 字符，不留空段）。
+fn choose_break(chars: &[char], seg_start: usize, i: usize) -> usize {
+    let mut b = i;
+    for j in (seg_start + 1..=i).rev() {
+        let prev = chars[j - 1];
+        if prev.is_whitespace()
+            || prev == '-'
+            || char_cols(prev, 0) >= 2.0
+            || char_cols(chars[j], 0) >= 2.0
+        {
+            b = j;
+            break;
+        }
+    }
+    while b > seg_start + 1 && is_head_forbidden(chars[b]) {
+        b -= 1;
+    }
+    b
+}
+
+/// 行首禁则字符（v2，设计 §3.1「`,。》」… 等」）：全角闭合标点不得
+/// 出现在视觉行首。刻意**不含半角** `.,?!` 等——代码文本里行首
+/// `)` / `...` 是合法常态，禁则只针对 CJK 行文。
+const HEAD_FORBIDDEN: &str = "，。、：；！？》〉」』）】〕｝…‥・ー～’”";
+
+fn is_head_forbidden(c: char) -> bool {
+    HEAD_FORBIDDEN.contains(c)
+}
+
 /// 按**真实字形像素宽**断行（P96 用户点单根治）：`xs` = 与绘制同源的
 /// 逐字符起点像素 x（`xs[k]` = 第 k 字符左缘，末项 = 行尾 x，即
-/// `shape_row_xs` 的输出；要求单调非降）。
+/// `shape_row_xs` 的输出；要求单调非降）；`body` = 行正文（与 `xs`
+/// 同序，供断点优选的字符分类——词边界/禁则判定，见 [`choose_break`]）。
 ///
 /// 断点语义与 [`wrap_breaks`] 一致（段首列向量、恒含 0、恰好压线不产
 /// 空段），但段宽累计用真实 advance——非等宽字体（CJK 全宽 ≠ 2×半宽
@@ -57,14 +106,18 @@ pub(crate) fn wrap_breaks(body: &str, max_cols: usize) -> Vec<usize> {
 /// * `max_px` = 段宽预算（像素）；≤0 防御为 1px；
 /// * 单字符超宽（emoji/超大字）自动自成一格，不产生空段（k==prev 时
 ///   强制容纳，下一字符起再判）。
-pub(crate) fn pixel_breaks(xs: &[f32], max_px: f32) -> Vec<usize> {
+pub(crate) fn pixel_breaks(xs: &[f32], max_px: f32, body: &str) -> Vec<usize> {
     let max_px = max_px.max(1.0);
+    let chars: Vec<char> = body.chars().collect();
+    // 防御：契约上 xs.len() == 字符数 + 1，越界时按可用前缀截断
+    let n = chars.len().min(xs.len().saturating_sub(1));
     let mut breaks = vec![0usize];
     let mut prev = 0usize;
-    for k in 0..xs.len().saturating_sub(1) {
+    for k in 0..n.saturating_sub(1) {
         if k > prev && xs[k + 1] - xs[prev] > max_px {
-            breaks.push(k);
-            prev = k;
+            let b = choose_break(&chars, prev, k);
+            breaks.push(b);
+            prev = b;
         }
     }
     breaks
@@ -131,7 +184,7 @@ impl WrapIndex {
             // P96：真实字形断行——段尾 = xs[段末字符右缘] ≤ max_px，
             // 非等宽/CJK 字体下也贴满右缘（列模型对非常规字距系统性
             // 留白：28px 字号 CJK 实测段尾缺 ~10% ≈ 6 字符）
-            Some(xs) => pixel_breaks(xs, max_px),
+            Some(xs) => pixel_breaks(xs, max_px, body),
             None => wrap_breaks(body, max_cols),
         });
         let seg = breaks.len() as u32;
@@ -350,20 +403,37 @@ mod tests {
         // 个汉字（段尾 952 ≤ 955），段 1 从第 34 字符起——列模型
         // （2×15.6=31.2/字 → 30 字/段）会少塞 4 字留下 ~115px 空白，
         // 像素断行必须按真实 advance 塞满。
+        let body = "中".repeat(40);
         let xs: Vec<f32> = (0..=40).map(|i| i as f32 * 28.0).collect();
-        let breaks = pixel_breaks(&xs, 955.0);
+        let breaks = pixel_breaks(&xs, 955.0, &body);
         assert_eq!(breaks, vec![0, 34], "段 0 恰容纳 34 汉字（952 ≤ 955）");
         // 段尾贴满：最后一段也 ≤ 预算（40 汉字全部放进 1 个后续段）
         assert_eq!(breaks[1], 34);
         // 恰好压线不产空段：100px 预算 + 每字符 25px → 4 字符/段
         let xs2: Vec<f32> = (0..=10).map(|i| i as f32 * 25.0).collect();
-        assert_eq!(pixel_breaks(&xs2, 100.0), vec![0, 4, 8]);
+        assert_eq!(pixel_breaks(&xs2, 100.0, "abcdefghij"), vec![0, 4, 8]);
         // 单字符超宽自成一格（emoji）：200px 预算 + 首字符 300px；
         // 后续两个 1px 字符在预算内共段
         let xs3 = vec![0.0, 300.0, 301.0, 302.0];
-        assert_eq!(pixel_breaks(&xs3, 200.0), vec![0, 1]);
+        assert_eq!(pixel_breaks(&xs3, 200.0, "😀aa"), vec![0, 1]);
         // 空行
-        assert_eq!(pixel_breaks(&[0.0], 100.0), vec![0]);
+        assert_eq!(pixel_breaks(&[0.0], 100.0, ""), vec![0]);
+    }
+
+    #[test]
+    fn wrap_breaks_v2_prefers_word_opportunities_and_kinsoku() {
+        // 词边界（设计 §3.1 v2）：拉丁词在空格后断行，空格留在上一段尾，
+        // 单词不被劈成两半；无机会的纯拉丁长词回退字符级断点（既有行为）
+        assert_eq!(wrap_breaks("hello world", 8), vec![0, 6]);
+        assert_eq!(wrap_breaks("abcdefgh", 4), vec![0, 4]);
+        // 拉丁→CJK 边界：宽字符前可断，拉丁词整体留在上一段
+        assert_eq!(wrap_breaks("abc中文", 4), vec![0, 3]);
+        // 行首禁则：'、' 不得起段——断点回退一字，'う、' 一起下移
+        assert_eq!(wrap_breaks("xあいう、えお", 8), vec![0, 3]);
+        // 像素路径同享词边界优选：等宽 10px 的 "hello world"，80px 预算
+        // 在 'r' 溢出 → 回退到空格后
+        let xs: Vec<f32> = (0..=11).map(|i| i as f32 * 10.0).collect();
+        assert_eq!(pixel_breaks(&xs, 80.0, "hello world"), vec![0, 6]);
     }
 
     #[test]
