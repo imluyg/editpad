@@ -334,3 +334,27 @@ fn current_line_copy_text_includes_line_ending() {
     p.cursor = CursorPos { line: 1, col: 0 };
     assert_eq!(p.current_line_copy_text(), "");
 }
+
+    // ---------- P123 查找命中高亮 ----------
+
+    #[test]
+    fn match_line_pieces_split_multiline_hits_by_display_span() {
+        let c = core_with("ab\ncd\r\nef");
+        // 单行命中：恒等片段
+        assert_eq!(
+            c.match_line_pieces(&editpad_core::MatchPos { line: 0, col: 1, len_chars: 1 }),
+            vec![(0, 1, 2)]
+        );
+        // 跨行命中：显示跨度口径（\r\n 计 1）——"d" + 换行 + "e"
+        assert_eq!(
+            c.match_line_pieces(&editpad_core::MatchPos { line: 1, col: 1, len_chars: 3 }),
+            vec![(1, 1, 2), (2, 0, 1)]
+        );
+        // 零宽命中与行号越界：空表（绘制层跳过）
+        assert!(c
+            .match_line_pieces(&editpad_core::MatchPos { line: 0, col: 0, len_chars: 0 })
+            .is_empty());
+        assert!(c
+            .match_line_pieces(&editpad_core::MatchPos { line: 9, col: 0, len_chars: 2 })
+            .is_empty());
+    }

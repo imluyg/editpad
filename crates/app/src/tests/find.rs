@@ -561,3 +561,71 @@ use super::*;
         assert!(!app.tab().dirty);
     }
 
+
+    // ---------- P123：视口命中高亮与选中带入 ----------
+
+    #[test]
+    fn find_scan_done_syncs_viewport_highlights_and_close_clears() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("cat concat cat"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::FindToggled);
+        assert!(app.find_visible);
+        dispatch(&mut app, Message::FindQueryChanged("cat".into()));
+        let scan_seq = app.find_scan.expect("查询变化应排队扫描");
+        dispatch(
+            &mut app,
+            Message::FindScanDone(
+                scan_seq,
+                vec![
+                    editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
+                    editpad_core::MatchPos { line: 0, col: 11, len_chars: 3 },
+                ],
+            ),
+        );
+        assert_eq!(
+            app.cur_handle.borrow().find_hl.len(),
+            2,
+            "扫描完成后命中表同步进编辑器高亮层"
+        );
+        // 关栏清空（cancel_find_scan 收口）
+        dispatch(&mut app, Message::FindToggled);
+        assert!(app.cur_handle.borrow().find_hl.is_empty());
+    }
+
+    #[test]
+    fn find_bar_open_prefills_selection_as_query() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("hello world"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        app.cur_handle.borrow_mut().select_span(0, 6, 5); // 选中 "world"
+        dispatch(&mut app, Message::FindToggled);
+        assert_eq!(app.find_query, "world", "开栏带入选中文本");
+        // 清掉选区后重开栏：无选区不覆盖已有查询（关栏不清编辑器选区）
+        dispatch(&mut app, Message::FindToggled); // 关
+        app.cur_handle.borrow_mut().anchor = None;
+        dispatch(&mut app, Message::FindToggled); // 开
+        assert_eq!(app.find_query, "world", "无选区开栏保留原查询");
+    }

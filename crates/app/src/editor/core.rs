@@ -394,6 +394,12 @@ pub struct EditorCore {
     /// * 行结构编辑同步平移/删除（各编辑路径内的 remap 注释）；
     /// * 撤销/重做经快照整体回滚（见 `Snapshot::bookmarks`）。
     pub(crate) bookmarks: BTreeSet<usize>,
+    /// 查找命中高亮（P123）：查找栏开态时视口内全部命中的底色数据源。
+    /// 数据 = 查找栏后台扫描的命中表（app 在 FindScanDone 时下发）；
+    /// 编辑后命中位置可能短暂漂移（防抖重扫完成前为旧位置），与主流
+    /// 编辑器一致可接受；不参与撤销/快照/置脏，换文档（reset_document）
+    /// 与关栏即清空。
+    pub(crate) find_hl: Vec<editpad_core::MatchPos>,
     /// 括号匹配查询缓存（第 61 轮）：键 = 光标位置，值 = 该位置的匹配
     /// 结果（含 None）。draw 每帧查询、命中即零扫描——孤立括号的封顶
     /// 扫描（MAX_BRACKET_SCAN_CHARS）只在新光标位付一次。RefCell 让
@@ -495,6 +501,7 @@ impl Default for EditorCore {
             max_cols_stale: false,
             max_cols_checked: None,
             bookmarks: BTreeSet::new(),
+            find_hl: Vec::new(),
             bracket_cache: RefCell::new(None),
             sel_span_cache: RefCell::new(None),
             show_whitespace: false,
@@ -693,11 +700,46 @@ impl EditorCore {
         self.typing_run = None; // P37：换文档即一切成组状态作废
                                 // 第 60 轮：新文档 = 新坐标系，旧书签一律作废（会话级标注不入快照）
         self.bookmarks.clear();
+        // P123：旧文档的查找命中表一并作废（查找栏仍开时由下一次
+        // FindScanDone 重新下发）
+        self.find_hl.clear();
         self.recompute_max_line_cols();
         // 第 61 轮：经唯一汇点失效——顺带清括号匹配缓存（光标复位 (0,0)
         // 恰是常见缓存键，静默重载后不得吐旧文档的陈旧配对）
         self.invalidate_highlight_from(0);
         self.preedit = None;
+    }
+
+    /// P123：下发查找命中高亮表（查找栏开态的全部命中快照）。表内容
+    /// 完全由应用层维护（扫描完成时替换、关栏/换文档清空），编辑器层
+    /// 只读绘制，不做失效推断。
+    pub fn set_find_highlights(&mut self, hits: Vec<editpad_core::MatchPos>) {
+        self.find_hl = hits;
+    }
+
+    /// P123：把命中 (line, col, len_chars) 拆成逐行 `[c0, c1)` 片段
+    /// （显示跨度口径：行尾换行单元计 1，与 `select_span` 同款走线）。
+    /// 供视口命中高亮按行/视觉段绘制；零宽命中产出空表。
+    pub(crate) fn match_line_pieces(
+        &self,
+        hit: &editpad_core::MatchPos,
+    ) -> Vec<(usize, usize, usize)> {
+        let mut out = Vec::new();
+        let mut line = hit.line;
+        let mut col = hit.col;
+        let mut remain = hit.len_chars;
+        while remain > 0 && line < self.doc.line_count() {
+            let line_len = self.line_display_len(line);
+            let take = remain.min(line_len.saturating_sub(col));
+            out.push((line, col, col + take));
+            remain -= take;
+            if remain > 0 {
+                remain -= 1; // 换行单元
+                line += 1;
+                col = 0;
+            }
+        }
+        out
     }
 
     // ---------- 高亮后台分批补建（P12 协作面） ----------

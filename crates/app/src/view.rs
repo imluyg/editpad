@@ -644,6 +644,15 @@ impl Editpad {
         self.find_scan = None;
         self.matches.clear();
         self.match_idx = None;
+        self.sync_find_highlights();
+    }
+
+    /// P123：把当前命中表同步进编辑器的视口高亮层——查找栏开态下发
+    /// 全部命中、关态清空。开/关/换结果的所有路径收口于此（关栏走
+    /// cancel_find_scan，扫描完成走 FindScanDone）。
+    pub(crate) fn sync_find_highlights(&mut self) {
+        let hits = if self.find_visible { self.matches.clone() } else { Vec::new() };
+        self.cur_handle.borrow_mut().set_find_highlights(hits);
     }
 
     pub(crate) fn find_scanning(&self) -> bool {
@@ -1263,6 +1272,14 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         .text_size(uipx)
                         .font(uifont)
                         .on_toggle(Message::WholeWordToggled),
+                    // P123：命中计数（扫描在途给动态反馈；0 处也如实显示）
+                    text(if self.find_scanning() {
+                        "扫描中…".to_owned()
+                    } else {
+                        format!("{} 处", self.matches.len())
+                    })
+                    .size(uipx)
+                    .font(uifont),
                     // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用）
                     button(text("查找全部").size(uipx).font(uifont))
                         .style(chrome_button_style)

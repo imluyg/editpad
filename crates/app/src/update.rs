@@ -1847,6 +1847,18 @@ impl Editpad {
                 self.find_visible = !self.find_visible;
                 if self.find_visible {
                     self.goto_visible = false;
+                    // P123：有选区则带入其文本作为查询（上限 1 万字符——
+                    // 防全选大文档把查询框与扫描撑爆；正则模式下原样带入，
+                    // 元字符由用户自行调整，主流「选中即查」同口径）
+                    let sel_len = self.cur_handle.borrow().selection_display_len();
+                    if matches!(sel_len, Some(n) if (1..=10_000).contains(&n)) {
+                        let text = self.cur_handle.borrow().selected_text();
+                        if let Some(text) = text {
+                            self.find_query = text;
+                            self.match_idx = None;
+                        }
+                    }
+                    self.sync_find_highlights();
                     return self.schedule_find_scan();
                 } else {
                     // 关栏即取消在途扫描并清结果（旧实现只清结果）
@@ -2091,6 +2103,8 @@ impl Editpad {
                     self.find_scan = None;
                     self.matches = found;
                     self.match_idx = None;
+                    // P123：新命中表同步视口高亮层
+                    self.sync_find_highlights();
                 }
                 Task::none()
             }
@@ -2099,6 +2113,9 @@ impl Editpad {
                 self.goto_visible = !self.goto_visible;
                 if self.goto_visible {
                     self.find_visible = false;
+                    // P123：查找栏被跳转栏顶掉时同步清视口高亮（命中表
+                    // 保留，重新开栏即恢复）
+                    self.sync_find_highlights();
                 }
                 Task::none()
             }
