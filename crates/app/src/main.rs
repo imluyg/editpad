@@ -31,6 +31,13 @@ pub(crate) use iced::{border::Radius, stream, window, Alignment, Background, Bor
 use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSpaceKind, TrimMode};
 
 fn main() -> iced::Result {
+    // 单实例互斥：同一份拷贝（同 exe 位置 → 同实例键）的第二个进程
+    // 弹原生提示后直接退出。必须在任何 iced/配置初始化之前拦截——
+    // 配置加载会触发遗留数据迁移等副作用，绝不与已运行实例并发
+    if !single_instance::acquire_single_instance() {
+        single_instance::notify_already_running();
+        return Ok(());
+    }
     // iced 0.14：第一个参数是 boot 函数（返回初始状态），title/theme/subscription 走 builder
     // 第 76 轮（用户点单）：窗口标题栏图标 = 应用自定义 Logo（P71 四档
     // ICO 的 48px 条目；解析失败回退 exe 资源图标，见 window_title_icon）
@@ -577,6 +584,7 @@ use icon::*;
 mod settings_ui;
 mod update;
 mod view;
+mod single_instance;
 #[cfg(test)]
 mod tests;
 

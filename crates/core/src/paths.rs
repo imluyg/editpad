@@ -59,6 +59,14 @@ fn instance_key(exe: &Path) -> String {
     format!("{:016x}", fnv1a64(canonical.to_string_lossy().as_bytes()))
 }
 
+/// 单实例互斥体名：按当前 exe 的实例键命名——同一份拷贝（同 exe 位置）
+/// 互斥，不同位置的拷贝各自单实例、彼此可共存（与数据目录的 P102
+/// 隔离口径一致）。exe 路径不可得时返回 None，调用方降级为允许多开。
+pub fn instance_mutex_name() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(format!("editpad-instance-{}", instance_key(&exe)))
+}
+
 /// FNV-1a 64b：无需依赖标准库哈希的随机种子（默认 SipHash 带随机 key，
 /// 跨进程不稳定，不可用于目录名）。
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -105,6 +113,17 @@ fn migrate_legacy(appdata: &Path, dir: &Path) {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn mutex_name_is_stable_and_prefixed() {
+        // 互斥体名按当前 exe 实例键派生：同进程内两次调用必然一致
+        //（跨进程稳定性由 instance_key 的 FNV 无种子性质保证）
+        let a = instance_mutex_name().expect("测试进程必能取到自身路径");
+        let b = instance_mutex_name().unwrap();
+        assert_eq!(a, b);
+        assert!(a.starts_with("editpad-instance-"), "实际 {a}");
+        assert!(a.len() <= 260, "内核对象名长度上限，实际 {a}");
+    }
 
     /// 每个 exe 位置一个实例目录：互不相同、同路径稳定；遗留目录整体
     /// 搬入首个实例且不再 互通（其余拷贝拿自己的空实例目录）。
