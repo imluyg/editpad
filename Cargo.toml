@@ -47,3 +47,10 @@ strip = "symbols"
 #   Default::default() + 逐字段赋值摆夹具，改结构体字面量反而冗长。
 [workspace.lints]
 clippy.field_reassign_with_default = "allow"
+
+# P117：vendor iced_tiny_skia 0.14 并最小修补——禁用其「部分损伤呈现」
+# （损伤计算与 softbuffer 复用缓冲失步，选区带等 quad 只上屏顶部 1px、
+# 其余停留旧帧；详见 vendor 内 compositor.rs 的 P117 注记）。待上游定位
+# 根因后可移除本补丁。
+[patch.crates-io]
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
