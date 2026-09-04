@@ -1,6 +1,6 @@
 //! 软换行（候选池⑯ Phase 1）地基组件。
 //!
-//! 设计文档：`docs/soft-wrap-design.md`（第 68 轮入库）。本模块提供两块
+//! 设计文档（第 68 轮入库，仅本地保留）。本模块提供两块
 //! 纯逻辑地基，供 Phase 1 后续轮接线 draw/hit_test/motion：
 //!
 //! * [`wrap_breaks`]：按**显示列**（与渲染 `char_cols` 同源：宽字符 2、

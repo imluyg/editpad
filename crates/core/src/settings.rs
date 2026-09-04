@@ -108,7 +108,7 @@ pub struct Settings {
     /// 第 73 轮 ⑯：自动换行（软换行）开关。默认关——关闭时视觉得到
     /// 恒等退化（与软换行引入前的渲染逐像素一致），一键可回退。
     /// 开启时：正文按视口宽折行为若干视觉行；水平滚动条隐藏、
-    /// scroll_left 锁 0、列块编辑禁用（设计 docs/soft-wrap-design.md）。
+    /// scroll_left 锁 0、列块编辑禁用（设计文档）。
     #[serde(default)]
     pub word_wrap: bool,
     /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
