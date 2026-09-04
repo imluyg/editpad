@@ -135,7 +135,11 @@ pub(crate) fn pixel_breaks(xs: &[f32], max_px: f32, body: &str) -> Vec<usize> {
 pub(crate) struct WrapIndex {
     bit: Vec<i64>, // 1-based Fenwick；bit[0] 占位
     seg_now: Vec<u32>,
-    memo: HashMap<usize, (u64, Rc<Vec<usize>>)>,
+    /// (gen, breaks, 断行路径=real_xs.is_some())。路径入键：同代内列
+    /// 模型↔像素互切（xs 注入/失效）即重算，列模型 memo 不冒充像素结果
+    /// （反之亦然）——换文档帧的脏 xs 曾以列模型/截断像素结果固化 memo，
+    /// 表现为 CJK 长行 boot 后整行不折、滚动不自愈。
+    memo: HashMap<usize, (u64, Rc<Vec<usize>>, bool)>,
     gen: u64,
 }
 
@@ -175,8 +179,9 @@ impl WrapIndex {
         max_px: f32,
         real_xs: Option<&[f32]>,
     ) -> Rc<Vec<usize>> {
-        if let Some((g, b)) = self.memo.get(&line) {
-            if *g == self.gen {
+        let pixel = real_xs.is_some();
+        if let Some((g, b, p)) = self.memo.get(&line) {
+            if *g == self.gen && *p == pixel {
                 return b.clone();
             }
         }
@@ -193,7 +198,7 @@ impl WrapIndex {
             self.bit_add(line, diff);
         }
         self.seg_now[line] = seg;
-        self.memo.insert(line, (self.gen, breaks.clone()));
+        self.memo.insert(line, (self.gen, breaks.clone(), pixel));
         breaks
     }
 

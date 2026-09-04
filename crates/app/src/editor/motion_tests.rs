@@ -1660,6 +1660,34 @@ fn p66_fractional_scroll_top_survives_clamp() {
     }
 
     #[test]
+    fn wrap_stale_row_layout_on_document_swap_must_not_pin_memo() {
+        // boot 折行事故（2026-08）：带文件启动时 CJK 长行整行不折、
+        // 滚动不自愈（编辑/最大化才自愈）。链路 = 换文档帧的 layout
+        // 先经 visible_range→locate_visual 用**上一帧布局**（此处手工
+        // 注入 1 项脏 xs 模拟空文档残留）调 set_line 写 memo；原
+        // locate_visual 不做长度校验，1 项 xs 被 pixel_breaks 截成
+        // 「整行一段」固化——之后 xs 注入恢复也不自愈（memo 只认
+        // gen）。修复 = 调用点统一 trusted_xs 对齐校验 + memo 记录
+        // 断行路径（列模型↔像素互切即重算）。
+        let mut c = core_with(&"汉".repeat(360));
+        c.set_viewport_width(1024.0);
+        c.set_viewport_height(600.0);
+        c.set_word_wrap(true);
+        // 换文档帧的脏布局：上一帧空文档的 line 0 布局 xs = [0.0]（1 项）
+        c.set_row_layout(0, vec![0.0]);
+        // layout 阶段的反解（visible_range 内部走 locate_visual）
+        let _ = c.visible_range();
+        // 本帧注入恢复正确布局：360 字 × 16px = 5760px ≫ 预算 975
+        let xs: Vec<f32> = (0..=360).map(|i| i as f32 * 16.0).collect();
+        c.set_row_layout(0, xs);
+        assert!(
+            c.line_visual_segments(0) > 1,
+            "脏 xs 固化 memo：换文档帧后 CJK 长行整行不折"
+        );
+        assert!(c.visual_rows_total() > 1, "总视觉行数未随真实布局收敛");
+    }
+
+    #[test]
     fn wrap_motion_vertical_uses_visual_rows_and_goal_column() {
         // 行 0：50 字符 → 2 段；行 1：70 字符 → 3 段。总视觉行 5。
         let mut c = wrap_core(&format!("{}\n{}\n", "a".repeat(50), "a".repeat(70)));

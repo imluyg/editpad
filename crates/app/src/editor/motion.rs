@@ -597,6 +597,18 @@ impl EditorCore {
         w.index.total()
     }
 
+    /// 可信的真实字形布局：与正文**逐字符对齐**（字符数 + 1）才返回。
+    /// 所有 [`WrapCache::segments_of`] 调用点必须经此取 xs——换文档/
+    /// 换行内容的帧里 row_layouts 尚存上一帧布局，残缺 xs 会让像素断行
+    /// 在截断前缀上漏判溢出（boot 后 CJK 长行整行不折、滚动不自愈）。
+    fn trusted_xs(&self, line: usize, body: &str) -> Option<&[f32]> {
+        let n = body.chars().count();
+        self.row_layouts
+            .get(&line)
+            .map(|v| v.as_slice())
+            .filter(|xs| xs.len() == n + 1)
+    }
+
     /// (line, col) 的视觉行号（开关关 = line）。
     pub fn visual_row_of(&self, line: usize, col: usize) -> u32 {
         if !self.wrap.borrow().enabled {
@@ -611,7 +623,7 @@ impl EditorCore {
             return prefix;
         }
         let body = self.line_text(line);
-        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        let real_xs = self.trusted_xs(line, &body);
         let breaks = w.segments_of(line, &body, real_xs);
         let seg = segment_index(&breaks, col, body.chars().count());
         prefix + seg as u32
@@ -626,26 +638,19 @@ impl EditorCore {
         let mut w = self.wrap.borrow_mut();
         w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
         let body = self.line_text(line);
-        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        let real_xs = self.trusted_xs(line, &body);
         w.segments_of(line, &body, real_xs).len() as u32
     }
 
     /// 逻辑行 `line` 的段首列向量（调用方常已持有正文，免二次取串；
     /// 内部按需重算并差值更新 BIT）。
     ///
-    /// 像素断行的 xs 必须与正文**逐字符对齐**（字符数 + 1）才可信：
-    /// shape 侧任何前缀截断/字体回退 cluster 丢字都会让溢出判定在
-    /// 残缺 xs 上漏判——表现为整行不折、一次编辑自愈（boot 后 CJK
-    /// 长行实测）。不对齐一律回退列模型，宁折勿溢。
+    /// xs 可信度见 [`Self::trusted_xs`]（历史：本处曾内联同款过滤，
+    /// locate_visual 等其余调用点漏防——boot 后 CJK 长行整行不折）。
     pub(crate) fn segments_of_line(&self, line: usize, body: &str) -> Rc<Vec<usize>> {
         let mut w = self.wrap.borrow_mut();
         w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
-        let char_count = body.chars().count();
-        let real_xs = self
-            .row_layouts
-            .get(&line)
-            .map(|v| v.as_slice())
-            .filter(|xs| xs.len() == char_count + 1);
+        let real_xs = self.trusted_xs(line, body);
         w.segments_of(line, body, real_xs)
     }
 
@@ -679,7 +684,7 @@ impl EditorCore {
         let line = lo.saturating_sub(1);
         let body = self.line_text(line);
         let lens = body.chars().count();
-        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        let real_xs = self.trusted_xs(line, &body);
         let breaks = w.segments_of(line, &body, real_xs);
         let off = (v.saturating_sub(w.index.prefix_rows(line))) as usize;
         let seg = off.min(breaks.len().saturating_sub(1));
@@ -1016,7 +1021,7 @@ impl EditorCore {
             let mut w = self.wrap.borrow_mut();
             w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
             let lens = text.chars().count();
-            let real_xs = self.row_layouts.get(&self.cursor.line).map(|x| x.as_slice());
+            let real_xs = self.trusted_xs(self.cursor.line, &text);
             let breaks = w.segments_of(self.cursor.line, &text, real_xs);
             let seg = segment_index(&breaks, col, lens);
             let v = w.index.prefix_rows(self.cursor.line) + seg as u32;
