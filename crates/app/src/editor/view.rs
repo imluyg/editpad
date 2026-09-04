@@ -1080,6 +1080,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     .saturating_add(rows_v)
                     .saturating_add(k_vis)
                     .min(total - 1);
+                // P118：组字行整行重排的绘制挂在其**首个被迭代到的段**上，
+                // 恒绘一次——修前挂在段 0（行号段）上，行号滚出视口顶后
+                // 循环只遇到段 ≥1、逐段 continue，组字行视口内部分整体
+                // 空白（用户截图：行号不可见时打字，上方文字全部消失）
+                let mut reflow_painted = false;
                 for v in first_v..=last_v {
                     let (line, seg, seg_start, seg_end) = core.locate_visual(v);
                     // 后续逻辑行整体下移：该行原首段之前的一切（含组字
@@ -1115,10 +1120,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             bounds,
                         );
                     }
-                    // P115 续：组字行（含空行）由首段全量重排绘制——
-                    // 段 0 覆盖全部新段（掩码裁视口外），其余旧表段跳过
+                    // P115 续：组字行（含空行）由重排全量绘制——首个被迭代
+                    // 到的段负责整行（新段逐段裁视口外，P118：不要求段 0
+                    // 在视口内），其余旧表段跳过
                     if reflow.as_ref().is_some_and(|r| r.line == line) {
-                        if seg == 0 {
+                        if !reflow_painted {
+                            reflow_painted = true;
                             let rtext = core.line_text(line);
                             let rruns = core.highlight_runs(line, &rtext);
                             if let Some(r) = &reflow {

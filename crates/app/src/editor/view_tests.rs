@@ -476,6 +476,96 @@ fn headless_preedit_clipped_at_wrap_right_edge_when_wrap_on() {
     assert!(inside_ink > 0, "组字前部墨迹缺失（裁过头/未渲染）");
 }
 
+/// P118 组字行首段滚出视口回归（headless 像素级）：软换行开态 + 长行
+/// 折成多段 + 下滚让行号（首段 v0）离开视口顶 + 行尾组字——修前 B 层
+/// 把组字行的重排绘制挂在段 0 上，段 0 滚出视口后循环只遇到段 ≥1、
+/// 逐段 continue，该行视口内正文整体空白（用户截图：行号不可见时
+/// 打字，上方文字全部消失）；修后 = 首个被迭代到的段即全量重排绘制。
+/// 断言：视口顶部可见段带有正文墨迹、总墨行覆盖大半视口（修前 = 0，
+/// 下划线/光标随组字尾落在视口外，正文区全白）。
+#[test]
+fn headless_preedit_reflow_paints_line_when_first_segment_scrolled_out() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (500u32, 260u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 460.0f32, 230.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&"中文折行测试".repeat(90)));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        // 光标落行尾（与用户场景一致：组字发生在行尾）
+        let end = c.line_display_len(0);
+        c.cursor = CursorPos { line: 0, col: end };
+        c.set_word_wrap(true);
+        c.ensure_visible();
+        assert!(c.visual_rows_total() > 3, "长行应折成多段（测试前提失效）");
+        // 下滚一行：行号（首段 v0 = 0）离开视口顶——「看不到行号」态
+        c.scroll_top = 1.0;
+        // 滚动条禁画（黑色 thumb 会污染墨迹判据，同 P114 口径）
+        c.sb_activity = None;
+        // 行尾组字（等价 Preedit 事件；focused 默认真）
+        assert!(c.ime_preedit("此时".to_owned()));
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    let (gutter, lh) = {
+        let c = core.borrow();
+        (c.gutter_width(), c.line_height())
+    };
+    let mut ink_rows = 0u32;
+    let mut first_ink = i32::MAX;
+    for y in ey as i32..(ey + eh) as i32 {
+        let mut row_ink = 0u32;
+        for x in (ex + gutter) as i32..(ex + ew) as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                let avg = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                if avg < 200 {
+                    row_ink += 1;
+                }
+            }
+        }
+        if row_ink > 0 {
+            ink_rows += 1;
+            first_ink = first_ink.min(y);
+        }
+    }
+    eprintln!("[P118] 墨行 {ink_rows} 首墨行 {first_ink}（ey={ey} lh={lh:.1}）");
+    assert!(
+        ink_rows as f32 >= 3.0 * lh,
+        "组字行首段滚出视口后正文消失（修前视口内整行空白，墨行≈0）"
+    );
+    assert!(
+        first_ink != i32::MAX && (first_ink as f32 - ey) < lh,
+        "首个可见段（视口顶行）应有正文墨迹"
+    );
+}
+
 /// P115 行中组字回归（headless 像素级）：组字串作为「虚拟插入文本」
 /// 参与行绘制——光标在**行中**时后文整体右移组字实测宽（不再与组字
 /// 重叠，用户复报「行中打字组字与已打的字重叠」；修前组字浮层直接
