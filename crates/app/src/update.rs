@@ -235,7 +235,16 @@ impl Editpad {
             active_font_family: active_font_family.map(leak_font_family),
             ..Self::default()
         };
-        state.cur().borrow_mut().set_font_size(font_size);
+        {
+            let mut ed = state.cur_handle.borrow_mut();
+            ed.set_font_size(font_size);
+            // 外观设置与 fresh_tab 同口径兜底：boot 初始页走 Self::default()
+            // 的 Tab::empty()、不经过 fresh_tab——漏下发则「重启后自动换行/
+            // 空白标记失效但设置里仍显示勾选」（用户实测：启动加载的文件
+            // 不折行、水平滚动条照旧出现，手动重勾一次才恢复）
+            ed.set_invisibles(state.settings.show_whitespace, state.settings.show_line_endings);
+            ed.set_word_wrap(state.settings.word_wrap);
+        }
         if configured_font_missing {
             if let Some(name) = state.settings.font_family.as_deref() {
                 state.status = format!("配置的字体「{name}」未安装，本次启动回退默认等宽");
@@ -272,18 +281,21 @@ impl Editpad {
         // 依赖 boot 任务的消息投递（iced 0.14 实测：boot 任务「立即
         // 输出」在窗口创建初期丢失，CaretTick 类延时输出正常；详见
         // 归档第 79 轮）。
-        let (state, boot_task) = if cli_files.is_empty() {
+        let (mut state, boot_task) = if cli_files.is_empty() {
             let task = state.boot_restore();
             (state, task)
         } else {
             state.boot_cli_kickoff(cli_files);
             (state, Task::none())
         };
+        // 单实例转发轮询链：已运行实例经实例目录的握手文件接收第二实例
+        // 递来的待开文件（双击文件而实例已在跑 = 新标签页打开而非弹窗）
+        let pending_open_poll = state.schedule_pending_open_poll();
         // 注：窗口标题栏图标（第 76 轮用户点单）在 main() 的
         // `.window(Settings { icon })` 声明期下发（见 window_title_icon）
         (
             state,
-            Task::batch([caret_chain, heartbeat_chain, boot_task]),
+            Task::batch([caret_chain, heartbeat_chain, boot_task, pending_open_poll]),
         )
     }
 
@@ -301,6 +313,15 @@ impl Editpad {
         // start_loading 返回恒为 none（登记即完成；加载流归订阅接管）
         let _ = self.start_loading(first, tab);
         self.pending_cli = rest.into();
+    }
+
+    /// 单实例转发握手文件的轮询链（自我续期，CaretTick/心跳同款模式）。
+    /// 每 400ms 一拍：常规代价 = 一次 stat，无转发时空转。
+    pub(crate) fn schedule_pending_open_poll(&mut self) -> Task<Message> {
+        Task::perform(
+            async { std::thread::sleep(std::time::Duration::from_millis(400)) },
+            |_| Message::PendingOpenTick,
+        )
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
@@ -330,6 +351,7 @@ impl Editpad {
         => self.update_settings(message),
         // ---------- 文件：打开/保存/编码/行尾/拖放/外部变更 ----------
         Message::OpenRequested | Message::FileChosen(..) | Message::FileDropped(..) | Message::OpenNextCliFile
+        | Message::PendingOpenTick
         | Message::LoadProgress(..) | Message::Loaded(..) | Message::SaveRequested | Message::SaveAsRequested
         | Message::SaveTargetChosen(..) | Message::Saved(..) | Message::TabAutosaved(..) | Message::WindowFocused
         | Message::ConfirmExternalReload(..) | Message::IgnoreExternalChange(..) | Message::IgnoreAllExternalChanges | Message::ConfirmOpenDiscard
@@ -1113,6 +1135,23 @@ impl Editpad {
                     return Task::none();
                 };
                 self.request_open(path)
+            }
+            Message::PendingOpenTick => {
+                // 单实例转发轮询（自我续期，CaretTick/心跳同款）：读实例
+                // 目录握手文件里第二实例递来的待开路径，走既有 CLI 队列
+                // 在新标签页逐个打开。busy（加载/对话框在途）时不动握手
+                // 文件、下一拍重试——防转发路径进队列后无人续排
+                if !self.busy {
+                    let paths = single_instance::take_pending_open();
+                    if !paths.is_empty() {
+                        self.pending_cli.extend(paths);
+                        return Task::batch([
+                            self.schedule_pending_open_poll(),
+                            self.update(Message::OpenNextCliFile),
+                        ]);
+                    }
+                }
+                self.schedule_pending_open_poll()
             }
             Message::LoadProgress(job_id, bytes_read, total_bytes) => {
                 if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {

@@ -71,6 +71,49 @@ pub(crate) fn notify_already_running() {
 #[cfg(not(windows))]
 pub(crate) fn notify_already_running() {}
 
+/// 第二实例的文件转发：把待开路径追加进实例目录的握手文件后正常退出
+/// （不弹提示——用户意图是打开文件，不是看弹窗）。已运行实例经轮询
+/// 读取后在新标签页逐个打开。exe 路径不可得（无法定位实例目录）时
+/// 无处可写，静默放弃。
+#[cfg(windows)]
+pub(crate) fn forward_pending_open(files: &[std::path::PathBuf]) {
+    let Some(base) = editpad_core::pending_open_path() else {
+        return;
+    };
+    let mut content = std::fs::read_to_string(&base).unwrap_or_default();
+    for f in files {
+        content.push_str(&f.to_string_lossy());
+        content.push('\n');
+    }
+    // 整批原子替换（临时文件 + rename 覆盖）：防第一实例读到半截行
+    let tmp = base.with_extension("txt.tmp");
+    if std::fs::write(&tmp, content.as_bytes()).is_ok() {
+        let _ = std::fs::rename(&tmp, &base);
+    }
+}
+
+/// 非 Windows 平台无单实例分支，自然也没有转发。
+#[cfg(not(windows))]
+pub(crate) fn forward_pending_open(_files: &[std::path::PathBuf]) {}
+
+/// 已运行实例侧：取走握手文件里的待开路径（读后即删，尽力而为）。
+/// 文件不存在 = 无转发（常态快速路径）。
+pub(crate) fn take_pending_open() -> Vec<std::path::PathBuf> {
+    let Some(base) = editpad_core::pending_open_path() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(&base) else {
+        return Vec::new();
+    };
+    let _ = std::fs::remove_file(&base);
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {

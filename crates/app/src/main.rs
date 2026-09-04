@@ -31,11 +31,22 @@ pub(crate) use iced::{border::Radius, stream, window, Alignment, Background, Bor
 use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSpaceKind, TrimMode};
 
 fn main() -> iced::Result {
-    // 单实例互斥：同一份拷贝（同 exe 位置 → 同实例键）的第二个进程
-    // 弹原生提示后直接退出。必须在任何 iced/配置初始化之前拦截——
-    // 配置加载会触发遗留数据迁移等副作用，绝不与已运行实例并发
+    // P103：命令行参数 = 待打开文件。资源管理器「双击文件」/右键
+    // 「打开方式」/多选右键「打开」都会把文件路径作为 argv 传给本程序
+    // （拖动进窗口走 FileDropped 事件，是另一条路）。必须在单实例
+    // 判定之前解析——第二实例要靠它决定「转发」还是「弹提示」
+    let cli_files = parse_cli_file_args(std::env::args_os());
+    // 单实例互斥：同一份拷贝（同 exe 位置 → 同实例键）只允许一个进程。
+    // 有待开文件的第二实例把路径**转发**给已运行实例（握手文件 + 轮询，
+    // 在新标签页打开）后静默退出；裸启动的第二实例才弹提示。
+    // 拦截必须先于任何 iced/配置初始化——配置加载会触发遗留数据迁移
+    // 等副作用，绝不与已运行实例并发
     if !single_instance::acquire_single_instance() {
-        single_instance::notify_already_running();
+        if cli_files.is_empty() {
+            single_instance::notify_already_running();
+        } else {
+            single_instance::forward_pending_open(&cli_files);
+        }
         return Ok(());
     }
     // iced 0.14：第一个参数是 boot 函数（返回初始状态），title/theme/subscription 走 builder
@@ -45,12 +56,8 @@ fn main() -> iced::Result {
     // 默认尺寸居中；配置损坏等异常均回退，不影响启动）
     let geometry = editpad_core::Settings::load();
     let (window_size, window_position) = restore_window_geometry(&geometry);
-    // P103：命令行参数 = 待打开文件。资源管理器「双击文件」/右键
-    // 「打开方式」/多选右键「打开」都会把文件路径作为 argv 传给本程序
-    // （拖动进窗口走 FileDropped 事件，是另一条路）。iced boot 函数
-    // 不收参数，用闭包捕获文件清单传入——boot 仅在事件循环启动时调用
-    // 一次，clone 开销可忽略。
-    let cli_files = parse_cli_file_args(std::env::args_os());
+    // boot 函数不收参数，用闭包捕获文件清单传入——boot 仅在事件循环
+    // 启动时调用一次，clone 开销可忽略。
     iced::application(move || Editpad::new(cli_files.clone()), Editpad::update, Editpad::view)
         .title(Editpad::title)
         .theme(Editpad::theme)
@@ -341,6 +348,8 @@ enum Message {
     /// 每次 Loaded 结算后续排——加载管线同一时刻只承接一个任务，多个
     /// 命令行文件必须串行；队列见 [`Editpad::pending_cli`]）
     OpenNextCliFile,
+    /// 单实例转发轮询拍：读实例目录握手文件里的待开路径（无则空转续期）
+    PendingOpenTick,
     /// 打开确认条「放弃更改并打开」：丢弃未保存修改并加载暂存路径
     ConfirmOpenDiscard,
     /// 打开确认条「取消」：留在当前文档

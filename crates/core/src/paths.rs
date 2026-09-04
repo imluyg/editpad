@@ -67,6 +67,13 @@ pub fn instance_mutex_name() -> Option<String> {
     Some(format!("editpad-instance-{}", instance_key(&exe)))
 }
 
+/// 单实例转发握手文件：第二实例把「想打开的文件路径」写入这里，
+/// 已运行实例轮询读取后在新标签页打开。与互斥体同键（同 exe 位置），
+/// 实例目录内平铺一个文件名。
+pub fn pending_open_path() -> Option<PathBuf> {
+    data_root().map(|root| root.join("pending_open.txt"))
+}
+
 /// FNV-1a 64b：无需依赖标准库哈希的随机种子（默认 SipHash 带随机 key，
 /// 跨进程不稳定，不可用于目录名）。
 fn fnv1a64(bytes: &[u8]) -> u64 {

@@ -632,10 +632,20 @@ impl EditorCore {
 
     /// 逻辑行 `line` 的段首列向量（调用方常已持有正文，免二次取串；
     /// 内部按需重算并差值更新 BIT）。
+    ///
+    /// 像素断行的 xs 必须与正文**逐字符对齐**（字符数 + 1）才可信：
+    /// shape 侧任何前缀截断/字体回退 cluster 丢字都会让溢出判定在
+    /// 残缺 xs 上漏判——表现为整行不折、一次编辑自愈（boot 后 CJK
+    /// 长行实测）。不对齐一律回退列模型，宁折勿溢。
     pub(crate) fn segments_of_line(&self, line: usize, body: &str) -> Rc<Vec<usize>> {
         let mut w = self.wrap.borrow_mut();
         w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
-        let real_xs = self.row_layouts.get(&line).map(|v| v.as_slice());
+        let char_count = body.chars().count();
+        let real_xs = self
+            .row_layouts
+            .get(&line)
+            .map(|v| v.as_slice())
+            .filter(|xs| xs.len() == char_count + 1);
         w.segments_of(line, body, real_xs)
     }
 
