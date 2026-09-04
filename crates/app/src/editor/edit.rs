@@ -45,16 +45,13 @@ impl EditorCore {
         let at = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
         let merges = match (self.typing_run, single) {
             (Some(run_end), Some(c)) => {
-                c != '\n'
-                    && c != '\r'
-                    && self.selection_offsets().is_none()
-                    && at == run_end
+                c != '\n' && c != '\r' && self.selection_offsets().is_none() && at == run_end
             }
             _ => false,
         };
         // 本次插入是否合格为「组内一员」——决定下一字符能否继续并入
-        let eligible =
-            matches!(single, Some(c) if c != '\n' && c != '\r') && self.selection_offsets().is_none();
+        let eligible = matches!(single, Some(c) if c != '\n' && c != '\r')
+            && self.selection_offsets().is_none();
         if !merges {
             self.snapshot();
         }
@@ -66,8 +63,11 @@ impl EditorCore {
         let replaced_span: Option<(usize, bool, usize, usize)> =
             self.ordered_selection().and_then(|(s, e)| {
                 (e.line > s.line).then(|| {
-                    let vanished =
-                        if e.col == 0 { e.line - 1 - s.line } else { e.line - s.line };
+                    let vanished = if e.col == 0 {
+                        e.line - 1 - s.line
+                    } else {
+                        e.line - s.line
+                    };
                     (s.line, s.col > 0, e.line, vanished)
                 })
             });
@@ -108,13 +108,36 @@ impl EditorCore {
         self.remap_shift_below(first_line, new_lines as isize);
         // P37：合格单字符插入把组延伸到新的结束偏移；换行/粘贴/选区替换
         // 保持 None——下一字符开新组
-        self.typing_run = if eligible { Some(start_offset + 1) } else { None };
+        self.typing_run = if eligible {
+            Some(start_offset + 1)
+        } else {
+            None
+        };
         self.ensure_visible();
     }
 
     /// 用给定文本替换当前选区；无选区时退化为插入。
     pub fn replace_selection(&mut self, text: &str) {
         self.insert_str(text);
+    }
+
+    /// P121 智能缩进回车：插入「换行 + 当前行行首空白」。
+    ///
+    /// 继承口径 = 行首到首个非空白字符（仅空格/Tab 计入），再与光标列取
+    /// 较小者——光标停在行首空白内时只带到光标处，不把其后的空白拖到
+    /// 新行。整体文本走 insert_str 统一入口：EOL 归一为主导行尾（P9）、
+    /// 换行开新撤销组（P37）、跨行选区替换的书签再映射全部继承。
+    pub fn enter(&mut self) {
+        let body = self.line_body_without_eol(self.cursor.line);
+        let indent_len = body
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .count()
+            .min(self.cursor.col);
+        let mut text = String::with_capacity(indent_len + 2);
+        text.push('\n');
+        text.extend(body.chars().take(indent_len));
+        self.insert_str(&text);
     }
 
     /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
@@ -251,7 +274,8 @@ impl EditorCore {
             Some(e.col.saturating_sub(s.col))
         } else if s.line < self.doc.line_count() && e.line < self.doc.line_count() {
             // 首行余部 + 其换行占 1；中间各行 disp+1；末行前缀 e.col
-            let mut n = self.line_display_len(s.line) - s.col.min(self.line_display_len(s.line)) + 1;
+            let mut n =
+                self.line_display_len(s.line) - s.col.min(self.line_display_len(s.line)) + 1;
             for l in (s.line + 1)..e.line {
                 n += self.line_display_len(l) + 1;
             }
@@ -280,8 +304,11 @@ impl EditorCore {
             // 终点行, 消失行数)，删除后按精化规则再映射书签（同 insert_str）
             let span = self.ordered_selection().and_then(|(s, e)| {
                 (e.line > s.line).then(|| {
-                    let vanished =
-                        if e.col == 0 { e.line - 1 - s.line } else { e.line - s.line };
+                    let vanished = if e.col == 0 {
+                        e.line - 1 - s.line
+                    } else {
+                        e.line - s.line
+                    };
                     (s.line, s.col > 0, e.line, vanished)
                 })
             });
@@ -314,7 +341,11 @@ impl EditorCore {
         if !self.focused {
             return false;
         }
-        self.preedit = if content.is_empty() { None } else { Some(content) };
+        self.preedit = if content.is_empty() {
+            None
+        } else {
+            Some(content)
+        };
         true
     }
 

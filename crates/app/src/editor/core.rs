@@ -14,8 +14,8 @@ pub(crate) use editpad_core::{
 };
 
 pub(crate) use super::metrics::{
-    char_cols, display_cols, measure_insertion, prefix_width,
-    validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
+    char_cols, display_cols, measure_insertion, prefix_width, validate_measured_char_width,
+    RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
 };
 pub(crate) use super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
 pub(crate) use super::wrap::{segment_index, WrapCache};
@@ -183,6 +183,14 @@ pub enum EditOp {
     // ---------- 第 67 轮：列块编辑 ----------
     /// 取消列块选区（Esc；不入热键注册表，固定语义）
     CancelBlock,
+    // ---------- P121：编辑手感——智能缩进与选区块缩进 ----------
+    /// 回车：插入「换行 + 当前行行首空白」（智能缩进）；换行经 insert_str
+    /// 统一入口归一为主导行尾。列块态不存活（apply_edit 白名单外先收块）
+    Enter,
+    /// Tab 键：bool = 是否 Shift 反缩进。有选区 = 触及行整块缩进/反缩进；
+    /// 无选区 = 加缩进仍是插入制表符（原语义），反缩进作用于当前行。
+    /// 列块态下加缩进仍走块内插制表符（apply_edit 白名单保路）
+    TabKey(bool),
 }
 
 /// 大小写转换方向（第 58 轮）。
@@ -433,8 +441,7 @@ pub fn scrollbar_alpha(idle_ms: u32) -> f32 {
     if idle_ms <= SCROLLBAR_IDLE_MS {
         1.0
     } else {
-        let remaining =
-            (SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS).saturating_sub(idle_ms);
+        let remaining = (SCROLLBAR_IDLE_MS + SCROLLBAR_FADE_MS).saturating_sub(idle_ms);
         remaining as f32 / SCROLLBAR_FADE_MS as f32
     }
 }
@@ -513,8 +520,7 @@ impl EditorCore {
     /// 假设值按 Consolas（≈0.55em）估的：P33 钉 NSimSun（0.5em）后每字符
     /// 累计 +1px 漂移，光标压字/离字（P42）皆源于此，实测后归零。
     pub fn char_width(&self) -> f32 {
-        self.measured_char_w
-            .unwrap_or(self.font_size * 0.5625)
+        self.measured_char_w.unwrap_or(self.font_size * 0.5625)
     }
 
     // ---------- 行级真实布局（第 40 轮根治） ----------
@@ -556,7 +562,9 @@ impl EditorCore {
     /// [`Self::max_row_width_px`] 消费；本查询供测试断言行级布局内容。
     #[allow(dead_code)]
     pub fn row_width_px(&self, line: usize) -> Option<f32> {
-        self.row_layouts.get(&line).and_then(|xs| xs.last().copied())
+        self.row_layouts
+            .get(&line)
+            .and_then(|xs| xs.last().copied())
     }
 
     /// 已注入行宽的最大值（水平行程钳制的真实补充上界）。
@@ -675,7 +683,7 @@ impl EditorCore {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.typing_run = None; // P37：换文档即一切成组状态作废
-        // 第 60 轮：新文档 = 新坐标系，旧书签一律作废（会话级标注不入快照）
+                                // 第 60 轮：新文档 = 新坐标系，旧书签一律作废（会话级标注不入快照）
         self.bookmarks.clear();
         self.recompute_max_line_cols();
         // 第 61 轮：经唯一汇点失效——顺带清括号匹配缓存（光标复位 (0,0)
@@ -728,7 +736,6 @@ impl EditorCore {
     // ---------- P53 竖直滚动条淡入淡出 ----------
 
     // ---------- 输入法事件的焦点裁决（P2） ----------
-
 }
 
 // ---------- 共享句柄 ----------
@@ -931,17 +938,17 @@ mod tests;
 // Phase 3b（第 85 轮）：core_tests 按 2c 域拆出的测试文件（随 undo/motion/edit/
 // block/highlight 拆分同步，纯搬移；共享助手留在 tests 模块并 pub(super) 提升）
 #[cfg(test)]
-#[path = "undo_tests.rs"]
-mod undo_tests;
-#[cfg(test)]
-#[path = "motion_tests.rs"]
-mod motion_tests;
+#[path = "block_tests.rs"]
+mod block_tests;
 #[cfg(test)]
 #[path = "edit_tests.rs"]
 mod edit_tests;
 #[cfg(test)]
-#[path = "block_tests.rs"]
-mod block_tests;
-#[cfg(test)]
 #[path = "highlight_tests.rs"]
 mod highlight_tests;
+#[cfg(test)]
+#[path = "motion_tests.rs"]
+mod motion_tests;
+#[cfg(test)]
+#[path = "undo_tests.rs"]
+mod undo_tests;

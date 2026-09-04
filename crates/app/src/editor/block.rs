@@ -1,3 +1,4 @@
+use super::metrics::TAB_STOP_COLS;
 use super::*;
 
 impl EditorCore {
@@ -6,8 +7,11 @@ impl EditorCore {
     pub(crate) fn touched_lines(&self) -> (usize, usize) {
         match self.ordered_selection() {
             Some((start, end)) => {
-                let last =
-                    if end.col == 0 && end.line > start.line { end.line - 1 } else { end.line };
+                let last = if end.col == 0 && end.line > start.line {
+                    end.line - 1
+                } else {
+                    end.line
+                };
                 (start.line, last)
             }
             None => (self.cursor.line, self.cursor.line),
@@ -25,8 +29,11 @@ impl EditorCore {
         let count = self.doc.line_count();
         let (a, b) = self.touched_lines();
         let start = self.doc.line_to_char(a);
-        let end =
-            if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        let end = if b + 1 < count {
+            self.doc.line_to_char(b + 1)
+        } else {
+            self.doc.text_len()
+        };
         let (start, end, removed_rows) = if start == end {
             if a == 0 {
                 return false; // 唯一内容为空：无可删
@@ -63,8 +70,11 @@ impl EditorCore {
         let count = self.doc.line_count();
         let (a, b) = self.touched_lines();
         let start = self.doc.line_to_char(a);
-        let end =
-            if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        let end = if b + 1 < count {
+            self.doc.line_to_char(b + 1)
+        } else {
+            self.doc.text_len()
+        };
         let text = self.doc.slice_text(start, end);
         if text.is_empty() {
             return false; // 空文档 / 幻影末行无内容可复制
@@ -90,7 +100,10 @@ impl EditorCore {
         self.remap_shift_below(b, (b - a + 1) as isize);
         self.anchor = None;
         // 插入点恒为第 b+1 行行首（块内已有行尾 / 已补行尾）
-        self.cursor = CursorPos { line: b + 1, col: 0 };
+        self.cursor = CursorPos {
+            line: b + 1,
+            col: 0,
+        };
         self.ensure_visible();
         true
     }
@@ -112,16 +125,23 @@ impl EditorCore {
             (a, b + 1)
         };
         // 光标列尽量保持（钳到原行长度；换位后行长可能不同，仅取近似）
-        let keep_col = self.cursor.col.min(self.doc.line_len_chars(self.cursor.line));
+        let keep_col = self
+            .cursor
+            .col
+            .min(self.doc.line_len_chars(self.cursor.line));
         let rs = self.doc.line_to_char(first);
-        let re =
-            if last + 1 < count { self.doc.line_to_char(last + 1) } else { self.doc.text_len() };
+        let re = if last + 1 < count {
+            self.doc.line_to_char(last + 1)
+        } else {
+            self.doc.text_len()
+        };
         // 区域内各行内容按方向旋转一行后以主导行尾重建；原区域以行尾
         // 结尾则重建串同样收尾（文档末行无行尾的形态保持）。
         // 混合行尾经此归一到主导行尾——与 P9「编辑不产生混合行尾」同哲学。
         // 第 59 轮起经共用助手剥行尾（口径：`\r\n`/`\n`/孤立 `\r` 皆换行）。
-        let mut lines: Vec<String> =
-            (first..=last).map(|i| self.line_body_without_eol(i)).collect();
+        let mut lines: Vec<String> = (first..=last)
+            .map(|i| self.line_body_without_eol(i))
+            .collect();
         if up {
             lines.rotate_left(1);
         } else {
@@ -139,8 +159,11 @@ impl EditorCore {
         self.max_cols_stale = true;
         // 第 60 轮：块内轮转的书签跟随——上移时相邻上行换入块尾、块内
         // 各上移一位；下移对称（相邻下行换入块头、块内各下移一位）
-        let (enter_from, enter_to, inner) =
-            if up { (a - 1, b, -1i64) } else { (b + 1, a, 1i64) };
+        let (enter_from, enter_to, inner) = if up {
+            (a - 1, b, -1i64)
+        } else {
+            (b + 1, a, 1i64)
+        };
         self.bookmarks = self
             .bookmarks
             .iter()
@@ -155,7 +178,10 @@ impl EditorCore {
             })
             .collect();
         self.anchor = None;
-        self.cursor = CursorPos { line: if up { a - 1 } else { b + 1 }, col: keep_col };
+        self.cursor = CursorPos {
+            line: if up { a - 1 } else { b + 1 },
+            col: keep_col,
+        };
         self.ensure_visible();
         true
     }
@@ -227,8 +253,11 @@ impl EditorCore {
             (0, count.saturating_sub(1))
         };
         let rs = self.doc.line_to_char(a);
-        let re =
-            if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        let re = if b + 1 < count {
+            self.doc.line_to_char(b + 1)
+        } else {
+            self.doc.text_len()
+        };
         let mut changed = false;
         let mut lines: Vec<String> = Vec::with_capacity(b - a + 1);
         for i in a..=b {
@@ -261,8 +290,10 @@ impl EditorCore {
         self.invalidate_highlight_from(rs);
         self.max_cols_stale = true;
         self.anchor = None;
-        self.cursor =
-            CursorPos { line: keep_line, col: keep_col.min(self.line_display_len(keep_line)) };
+        self.cursor = CursorPos {
+            line: keep_line,
+            col: keep_col.min(self.line_display_len(keep_line)),
+        };
         self.ensure_visible();
         true
     }
@@ -270,6 +301,100 @@ impl EditorCore {
     /// 取第 `i` 行正文：剥掉行尾换行单元。ropey 换行口径 = `\r\n`、`\n`、
     /// **孤立 `\r`** 三者皆是换行（第 59 轮实测钉死），故末尾的 `\r` 同样
     /// 属换行单元而非内容，必须剥除。
+    /// P121 选区块缩进/反缩进（Tab / Shift+Tab）。
+    ///
+    /// - 有选区：触及行整块加/去一层缩进；无选区：加缩进 = 插入一个
+    ///   制表符（原 Tab 语义不变），反缩进 = 当前行去一层；
+    /// - 缩进单位恒为 `\t`——显示层 `char_cols` 展开到制表位，与 Tab↔空格
+    ///   转换、软换行断行同源，保存往返不失真；
+    /// - 反缩进：行首一个 `\t`，否则至多 [`TAB_STOP_COLS`] 个行首空格
+    ///   （不足一个制表位的零星空格一并收掉），行首无空白则该行不动；
+    /// - 空行/纯空白行同样加缩进（整块可逆，反缩进原样剥回）；
+    /// - 选区覆盖同一段文本：触及行的列按所在行的行首增减量平移
+    ///   （列 0 恒保持列 0，光标/锚点各自平移）；行数不变 → 书签无需再映射；
+    /// - 幻影末行不入块（与 [`Self::collect_line_block`] 同款排除）；
+    /// - 幂等：无任何行发生改动时不产快照、返回 false。
+    pub fn indent_touched_lines(&mut self, outdent: bool) -> bool {
+        let has_sel = self.anchor.is_some();
+        if !has_sel && !outdent {
+            self.insert_str("\t"); // 无选区 Tab：保持原插制表符语义
+            return true;
+        }
+        let (a, b) = if has_sel {
+            self.touched_lines()
+        } else {
+            (self.cursor.line, self.cursor.line)
+        };
+        let count = self.doc.line_count();
+        let len = self.doc.text_len();
+        let start = self.doc.line_to_char(a);
+        let end = if b + 1 < count {
+            self.doc.line_to_char(b + 1)
+        } else {
+            len
+        };
+        // 块尾换行补回判定与幻影末行排除（collect_line_block 同口径：
+        // 文档以换行收尾且块顶到文档尾时，末空壳行不入块）
+        let nl_tail = end == len
+            && len > start
+            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let last = if nl_tail && b == count - 1 && b > a {
+            b - 1
+        } else {
+            b
+        };
+        let bodies: Vec<String> = (a..=last).map(|i| self.line_body_without_eol(i)).collect();
+        let mut new_bodies: Vec<String> = Vec::with_capacity(bodies.len());
+        let mut deltas: Vec<isize> = Vec::with_capacity(bodies.len());
+        for body in &bodies {
+            if outdent {
+                let stripped = strip_one_indent_unit(body);
+                deltas.push(stripped.len() as isize - body.len() as isize);
+                new_bodies.push(stripped);
+            } else {
+                let mut nb = String::with_capacity(body.len() + 1);
+                nb.push('\t');
+                nb.push_str(body);
+                deltas.push(1);
+                new_bodies.push(nb);
+            }
+        }
+        if new_bodies == bodies {
+            return false; // 幂等 no-op：反缩进无空白可收，不产快照
+        }
+        self.snapshot();
+        let nl = self.doc.line_ending().newline();
+        let mut rebuilt = new_bodies.join(nl);
+        if end < len || nl_tail {
+            rebuilt.push_str(nl);
+        }
+        self.doc.remove_range(start, end);
+        self.doc.insert(start, &rebuilt);
+        self.invalidate_highlight_from(start);
+        // 行长可能增减——列高水位交惰性收敛（P45 口径）
+        self.max_cols_stale = true;
+        // 光标/锚点列随所在行的行首增量平移（列 0 恒保持列 0；反缩进时
+        // 落在被剥空白内的列钳回 0）
+        let shifted = |line: usize, col: usize| -> usize {
+            if (a..=last).contains(&line) && col > 0 {
+                let d = deltas[line - a];
+                if d >= 0 {
+                    col + d as usize
+                } else {
+                    col.saturating_sub((-d) as usize)
+                }
+            } else {
+                col
+            }
+        };
+        self.cursor.col = shifted(self.cursor.line, self.cursor.col);
+        if let Some(anchor) = self.anchor.as_mut() {
+            anchor.col = shifted(anchor.line, anchor.col);
+        }
+        self.ensure_visible();
+        true
+    }
+
     pub(crate) fn line_body_without_eol(&self, i: usize) -> String {
         let mut s = self.doc.line_str(i);
         if s.ends_with("\r\n") {
@@ -283,10 +408,17 @@ impl EditorCore {
     pub(crate) fn collect_line_block(&self) -> LineBlock {
         let count = self.doc.line_count();
         let len = self.doc.text_len();
-        let (a, b) =
-            if self.anchor.is_some() { self.touched_lines() } else { (0, count.saturating_sub(1)) };
+        let (a, b) = if self.anchor.is_some() {
+            self.touched_lines()
+        } else {
+            (0, count.saturating_sub(1))
+        };
         let start = self.doc.line_to_char(a);
-        let end = if b + 1 < count { self.doc.line_to_char(b + 1) } else { len };
+        let end = if b + 1 < count {
+            self.doc.line_to_char(b + 1)
+        } else {
+            len
+        };
         // 幻影末行检测：块到达文档末尾且原文以换行单元收尾（`\n` 或孤立
         // `\r`，ropey 口径两者皆换行）→ 最后一行是空壳。仅在块内还有
         // 更前面的行时才排除（a == b 时无从回退，交由调用方的「不足两行」
@@ -323,7 +455,12 @@ impl EditorCore {
     ///
     /// `map[rel]` = 块内原第 rel 行的新块内位置（None = 内容消失）——
     /// 先快照（携带重排前的书签集）再按映射搬迁书签，最后重写文档字节。
-    pub(crate) fn apply_line_block(&mut self, blk: &LineBlock, lines: &[String], map: &[Option<usize>]) {
+    pub(crate) fn apply_line_block(
+        &mut self,
+        blk: &LineBlock,
+        lines: &[String],
+        map: &[Option<usize>],
+    ) {
         let keep_line = self.cursor.line.clamp(blk.a, blk.b);
         let keep_col = self.cursor.col;
         self.snapshot();
@@ -344,8 +481,10 @@ impl EditorCore {
         // （删空行/合并）后旧光标行可能超出新行数（随机对拍当场抓住：
         // 全删空文档只剩 1 行而 keep_line 仍是旧的大行号）
         let keep_line = keep_line.min(self.doc.line_count() - 1);
-        self.cursor =
-            CursorPos { line: keep_line, col: keep_col.min(self.line_display_len(keep_line)) };
+        self.cursor = CursorPos {
+            line: keep_line,
+            col: keep_col.min(self.line_display_len(keep_line)),
+        };
         self.ensure_visible();
     }
 
@@ -458,14 +597,18 @@ impl EditorCore {
             (a, a + 1)
         };
         let start = self.doc.line_to_char(a);
-        let end = if b + 1 < count { self.doc.line_to_char(b + 1) } else { self.doc.text_len() };
+        let end = if b + 1 < count {
+            self.doc.line_to_char(b + 1)
+        } else {
+            self.doc.text_len()
+        };
         // 区域尾字节是否换行单元（\n / 孤立 \r）：决定重建时是否补回
         // 块尾换行——选中真实末行（其行尾即文档末尾换行）时同样成立，
         // 不能只看「块不在文档末尾」
         let len = self.doc.text_len();
-        let nl_tail =
-            end == len && end > start
-                && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let nl_tail = end == len
+            && end > start
+            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
         // 幻影末行排除：仅当 b 本身就是文档最后一行（ropey 在尾随换行后
         // 多出的空壳行）且区域确以换行收尾。b 是唯一真实行的场景无从回
         // 退，直接按无可并内容处理。
@@ -481,8 +624,7 @@ impl EditorCore {
         if last <= a {
             return false; // 触及块实际不足两行
         }
-        let bodies: Vec<String> =
-            (a..=last).map(|i| self.line_body_without_eol(i)).collect();
+        let bodies: Vec<String> = (a..=last).map(|i| self.line_body_without_eol(i)).collect();
         let mut joined = String::new();
         for part in &bodies {
             let t = part.trim();
@@ -494,10 +636,18 @@ impl EditorCore {
             }
             joined.push_str(t);
         }
-        let blk = LineBlock { a, b, start, end, push_nl: end < len || nl_tail, lines: bodies };
+        let blk = LineBlock {
+            a,
+            b,
+            start,
+            end,
+            push_nl: end < len || nl_tail,
+            lines: bodies,
+        };
         let n = last - a + 1;
-        let map: Vec<Option<usize>> =
-            (0..n).map(|rel| if rel == 0 { Some(0) } else { None }).collect();
+        let map: Vec<Option<usize>> = (0..n)
+            .map(|rel| if rel == 0 { Some(0) } else { None })
+            .collect();
         self.apply_line_block(&blk, &[joined], &map);
         // 块由 n 行并为 1 行：块尾之下的书签整体上移 n-1 行
         self.shift_bookmarks_below(blk.b, -(n as isize - 1));
@@ -557,12 +707,15 @@ impl EditorCore {
         // 末尾换行，重建必须补回；无尾随换行的文档则不加
         let count = self.doc.line_count();
         let start_off = self.doc.line_to_char(ls);
-        let end_off =
-            if le + 1 < count { self.doc.line_to_char(le + 1) } else { self.doc.text_len() };
+        let end_off = if le + 1 < count {
+            self.doc.line_to_char(le + 1)
+        } else {
+            self.doc.text_len()
+        };
         let len = self.doc.text_len();
-        let nl_tail =
-            end_off == len && end_off > start_off
-                && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let nl_tail = end_off == len
+            && end_off > start_off
+            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
         let mut new_lines = Vec::with_capacity(middle.len() + 2);
         new_lines.push(pre);
         new_lines.extend(middle.iter().cloned());
@@ -596,13 +749,13 @@ impl EditorCore {
         };
         self.apply_line_block(&blk, &new_lines, &map);
         // 块行数增量 = 新行数 - 原行数：块尾之下的书签整体平移
-        self.shift_bookmarks_below(
-            le,
-            new_lines.len() as isize - blk.lines.len() as isize,
-        );
+        self.shift_bookmarks_below(le, new_lines.len() as isize - blk.lines.len() as isize);
         // 光标落到断出的新内容行首（无选区 = 后半段行首；选区 = 摘出行首）
         let target = (ls + 1).min(self.doc.line_count().saturating_sub(1));
-        self.cursor = CursorPos { line: target, col: 0 };
+        self.cursor = CursorPos {
+            line: target,
+            col: 0,
+        };
         self.ensure_visible();
         true
     }
@@ -667,7 +820,10 @@ impl EditorCore {
             return;
         }
         self.block_dragging = true;
-        self.block_sel = Some(BlockSel { anchor: at, head: at });
+        self.block_sel = Some(BlockSel {
+            anchor: at,
+            head: at,
+        });
         // 块态与单选区互斥
         self.anchor = None;
         self.break_typing();
@@ -748,7 +904,10 @@ impl EditorCore {
         self.invalidate_highlight_from(self.doc.line_to_char(r0));
         self.max_cols_stale = true;
         self.block_sel = None;
-        self.cursor = CursorPos { line: r0, col: c0.min(self.line_display_len(r0)) };
+        self.cursor = CursorPos {
+            line: r0,
+            col: c0.min(self.line_display_len(r0)),
+        };
         self.ensure_visible();
         true
     }
@@ -813,7 +972,10 @@ impl EditorCore {
         self.max_cols_stale = true;
         self.block_sel = None;
         let new_col = c0 + lines[0].chars().count();
-        self.cursor = CursorPos { line: r0, col: new_col.min(self.line_display_len(r0)) };
+        self.cursor = CursorPos {
+            line: r0,
+            col: new_col.min(self.line_display_len(r0)),
+        };
         self.ensure_visible();
         true
     }
@@ -825,8 +987,8 @@ impl EditorCore {
         let lang = self.highlight_syntax_name().unwrap_or_default();
         let lang = lang.to_ascii_lowercase();
         match lang.as_str() {
-            "python" | "ruby" | "shellscript" | "bash" | "yaml" | "toml" | "ini"
-            | "properties" | "r" | "perl" => "#",
+            "python" | "ruby" | "shellscript" | "bash" | "yaml" | "toml" | "ini" | "properties"
+            | "r" | "perl" => "#",
             "sql" | "lua" => "--",
             "batch file" | "bat" | "dosbatch" => "::",
             _ => "//", // rust/c/cpp/java/js/ts/go/json/css/php/未知……
@@ -956,7 +1118,10 @@ impl EditorCore {
         }
         self.break_typing();
         self.anchor = None;
-        self.cursor = CursorPos { line: target, col: 0 };
+        self.cursor = CursorPos {
+            line: target,
+            col: 0,
+        };
         self.ensure_visible();
         true
     }
@@ -1018,7 +1183,11 @@ impl EditorCore {
         let mut first_deleted_at = usize::MAX;
         for (a, b) in runs {
             let start = self.doc.line_to_char(a);
-            let end = if b + 1 < count { self.doc.line_to_char(b + 1) } else { len };
+            let end = if b + 1 < count {
+                self.doc.line_to_char(b + 1)
+            } else {
+                len
+            };
             if start < end {
                 spans.push((start, end));
             } else if start > 0 {
@@ -1063,8 +1232,11 @@ impl EditorCore {
             .bookmarks
             .iter()
             .filter_map(|&l| {
-                let moved =
-                    if l > from_exclusive { l as isize + delta } else { l as isize };
+                let moved = if l > from_exclusive {
+                    l as isize + delta
+                } else {
+                    l as isize
+                };
                 usize::try_from(moved).ok()
             })
             .collect();
@@ -1120,8 +1292,11 @@ impl EditorCore {
         } else {
             self.bookmarks.remove(&start_line);
         }
-        let interior: Vec<usize> =
-            self.bookmarks.range(start_line + 1..end_line).copied().collect();
+        let interior: Vec<usize> = self
+            .bookmarks
+            .range(start_line + 1..end_line)
+            .copied()
+            .collect();
         for l in interior {
             self.bookmarks.remove(&l);
         }
@@ -1169,4 +1344,19 @@ impl EditorCore {
             })
             .collect();
     }
+}
+
+/// P121：反缩进时剥掉一层行首缩进——优先剥一个 `\t`，否则至多剥
+/// [`TAB_STOP_COLS`] 个行首空格（不足一个制表位的零星空格一并收掉）。
+/// 行首非空白开头时原样返回。行首若为空白必然是 ASCII（ropey 口径
+/// `\r`/`\n` 是换行单元，不会出现在行体内），字节切片安全。
+fn strip_one_indent_unit(body: &str) -> String {
+    if let Some(rest) = body.strip_prefix('\t') {
+        return rest.to_owned();
+    }
+    let spaces = body.len() - body.trim_start_matches(' ').len();
+    if spaces == 0 {
+        return body.to_owned();
+    }
+    body[spaces.min(TAB_STOP_COLS)..].to_owned()
 }

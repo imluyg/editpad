@@ -1,5 +1,5 @@
-use super::*;
 use super::settings_ui::SettingsPage;
+use super::*;
 
 impl Editpad {
     // ---------- 多标签访问器（P21） ----------
@@ -24,7 +24,9 @@ impl Editpad {
             self.settings.show_line_endings,
         );
         // 第 73 轮 ⑯：自动换行（软换行）同口径下发（fresh_tab 幂等）
-        tab.editor.borrow_mut().set_word_wrap(self.settings.word_wrap);
+        tab.editor
+            .borrow_mut()
+            .set_word_wrap(self.settings.word_wrap);
         tab
     }
 
@@ -242,7 +244,10 @@ impl Editpad {
             // 的 Tab::empty()、不经过 fresh_tab——漏下发则「重启后自动换行/
             // 空白标记失效但设置里仍显示勾选」（用户实测：启动加载的文件
             // 不折行、水平滚动条照旧出现，手动重勾一次才恢复）
-            ed.set_invisibles(state.settings.show_whitespace, state.settings.show_line_endings);
+            ed.set_invisibles(
+                state.settings.show_whitespace,
+                state.settings.show_line_endings,
+            );
             ed.set_word_wrap(state.settings.word_wrap);
         }
         if configured_font_missing {
@@ -253,9 +258,7 @@ impl Editpad {
         // P18 打磨：启动光标闪烁心跳链（自我续期，占用一个睡眠节拍）
         let caret_chain = Task::perform(
             async {
-                std::thread::sleep(std::time::Duration::from_millis(
-                    editor::CARET_BLINK_MS,
-                ));
+                std::thread::sleep(std::time::Duration::from_millis(editor::CARET_BLINK_MS));
             },
             |_| Message::CaretTick,
         );
@@ -326,54 +329,133 @@ impl Editpad {
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match &message {
-        // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
-        Message::Edit(..) | Message::EditorNavChanged | Message::CopyRequested | Message::CutRequested
-        | Message::PasteRequested | Message::Pasted(..) | Message::KeyPressed(..) | Message::HighlightPaveNeeded
-        | Message::FormatJson | Message::HlPaveProgress(..) | Message::HlPaved(..) | Message::CaretTick
-        | Message::PreviewToggled | Message::CursorMoved(..) | Message::ViewportResized(..)
-        => self.update_editor(message),
-        // ---------- 标签页/右键菜单/批关 ----------
-        Message::CopyFilePath(..) | Message::CopyFileName(..) | Message::ReopenLastClosedFile | Message::NewTab
-        | Message::TabStripBlankPressed | Message::SwitchTabNext | Message::SwitchTabPrev | Message::SwitchTab(..) | Message::CloseTabRequest
-        | Message::ConfirmCloseTabDiscard(..) | Message::CancelCloseTab | Message::CloseTabSave(..) | Message::TabContextMenu(..)
-        | Message::TabContextMenuClosed | Message::TogglePinTab(..) | Message::SaveTabFromMenu(..) | Message::RenameOrSaveAsTab(..)
-        | Message::TabRenameInputChanged(..) | Message::TabRenameCommitted | Message::TabRenameCancelled | Message::CloseTabAt(..)
-        | Message::CloseOtherTabs(..) | Message::CloseTabsRight(..) | Message::ConfirmBatchCloseDiscard | Message::CancelBatchCloseTabs
-        | Message::TabHovered(..)
-        => self.update_tabs(message),
-        // ---------- 设置/字体/热键 ----------
-        Message::SettingsShowWhitespaceToggled(..) | Message::SettingsShowLineEndingsToggled(..) | Message::SettingsWordWrapToggled(..) | Message::HotkeyCaptureStarted(..)
-        | Message::HotkeyCaptureKey(..) | Message::HotkeyCaptureCancel | Message::HotkeysResetAll | Message::ThemeToggled
-        | Message::FontSizeDelta(..) | Message::SettingsToggled | Message::SettingsPageSelected(..) | Message::SettingsSearchChanged(..)
-        | Message::SettingsAutosaveToggled(..) | Message::SettingsAutosaveDelayDelta(..) | Message::SettingsRememberRecentToggled(..) | Message::SettingsSnapshotsToggled(..)
-        | Message::SettingsBackupModeToggled | Message::SettingsRememberSessionToggled(..) | Message::SettingsExitModeToggled | Message::SettingsIntervalDelta(..)
-        | Message::SettingsFontSelected(..) | Message::SettingsFontReset | Message::FontFilterChanged(..)
-        => self.update_settings(message),
-        // ---------- 文件：打开/保存/编码/行尾/拖放/外部变更 ----------
-        Message::OpenRequested | Message::FileChosen(..) | Message::FileDropped(..) | Message::OpenNextCliFile
-        | Message::PendingOpenTick
-        | Message::LoadProgress(..) | Message::Loaded(..) | Message::SaveRequested | Message::SaveAsRequested
-        | Message::SaveTargetChosen(..) | Message::Saved(..) | Message::TabAutosaved(..) | Message::WindowFocused
-        | Message::ConfirmExternalReload(..) | Message::IgnoreExternalChange(..) | Message::IgnoreAllExternalChanges | Message::ConfirmOpenDiscard
-        | Message::ConfirmOpenCancel | Message::ToggleEncodingMenu | Message::ToggleEolMenu | Message::SaveWithEncoding(..)
-        | Message::ConvertEol(..) | Message::TabSaved(..)
-        => self.update_file(message),
-        // ---------- 菜单栏/最近文件/面板 ----------
-        Message::MenuToggled(..) | Message::MenubarHovered(..) | Message::MenubarPressed | Message::RecentsToggled
-        | Message::RecentSelected(..) | Message::RecentsCleared | Message::BarsDismissed
-        => self.update_menus(message),
-        // ---------- 会话/快照/关窗/窗口 ----------
-        Message::CloseRequested(..) | Message::ConfirmSaveAndClose | Message::DiscardAndClose | Message::CancelClose
-        | Message::SessionRecoverAccepted | Message::SessionRecoverDiscarded | Message::SnapshotHeartbeatTick | Message::HeartbeatDone(..)
-        | Message::WindowMoved(..)
-        => self.update_session(message),
-        // ---------- 查找/替换/跳转/查找全部 ----------
-        Message::FindToggled | Message::FindQueryChanged(..) | Message::FindNext | Message::FindPrev
-        | Message::FindAllToggled | Message::FindAllGoto(..) | Message::CaseToggled(..) | Message::RegexToggled(..)
-        | Message::WholeWordToggled(..)
-        | Message::ReplaceQueryChanged(..) | Message::ReplaceCurrent | Message::ReplaceCurrentRegex | Message::ReplaceAll
-        | Message::FindScanDone(..) | Message::GotoToggled | Message::GotoInputChanged(..) | Message::GotoSubmit
-        => self.update_find(message),
+            // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
+            Message::Edit(..)
+            | Message::EditorNavChanged
+            | Message::CopyRequested
+            | Message::CutRequested
+            | Message::PasteRequested
+            | Message::Pasted(..)
+            | Message::KeyPressed(..)
+            | Message::HighlightPaveNeeded
+            | Message::FormatJson
+            | Message::HlPaveProgress(..)
+            | Message::HlPaved(..)
+            | Message::CaretTick
+            | Message::PreviewToggled
+            | Message::CursorMoved(..)
+            | Message::ViewportResized(..) => self.update_editor(message),
+            // ---------- 标签页/右键菜单/批关 ----------
+            Message::CopyFilePath(..)
+            | Message::CopyFileName(..)
+            | Message::ReopenLastClosedFile
+            | Message::NewTab
+            | Message::TabStripBlankPressed
+            | Message::SwitchTabNext
+            | Message::SwitchTabPrev
+            | Message::SwitchTab(..)
+            | Message::CloseTabRequest
+            | Message::ConfirmCloseTabDiscard(..)
+            | Message::CancelCloseTab
+            | Message::CloseTabSave(..)
+            | Message::TabContextMenu(..)
+            | Message::TabContextMenuClosed
+            | Message::TogglePinTab(..)
+            | Message::SaveTabFromMenu(..)
+            | Message::RenameOrSaveAsTab(..)
+            | Message::TabRenameInputChanged(..)
+            | Message::TabRenameCommitted
+            | Message::TabRenameCancelled
+            | Message::CloseTabAt(..)
+            | Message::CloseOtherTabs(..)
+            | Message::CloseTabsRight(..)
+            | Message::ConfirmBatchCloseDiscard
+            | Message::CancelBatchCloseTabs
+            | Message::TabHovered(..) => self.update_tabs(message),
+            // ---------- 设置/字体/热键 ----------
+            Message::SettingsShowWhitespaceToggled(..)
+            | Message::SettingsShowLineEndingsToggled(..)
+            | Message::SettingsWordWrapToggled(..)
+            | Message::HotkeyCaptureStarted(..)
+            | Message::HotkeyCaptureKey(..)
+            | Message::HotkeyCaptureCancel
+            | Message::HotkeysResetAll
+            | Message::ThemeToggled
+            | Message::FontSizeDelta(..)
+            | Message::SettingsToggled
+            | Message::SettingsPageSelected(..)
+            | Message::SettingsSearchChanged(..)
+            | Message::SettingsAutosaveToggled(..)
+            | Message::SettingsAutosaveDelayDelta(..)
+            | Message::SettingsRememberRecentToggled(..)
+            | Message::SettingsSnapshotsToggled(..)
+            | Message::SettingsBackupModeToggled
+            | Message::SettingsRememberSessionToggled(..)
+            | Message::SettingsExitModeToggled
+            | Message::SettingsIntervalDelta(..)
+            | Message::SettingsFontSelected(..)
+            | Message::SettingsFontReset
+            | Message::FontFilterChanged(..) => self.update_settings(message),
+            // ---------- 文件：打开/保存/编码/行尾/拖放/外部变更 ----------
+            Message::OpenRequested
+            | Message::FileChosen(..)
+            | Message::FileDropped(..)
+            | Message::OpenNextCliFile
+            | Message::PendingOpenTick
+            | Message::LoadProgress(..)
+            | Message::Loaded(..)
+            | Message::SaveRequested
+            | Message::SaveAsRequested
+            | Message::SaveTargetChosen(..)
+            | Message::Saved(..)
+            | Message::TabAutosaved(..)
+            | Message::WindowFocused
+            | Message::ConfirmExternalReload(..)
+            | Message::IgnoreExternalChange(..)
+            | Message::IgnoreAllExternalChanges
+            | Message::ConfirmOpenDiscard
+            | Message::ConfirmOpenCancel
+            | Message::ToggleEncodingMenu
+            | Message::ToggleEolMenu
+            | Message::SaveWithEncoding(..)
+            | Message::ConvertEol(..)
+            | Message::TabSaved(..) => self.update_file(message),
+            // ---------- 菜单栏/最近文件/面板 ----------
+            Message::MenuToggled(..)
+            | Message::MenubarHovered(..)
+            | Message::MenubarPressed
+            | Message::RecentsToggled
+            | Message::RecentSelected(..)
+            | Message::RecentsCleared
+            | Message::BarsDismissed => self.update_menus(message),
+            // ---------- 会话/快照/关窗/窗口 ----------
+            Message::CloseRequested(..)
+            | Message::ConfirmSaveAndClose
+            | Message::DiscardAndClose
+            | Message::CancelClose
+            | Message::SessionRecoverAccepted
+            | Message::SessionRecoverDiscarded
+            | Message::SnapshotHeartbeatTick
+            | Message::HeartbeatDone(..)
+            | Message::WindowMoved(..) => self.update_session(message),
+            // ---------- 查找/替换/跳转/查找全部 ----------
+            Message::FindToggled
+            | Message::FindQueryChanged(..)
+            | Message::FindNext
+            | Message::FindPrev
+            | Message::FindAllToggled
+            | Message::FindAllGoto(..)
+            | Message::CaseToggled(..)
+            | Message::RegexToggled(..)
+            | Message::WholeWordToggled(..)
+            | Message::ReplaceQueryChanged(..)
+            | Message::ReplaceCurrent
+            | Message::ReplaceCurrentRegex
+            | Message::ReplaceAll
+            | Message::FindScanDone(..)
+            | Message::GotoToggled
+            | Message::GotoInputChanged(..)
+            | Message::GotoSubmit => self.update_find(message),
         }
     }
 
@@ -430,8 +512,7 @@ impl Editpad {
                 let block_text = self.cur_handle.borrow().block_copy_text();
                 if let Some(text) = block_text {
                     let write: Task<Message> = iced::clipboard::write(text);
-                    let edit =
-                        self.update(Message::Edit(EditOp::Delete));
+                    let edit = self.update(Message::Edit(EditOp::Delete));
                     return write.chain(edit);
                 }
                 let Some(text) = self.cur_handle.borrow().selected_text() else {
@@ -444,8 +525,7 @@ impl Editpad {
             }
             Message::PasteRequested => {
                 // clipboard::read 返回 Task<Option<String>>
-                iced::clipboard::read()
-                    .map(|content| Message::Pasted(content.unwrap_or_default()))
+                iced::clipboard::read().map(|content| Message::Pasted(content.unwrap_or_default()))
             }
             Message::Pasted(text) => {
                 if text.is_empty() {
@@ -498,8 +578,9 @@ impl Editpad {
                 };
                 if chars > FORMAT_JSON_MAX_CHARS {
                     // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
-                    self.status =
-                        format!("文档过大（{chars} 字符），暂不支持格式化（上限 {FORMAT_JSON_MAX_CHARS}）");
+                    self.status = format!(
+                        "文档过大（{chars} 字符），暂不支持格式化（上限 {FORMAT_JSON_MAX_CHARS}）"
+                    );
                     return Task::none();
                 }
                 match editpad_core::format_json(&text) {
@@ -515,10 +596,7 @@ impl Editpad {
                         if self.find_visible {
                             // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
                             let find_task = self.schedule_find_scan();
-                            return Task::batch([
-                                find_task,
-                                self.maybe_schedule_autosave(),
-                            ]);
+                            return Task::batch([find_task, self.maybe_schedule_autosave()]);
                         }
                         self.maybe_schedule_autosave()
                     }
@@ -579,9 +657,7 @@ impl Editpad {
             }
             Message::PreviewToggled => {
                 // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
-                if self.cur_handle.borrow().highlight_syntax_name().as_deref()
-                    == Some("Markdown")
-                {
+                if self.cur_handle.borrow().highlight_syntax_name().as_deref() == Some("Markdown") {
                     self.preview_visible = !self.preview_visible;
                 } else {
                     self.set_status("预览仅支持 Markdown 文件".to_owned());
@@ -616,12 +692,8 @@ impl Editpad {
             // ---------- 复制完整路径 / 文件名（第 63 轮） ----------
             // None = 活动页（热键），Some(i) = 指定页（标签右键菜单）；
             // 未命名页无路径可写，给状态栏提示
-            Message::CopyFilePath(target) => {
-                self.copy_tab_ident(target, true)
-            }
-            Message::CopyFileName(target) => {
-                self.copy_tab_ident(target, false)
-            }
+            Message::CopyFilePath(target) => self.copy_tab_ident(target, true),
+            Message::CopyFileName(target) => self.copy_tab_ident(target, false),
             // ---------- 恢复上次关闭 / 显示标记（第 64 轮） ----------
             Message::ReopenLastClosedFile => {
                 // busy 与打开确认流共用守卫语义；栈空静默
@@ -808,9 +880,7 @@ impl Editpad {
                         // P64：聚焦 + 全选——键盘流直达，预填旧名整体可
                         // 被直接覆盖；操作在下一帧视图含该输入框后生效
                         return iced::widget::operation::focus(rename_input_id())
-                            .chain(iced::widget::operation::select_all(
-                                rename_input_id(),
-                            ));
+                            .chain(iced::widget::operation::select_all(rename_input_id()));
                     }
                     return self.save_as_dialog();
                 }
@@ -883,10 +953,9 @@ impl Editpad {
             Message::SettingsShowWhitespaceToggled(value) => {
                 self.settings.show_whitespace = value;
                 for tab in &self.tabs {
-                    tab.editor.borrow_mut().set_invisibles(
-                        value,
-                        self.settings.show_line_endings,
-                    );
+                    tab.editor
+                        .borrow_mut()
+                        .set_invisibles(value, self.settings.show_line_endings);
                 }
                 self.persist_settings();
                 Task::none()
@@ -894,10 +963,9 @@ impl Editpad {
             Message::SettingsShowLineEndingsToggled(value) => {
                 self.settings.show_line_endings = value;
                 for tab in &self.tabs {
-                    tab.editor.borrow_mut().set_invisibles(
-                        self.settings.show_whitespace,
-                        value,
-                    );
+                    tab.editor
+                        .borrow_mut()
+                        .set_invisibles(self.settings.show_whitespace, value);
                 }
                 self.persist_settings();
                 Task::none()
@@ -991,11 +1059,10 @@ impl Editpad {
                 Task::none()
             }
             Message::SettingsAutosaveDelayDelta(delta) => {
-                let next = (self.settings.autosave_delay_secs as i64 + delta as i64)
-                    .clamp(
-                        editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS as i64,
-                        editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS as i64,
-                    ) as u32;
+                let next = (self.settings.autosave_delay_secs as i64 + delta as i64).clamp(
+                    editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS as i64,
+                    editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS as i64,
+                ) as u32;
                 self.settings.autosave_delay_secs = next;
                 self.persist_settings();
                 Task::none()
@@ -1030,9 +1097,7 @@ impl Editpad {
                 self.persist_settings();
                 self.set_status(match self.settings.backup_mode.as_str() {
                     BACKUP_MODE_SIMPLE => "保存时备份：同目录 name.bak 覆盖式".to_owned(),
-                    BACKUP_MODE_TIMESTAMPED => {
-                        "保存时备份：name.bak/ 目录按时间戳留存".to_owned()
-                    }
+                    BACKUP_MODE_TIMESTAMPED => "保存时备份：name.bak/ 目录按时间戳留存".to_owned(),
                     _ => "保存时备份：已关闭".to_owned(),
                 });
                 Task::none()
@@ -1054,11 +1119,10 @@ impl Editpad {
                 Task::none()
             }
             Message::SettingsIntervalDelta(delta) => {
-                let next = (self.settings.snapshot_interval_secs as i64 + delta as i64)
-                    .clamp(
-                        editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS as i64,
-                        editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS as i64,
-                    ) as u32;
+                let next = (self.settings.snapshot_interval_secs as i64 + delta as i64).clamp(
+                    editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS as i64,
+                    editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS as i64,
+                ) as u32;
                 self.settings.snapshot_interval_secs = next;
                 self.persist_settings();
                 Task::none()
@@ -1326,9 +1390,7 @@ impl Editpad {
                 // 无转码时补显暂存的备份提示（备份消息写在异步落盘完成
                 // 之前，直接进状态栏会被本分支立即覆盖/抹掉）
                 let backup_note = self.pending_backup_notice.take();
-                if let Some(text) =
-                    transcode_notice(&prev_label, target_label, notice.unmappable)
-                {
+                if let Some(text) = transcode_notice(&prev_label, target_label, notice.unmappable) {
                     self.set_status(text);
                 } else if let Some(text) = backup_note {
                     self.set_status(text);
@@ -1372,9 +1434,7 @@ impl Editpad {
                 // 期间关掉前面的页会让下标漂移——路径不符说明这批账目属于
                 // 已不存在的旧页（或页已换血），整条丢弃。磁盘写入本身用
                 // 的是调度时刻克隆的路径，无损害；只是不能让错误的页记账。
-                if self.tabs.get(idx).and_then(|t| t.path.as_deref())
-                    != Some(path.as_path())
-                {
+                if self.tabs.get(idx).and_then(|t| t.path.as_deref()) != Some(path.as_path()) {
                     return Task::none();
                 }
                 let tab = &mut self.tabs[idx];
@@ -1401,19 +1461,15 @@ impl Editpad {
                         // 真外部改动时记录戳 ≠ 磁盘 → 照常入队裁决，
                         // 且未裁决前不重记戳（磁盘现状还没被用户确认过）。
                         let own_save_superseded = match tab.path.as_deref() {
-                            Some(p) => {
-                                !file_changed_externally(tab.file_stamp, file_stamp(p))
-                            }
+                            Some(p) => !file_changed_externally(tab.file_stamp, file_stamp(p)),
                             None => false,
                         };
                         if !own_save_superseded {
-                            let queue =
-                                self.external_change.get_or_insert_with(Vec::new);
+                            let queue = self.external_change.get_or_insert_with(Vec::new);
                             if !queue.contains(&idx) {
                                 queue.push(idx);
                             }
-                            self.status =
-                                "文件已被外部修改，已跳过自动写盘".to_owned();
+                            self.status = "文件已被外部修改，已跳过自动写盘".to_owned();
                         }
                     }
                     AutosaveOutcome::Failed(error) => {
@@ -1552,10 +1608,7 @@ impl Editpad {
                 // 内容变了：命中表过期重扫（查找栏开着才扫）+ 排队自动保存
                 if self.find_visible {
                     let find_task = self.schedule_find_scan();
-                    return Task::batch([
-                        find_task,
-                        self.maybe_schedule_autosave(),
-                    ]);
+                    return Task::batch([find_task, self.maybe_schedule_autosave()]);
                 }
                 self.maybe_schedule_autosave()
             }
@@ -1574,9 +1627,7 @@ impl Editpad {
                             // 本页通常随即被移除，此处是 close_tab_now 失败
                             // 等幸存路径的基线兜底
                             self.tabs[idx].editor.borrow_mut().mark_saved();
-                            if self.pending_close_tab == Some(idx)
-                                && self.close_tab_now(idx)
-                            {
+                            if self.pending_close_tab == Some(idx) && self.close_tab_now(idx) {
                                 self.cancel_find_scan();
                             }
                             self.pending_close_tab = None;
@@ -1606,8 +1657,11 @@ impl Editpad {
                 // （含背板 on_move）不再影响已展开浮层的位置（修「弹窗
                 // 会移动」：旧实现锚点实时读悬停点，展开期间漂移）
                 self.menubar_anchor = self.menubar_pos;
-                self.menu_bar_open =
-                    if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
+                self.menu_bar_open = if self.menu_bar_open == Some(idx) {
+                    None
+                } else {
+                    Some(idx)
+                };
                 Task::none()
             }
             Message::MenubarHovered(pos) => {
@@ -1619,8 +1673,11 @@ impl Editpad {
                 if self.menubar_pos.1 < MENU_BAR_H {
                     let idx = menubar_slot_idx(self.menubar_pos.0);
                     self.menubar_anchor = self.menubar_pos;
-                    self.menu_bar_open =
-                        if self.menu_bar_open == Some(idx) { None } else { Some(idx) };
+                    self.menu_bar_open = if self.menu_bar_open == Some(idx) {
+                        None
+                    } else {
+                        Some(idx)
+                    };
                 } else {
                     self.menu_bar_open = None;
                 }
@@ -1718,13 +1775,11 @@ impl Editpad {
                 // P31 自我续期：无论本轮是否干活，下一拍恒排队（与光标
                 // 闪烁同一模式；进程退出即销毁，无残留计时器）。间隔取
                 // 加载时已归一的设置值，运行期视为不变。
-                let interval = std::time::Duration::from_secs(u64::from(
-                    self.settings.snapshot_interval_secs,
-                ));
-                let rearm = Task::perform(
-                    async move { std::thread::sleep(interval) },
-                    |_| Message::SnapshotHeartbeatTick,
-                );
+                let interval =
+                    std::time::Duration::from_secs(u64::from(self.settings.snapshot_interval_secs));
+                let rearm = Task::perform(async move { std::thread::sleep(interval) }, |_| {
+                    Message::SnapshotHeartbeatTick
+                });
                 // 快照底座任一开关关闭 / ask 模式 = 心跳整体停摆：
                 // 清单不写，退出流与启动恢复同样不依赖它（P29/P30 语义）
                 if !session_restore_allowed(
@@ -1824,7 +1879,9 @@ impl Editpad {
                 // P70：查询语义切换（字面转义 ↔ 正则语法），必须重扫
                 self.regex_enabled = value;
                 if value {
-                    self.set_status("正则模式：替换支持 $1/${1} 组引用，^$ 逐行锚定用 (?m)".to_owned());
+                    self.set_status(
+                        "正则模式：替换支持 $1/${1} 组引用，^$ 逐行锚定用 (?m)".to_owned(),
+                    );
                 }
                 self.schedule_find_scan()
             }
@@ -1864,11 +1921,8 @@ impl Editpad {
                     let expansion = {
                         let ed = self.cur_handle.borrow();
                         let line_text = ed.doc.line_str(pos.line);
-                        let byte_in_line: usize = line_text
-                            .chars()
-                            .take(pos.col)
-                            .map(char::len_utf8)
-                            .sum();
+                        let byte_in_line: usize =
+                            line_text.chars().take(pos.col).map(char::len_utf8).sum();
                         editpad_core::expand_regex_at(
                             &line_text,
                             byte_in_line,
@@ -1893,7 +1947,9 @@ impl Editpad {
                 };
                 match editpad_core::compile_regex(&self.find_query, self.case_sensitive) {
                     Ok(re) => {
-                        let expanded = re.replace(&matched, self.replace_query.as_str()).into_owned();
+                        let expanded = re
+                            .replace(&matched, self.replace_query.as_str())
+                            .into_owned();
                         self.cur_handle.borrow_mut().replace_selection(&expanded);
                         self.tab_mut().dirty = true;
                         self.tab_mut().note_mutation();
@@ -2059,7 +2115,6 @@ impl Editpad {
         }
     }
 
-
     // ---------- 编辑分发 ----------
 
     /// 执行一次按键编辑；返回是否真的改动了文本。
@@ -2073,11 +2128,11 @@ impl Editpad {
         // 第 63 轮起 hint 升级为 String：插入日期时间等动态反馈不再
         // 需要 'static（曾用 leak() 属内存泄漏，已纠正）
         let mut hint: Option<String> = None;
-        // 第 67 轮 ⑮：列块态只在白名单三臂内存活（输入/退格/删除走块
-        // 分支），其余任何编辑动作先清块——单点收口防漏清
+        // 第 67 轮 ⑮：列块态只在白名单内存活（输入/退格/删除/块内 Tab 走
+        // 块分支），其余任何编辑动作先清块——单点收口防漏清
         if !matches!(
             op,
-            E::InsertText(_) | E::Backspace | E::Delete | E::CancelBlock
+            E::InsertText(_) | E::Backspace | E::Delete | E::CancelBlock | E::TabKey(false)
         ) {
             self.cur_handle.borrow_mut().clear_block();
         }
@@ -2194,6 +2249,22 @@ impl Editpad {
             E::DeleteEmptyLines(kind) => editor.delete_empty_lines(kind),
             // ---------- 行注释切换（第 64 轮） ----------
             E::ToggleLineComment => editor.toggle_line_comment(),
+            // ---------- P121：智能缩进与选区块缩进 ----------
+            // 回车不入列块白名单：列块态按回车先收块再智能缩进（原「向块
+            // 内插换行」无实用语义）；Tab 分流——列块态加缩进仍是块内插
+            // 制表符（与 InsertText 同路），其余走触及行整块缩进/反缩进
+            // （无选区 Tab=插制表符、Shift+Tab=当前行反缩进，函数内兜底）
+            E::Enter => {
+                editor.enter();
+                true
+            }
+            E::TabKey(outdent) => {
+                if !outdent && editor.has_block() {
+                    editor.insert_into_block("\t")
+                } else {
+                    editor.indent_touched_lines(outdent)
+                }
+            }
             // ---------- 插入日期时间（第 63 轮） ----------
             // 真编辑：走 insert_str 统一管线（置脏+快照+查找重扫由上层
             // changed 驱动）；时间戳文本给状态栏反馈
@@ -2251,8 +2322,7 @@ impl Editpad {
             .map(|t| t.editor.borrow().doc.text_len())
             .sum();
         if !mem_guard_allows(existing, incoming, MULTI_TAB_MEM_CAP_BYTES) {
-            self.status =
-                "内存保护：合计内容超过上限，请先关闭部分大文档再打开".to_owned();
+            self.status = "内存保护：合计内容超过上限，请先关闭部分大文档再打开".to_owned();
             return Task::none();
         }
         if tab >= self.tabs.len() {
@@ -2319,13 +2389,14 @@ impl Editpad {
             self.set_status_error(format!("「{combo}」不是有效的热键组合"));
             return Task::none();
         }
-        if let Some(other) = HOTKEY_ACTIONS.iter().find(|a| {
-            a.id != id
-                && self
-                    .hotkey_capture_conflicts_with(a.id, &combo)
-        }) {
-            self.status =
-                format!("「{combo}」已被「{}」占用，换一个组合再试（Esc 取消）", other.desc);
+        if let Some(other) = HOTKEY_ACTIONS
+            .iter()
+            .find(|a| a.id != id && self.hotkey_capture_conflicts_with(a.id, &combo))
+        {
+            self.status = format!(
+                "「{combo}」已被「{}」占用，换一个组合再试（Esc 取消）",
+                other.desc
+            );
             return Task::none();
         }
         self.settings.hotkeys.insert(id.to_owned(), combo.clone());
@@ -2423,8 +2494,11 @@ impl Editpad {
                 if let Some(view) = self.settings.recent_views.remove(&old_key) {
                     self.settings.recent_views.insert(new_key.clone(), view);
                 }
-                if let Some(pos) =
-                    self.settings.recent_files.iter().position(|p| *p == old_key)
+                if let Some(pos) = self
+                    .settings
+                    .recent_files
+                    .iter()
+                    .position(|p| *p == old_key)
                 {
                     self.settings.recent_files[pos] = new_key.clone();
                 }
@@ -2452,34 +2526,28 @@ impl Editpad {
         // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）。
         // P62：按键转发为 KeyPressed 消息、分发挪到 update——重映射表与
         // 热键捕获态必须读活状态，订阅闭包捕获会陈旧。
-        let events =
-            iced::event::listen_with(|event, status, _window| match (event, status) {
-                (
-                    iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                        key, modifiers, ..
-                    }),
-                    iced::event::Status::Ignored,
-                ) => Some(Message::KeyPressed(key, modifiers)),
-                (
-                    iced::Event::Window(window::Event::FileDropped(path)),
-                    _,
-                ) => Some(Message::FileDropped(path)),
-                // P50：窗口重新聚焦 = 外部修改巡检时机（编辑器无常驻轮询，
-                // 焦点回归是最自然的检查点——用户刚从外部工具切回来）
-                (iced::Event::Window(window::Event::Focused), _) => {
-                    Some(Message::WindowFocused)
-                }
-                // P39/P40：窗口逻辑尺寸（浮层贴边钳制依据；iced_winit 已
-                // 换算成逻辑坐标，与 mouse_area 光标坐标同空间）
-                (iced::Event::Window(window::Event::Resized(size)), _) => {
-                    Some(Message::ViewportResized(size.width, size.height))
-                }
-                // P102：窗口移动（逻辑坐标）→ 几何记忆（节流落盘见 update）
-                (iced::Event::Window(window::Event::Moved(position)), _) => {
-                    Some(Message::WindowMoved(position))
-                }
-                _ => None,
-            });
+        let events = iced::event::listen_with(|event, status, _window| match (event, status) {
+            (
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }),
+                iced::event::Status::Ignored,
+            ) => Some(Message::KeyPressed(key, modifiers)),
+            (iced::Event::Window(window::Event::FileDropped(path)), _) => {
+                Some(Message::FileDropped(path))
+            }
+            // P50：窗口重新聚焦 = 外部修改巡检时机（编辑器无常驻轮询，
+            // 焦点回归是最自然的检查点——用户刚从外部工具切回来）
+            (iced::Event::Window(window::Event::Focused), _) => Some(Message::WindowFocused),
+            // P39/P40：窗口逻辑尺寸（浮层贴边钳制依据；iced_winit 已
+            // 换算成逻辑坐标，与 mouse_area 光标坐标同空间）
+            (iced::Event::Window(window::Event::Resized(size)), _) => {
+                Some(Message::ViewportResized(size.width, size.height))
+            }
+            // P102：窗口移动（逻辑坐标）→ 几何记忆（节流落盘见 update）
+            (iced::Event::Window(window::Event::Moved(position)), _) => {
+                Some(Message::WindowMoved(position))
+            }
+            _ => None,
+        });
         // 窗口关闭请求：exit_on_close_request(false) 后以订阅事件流转
         let close_requests = window::close_requests().map(Message::CloseRequested);
         // P18 即时保存不走订阅：编辑后由 maybe_schedule_autosave 直接派发
@@ -2524,8 +2592,7 @@ impl Editpad {
                     queue.push(idx);
                 }
                 self.status =
-                    "检测到外部修改，已暂停保存：请先在提示条选择「重新加载」或「忽略」"
-                        .to_owned();
+                    "检测到外部修改，已暂停保存：请先在提示条选择「重新加载」或「忽略」".to_owned();
                 return Task::none();
             }
         }
@@ -2599,9 +2666,7 @@ impl Editpad {
                     .save_encoding
                     .unwrap_or(editpad_core::SaveEncoding::Utf8),
                 expected_stamp: self.tabs[idx].file_stamp,
-                delay: std::time::Duration::from_secs(u64::from(
-                    self.settings.autosave_delay_secs,
-                )),
+                delay: std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs)),
                 backup_mode: self.settings.backup_mode.clone(),
             };
             self.tabs[idx].autosave_inflight = true;
@@ -2667,9 +2732,7 @@ impl Editpad {
             self.persist_settings();
         }
     }
-
 }
 
 /// P102：窗口几何落盘节流窗（2 秒一道；最后一次状态由关闭路径兜底）。
-const GEOMETRY_PERSIST_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(2);
+const GEOMETRY_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
