@@ -15,7 +15,7 @@ use super::core::{
     luminance, lighten, EditOp, EditorHandle, ImeCommit, SCROLL_LINES_PER_NOTCH,
 };
 use super::metrics::{
-    char_cols, display_cols, measure_char_width, measure_ink_offset, shape_row_xs,
+    char_cols, display_cols, measure_char_width, measure_ink_box, shape_row_xs,
 };
 use super::scrollbars::{
     HScrollbar, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
@@ -164,10 +164,11 @@ impl EditorView {
         if let Some(w) = measure_char_width(self.font, key.1) {
             self.core.borrow_mut().set_measured_char_width(w);
         }
-        // P88：同键顺带实测字形墨迹上边距（光标/选区纵向对齐基准）。
-        // 失败保持 0（恒安全，与旧行为一致）。
-        if let Some(off) = measure_ink_offset(self.font, key.1) {
-            self.core.borrow_mut().set_ink_offset(off);
+        // P88/P89：同键顺带实测字形墨迹盒（上边距 + 墨迹高）——光标/
+        // 选区纵向对齐基准（P89 起选区带按墨迹盒居中，需成对注入）。
+        // 失败保持默认（顶 0 / 整行高 = 旧行为，恒安全）。
+        if let Some((off, ink_h)) = measure_ink_box(self.font, key.1) {
+            self.core.borrow_mut().set_ink_box(off, ink_h);
         }
     }
 
@@ -451,9 +452,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         // P59：选区矩形与控件边界求交（quad 无任何裁剪）
                         // P88：y 下移字形墨迹上边距——行盒顶对齐会让选区
                         // 带顶悬在首行上方空带（用户截图「色带残影」）
+                        // P89：改为按字形墨迹盒**居中**（带高仍 = 行盒高，
+                        // 多行选区带带相接不断裂；P88 只顶对齐会让带底
+                        // 悬出行盒下缘、单选字被顶在带顶不居中）
                         let Some(rect) = Rectangle {
                             x: bounds.x + gutter_w + x0 - scroll_left,
-                            y: bounds.y + (row - core.scroll_top) * lh + core.ink_offset(),
+                            y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
                             width: (x1 - x0).max(char_w),
                             height: lh,
                         }
@@ -481,10 +485,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     .px_of(line, &text, end_col.min(lens));
                 // P59：选区矩形与控件边界求交——部分可见行的高亮不再越界
                 // （quad 无任何裁剪，越界部分会压标签条/状态栏）
+                // P88/P89：与折行分支同款——y 从墨迹上边距改为按墨迹
+                // 盒居中（带高仍 = 行盒高，单字选区字居中）
                 let Some(rect) = Rectangle {
                     x: bounds.x + gutter_w + x0 - scroll_left,
-                    // P88：与折行分支同款——y 下移字形墨迹上边距
-                    y: bounds.y + (row - core.scroll_top) * lh + core.ink_offset(),
+                    y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
                     width: (x1 - x0).max(char_w),
                     height: lh,
                 }
@@ -504,10 +509,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
 
         // 第 67 轮 ⑮：列块高亮——逐行画 [c0, c1) 段 quad，颜色与单选区
         // 同族（互斥状态不会同帧出现）。短行自动到行尾：x1 取该行实际
-        // 列宽 min(c1) 的像素。
+        // 列宽 min(c1) 的像素。P89：y 与选区同款按墨迹盒居中。
         if let Some((r0, r1, c0, c1)) = core.active_block() {
             for line in r0..=r1 {
-                let y = bounds.y + (line as f32 - core.scroll_top) * lh + core.ink_offset();
+                let y =
+                    bounds.y + (line as f32 - core.scroll_top) * lh + core.decoration_inset();
                 if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                     continue;
                 }

@@ -331,6 +331,12 @@ pub struct EditorCore {
     /// 悬在首行上方空带（用户截图「黑点/色带残影」根因）。控件层按
     /// (字体, 字号) 用同源渲染管线实测注入；未测量保持 0（旧行为）。
     pub(crate) ink_offset: f32,
+    /// P89：字形墨迹高度（px，与 [`Self::ink_offset`] 成对注入）：行盒内
+    /// 墨迹顶→底跨度（metrics 同源扫描实测）。选区/列块等「面状」装饰
+    /// 按墨迹盒垂直居中需要它（P88 只对齐顶边 → 单选字被顶在带顶不
+    /// 居中）。默认 0 = 未实测 → [`Self::decoration_inset`] 公式自动得 0
+    /// （整行盒装饰 = 旧行为），恒安全。
+    pub(crate) ink_height: f32,
     /// P42 度量键：最近一次实测尝试的 (字体, 字号)。与上字段配对去重——
     /// 键相同即「已按当前字体/字号测过（无论成败）」，避免每帧重测；
     /// 字体切换（P34）/字号变更（set_font_size 折算后仍会重测校准）时换键。
@@ -451,6 +457,8 @@ impl Default for EditorCore {
             // P42：默认未实测，走 0.5625 固定假设（既有契约不变）
             measured_char_w: None,
             ink_offset: 0.0,
+            // P89：默认 0 = 未实测（decoration_inset 自动退化为整行盒）
+            ink_height: 0.0,
             metric_key: None,
             row_layouts: HashMap::new(),
             max_row_width_px: 0.0,
@@ -573,20 +581,35 @@ impl EditorCore {
         }
     }
 
-    /// P88：字形墨迹在行盒内的上边距（见字段注释）。校验失败保持现状。
-    pub fn set_ink_offset(&mut self, offset: f32) -> bool {
-        let max = (self.font_size * 0.75).max(1.0);
-        if offset.is_finite() && (0.0..=max).contains(&offset) {
+    /// P88/P89：注入字形墨迹盒——上边距 + 墨迹高（px，见字段注释）。
+    /// 两值须**同时**通过校验才落库（任一非法返回 false 且保持现状），
+    /// 避免只更新一半产生非对称几何。上边距上界 = 字号 × 0.75；高度
+    /// 上界 = 行盒高（墨迹不可能超出行盒，实测扫描窗口即行盒）。
+    pub fn set_ink_box(&mut self, offset: f32, height: f32) -> bool {
+        let max_top = (self.font_size * 0.75).max(1.0);
+        let max_h = self.line_height() + 0.01;
+        if offset.is_finite()
+            && height.is_finite()
+            && (0.0..=max_top).contains(&offset)
+            && (0.0..=max_h).contains(&height)
+        {
             self.ink_offset = offset;
+            self.ink_height = height;
             true
         } else {
             false
         }
     }
 
-    /// P88：字形墨迹上边距（px，默认 0 = 行盒顶对齐，旧行为）。
-    pub fn ink_offset(&self) -> f32 {
-        self.ink_offset
+    /// P89：面状行盒装饰（选区/列块高亮）相对行盒顶的纵向偏移（px）：
+    /// 带 = 行盒整高 + 按字形墨迹盒垂直居中——带顶 = 行盒顶 + 返回值、
+    /// 带高 = 行盒高，带内墨迹上下留白相等（(行盒高 − 墨迹高) / 2），
+    /// 单选一字时字居中不再顶边；多行选区相邻带首尾相接（带距 = 行高），
+    /// 高亮连续不断裂。推导：偏移 = ink_offset − (行盒高 − ink_height) / 2，
+    /// 钳制 ≥ 0（墨迹贴行盒顶的字体退化为行盒顶对齐，不重返 P88 悬墨；
+    /// 未实测时 ink_height = 0 且 ink_offset = 0，公式自动得 0 = 旧行为）。
+    pub fn decoration_inset(&self) -> f32 {
+        ((2.0 * self.ink_offset + self.ink_height - self.line_height()) * 0.5).max(0.0)
     }
 
     /// 设置字号：clamp 到合法区间后让滚动/可见性按新度量重新收敛

@@ -136,6 +136,122 @@ fn headless_caret_and_selection_never_ink_above_first_row() {
     assert_eq!(sel_strip, 0, "选区态：首行上方空带出现墨迹（选区带悬墨）");
 }
 
+/// P89 单选字高亮带居中回归（headless 像素级）：P88 只把选区带**顶边**
+/// 对齐字形墨迹顶、带高仍 = 行盒高——单选一字时带底悬出行盒下缘、字
+/// 被顶在带顶（用户复报「字置顶没居中」）。修复 = 带按字形墨迹盒垂直
+/// 居中（带高不变，带内上下留白相等）。本测试渲染「首行单选一个中文
+/// 字」断言：①带纵向中心 ≈ 字形墨迹纵向中心（±2px 抗锯齿/取整容差）；
+/// ②带顶不低于行盒顶（P88 悬墨不复发）；③带在墨迹上下都有可见余量
+/// （居中确有实体，修前态带顶 ≈ 墨迹顶必挂）。
+#[test]
+fn headless_single_char_selection_band_centered_on_glyph_ink() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (400u32, 160u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 360.0f32, 120.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str("中"));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 0, col: 1 };
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    let (gutter, lh, io, ih, inset) = {
+        let c = core.borrow();
+        (
+            c.gutter_width(),
+            c.line_height(),
+            c.ink_offset,
+            c.ink_height,
+            c.decoration_inset(),
+        )
+    };
+    // 墨迹 = 深墨行（字形 + 光标，avg < 180）；带 = 选区蓝混合行
+    // （偏离纯白且非深墨：B < 250 且 avg ≥ 180）。行号栏（x < gutter）
+    // 与控件外一律不扫。
+    let mut ink_top = i32::MAX;
+    let mut ink_bot = i32::MIN;
+    let mut band_top = i32::MAX;
+    let mut band_bot = i32::MIN;
+    for y in ey as i32..(ey + eh) as i32 {
+        let mut ink_row = false;
+        let mut band_row = false;
+        for x in (ex + gutter) as i32..(ex + ew) as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                let avg = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                if avg < 180 {
+                    ink_row = true;
+                } else if p.blue() < 250 {
+                    band_row = true;
+                }
+            }
+        }
+        if ink_row {
+            ink_top = ink_top.min(y);
+            ink_bot = ink_bot.max(y);
+        }
+        if band_row {
+            band_top = band_top.min(y);
+            band_bot = band_bot.max(y);
+        }
+    }
+    eprintln!(
+        "[P89] io={io:.1} ih={ih:.1} inset={inset:.2} lh={lh:.1} \
+         ink={ink_top}..{ink_bot} band={band_top}..{band_bot}"
+    );
+    assert_ne!(ink_top, i32::MAX, "首行应有字形墨迹（渲染管线失效？）");
+    assert_ne!(band_top, i32::MAX, "选区高亮带未渲染");
+    // ①墨迹盒访问值须与像素吻合（同源管线，±2 取整/AA 容差）
+    assert!(
+        (ey + io - ink_top as f32).abs() <= 2.0,
+        "墨迹上边距与渲染不符：io={io} ink_top={ink_top}"
+    );
+    assert!(
+        (ey + io + ih - (ink_bot as f32 + 1.0)).abs() <= 2.0,
+        "墨迹高度与渲染不符：ih={ih} ink_bot={ink_bot}"
+    );
+    // ②带顶不低于行盒顶（P88 悬墨不复发）
+    assert!(band_top >= ey as i32, "高亮带顶越过行盒顶（悬墨复发）");
+    // ③带在墨迹上下都有可见余量（修前态：带顶 ≈ 墨迹顶，必挂此项）
+    assert!(band_top < ink_top, "高亮带顶未高于墨迹顶（仍顶对齐）");
+    assert!(band_bot > ink_bot, "高亮带底未低于墨迹底（仍顶对齐）");
+    // 带纵向中心 ≈ 墨迹纵向中心（±2px）
+    let band_mid = (band_top + band_bot) as f32 / 2.0;
+    let ink_mid = (ink_top + ink_bot) as f32 / 2.0;
+    assert!(
+        (band_mid - ink_mid).abs() <= 2.0,
+        "高亮带未按字形墨迹居中：带中心 {band_mid} vs 墨迹中心 {ink_mid}"
+    );
+}
+
 
     /// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
 /// tiny-skia 光栅化）下，41 汉字行 + 水平滚动（scroll_left=80），

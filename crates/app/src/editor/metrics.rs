@@ -230,21 +230,26 @@ pub(crate) fn shape_row_xs(font: Font, size: f32, text: &str) -> Option<Vec<f32>
     Some(xs)
 }
 
-/// 字形墨迹在行盒内的上边距（px，P88 残影根治）。
+/// 字形墨迹在行盒内的纵向范围：上边距 + 墨迹高（px，P88 残影根治 +
+/// P89 居中勘误）。
 ///
-/// 光标/选区等「行盒装饰」矩形按行盒顶（y = 视觉行 × 行高）绘制，而
+/// 光标/选区等「行盒装饰」矩形本按行盒顶（y = 视觉行 × 行高）绘制，而
 /// 字形墨迹在行盒（行高 = 字号 × 1.375）内按字体度量下浮 1~6px——
-/// 实测（经完整绘制链路）：CJK 等宽钉字 ≈ 4px、拉丁等宽 ≈ 6px、无
-/// 钉字回退字体更高。行盒顶对齐时装饰的顶部悬墨落在首行上方空带，
+/// 实测（经完整绘制链路）：CJK 等宽钉字上边距 ≈ 4px、拉丁等宽 ≈ 6px、
+/// 无钉字回退字体更高。行盒顶对齐时装饰的顶部悬墨落在首行上方空带，
 /// 即用户截图的「黑点/色带残影」（P88 根因，headless 测试因字体
-/// 管线差异测不出——此前 P42 只实测了列宽，漏了纵轴）。
+/// 管线差异测不出——此前 P42 只实测了列宽，漏了纵轴）。P88 只把装饰
+/// 顶边下移到墨迹顶，高度仍 = 行盒高：单选一字时带底悬出行盒下缘、
+/// 字被顶在带顶（用户复报「没居中」）——故本函数额外扫描墨迹**底行**，
+/// 把「上边距 + 墨迹高」一并交给调用方，选区/列块带按墨迹盒垂直居中
+/// （见 `EditorCore::decoration_inset`）。
 ///
-/// 本函数用与正文绘制**完全同源**的渲染管线（同 font/字号/行高/
+/// 实现：用与正文绘制**完全同源**的渲染管线（同 font/字号/行高/
 /// Shaping::Advanced + tiny-skia 光栅化）把采样行画到离屏像素图，
-/// 扫描字形墨迹的最高行，返回「行盒顶 → 墨迹顶」的偏移。采样串用
-/// CJK 字符：捕获钉字/回退后的 CJK 字形度量（正文混排的主字体）；
-/// 渲染失败/参数无效返回 None（调用方保持 0 = 旧行为，恒安全）。
-pub(crate) fn measure_ink_offset(font: Font, size: f32) -> Option<f32> {
+/// 扫描字形墨迹的最高/最低行。采样串用 CJK 字符：捕获钉字/回退后的
+/// CJK 字形度量（正文混排的主字体）；渲染失败/参数无效返回 None
+/// （调用方保持默认 0 / 整行高 = 旧行为，恒安全）。
+pub(crate) fn measure_ink_box(font: Font, size: f32) -> Option<(f32, f32)> {
     if !(size.is_finite() && size > 0.0) {
         return None;
     }
@@ -278,17 +283,37 @@ pub(crate) fn measure_ink_offset(font: Font, size: f32) -> Option<f32> {
         &damage,
         Color::WHITE,
     );
-    // 只扫行盒高度内的墨迹；超出视为异常（字体未就绪 → 0 保守回退）
-    let scan_rows = ((size * 1.375) as i32).clamp(1, h as i32);
-    for y in 0..scan_rows {
+    // 只扫行盒高度内的墨迹（超出视为异常：字体未就绪 → 顶 0 / 整行高
+    // 保守回退，装饰保持行盒顶对齐的旧观感）
+    let lh = size * 1.375;
+    let scan_rows = (lh as i32).clamp(1, h as i32);
+    let row_has_ink = |y: i32| -> bool {
         for x in 0..w as i32 {
             if let Some(p) = pixels.pixel(x as u32, y as u32) {
                 if p.red() < 250 || p.green() < 250 || p.blue() < 250 {
-                    return Some(y as f32);
+                    return true;
                 }
             }
         }
+        false
+    };
+    let mut top = None;
+    for y in 0..scan_rows {
+        if row_has_ink(y) {
+            top = Some(y);
+            break;
+        }
     }
-    Some(0.0)
+    let Some(top) = top else {
+        return Some((0.0, lh));
+    };
+    let mut bottom = top;
+    for y in (top..scan_rows).rev() {
+        if row_has_ink(y) {
+            bottom = y;
+            break;
+        }
+    }
+    Some((top as f32, (bottom - top + 1) as f32))
 }
 
