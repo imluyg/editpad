@@ -10,33 +10,43 @@ pub(crate) enum AutosaveOutcome {
     Failed(String),
 }
 
+/// 自动保存任务的落盘配置快照（P63/第 64 轮 ⑭：后台线程无 &Settings/
+/// &Tab 可用，调度时刻随任务下发）。
+pub(crate) struct AutosaveTask {
+    /// 按标签页保存编码落盘（与手动保存同参，防静默转码）
+    pub(crate) encoding: editpad_core::SaveEncoding,
+    /// 调度时刻的外部修改比对戳：醒来先校验再写，绝不盲写覆盖外部改动
+    pub(crate) expected_stamp: Option<(std::time::SystemTime, u64)>,
+    /// 防抖窗时长
+    pub(crate) delay: std::time::Duration,
+    /// 写前备份模式（自动保存静默口径）
+    pub(crate) backup_mode: String,
+}
+
 /// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 写前校验 → 分块原子
 /// 落盘」，结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待
 /// 结果，且按页 inflight 去重保证同一页至多一个这样的线程）。
 ///
 /// P63 写前校验：防抖睡眠期间磁盘可能被外部修改（焦点巡检只在窗口
-/// 重聚焦时跑，救不了后台线程）。调度时刻的 `(mtime, size)` 戳随任务
-/// 下发，醒来先比对，不一致即拒写并回报 [`AutosaveOutcome::
-/// SkippedExternalChange`]——原文件绝不盲写覆盖外部内容。期望戳为
-/// None（从未记录，如测试注入的不存在路径）时保持旧语义直接写。
+/// 重聚焦时跑，救不了后台线程）。期望戳不一致即拒写并回报
+/// [`AutosaveOutcome::SkippedExternalChange`]——原文件绝不盲写覆盖外部
+/// 内容。期望戳为 None（从未记录，如测试注入的不存在路径）时保持旧
+/// 语义直接写。
 pub(crate) async fn drive_autosave_once(
     tab: usize,
     path: PathBuf,
     doc: editpad_core::Document,
-    encoding: editpad_core::SaveEncoding,
     version: u64,
-    expected_stamp: Option<(std::time::SystemTime, u64)>,
-    delay: std::time::Duration,
-    backup_mode: String,
+    task: AutosaveTask,
 ) -> Message {
     let (tx, rx) = std_mpsc::channel::<AutosaveOutcome>();
     let thread_path = path.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(delay);
-        let outcome = if autosave_must_skip(expected_stamp, file_stamp(&path)) {
+        std::thread::sleep(task.delay);
+        let outcome = if autosave_must_skip(task.expected_stamp, file_stamp(&path)) {
             AutosaveOutcome::SkippedExternalChange
         } else {
-            write_to_disk(&path, &doc, encoding, &backup_mode)
+            write_to_disk(&path, &doc, task.encoding, &task.backup_mode)
         };
         let _ = tx.send(outcome);
     });

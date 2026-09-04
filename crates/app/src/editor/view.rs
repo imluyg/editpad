@@ -180,6 +180,8 @@ impl EditorView {
             let mut out = Vec::with_capacity((last - first + 1).min(512));
             for line in first..=last {
                 let text = core.line_text(line);
+                // 已知问题（boot 折行排查中）：首帧 P42 度量切换会污染
+                // 列模型预算与缓存 xs，个别行首帧不折、编辑/缩放自愈。
                 if let Some(xs) = shape_row_xs(font, size, &text) {
                     out.push((line, xs));
                 }

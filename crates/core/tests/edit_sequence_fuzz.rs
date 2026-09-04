@@ -171,7 +171,13 @@ fn fuzz_one(seed: u64, rounds: usize) {
                 let query: String = (0..rng.below(4) + 1).map(|_| *rng.pick(TOKENS)).collect();
                 let replacement: String =
                     (0..rng.below(4) + 1).map(|_| *rng.pick(TOKENS)).collect();
-                let expected = model.replacen(&query, &replacement, usize::MAX);
+                // 参照口径：Document 路径的既定语义含行尾归一（P26「替换
+                // 当前」同口径）——查询与替换文本按主导行尾改写后比对，
+                // EOL 无关 token 归一为恒等，不影响覆盖
+                let eol = doc.line_ending();
+                let nq = eol.normalize(&query);
+                let nr = eol.normalize(&replacement);
+                let expected = model.replacen(&nq, &nr, usize::MAX);
                 let (new_text, count) =
                     replace_all_document(&doc, &query, &replacement, true);
                 assert_eq!(
@@ -180,7 +186,7 @@ fn fuzz_one(seed: u64, rounds: usize) {
                 );
                 assert_eq!(
                     count,
-                    model.matches(&query).count(),
+                    model.matches(&nq).count(),
                     "seed={seed} step={step} 替换计数不一致"
                 );
                 past.push(model.clone());

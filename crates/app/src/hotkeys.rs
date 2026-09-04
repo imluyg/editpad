@@ -95,17 +95,6 @@ pub(crate) fn default_combo_of(id: &str) -> Option<&'static str> {
         .copied()
 }
 
-/// 动作 id 的当前生效组合：用户重映射优先，否则默认。
-pub(crate) fn effective_combo<'a>(
-    id: &str,
-    remap: &'a HashMap<String, String>,
-) -> Option<&'a str> {
-    remap
-        .get(id)
-        .map(String::as_str)
-        .or_else(|| default_combo_of(id))
-}
-
 /// 过滤用户重映射表：动作 id 不在注册表中的条目删除（启动加载时调用）。
 pub(crate) fn sanitize_hotkeys(settings: &mut editpad_core::Settings) {
     settings
