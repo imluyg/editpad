@@ -1373,23 +1373,28 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         renderer.start_layer(bounds);
 
         // 输入法下划线：与组字占位同门控同口径——默认 = 原段口径（caret.x +
-        // preedit_visual_w 可显示宽）；组字重排存在时按**合成流**定位：
-        // 组字起点所在段内 x、宽 = 段内可显示部分、y = 该段行盒底
+        // preedit_visual_w 可显示宽）；组字重排存在时**逐段**绘制：组字
+        // 串跨越多段（自动换行折到下段）时，每段的组字部分都有下划线
+        // （用户复报「下一行的换行没有下划线」，Word 系组字折行同款）
         if let Some(preedit) = preedit_text.as_deref() {
             let w = measure_preedit_w(body_font, core.font_size(), preedit);
             if let Some(r) = &reflow {
-                let s0 = r.col_p;
                 let s1 = (r.col_p + r.pel).min(r.s.chars().count());
-                if let Some(bi) = reflow_seg_of(&r.breaks, s0) {
-                    let seg_end = r
-                        .breaks
-                        .get(bi + 1)
-                        .copied()
-                        .unwrap_or(r.s.chars().count());
-                    let x = text_x0 + (r.s_xs[s0] - r.s_xs[r.breaks[bi]]);
-                    let vis = (r.s_xs[s1.min(seg_end)] - r.s_xs[s0]).max(0.0);
+                for (bi, &bs) in r.breaks.iter().enumerate() {
+                    let be = r.breaks.get(bi + 1).copied().unwrap_or(r.s.chars().count());
+                    // 段内组字区间 [max(bs, col_p), min(be, col_p+pel))
+                    let ul_lo = bs.max(r.col_p);
+                    let ul_hi = be.min(s1);
+                    if ul_hi <= ul_lo {
+                        continue;
+                    }
+                    let x = text_x0 + (r.s_xs[ul_lo] - r.s_xs[bs]);
+                    let vis = (r.s_xs[ul_hi] - r.s_xs[ul_lo]).max(0.0);
+                    if vis <= 0.0 {
+                        continue;
+                    }
                     let y = bounds.y + (r.v0 as f32 + bi as f32 - core.scroll_top) * lh;
-                    if vis > 0.0 && y + lh > bounds.y && y < bounds.y + bounds.height {
+                    if y + lh > bounds.y && y < bounds.y + bounds.height {
                         renderer.fill_quad(
                             renderer::Quad {
                                 bounds: Rectangle {

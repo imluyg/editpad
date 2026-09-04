@@ -36,8 +36,9 @@ pub const THEME_LIGHT: &str = "light";
 pub const THEME_DARK: &str = "dark";
 
 /// 字号允许范围（闭区间）与默认值；越界值在加载时被 clamp。
+/// P116：上限 28 → 48（用户点单：调节范围太小；下限 10 保持）。
 pub const MIN_FONT_SIZE: f32 = 10.0;
-pub const MAX_FONT_SIZE: f32 = 28.0;
+pub const MAX_FONT_SIZE: f32 = 48.0;
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -641,12 +642,12 @@ mod tests {
         let dir = scratch_dir("invalid");
         fs::create_dir_all(&dir).unwrap();
 
-        // 越界 + 非法主题 → 归一为 "light" / 上界 28.0
+        // 越界 + 非法主题 → 归一为 "light" / 上界（P116 起 48.0）
         let over = dir.join("over.toml");
         fs::write(&over, "theme = \"blue\"\nfont_size = 99\nrecent_files = []").unwrap();
         let loaded = Settings::load_from(&over);
         assert_eq!(loaded.theme, "light");
-        assert_eq!(loaded.font_size, 28.0);
+        assert_eq!(loaded.font_size, MAX_FONT_SIZE);
 
         // 下界同样被 clamp，合法 dark 值保留
         let under = dir.join("under.toml");

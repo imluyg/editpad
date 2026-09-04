@@ -579,14 +579,13 @@ impl EditorCore {
     /// 全宽贴边（P95 口径保留）。判定与稳定性见
     /// [`Self::set_wrap_sb_reserve`]。
     ///
-    /// P115 用户点单：**行尾与文本区右缘恒留一个汉字宽**（= 正文字号）——
-    /// 英文半宽字符行尾不再贴右缘/滚动条（「遇到英文可能出现问题」），
-    /// 组字挤出后文时右缘也有余量缓冲。折行断行（P96）与组字重排
-    /// （P115）共用本预算，口径单一。
+    /// P115/P116：**行尾与文本区右缘恒留一个汉字宽**（= 默认字号全宽，
+    /// [`RIGHT_EDGE_HAN_GAP`] 固定 16px）——英文半宽字符行尾不再贴右缘/
+    /// 滚动条，组字挤出后文时右缘有余量缓冲；大字号下余量不随之膨胀
+    /// （用户复报「放大后段变短、右侧空白大」）。折行断行（P96）与组字
+    /// 重排（P115）共用本预算，口径单一。
     pub(crate) fn wrap_budget_px(&self) -> f32 {
-        // 一个汉字 = 全宽字形 = 正文字号（em 方形，实测 NSimSun 全宽
-        // 16px @ 16px 字号 = font_size）
-        let full = (self.text_viewport_w() - self.font_size).max(4.0);
+        let full = (self.text_viewport_w() - RIGHT_EDGE_HAN_GAP).max(4.0);
         if self.wrap_sb_reserve {
             (full - VERTICAL_SCROLLBAR_RESERVE).max(4.0)
         } else {

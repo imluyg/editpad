@@ -28,6 +28,11 @@ pub(crate) const CARET_WIDTH: f32 = 2.0;
 pub(crate) const MAX_UNDO: usize = 512;
 /// 滚轮一格的行数（Windows 记事本口径）。
 pub(crate) const SCROLL_LINES_PER_NOTCH: f32 = 3.0;
+/// P115/P116：折行行尾与文本区右缘的余量（px）= **默认字号的一个汉字
+/// 宽**（16px 固定）——用户点单「右侧边缘和字体距离一个汉字」；放大
+/// 字号后余量不再跟随膨胀（修前 = font_size，48px 字号右缘空 48px，
+/// 「段变短右侧空白大」）。
+pub(crate) const RIGHT_EDGE_HAN_GAP: f32 = 16.0;
 
 /// 把任意来源的字号归一成合法值：非有限值回退默认，其余 clamp 到设置层允许区间。
 pub fn normalize_font_size(size: f32) -> f32 {

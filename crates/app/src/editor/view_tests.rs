@@ -740,7 +740,7 @@ fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
     };
     let (w, h) = (400u32, 200u32);
     let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 300.0f32, 180.0f32);
-    let preedit = "zhongguozhongguozhongguo"; // 24 字母 ≈212px
+    let preedit = "zhongguo".repeat(6); // 48 字母 ≈384px，跨 ≥2 重排段
     let doc = format!("{}\nAB", "中".repeat(20));
     let core = EditorHandle::default();
     {
@@ -789,7 +789,11 @@ fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
         breaks.len(),
         s_xs.last().copied().unwrap_or(0.0)
     );
-    assert!(breaks.len() >= 3, "测试前提失效：合成串应 ≥3 段，实际 {}", breaks.len());
+    assert!(
+        breaks.len() >= 4,
+        "测试前提失效：合成串应 ≥4 段（48 字母跨段），实际 {}",
+        breaks.len()
+    );
     let gutter = core.borrow().gutter_width();
     let x0 = (ex + gutter) as i32;
     let ink_in = |y0: f32, y1: f32, x0r: i32, x1r: i32| -> u32 {
@@ -833,10 +837,10 @@ fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
         (ink_right - x0) as f32,
         last_right
     );
-    // ③ 后续逻辑行下移 k = 合成段数 − 原段数（AB 应从 ey+44 移到
-    // ey+(2+k)*22）
+    // ③ 后续逻辑行下移 k = 合成段数 − 原段数（原 2 段 → 4 段 → k=2：
+    // AB 从 ey+44 移到 ey+88）
     let mut ab_shifted = 0u32;
-    for y in (ey + 66.0) as i32..(ey + 88.0) as i32 {
+    for y in (ey + 88.0) as i32..(ey + 110.0) as i32 {
         for x in x0..(x0 + 40) {
             if let Some(p) = pixels.pixel(x as u32, y as u32) {
                 if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
@@ -848,6 +852,17 @@ fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
     assert!(
         ab_shifted > 0,
         "后续逻辑行未随重排下移（k 偏移缺失；修前 AB 画在 ey+44 原位必挂）"
+    );
+    // ④ 组字跨段：**每段**的组字部分下方都应有下划线（用户复报
+    // 「下一行的换行没有下划线」——修前只在组字起点段画）。组字串
+    // 从段 1 起（词边界断点提前在「中↔拼音」交界），跨段 1/2
+    let ul_seg1 = ink_in(ey + 41.0, ey + 43.0, x0, x0 + 300);
+    let ul_seg2 = ink_in(ey + 63.0, ey + 65.0, x0, x0 + 300);
+    eprintln!("[P115续] 段1下划线墨px={ul_seg1} 段2下划线墨px={ul_seg2}");
+    assert!(ul_seg1 > 0, "段 1 组字部分缺下划线");
+    assert!(
+        ul_seg2 > 0,
+        "组字折行到段 2 后该段缺下划线（修前只画起点段必挂）"
     );
 }
 
@@ -2199,4 +2214,157 @@ fn headless_wrap_reserves_scrollbar_band_no_text_ink_under_thumb() {
         }
     }
     assert!(text_ink > 15, "预留线左侧应仍有正文墨迹（仅 {text_ink}px）");
+}
+
+/// P116 窗口缩放适配（headless 像素级）：**拉窄**后折行必须立即按新
+/// 预算重排（段数变多、行尾余量保持一个汉字宽）——既有 P96 测试只
+/// 覆盖「拉宽」方向，用户复报「窗口缩放时不适配」。220 ASCII 字符：
+/// 800 宽 3 段 → 450 宽 6 段；首帧渲染即应生效（无陈旧断点残留）。
+#[test]
+fn headless_wrap_reflows_after_viewport_shrink() {
+    use super::super::CursorPos;
+    let (w, h) = (900u32, 400u32);
+    let (ex, ey, ew, eh) = (0.0f32, 0.0f32, 800.0f32, 400.0f32);
+    let doc = format!("{}\n", "a".repeat(220));
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_height(eh);
+        c.cursor = CursorPos { line: 0, col: 0 };
+    }
+    let render = |ew: f32| -> tiny_skia::Pixmap {
+        core.borrow_mut().set_viewport_width(ew);
+        core.borrow_mut().set_word_wrap(true);
+        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+    let _ = render(800.0);
+    {
+        let c = core.borrow();
+        eprintln!("[P116] 800 宽段数 = {}", c.line_visual_segments(0));
+    }
+    let px = render(450.0);
+    let segs = core.borrow().line_visual_segments(0);
+    let budget = core.borrow().wrap_max_px();
+    let gutter = core.borrow().gutter_width();
+    eprintln!("[P116] 450 宽段数 = {segs}（预算 {budget:.1}）");
+    assert!(segs >= 6, "拉窄后折行未按新预算重排（段数 {segs}，应 ≥6 段）");
+    // 行尾余量 = 一个汉字宽：最右正文墨迹 ≤ 控件右缘 − 14px（文本区
+    // 右缘 = 控件右缘，P95 贴边口径；预算已内收余量）
+    let x0 = (ex + gutter) as u32;
+    let text_right = (ex + ew) as u32;
+    let mut max_x = 0u32;
+    for y in 0..h {
+        for x in x0..w {
+            if let Some(p) = px.pixel(x, y) {
+                if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
+                    max_x = max_x.max(x);
+                }
+            }
+        }
+    }
+    eprintln!("[P116] 最右正文墨 x={max_x}（控件右缘 {text_right}）");
+    assert!(max_x <= text_right, "折行墨迹越过右缘（max_x={max_x} > {text_right}）");
+    assert!(
+        max_x >= x0 && text_right.saturating_sub(max_x) >= 14,
+        "行尾距右缘不足一个汉字宽（余 {}px）",
+        text_right.saturating_sub(max_x)
+    );
+}
+
+/// P116 字号上限 48 的渲染边界（headless 像素级）：大字号 + 折行 +
+/// 右缘固定余量——20 汉字应折多段、全部墨迹不越文本区右缘（P42 列宽、
+/// P88 墨迹盒、P96 断行均按字号线性换算，放大只观感变化）。
+#[test]
+fn headless_large_font_48_wrap_keeps_right_margin() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (700u32, 400u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 620.0f32, 380.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&"中".repeat(20)));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.set_font_size(48.0);
+        c.set_word_wrap(true);
+        c.cursor = CursorPos { line: 0, col: 0 };
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(48.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    let segs = core.borrow().line_visual_segments(0);
+    let budget = core.borrow().wrap_max_px();
+    let gutter = core.borrow().gutter_width();
+    eprintln!("[P116] 48px 字号：段数={segs} 预算={budget:.1}");
+    assert!(segs >= 2, "48px 字号 20 汉字应折 ≥2 段，实际 {segs}");
+    let x0 = (ex + gutter) as u32;
+    let text_right = (ex + ew) as u32;
+    let mut max_x = 0u32;
+    let mut min_x = u32::MAX;
+    for y in ey as u32..(ey + eh) as u32 {
+        for x in x0..(ex + ew) as u32 {
+            if let Some(p) = pixels.pixel(x, y) {
+                if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
+                    max_x = max_x.max(x);
+                    min_x = min_x.min(x);
+                }
+            }
+        }
+    }
+    eprintln!("[P116] 墨迹 x ∈ [{min_x}, {max_x}]（控件右缘 {text_right}）");
+    assert!(min_x != u32::MAX, "48px 大字未渲染");
+    assert!(max_x <= text_right, "大字号墨迹越过右缘");
+    assert!(
+        text_right.saturating_sub(max_x) >= 14,
+        "大字号行尾距右缘不足一个汉字宽（余 {}px）",
+        text_right.saturating_sub(max_x)
+    );
 }

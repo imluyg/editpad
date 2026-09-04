@@ -843,9 +843,9 @@ fn p66_fractional_scroll_top_survives_clamp() {
         use editpad_core::settings::{MAX_FONT_SIZE, MIN_FONT_SIZE};
 
         let mut c = core_with("hello\nworld\n");
-        c.set_font_size(40.0); // 越上界被夹紧
+        c.set_font_size(MAX_FONT_SIZE + 1.0); // 越上界被夹紧
         assert_eq!(c.font_size(), MAX_FONT_SIZE);
-        c.set_font_size(1.0); // 越下界被夹紧
+        c.set_font_size(MIN_FONT_SIZE - 1.0); // 越下界被夹紧
         assert_eq!(c.font_size(), MIN_FONT_SIZE);
         c.set_font_size(f32::NAN); // 非有限值回退默认
         assert_eq!(c.font_size(), 16.0);
@@ -1546,8 +1546,9 @@ fn p66_fractional_scroll_top_survives_clamp() {
         let mut c = wrap_core("1234567890\n");
         wrap_converge(&mut c);
         let mc = c.wrap_max_cols();
-        let expect =
-            ((c.text_viewport_w() - c.font_size()) / c.char_width()).floor().max(1.0) as usize;
+        let expect = ((c.text_viewport_w() - RIGHT_EDGE_HAN_GAP) / c.char_width())
+            .floor()
+            .max(1.0) as usize;
         assert_eq!(mc, expect, "开态列预算 = 可视宽 − 汉字宽余量（不预留滚动条槽位）");
         assert!(mc >= 20, "300 宽视窗应有充足列数，实际 {mc}");
     }
@@ -1598,12 +1599,12 @@ fn p66_fractional_scroll_top_survives_clamp() {
         // P99 用户点单：折行文本贴满右缘后行尾字符被垂直滚动条盖住。
         // 修复 = 内容超出视口（滚动条 needed）时折行预算扣除滚动条
         // 可视带宽；放得下（无滚动条）时零预留全宽贴边（P95 口径
-        // 不回归）。P115 叠加：全宽口径 = 可视宽 − 一个汉字宽（右缘
-        // 余量，用户点单）。
+        // 不回归）。P115/P116 叠加：全宽口径 = 可视宽 − 一个汉字宽
+        // （RIGHT_EDGE_HAN_GAP 固定 16px，不随字号膨胀）。
         let mut c = wrap_core("1234567890\n");
         wrap_converge(&mut c);
         assert!(!c.wrap_sb_reserve, "默认零预留（P95 贴边口径）");
-        let full = (c.text_viewport_w() - c.font_size()).max(4.0);
+        let full = (c.text_viewport_w() - RIGHT_EDGE_HAN_GAP).max(4.0);
         assert!((c.wrap_max_px() - full).abs() < 0.01);
         assert_eq!(
             c.wrap_max_cols(),
@@ -1629,15 +1630,15 @@ fn p66_fractional_scroll_top_survives_clamp() {
     fn wrap_sb_reserve_rebreaks_at_smaller_budget() {
         // P99 像素口径：预留后断点按更小预算重算——每段右缘 ≤
         // 「文本区宽 − 滚动条带」，行尾字符整体在滑块左侧收尾。
-        // （真实字形场景：15.6px 半宽 → 975px 全宽、P115 右缘汉字宽
-        // 余量 −16px → 959px 全宽 61 字符/段、946px 预留 60 字符/段。）
+        // （真实字形场景：15.6px 半宽 → 975px 全宽、P115/P116 右缘汉字
+        // 宽余量固定 16px → 959px 全宽 61 字符/段、946px 预留 60 字符/段。）
         let mut c = core_with(&"a".repeat(100));
         c.set_viewport_width(1024.0);
         c.set_viewport_height(600.0);
         c.set_word_wrap(true);
         let xs: Vec<f32> = (0..=100).map(|i| i as f32 * 15.6).collect();
         c.set_row_layout(0, xs.clone());
-        let full = c.text_viewport_w() - c.font_size();
+        let full = c.text_viewport_w() - RIGHT_EDGE_HAN_GAP;
         let breaks_full = c.segments_of_line(0, &c.line_text(0));
         assert_eq!(breaks_full[1], 61, "全宽预算 61 字符/段（951.6 ≤ 959）");
         c.set_wrap_sb_reserve(true);
