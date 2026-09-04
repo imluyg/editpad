@@ -533,6 +533,58 @@ use super::*;
     }
 
     #[test]
+    fn saved_ok_surfaces_stashed_backup_notice() {
+        // 备份提示写在异步落盘完成之前，会被 Saved 分支立即覆盖/抹掉；
+        // 暂存补显机制钉死：无转码补显、转码让位、失败弃置。
+        let (mut app, _path) = loaded_real_file_app("backup-notice");
+        let v = app.tab().version;
+        app.pending_backup_notice = Some("已备份旧版 → x.bak".to_owned());
+        dispatch(&mut app, Message::Saved(v, Ok(editpad_core::EncodeNotice::default())));
+        assert!(
+            app.status.contains("已备份"),
+            "落盘成功后补显备份提示，实际 {:?}",
+            app.status
+        );
+        assert!(app.pending_backup_notice.is_none(), "补显即取走");
+
+        // 转码提示优先：备份提示让位且不留存
+        app.pending_backup_notice = Some("已备份旧版 → x.bak".to_owned());
+        app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+        app.tabs[0].encoding_label = "UTF-8".to_owned();
+        let v = app.tab().version;
+        dispatch(&mut app, Message::Saved(v, Ok(editpad_core::EncodeNotice::default())));
+        assert!(!app.status.contains("已备份"), "转码知情权优先，实际 {:?}", app.status);
+        assert!(app.pending_backup_notice.is_none());
+    }
+
+    #[test]
+    fn error_status_survives_edit_noise() {
+        // 「保存失败」等错误必须持久：编辑噪声不清除，直到下一条信息
+        // 状态让位。旧实现打一个字就把错误抹掉且无日志可查。
+        let (mut app, _path) = loaded_real_file_app("error-sticky");
+        let v = app.tab().version;
+        let err = Err("无法写入文件 x: disk full".to_owned());
+        dispatch(&mut app, Message::Saved(v, err));
+        assert!(app.status.contains("保存失败"));
+        assert!(app.status_is_error, "错误必须带类型标记");
+
+        // 编辑一次：错误仍在（旧实现此处被 status.clear() 抹掉）
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(
+            app.status.contains("保存失败"),
+            "错误不得被编辑噪声清除，实际 {:?}",
+            app.status
+        );
+        assert!(app.status_is_error);
+
+        // 下一条信息状态正常让位并复位类型
+        app.set_status("已替换 1 处");
+        assert!(!app.status_is_error);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+        assert!(app.status.is_empty(), "普通信息照旧被编辑清除，实际 {:?}", app.status);
+    }
+
+    #[test]
     fn p67_convert_eol_rewrites_document_undoably() {
         let (mut app, _path) = loaded_real_file_app("p67-eol");
         {

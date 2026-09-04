@@ -40,6 +40,71 @@ fn char_eq(a: char, b: char, case_sensitive: bool) -> bool {
     ascii_case_eq(a, b, case_sensitive)
 }
 
+// ---------- 行界口径（查找 ↔ ropey 对齐） ----------
+
+/// ropey `unicode_lines` 行界全集的判定：`c` 构成的行界共几字节
+/// （CRLF 配对算一个单元计 2 字节），非行界返回 0。
+///
+/// 这是查找模块与编辑器（ropey 默认 `unicode_lines` 特性）行号坐标的
+/// 唯一对齐点：`\n`、`\r\n`、孤立 `\r`、VT、FF、NEL、LS、PS 一律算
+/// 行界。旧实现只认 `\n`，在含孤立 `\r` 的文档上（加载器明确支持的
+/// 经典 Mac CR 文件）所有命中的行号都会漂移、选区定位错位。
+fn line_break_byte_len(c: char, next: Option<char>) -> usize {
+    let is_break = matches!(
+        c,
+        '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+    );
+    if !is_break {
+        return 0;
+    }
+    let mut len = c.len_utf8();
+    if c == '\r' && next == Some('\n') {
+        len += '\n'.len_utf8();
+    }
+    len
+}
+
+/// 按 ropey 行界全集把 `text` 切成行并逐行回调（行内容不含行界）。
+fn for_each_line(text: &str, mut f: impl FnMut(usize, &str)) {
+    let mut line_start = 0usize;
+    let mut line_idx = 0usize;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().copied().map(|(_, nc)| nc);
+        let blen = line_break_byte_len(c, next);
+        if blen == 0 {
+            continue;
+        }
+        f(line_idx, &text[line_start..i]);
+        line_idx += 1;
+        line_start = i + blen;
+        if blen == 2 {
+            chars.next(); // 消费 CRLF 配对的 \n
+        }
+    }
+    f(line_idx, &text[line_start..]);
+}
+
+/// 在片段内找第一个「完整落在片段内」的行界，返回 (起始字节偏移, 字节数)。
+///
+/// 片段末尾悬置的 `\r` 不在此返回——它可能是跨块 `\r\n` 的前半，
+/// 由调用方按 [`MultiLineScanner::pending_cr`] 同款逻辑裁决。
+fn next_line_break(s: &str) -> Option<(usize, usize)> {
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().copied().map(|(_, nc)| nc);
+        let blen = line_break_byte_len(c, next);
+        if blen == 0 {
+            continue;
+        }
+        if c == '\r' && next.is_none() {
+            return None; // 片段末尾的 \r：跨块归并悬置
+        }
+        return Some((i, blen));
+    }
+    None
+}
+
 /// 找出全部匹配（按文档顺序）。查询串为空时返回空表。
 ///
 /// P26：查询含 `\n` 时走 [`MultiLineScanner`] 跨行归一分支——
@@ -58,18 +123,18 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
     // 行字符缓冲跨行复用：50MB 级文档约 50 万行，逐行新建 Vec<char>
     // 会产生等量小堆分配（第 39 轮实测占查找耗时可观份额）
     let mut lc: Vec<char> = Vec::new();
-    for (line_idx, line) in text.split('\n').enumerate() {
+    for_each_line(text, |line_idx, line| {
         scan_line(line, &q, case_sensitive, line_idx, &mut lc, &mut out);
-    }
+    });
     out
 }
 
 /// 在 [`Document`]（rope）上直接查找，语义与 [`find_all`] 完全一致（P10）。
 ///
 /// 与 `find_all(&doc.to_text(), ..)` 相比省掉整份全文 String：
-/// 按存储块零拷贝迭代、手工按 `\n` 分段，峰值内存只多一个「当前行」缓冲
-/// （复用分配，长度 = 最长行）。列语义逐字符对齐 `split('\n')`——
-/// 行尾 `\r` 保留在行内（与 find_all 一致），孤立 `\r` 不当行界。
+/// 按存储块零拷贝迭代、手工按行界全集分段，峰值内存只多一个「当前行」
+/// 缓冲（复用分配，长度 = 最长行）。行界口径与 ropey 一致（含孤立
+/// `\r` 等），与编辑器行号同源；`\r\n` 跨块悬置裁决保证逐字节等价。
 pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> Vec<MatchPos> {
     let mut out = Vec::new();
     if query.is_empty() {
@@ -87,18 +152,36 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
     let mut line = String::new();
     let mut line_idx = 0usize;
     let mut lc: Vec<char> = Vec::new(); // 同 find_all：跨行复用字符缓冲
+    // 上块以 \r 结尾：下块若以 \n 开头则并入同一 CRLF 单元（不另起一行）
+    let mut pending_cr = false;
     for chunk in doc.chunks() {
         let mut rest = chunk;
-        // 块边界可能落在任意位置：'\n' 前的残段累积进当前行缓冲，
-        // 遇到完整 '\n' 才结算一行——保证与 split('\n') 逐字节等价
-        while let Some(pos) = rest.find('\n') {
+        if pending_cr {
+            pending_cr = false;
+            if let Some(stripped) = rest.strip_prefix('\n') {
+                rest = stripped; // \r\n 跨块：\n 已随上块的 \r 一并结算
+            }
+        }
+        // 块边界可能落在任意位置：行界前的残段累积进当前行缓冲，
+        // 遇到完整行界才结算一行——保证与全文单遍切分逐字节等价
+        while let Some((pos, blen)) = next_line_break(rest) {
             line.push_str(&rest[..pos]);
             scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
             line.clear();
             line_idx += 1;
-            rest = &rest[pos + 1..];
+            rest = &rest[pos + blen..];
         }
-        line.push_str(rest);
+        if rest.ends_with('\r') {
+            // 悬置 \r 必是行界（孤立或 CRLF 均然）：行内容到此结算，
+            // 是否吞掉下块开头的 \n 交 pending_cr 裁决
+            line.push_str(&rest[..rest.len() - '\r'.len_utf8()]);
+            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
+            line.clear();
+            line_idx += 1;
+            pending_cr = true;
+        } else {
+            line.push_str(rest);
+        }
     }
     scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
     out
@@ -251,7 +334,10 @@ impl MultiLineScanner {
                     Some(_) => self.push_token(ScanToken::Newline, out), // 孤立 `\r`
                     None => self.pending_cr = true, // 片段末尾：悬置待下片段裁决
                 },
-                '\n' => self.push_token(ScanToken::Newline, out),
+                // 行界全集（除 \r\n 外的单字符行界）：与编辑器行号同源
+                '\n' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+                    self.push_token(ScanToken::Newline, out)
+                }
                 other => self.push_token(ScanToken::Char(other), out),
             }
         }
@@ -561,9 +647,38 @@ pub fn replace_all_regex(
     Ok((out, count))
 }
 
+/// 对字节偏移 `byte_start` 处的当前正则命中做单次替换展开（支持
+/// `$1`/`${1}` 组引用），专为零宽命中设计——常规命中可直接对命中文本
+/// `Regex::replace`，零宽命中拿不到命中文本，须在原文上按位置重取
+/// 捕获组。`text` 须包含该命中（零宽命中必为单行，所在行即可），
+/// `byte_start` 为命中起点在 `text` 内的字节偏移。
+pub fn expand_regex_at(
+    text: &str,
+    byte_start: usize,
+    pattern: &str,
+    replacement: &str,
+    case_sensitive: bool,
+) -> Result<String, String> {
+    let re = compile_regex(pattern, case_sensitive)?;
+    let caps = re
+        .captures_from_pos(text, byte_start)
+        .map_err(|e| e.to_string())?
+        .ok_or("无匹配")?;
+    let m0 = caps.get(0).ok_or("无匹配")?;
+    if m0.start() != byte_start {
+        // 行窗口内首个匹配不在命中位置（多行命中被窗口截断等异常形态）：
+        // 显式报错而非静默错位展开
+        return Err(format!("命中位置漂移（期望 {byte_start}，实际 {}）", m0.start()));
+    }
+    let mut out = String::new();
+    caps.expand(replacement, &mut out);
+    Ok(out)
+}
+
 /// 字节跨度序列 → [`MatchPos`]：单遍游标推进（避免每命中一次
 /// `text[..start].chars().count()` 的 O(命中×文档) 复杂度）。
-/// `\r\n` 计 1 字符；命中内容内的换行推进行号、列号回到行首计数。
+/// 行界按 ropey `unicode_lines` 全集（`\r\n` 计 1 字符）；命中内容内
+/// 的换行推进行号、列号回到行首计数。
 fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
     let mut out = Vec::with_capacity(spans.len());
     let mut byte_pos = 0usize;
@@ -584,7 +699,7 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
                 continue;
             }
             *char_pos += 1;
-            if c == '\n' {
+            if line_break_byte_len(c, None) > 0 {
                 *line += 1;
                 *line_start_char = *char_pos;
             }
@@ -675,6 +790,43 @@ mod tests {
     }
 
     #[test]
+    fn find_line_numbers_align_with_ropey_unicode_lines() {
+        // 行界口径与 ropey `unicode_lines` 全集对齐：孤立 \r 也是行界。
+        // 旧实现只认 \n，经典 Mac CR 文件上所有命中行号漂移、选区错位。
+        // "a\rb" 在编辑器里是两行（ropey 行界），b 在第 1 行第 0 列。
+        let text = "a\rb";
+        assert_eq!(
+            find_all(text, "b", true),
+            vec![MatchPos { line: 1, col: 0, len_chars: 1 }]
+        );
+        // 单字符行界 VT/FF/NEL/LS/PS 同口径
+        for br in ['\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'] {
+            let text = format!("a{br}b");
+            assert_eq!(
+                find_all(&text, "b", true),
+                vec![MatchPos { line: 1, col: 0, len_chars: 1 }],
+                "行界字符 U+{:04X}", br as u32
+            );
+        }
+        // rope 路径与 str 路径同口径
+        let doc = Document::from_str("a\rb");
+        assert_eq!(
+            find_all_document(&doc, "b", true),
+            find_all("a\rb", "b", true),
+        );
+        // 正则路径同口径
+        assert_eq!(
+            find_all_regex("a\rb", "b", true).unwrap(),
+            vec![MatchPos { line: 1, col: 0, len_chars: 1 }]
+        );
+        // 跨行查询沿用 P26 归一口径：查询 \n 命中孤立 \r 的行界
+        assert_eq!(
+            find_all("a\rb", "a\nb", true),
+            vec![MatchPos { line: 0, col: 0, len_chars: 3 }]
+        );
+    }
+
+    #[test]
     fn next_prev_wrap_around_cursor() {
         let ms = find_all("aXaXaX", "a", true);
         // 光标在 col 1 → 下一个是 col 2；上一个回卷到最后
@@ -728,8 +880,8 @@ mod tests {
             "",                                  // 空文档
             "single line no newline",            // 单行无换行
             "foo\nbar foo\n",                    // 常规多行（尾换行）
-            "a\r\nb\r\nc",                       // CRLF：\r 留在行内，列语义同 split('\n')
-            "x\r\ny\nz\rw",                      // 混合 + 孤立 \r（不作行界）
+            "a\r\nb\r\nc",                       // CRLF：\r\n 是一个行界单元
+            "x\r\ny\nz\rw",                      // 混合 + 孤立 \r（孤立 \r 也是行界）
             "中文中文\n🚀🚀中\n",                 // 多字节字符列号
             "\tindent\ttab\t\n",                 // Tab 原样计数
             "aaaa aa\naa",                       // 重叠命中窗口
@@ -864,10 +1016,12 @@ mod tests {
         assert!(find_all("a\r\nb", "a\r\nb", true).is_empty());
         assert!(find_all_document(&Document::from_str("a\r\nb"), "a\r\nb", true).is_empty());
 
-        // 对照：不含 \n 的查询仍走旧单行路径——行内字面 \r 照常命中，
-        // 单行路径行为零变化
+        // 对照：行界统一后 \r 只作为行界存在（与 ropey 同源），单行窗口
+        // 内不会再出现字面 \r——含 \r 不含 \n 的查询恒不命中；
+        // 跨行匹配一律经 \n 查询走归一分支（孤立 \r 折叠判等）
+        assert!(find_all("x\ry", "x\ry", true).is_empty());
         assert_eq!(
-            find_all("x\ry", "x\ry", true),
+            find_all("x\ry", "x\ny", true),
             vec![MatchPos { line: 0, col: 0, len_chars: 3 }]
         );
     }
@@ -1198,6 +1352,17 @@ mod tests {
         assert!(!err.is_empty());
         // 查找路径同一口径：运行期错误同样上抛，不静默吞
         assert!(find_all_regex(&text, "(a|b|ab)*(?>c)", true).is_err());
+    }
+
+    #[test]
+    fn expand_regex_at_expands_zero_width_match_in_place() {
+        // 零宽命中按位置展开：$0 引用整段命中、空匹配也能展开
+        assert_eq!(expand_regex_at("abc", 1, "b*", "[${0}]", true).unwrap(), "[b]");
+        assert_eq!(expand_regex_at("abc", 1, "x*", "Y", true).unwrap(), "Y");
+        // 组引用与常规命中同样可用
+        assert_eq!(expand_regex_at("a1b", 0, r"a(\d)", "<$1>", true).unwrap(), "<1>");
+        // 行窗口内首个匹配不在命中位置：显式报错而非静默错位展开
+        assert!(expand_regex_at("abc", 1, "c", "Y", true).is_err());
     }
 
     #[test]

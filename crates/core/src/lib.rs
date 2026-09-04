@@ -28,8 +28,9 @@ pub use paths::{data_root, data_root_for, data_root_for_base};
 pub use saver::{save_atomic, save_document_atomic, save_document_encoded, EncodeNotice,
     SaveEncoding};
 pub use search::{
-    find_all, find_all_document, next_from, prev_from, replace_all, replace_all_document,
-    ascii_case_eq, compile_regex, find_all_regex, replace_all_regex, MatchPos,
+    expand_regex_at, find_all, find_all_document, next_from, prev_from, replace_all,
+    replace_all_document, ascii_case_eq, compile_regex, find_all_regex, replace_all_regex,
+    MatchPos,
 };
 pub use settings::{Settings, RecentView, normalize_combo, normalize_settings_page, EXIT_MODE_ASK,
     EXIT_MODE_SNAPSHOT, SETTINGS_PAGES, SETTINGS_PAGE_APPEARANCE, SETTINGS_PAGE_FONT,

@@ -166,7 +166,7 @@ impl Editpad {
                 for tab in &mut self.tabs {
                     tab.heartbeat_snap = None;
                 }
-                self.status = format!("快照心跳失败:{error}");
+                self.set_status_error(format!("快照心跳失败:{error}"));
             }
         }
     }
@@ -263,7 +263,7 @@ impl Editpad {
                 self.close_window()
             }
             Err(error) => {
-                self.status = format!("会话快照失败:{error}");
+                self.set_status_error(format!("会话快照失败:{error}"));
                 self.confirm_or_close()
             }
         }
@@ -508,7 +508,7 @@ impl Editpad {
             notes.push(format!("{} 页超出内存护栏未恢复", self.restore_dropped));
         }
         if !notes.is_empty() {
-            self.status = format!("会话恢复完成:{}", notes.join("，"));
+            self.set_status(format!("会话恢复完成:{}", notes.join("，")));
         }
         self.restore_failed = 0;
         self.restore_dropped = 0;
@@ -602,7 +602,7 @@ impl Editpad {
         if self.regex_enabled {
             if let Err(e) = editpad_core::compile_regex(&effective_query, self.case_sensitive) {
                 self.cancel_find_scan();
-                self.status = format!("正则无效：{e}");
+                self.set_status_error(format!("正则无效：{e}"));
                 return Task::none();
             }
         }
@@ -690,7 +690,7 @@ impl Editpad {
         self.cur_handle
             .borrow_mut()
             .select_span(pos.line, pos.col, pos.len_chars);
-        self.status = format!("第 {}/{} 处匹配", index + 1, self.matches.len());
+        self.set_status(format!("第 {}/{} 处匹配", index + 1, self.matches.len()));
     }
 
     /// 第 63 轮：复制某页的完整路径或文件名到剪贴板。
@@ -702,7 +702,7 @@ impl Editpad {
             return Task::none();
         };
         let Some(path) = tab.path.clone() else {
-            self.status = "未命名页没有路径可复制（先保存）".to_owned();
+            self.set_status("未命名页没有路径可复制（先保存）".to_owned());
             return Task::none();
         };
         let payload = if full_path {
@@ -712,7 +712,7 @@ impl Editpad {
                 .map(|n| n.display().to_string())
                 .unwrap_or_else(|| path.display().to_string())
         };
-        self.status = format!("已复制 {payload}");
+        self.set_status(format!("已复制 {payload}"));
         iced::clipboard::write(payload)
     }
 
@@ -722,23 +722,30 @@ impl Editpad {
         }
         // 扫描在途：不基于过期命中表跳转
         if self.find_scanning() {
-            self.status = "查找中…".to_owned();
+            self.set_status("查找中…".to_owned());
             return Task::none();
         }
         if self.matches.is_empty() {
             // 懒触发：开栏即按 Enter 而扫描还没排队过时，先补一次扫描
             return self.schedule_find_scan();
         }
-        if self.matches.is_empty() {
-            self.status = "无匹配".to_owned();
-            return Task::none();
-        }
 
-        let cursor = self.cur_handle.borrow().cursor;
+        // 「上一个」以选区起点为原点：光标/选区正落在某命中上时一步跳到
+        // 上一处——以命中末尾为原点会让第一按重新选中当前命中（需两按）；
+        // 「下一个」维持光标（命中末尾）原点不变
+        let (origin_line, origin_col) = {
+            let ed = self.cur_handle.borrow();
+            if forward {
+                (ed.cursor.line, ed.cursor.col)
+            } else {
+                let (start, _) = ed.ordered_selection().unwrap_or((ed.cursor, ed.cursor));
+                (start.line, start.col)
+            }
+        };
         let index = if forward {
-            editpad_core::next_from(&self.matches, cursor.line, cursor.col)
+            editpad_core::next_from(&self.matches, origin_line, origin_col)
         } else {
-            editpad_core::prev_from(&self.matches, cursor.line, cursor.col)
+            editpad_core::prev_from(&self.matches, origin_line, origin_col)
         };
         self.match_idx = index;
 
@@ -752,7 +759,7 @@ impl Editpad {
             self.cur_handle
                 .borrow_mut()
                 .select_span(pos.line, pos.col, pos.len_chars);
-            self.status = format!("第 {}/{} 处匹配", i + 1, self.matches.len());
+            self.set_status(format!("第 {}/{} 处匹配", i + 1, self.matches.len()));
         }
         Task::none()
     }
@@ -1497,12 +1504,25 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         }
 
         if !self.status.is_empty() {
+            // 错误（红色 ⚠）与普通信息（主题文字色，无警号）区分渲染：
+            // 信息持久化后满屏红字会放大无关紧要的提示
+            let (icon, color) = if self.status_is_error {
+                ("⚠ ", [0.9, 0.25, 0.25])
+            } else {
+                let palette = if self.dark_mode {
+                    Theme::Dark.palette()
+                } else {
+                    Theme::Light.palette()
+                };
+                let Color { r, g, b, .. } = palette.text;
+                ("", [r, g, b])
+            };
             body = body.push(
                 container(
-                    text(format!("⚠ {}", self.status))
+                    text(format!("{icon}{}", self.status))
                         .size(uipx)
                         .font(uifont)
-                        .color([0.9, 0.25, 0.25]),
+                        .color(color),
                 )
                 .padding([4, 10]),
             );

@@ -16,6 +16,14 @@ pub(crate) struct Editpad {
     /// 对话框/IO 进行中，防止重复触发
     pub(crate) busy: bool,
     pub(crate) status: String,
+    /// 上一条状态是否为错误：错误以红色 ⚠ 渲染，且**不被编辑噪声
+    /// 清除**（如「保存失败」必须持久到用户做出下一个有效动作才让位）。
+    /// 写入一律走 [`Editpad::set_status`] / [`Editpad::set_status_error`]。
+    pub(crate) status_is_error: bool,
+    /// 手动保存时暂存的「已备份旧版」提示：备份消息在异步落盘完成前
+    /// 写入会被 [`Message::Saved`] 分支立即覆盖/抹掉，故随保存请求暂存，
+    /// 落盘成功且无转码提示时补显。
+    pub(crate) pending_backup_notice: Option<String>,
 
     // ---------- 即时保存（P18，版本号已下沉 Tab） ----------
     /// 「保存后关闭标签」的目标页；Saved/TabSaved 完成后据此关页
@@ -205,6 +213,8 @@ impl Default for Editpad {
             cur_handle,
             busy: false,
             status: String::new(),
+            status_is_error: false,
+            pending_backup_notice: None,
             settings: editpad_core::Settings::default(),
             settings_path_override: None,
             settings_visible: false,
@@ -276,5 +286,19 @@ impl Default for Editpad {
             snapshot_dir_override: None,
             last_geometry_persist: None,
         }
+    }
+}
+
+impl Editpad {
+    /// 写入普通信息状态（编辑动作可清除，中性配色渲染）。
+    pub(crate) fn set_status(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_is_error = false;
+    }
+
+    /// 写入错误状态（红色 ⚠ 渲染；编辑噪声不清除，直到下一条状态让位）。
+    pub(crate) fn set_status_error(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_is_error = true;
     }
 }

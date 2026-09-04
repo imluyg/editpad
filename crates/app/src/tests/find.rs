@@ -143,6 +143,64 @@ use super::*;
     }
 
     #[test]
+    fn step_prev_from_selected_match_jumps_back_in_one_press() {
+        // 光标/选区正落在命中上时，「查找上一个」必须一步跳到上一处——
+        // 旧实现以光标（命中末尾）为原点，第一按会重新选中当前命中
+        let (mut app, _path) = loaded_real_file_app("step-prev");
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.reset_document(editpad_core::Document::from_str("aXbXc"));
+        }
+        app.find_visible = true;
+        app.find_query = "X".to_owned();
+        let hits = vec![
+            editpad_core::MatchPos { line: 0, col: 1, len_chars: 1 },
+            editpad_core::MatchPos { line: 0, col: 3, len_chars: 1 },
+        ];
+        let seq = app.find_seq;
+        app.find_scan = Some(seq);
+        dispatch(&mut app, Message::FindScanDone(seq, hits));
+
+        dispatch(&mut app, Message::FindNext); // 选中第 1 个命中
+        dispatch(&mut app, Message::FindNext); // 选中第 2 个命中
+        dispatch(&mut app, Message::FindPrev);
+        assert_eq!(app.match_idx, Some(0), "从第 2 个命中一步回到第 1 个");
+
+        // 「下一个」语义不变：以命中末尾为原点继续向后
+        dispatch(&mut app, Message::FindNext);
+        assert_eq!(app.match_idx, Some(1));
+    }
+
+    #[test]
+    fn p70_regex_replace_current_zero_width_expands_not_literal_fallback() {
+        // 零宽命中（如 a*/b* 的空匹配）：旧实现 selected_text() 为 None
+        // 时静默回落字面 replace_current——拿正则串当字面量匹配。钉死：
+        // 按位置展开替换文本（$0 引用）。
+        let (mut app, _path) = loaded_real_file_app("p70-zero-width");
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.reset_document(editpad_core::Document::from_str("abc"));
+        }
+        app.regex_enabled = true;
+        app.find_query = r"b*".to_owned();
+        app.replace_query = "-$0-".to_owned();
+
+        // 命中表直接注入：b* 在 col 1 的零宽匹配（空命中 len_chars=0）
+        let hits = vec![editpad_core::MatchPos { line: 0, col: 1, len_chars: 0 }];
+        let seq = app.find_seq;
+        app.find_scan = Some(seq);
+        dispatch(&mut app, Message::FindScanDone(seq, hits));
+
+        dispatch(&mut app, Message::ReplaceCurrentRegex);
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "a-b-bc",
+            "零宽命中应在原位展开替换文本（b 被 $0 引用）"
+        );
+        assert!(app.tab().dirty);
+    }
+
+    #[test]
     fn p63_autosave_must_skip_contract() {
         // 写前判定纯函数契约：期望戳缺失不拦截；期望已知时以差异为准
         let t0 = std::time::SystemTime::UNIX_EPOCH;
