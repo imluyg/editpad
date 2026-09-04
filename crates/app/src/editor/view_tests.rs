@@ -2216,6 +2216,232 @@ fn headless_wrap_reserves_scrollbar_band_no_text_ink_under_thumb() {
     assert!(text_ink > 15, "预留线左侧应仍有正文墨迹（仅 {text_ink}px）");
 }
 
+/// P116 勘误探测：**同状态连续两帧像素必须一致**（用户复报「字号调到
+/// 24 时字闪来闪去、段落不停出现消失」——帧间布局振荡的嫌疑）。遍历
+/// 字号 × 视口宽 × 多行混合文本，同一 EditorView 连续渲染两帧比对；
+/// 滚动条 alpha 用系统时钟（两帧有毫秒差，可能进入淡出）——置
+/// sb_activity=None 排除，只留正文/组字墨迹的帧差。任何 diff 即振荡
+/// 组合（修后此测试恒绿，作为缩放稳定护栏）。
+#[test]
+fn headless_no_frame_oscillation_after_font_zoom() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    // 多行混合文本：中文长句（折多段）+ 英文短行交错，覆盖段落出现/
+    // 消失观感
+    let lines: Vec<String> = (0..36)
+        .map(|i| {
+            if i % 3 == 0 {
+                format!("中文长文本段落第{ }行{}", i + 1, "abcdefghijklmnopqrstuvwxyz".repeat(4))
+            } else {
+                format!("line {} with some english {}", i + 1, "word ".repeat(8))
+            }
+        })
+        .collect();
+    let doc = lines.join("\n");
+    for size in [16.0f32, 20.0, 22.0, 24.0, 26.0, 28.0, 32.0, 40.0, 48.0] {
+        for ew in [600.0f32, 900.0, 1200.0] {
+            let core = EditorHandle::default();
+            {
+                let mut c = core.borrow_mut();
+                c.reset_document(editpad_core::Document::from_str(&doc));
+                c.set_viewport_width(ew);
+                c.set_viewport_height(600.0);
+                c.set_font_size(size);
+                c.set_word_wrap(true);
+                c.cursor = CursorPos { line: 0, col: 0 };
+                c.sb_activity = None; // 滚动条 alpha 有时钟差，排除
+            }
+            let (w, h) = (1300u32, 640u32);
+            let (ex, ey) = (10.0f32, 10.0f32);
+            let render = || -> tiny_skia::Pixmap {
+                let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+                let mut renderer = iced::Renderer::new(font, Pixels(size));
+                let mut tree = Tree::empty();
+                let limits = layout::Limits::new(Size::new(ew, 600.0), Size::new(ew, 600.0));
+                let node = view.layout(&mut tree, &renderer, &limits);
+                let node = node.translate(iced::Vector::new(ex, ey));
+                let lyt = Layout::new(&node);
+                let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+                pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+                let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+                let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+                let viewport =
+                    iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+                let damage = vec![viewport_rect];
+                view.draw(
+                    &tree,
+                    &mut renderer,
+                    &Theme::Light,
+                    &iced::advanced::renderer::Style::default(),
+                    lyt,
+                    mouse::Cursor::Unavailable,
+                    &viewport_rect,
+                );
+                renderer
+                    .draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+                pixels
+            };
+            let a = render();
+            let b = render(); // 同一状态第二帧（真实 GUI 每帧同态重绘）
+            let mut diff = 0u32;
+            for y in 0..h {
+                for x in 0..w {
+                    if let (Some(pa), Some(pb)) = (a.pixel(x, y), b.pixel(x, y)) {
+                        let d = (pa.red() as i32 - pb.red() as i32).abs()
+                            + (pa.green() as i32 - pb.green() as i32).abs()
+                            + (pa.blue() as i32 - pb.blue() as i32).abs();
+                        if d > 8 {
+                            diff += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                diff, 0,
+                "同状态两帧像素不一致（帧间振荡）：字号 {size} 视口宽 {ew} diff={diff}px"
+            );
+        }
+    }
+}
+
+/// P116 勘误探测 2：**内容高度贴视口边缘**时垂直滚动条 needed ↔
+/// 折行预算（±VERTICAL_SCROLLBAR_RESERVE）不得逐帧翻转（P99 自持
+/// 证明的稳态；翻转即「段落出现/消失」闪烁，用户复报）。连续 8 帧
+/// 打印 needed/预算/段数，任何两帧翻转即失败。
+#[test]
+fn probe_wrap_sb_reserve_no_flip_at_viewport_edge() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    // 24px（lh=33）：视口 600px = 18.18 行；构造单行长文折 ~18 段
+    // （内容高度贴 600 边缘），needed 判定处临界
+    let scenarios: Vec<(&str, String)> = vec![
+        (
+            "单行长文",
+            "中文长文本段落内容内容内容".repeat(60),
+        ),
+        (
+            "两行长文",
+            format!(
+                "{}\n{}",
+                "英文englishword".repeat(50),
+                "中文段落中文段落".repeat(45)
+            ),
+        ),
+        (
+            "17短行",
+            (0..17).map(|_| "short line xxxx".to_string()).collect::<Vec<_>>().join("\n"),
+        ),
+        (
+            "19短行",
+            (0..19).map(|_| "short line xxxx".to_string()).collect::<Vec<_>>().join("\n"),
+        ),
+        // 翻转带探索：总行数略超视口（18 行 @33px = 594 < 600）+ 长行
+        // （不可见行按 1 段低估行程）+ 混合
+        (
+            "18行+长行尾",
+            (0..17)
+                .map(|_| "short line xxxx".to_string())
+                .chain(std::iter::once(
+                    "中文长篇尾部段落".repeat(30),
+                ))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        (
+            "20行+长首行",
+            std::iter::once("中文首行长段落".repeat(28))
+                .chain((1..20).map(|_| "short line yyyy".to_string()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        (
+            "25行混合",
+            (0..25)
+                .map(|i| {
+                    if i % 4 == 0 {
+                        "长段落英文englishword".repeat(20)
+                    } else {
+                        "short sh".to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ];
+    for (label, doc) in &scenarios {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str(doc));
+            c.set_viewport_width(760.0);
+            c.set_viewport_height(600.0);
+            c.set_font_size(24.0);
+            c.set_word_wrap(true);
+            c.cursor = CursorPos { line: 0, col: 0 };
+        }
+        let mut history: Vec<(bool, f32, u32)> = Vec::new();
+        for _ in 0..8 {
+            // 完整 layout+draw（P99 的 needed 判定与 set_wrap_sb_reserve
+            // 在 draw 内执行——layout 只注入度量，不触发翻转）
+            let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+            let mut renderer = iced::Renderer::new(font, Pixels(24.0));
+            let mut tree = Tree::empty();
+            let limits =
+                layout::Limits::new(Size::new(760.0, 600.0), Size::new(760.0, 600.0));
+            let node = view.layout(&mut tree, &renderer, &limits);
+            let node = node.translate(iced::Vector::new(0.0, 0.0));
+            let lyt = Layout::new(&node);
+            let mut pixels = tiny_skia::Pixmap::new(760, 640).expect("pixmap");
+            pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+            let mut mask = tiny_skia::Mask::new(760, 640).expect("mask");
+            let viewport_rect = Rectangle::with_size(Size::new(760.0f32, 640.0f32));
+            let viewport = iced_graphics::Viewport::with_physical_size(
+                Size::new(760, 640),
+                1.0,
+            );
+            let damage = vec![viewport_rect];
+            view.draw(
+                &tree,
+                &mut renderer,
+                &Theme::Light,
+                &iced::advanced::renderer::Style::default(),
+                lyt,
+                mouse::Cursor::Unavailable,
+                &viewport_rect,
+            );
+            renderer
+                .draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+            let c = core.borrow();
+            let (reserve, mpx, segs) = (
+                c.wrap_sb_reserve,
+                c.wrap_max_px(),
+                c.line_visual_segments(0),
+            );
+            history.push((reserve, mpx, segs));
+            eprintln!(
+                "[P116探测2] {label} 帧{}: reserve={reserve} 预算={mpx:.1} 行0段数={segs}",
+                history.len()
+            );
+        }
+        // 允许帧1→2 的一次性收敛（P99 设计：needed 判定基于上一帧
+        // 行程，翻转滞后一帧）；帧2 起必须全部稳定（持续翻转 = 闪烁）
+        for w in history.windows(2).skip(1) {
+            assert!(
+                w[0].0 == w[1].0 && (w[0].1 - w[1].1).abs() < 0.01 && w[0].2 == w[1].2,
+                "边界场景 reserve/预算/段数持续翻转（{label}）：{:?} → {:?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+}
+
 /// P116 窗口缩放适配（headless 像素级）：**拉窄**后折行必须立即按新
 /// 预算重排（段数变多、行尾余量保持一个汉字宽）——既有 P96 测试只
 /// 覆盖「拉宽」方向，用户复报「窗口缩放时不适配」。220 ASCII 字符：

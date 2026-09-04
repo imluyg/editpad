@@ -33,6 +33,10 @@ pub(crate) const SCROLL_LINES_PER_NOTCH: f32 = 3.0;
 /// 字号后余量不再跟随膨胀（修前 = font_size，48px 字号右缘空 48px，
 /// 「段变短右侧空白大」）。
 pub(crate) const RIGHT_EDGE_HAN_GAP: f32 = 16.0;
+/// P116：垂直滚动条 needed ↔ 折行预算让位的**滞回死区**（行）——判定
+/// 需跨过视口 ± 死区才翻转，杜绝惰性收敛期 BIT 行程低估导致的逐帧翻转
+/// （滚动条反复出现/消失、段落不停出现消失，用户复报）。
+pub(crate) const WRAP_SB_RESERVE_HYSTERESIS_LINES: f32 = 2.0;
 
 /// 把任意来源的字号归一成合法值：非有限值回退默认，其余 clamp 到设置层允许区间。
 pub fn normalize_font_size(size: f32) -> f32 {

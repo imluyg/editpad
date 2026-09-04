@@ -13,6 +13,7 @@ use iced::{alignment, border::Radius, mouse, window, Color, Element, Font, Lengt
 
 use super::core::{
     luminance, lighten, EditOp, EditorHandle, ImeCommit, SCROLL_LINES_PER_NOTCH,
+    WRAP_SB_RESERVE_HYSTERESIS_LINES,
 };
 use super::metrics::{
     char_cols, display_cols, measure_char_width, measure_ink_box, shape_row_xs,
@@ -549,13 +550,30 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // P59：滚动条测量提前（与绘制共用同一结果）。
         // 第 73 轮 ⑯：垂直行程按视觉行总数；软换行开态水平行程置 0
         // （hscroll 隐藏，needed 恒 false）
-        let sb = VScrollbar::measure(
+        // P116 续：needed 加**滞回死区**（见下）——垂直行程在惰性收敛期
+        // 可能低估（不可见行暂记 1 段），needed 直判会在边界逐帧翻转
+        // （滚动条反复出现/消失、段落不停出现消失，用户复报）。
+        let mut sb = VScrollbar::measure(
             core.scroll_content_lines(),
             core.viewport_h,
             lh,
             bounds.height,
             core.scroll_top,
         );
+        if core.wrap_enabled() {
+            let vis_lines = core.viewport_h / lh.max(1e-3);
+            let cur = core.wrap_sb_reserve;
+            let raw_needed = core.scroll_content_lines() as f32 > vis_lines;
+            sb.needed = if raw_needed == cur {
+                raw_needed
+            } else if cur {
+                // 让位中：内容必须明显放下（< 视口 − 死区）才退出
+                (core.scroll_content_lines() as f32) < (vis_lines - WRAP_SB_RESERVE_HYSTERESIS_LINES)
+            } else {
+                // 未让位：内容必须明显超出（> 视口 + 死区）才进入
+                (core.scroll_content_lines() as f32) > (vis_lines + WRAP_SB_RESERVE_HYSTERESIS_LINES)
+            };
+        }
         let (hcontent_px, hview_px) = if core.wrap_enabled() {
             (0.0, (bounds.width - gutter_w).max(0.0))
         } else {
@@ -575,15 +593,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // P99：软换行折行预算跟随垂直滚动条 needed——内容超出视口
         // （滚动条必然出现）时按滚动条可视带宽让位，折行文本在滑块
         // 左侧收尾，行尾字符不再被盖住/显得截断；放得下（无滚动条）
-        // 时零预留全宽贴边（P95 口径保留）。稳定性双向自持：预算
-        // 收缩只增视觉行数、「预留后仍 needed」与「取消后仍放得下」
-        // 各自成立，不会逐帧翻转（见 core.rs set_wrap_sb_reserve
-        // 注释）。翻转于本帧正文绘制前生效：预算变化经 WrapCache
-        // 同步键整表重置，可见行在下方绘制循环内惰性重算（v1 已
-        // 披露的收敛模型，滚动范围下一帧对齐）。
-        let wrap_reserve = core.wrap_enabled() && sb.needed;
+        // 时零预留全宽贴边（P95 口径保留）。翻转于本帧正文绘制前生效：
+        // 预算变化经 WrapCache 同步键整表重置，可见行在下方绘制循环内
+        // 惰性重算（v1 已披露的收敛模型，滚动范围下一帧对齐）。
+        // 滚动条绘制与 reserve 共用滞回后的 needed，观感一致。
         drop(core);
-        self.core.borrow_mut().set_wrap_sb_reserve(wrap_reserve);
+        self.core.borrow_mut().set_wrap_sb_reserve(sb.needed);
         let core = self.core.borrow();
 
         // P66：三兄弟图层实现真裁剪。上游 Cached 文本分支用「声明的
