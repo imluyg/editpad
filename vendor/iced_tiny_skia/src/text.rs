@@ -180,6 +180,16 @@ impl Pipeline {
     }
 }
 
+thread_local! {
+    // P120：SwashCache 提升为线程级复用。原实现每次 draw() 调用新建
+    // 一个 SwashCache（内含哈希表等分配），一帧内每个文本图元各建一次、
+    // 用完即弃——纯分配 churn，加剧打字期堆水位爬升（P120 层栈同因）。
+    // 渲染恒单线程（tiny_skia 在主线程栅格化），thread_local 无竞争；
+    // 内部图像缓存按字形 CacheKey 键控，规模 ≤ 同键的 GlyphCache，有界。
+    static SWASH_CACHE: RefCell<cosmic_text::SwashCache> =
+        RefCell::new(cosmic_text::SwashCache::new());
+}
+
 fn draw(
     font_system: &mut cosmic_text::FontSystem,
     glyph_cache: &mut GlyphCache,
@@ -192,50 +202,52 @@ fn draw(
 ) {
     let position = position * transformation;
 
-    let mut swash = cosmic_text::SwashCache::new();
+    SWASH_CACHE.with(|swash_cell| {
+        let mut swash = swash_cell.borrow_mut();
 
-    for run in buffer.layout_runs() {
-        for glyph in run.glyphs {
-            let physical_glyph = glyph.physical(
-                (position.x, position.y),
-                transformation.scale_factor(),
-            );
-
-            if let Some((buffer, placement)) = glyph_cache.allocate(
-                physical_glyph.cache_key,
-                glyph.color_opt.map(from_color).unwrap_or(color),
-                font_system,
-                &mut swash,
-            ) {
-                let pixmap = tiny_skia::PixmapRef::from_bytes(
-                    buffer,
-                    placement.width,
-                    placement.height,
-                )
-                .expect("Create glyph pixel map");
-
-                let opacity = color.a
-                    * glyph
-                        .color_opt
-                        .map(|c| c.a() as f32 / 255.0)
-                        .unwrap_or(1.0);
-
-                pixels.draw_pixmap(
-                    physical_glyph.x + placement.left,
-                    physical_glyph.y - placement.top
-                        + (run.line_y * transformation.scale_factor()).round()
-                            as i32,
-                    pixmap,
-                    &tiny_skia::PixmapPaint {
-                        opacity,
-                        ..tiny_skia::PixmapPaint::default()
-                    },
-                    tiny_skia::Transform::identity(),
-                    clip_mask,
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs {
+                let physical_glyph = glyph.physical(
+                    (position.x, position.y),
+                    transformation.scale_factor(),
                 );
+
+                if let Some((buffer, placement)) = glyph_cache.allocate(
+                    physical_glyph.cache_key,
+                    glyph.color_opt.map(from_color).unwrap_or(color),
+                    font_system,
+                    &mut swash,
+                ) {
+                    let pixmap = tiny_skia::PixmapRef::from_bytes(
+                        buffer,
+                        placement.width,
+                        placement.height,
+                    )
+                    .expect("Create glyph pixel map");
+
+                    let opacity = color.a
+                        * glyph
+                            .color_opt
+                            .map(|c| c.a() as f32 / 255.0)
+                            .unwrap_or(1.0);
+
+                    pixels.draw_pixmap(
+                        physical_glyph.x + placement.left,
+                        physical_glyph.y - placement.top
+                            + (run.line_y * transformation.scale_factor()).round()
+                                as i32,
+                        pixmap,
+                        &tiny_skia::PixmapPaint {
+                            opacity,
+                            ..tiny_skia::PixmapPaint::default()
+                        },
+                        tiny_skia::Transform::identity(),
+                        clip_mask,
+                    );
+                }
             }
         }
-    }
+    });
 }
 
 fn from_color(color: cosmic_text::Color) -> Color {

@@ -179,8 +179,17 @@ pub fn present(
     // （实测空文档怠速 ~2MB/分钟；最小化不渲染则零增长）。上游语义 =
     // 队列仅保留最近数帧供损伤差分；本后端损伤呈现已禁用，保留最近
     // 2 帧仅为未来还原损伤优化留底，内存有界（configure_surface 清场不变）。
-    surface.layer_stack.push_front(renderer.layers().to_vec());
-    surface.layer_stack.truncate(2);
+    // P120：常态不再入队。这份数据在损伤呈现禁用后没有任何读取方，
+    // 每帧深拷贝是纯分配 churn——内容不变的怠速帧尺寸恒定、堆可复用，
+    // 打字帧却因内容逐帧变化使拷贝尺寸漂移，堆高位水位随击键线性爬升
+    // （实测 ~KB/击键，存活字节仅 ~0.3KB，其余全是释放后滞留堆顶的
+    // 碎片；任务管理器呈现为「打字内存持续上涨」）。改为仅 EDITPAD_
+    // QUAD_LOG 探针期入队（截两帧），未来还原损伤优化时连同本闸门
+    // 一起回迁。
+    if std::env::var_os("EDITPAD_QUAD_LOG").is_some() {
+        surface.layer_stack.push_front(renderer.layers().to_vec());
+        surface.layer_stack.truncate(2);
+    }
     surface.background_color = background_color;
 
     let mut pixels = tiny_skia::PixmapMut::from_bytes(
