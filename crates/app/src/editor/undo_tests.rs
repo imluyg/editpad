@@ -336,6 +336,9 @@ use super::tests::*;
                         let expected = match kind {
                             CaseKind::Upper => strip_newlines(&old_text).to_uppercase(),
                             CaseKind::Lower => strip_newlines(&old_text).to_lowercase(),
+                            // P124 fuzz 只取 Upper/Lower 两方向（Title 的
+                            // 词首大写参照实现见 block_tests 专项用例）
+                            CaseKind::Title => unreachable!("fuzz 不产生 Title"),
                         };
                         let _changed = c.convert_case(kind);
                         assert_eq!(

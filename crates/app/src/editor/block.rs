@@ -205,6 +205,7 @@ impl EditorCore {
         let out = match kind {
             CaseKind::Upper => src.to_uppercase(),
             CaseKind::Lower => src.to_lowercase(),
+            CaseKind::Title => to_title_case(&src),
         };
         if out == src {
             return false; // 无可转换内容：no-op 不产生撤销快照
@@ -516,6 +517,94 @@ impl EditorCore {
             return false; // 已有序：幂等 no-op 不产生撤销快照
         }
         self.apply_line_block(&blk, &sorted, &map);
+        true
+    }
+
+    /// P124：行序反转（触及块/全文）。返回是否改动。回文块反转后与
+    /// 原文相同 → 幂等 no-op 不产快照；书签按排列映射搬迁。
+    pub fn reverse_lines(&mut self) -> bool {
+        let blk = self.collect_line_block();
+        let n = blk.lines.len();
+        if n <= 1 {
+            return false;
+        }
+        let mut map = vec![None; n];
+        for (new_rel, old_rel) in (0..n).rev().enumerate() {
+            map[old_rel] = Some(new_rel);
+        }
+        let reversed: Vec<String> = blk.lines.iter().rev().cloned().collect();
+        if reversed == blk.lines {
+            return false; // 回文块：no-op
+        }
+        self.apply_line_block(&blk, &reversed, &map);
+        true
+    }
+
+    /// P124：带键行排序内核（数值/长度共用）——有键行稳定排序，无键行
+    /// 恒排末尾、相对次序不变（升/降序都如此，保证「无键行找得到」）。
+    /// 已有序 → 幂等 no-op。
+    fn sort_lines_with_key(
+        &mut self,
+        order: SortOrder,
+        key_of: impl Fn(&str) -> Option<i128>,
+    ) -> bool {
+        let blk = self.collect_line_block();
+        let n = blk.lines.len();
+        if n <= 1 {
+            return false;
+        }
+        let keys: Vec<Option<i128>> = blk.lines.iter().map(|l| key_of(l)).collect();
+        let mut with_key: Vec<usize> = (0..n).filter(|&i| keys[i].is_some()).collect();
+        let without_key: Vec<usize> = (0..n).filter(|&i| keys[i].is_none()).collect();
+        match order {
+            SortOrder::Ascending => with_key.sort_by_key(|&i| keys[i].unwrap_or(0)),
+            SortOrder::Descending => {
+                with_key.sort_by_key(|&i| std::cmp::Reverse(keys[i].unwrap_or(0)))
+            }
+        }
+        let perm: Vec<usize> = with_key.into_iter().chain(without_key).collect();
+        let mut map = vec![None; n];
+        for (new_rel, &old_rel) in perm.iter().enumerate() {
+            map[old_rel] = Some(new_rel);
+        }
+        let sorted: Vec<String> = perm.iter().map(|&i| blk.lines[i].clone()).collect();
+        if sorted == blk.lines {
+            return false; // 已有序：幂等 no-op
+        }
+        self.apply_line_block(&blk, &sorted, &map);
+        true
+    }
+
+    /// P124：按数值排序——行内第一个带符号十进制整数为键（[`extract_leading_int`]）。
+    pub fn sort_lines_numeric(&mut self, order: SortOrder) -> bool {
+        self.sort_lines_with_key(order, extract_leading_int)
+    }
+
+    /// P124：按行长排序——行字符数为键（CJK 计 1，与编辑器列口径同源）。
+    pub fn sort_lines_length(&mut self, order: SortOrder) -> bool {
+        self.sort_lines_with_key(order, |l| Some(l.chars().count() as i128))
+    }
+
+    /// P124：去连续重复行——每段连续重复只保留首次出现（触及块/全文；
+    /// 全无连续重复时幂等 no-op；书签：保留行搬迁、重复行随行丢弃）。
+    pub fn remove_consecutive_duplicate_lines(&mut self) -> bool {
+        let blk = self.collect_line_block();
+        let n = blk.lines.len();
+        if n <= 1 {
+            return false;
+        }
+        let keep: Vec<usize> = (0..n)
+            .filter(|&i| i == 0 || blk.lines[i] != blk.lines[i - 1])
+            .collect();
+        if keep.len() == n {
+            return false; // 无连续重复：no-op
+        }
+        let mut map = vec![None; n];
+        for (new_rel, &old_rel) in keep.iter().enumerate() {
+            map[old_rel] = Some(new_rel);
+        }
+        let kept: Vec<String> = keep.iter().map(|&i| blk.lines[i].clone()).collect();
+        self.apply_line_block(&blk, &kept, &map);
         true
     }
 
@@ -1359,4 +1448,50 @@ fn strip_one_indent_unit(body: &str) -> String {
         return body.to_owned();
     }
     body[spaces.min(TAB_STOP_COLS)..].to_owned()
+}
+
+/// P124：抽行内第一个带符号十进制整数（跳过前置的非数字字符；
+/// `-`/`+` 后必须紧跟数字才算符号）。数值超 i128 时饱和钳制——
+/// 长数字串仍保有键、不因溢出丢进「无键」档。
+pub(crate) fn extract_leading_int(line: &str) -> Option<i128> {
+    let cs: Vec<char> = line.chars().collect();
+    let n = cs.len();
+    let mut i = 0;
+    while i < n {
+        let neg = cs[i] == '-';
+        let start = if matches!(cs[i], '-' | '+') { i + 1 } else { i };
+        if start < n && cs[start].is_ascii_digit() {
+            // 带符号累积：负数走饱和减法，溢出时正负各自钳到 MAX/MIN
+            let (mut acc, step) = (0i128, |a: i128, d: i128| if neg { a.saturating_mul(10).saturating_sub(d) } else { a.saturating_mul(10).saturating_add(d) });
+            let mut j = start;
+            while j < n && cs[j].is_ascii_digit() {
+                acc = step(acc, (cs[j] as u8 - b'0') as i128);
+                j += 1;
+            }
+            return Some(acc);
+        }
+        i = start.max(i + 1);
+    }
+    None
+}
+
+/// P124：词首大写——每个「字母/数字连续段」首字符转大写、段内其余转
+/// 小写（Unicode 全量映射；分隔符/空白原样保留）。
+pub(crate) fn to_title_case(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut in_word = false;
+    for c in src.chars() {
+        if c.is_alphanumeric() {
+            if in_word {
+                out.extend(c.to_lowercase());
+            } else {
+                out.extend(c.to_uppercase());
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+            out.push(c);
+        }
+    }
+    out
 }

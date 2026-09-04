@@ -199,13 +199,25 @@ pub enum EditOp {
     DeleteWordLeft,
     /// 删到词尾（有选区退化为普通删除）
     DeleteWordRight,
+    // ---------- P124：行操作扩展（对标主流编辑器行操作） ----------
+    /// 行序反转（触及块/全文；回文块 no-op）
+    ReverseLines,
+    /// 按数值排序：行内第一个带符号整数为键，无数字行恒排末尾
+    SortLinesNumeric(SortOrder),
+    /// 按行长排序：行字符数为键
+    SortLinesLength(SortOrder),
+    /// 去连续重复行：每段连续重复只保留首次出现
+    RemoveConsecutiveDuplicateLines,
 }
 
-/// 大小写转换方向（第 58 轮）。
+/// 大小写转换方向（第 58 轮；P124 增补词首大写）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaseKind {
     Upper,
     Lower,
+    /// 词首大写：每个「字母/数字连续段」首字符大写、段内其余小写
+    /// （分隔符原样保留）
+    Title,
 }
 
 /// 行首尾清理模式（第 58 轮）：去行首 / 去行尾 / 两端都去。

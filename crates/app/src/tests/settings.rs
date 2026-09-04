@@ -378,26 +378,27 @@ use super::*;
 
         // 进入捕获 → 提交无冲突组合 → 写映射 + 持久化 + 退出捕获
         // （第 59 轮注：Ctrl+Shift+S/D/K 已成为排序/去重默认键，本测试
-        //   改用仍无主的 Ctrl+Shift+E 演练重映射流程）
+        //   改用仍无主的 Ctrl+Shift+V 演练重映射流程；P124 后 Ctrl+Shift+E
+        //   已成为行序反转默认键）
         dispatch(&mut app, Message::HotkeyCaptureStarted("save"));
         assert_eq!(app.hotkey_capture, Some("save"));
-        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+E".into()));
+        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+V".into()));
         assert!(app.hotkey_capture.is_none());
         assert_eq!(
             app.settings.hotkeys.get("save").map(String::as_str),
-            Some("Ctrl+Shift+E")
+            Some("Ctrl+Shift+V")
         );
         assert_eq!(
             editpad_core::Settings::load_from(&config)
                 .hotkeys
                 .get("save")
                 .map(String::as_str),
-            Some("Ctrl+Shift+E"),
+            Some("Ctrl+Shift+V"),
             "重映射必须即时落盘"
         );
 
         // 重映射后分发走新组合（save → Ctrl+Shift+E；分发读活重映射表）
-        let (mods, key) = parse_combo_for_test("Ctrl+Shift+E");
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+V");
         assert!(matches!(
             handle_key(key, mods, &app.settings.hotkeys),
             Some(Message::SaveRequested)
@@ -410,7 +411,7 @@ use super::*;
 
         // 冲突：把「打开」绑到已被 save 占用的组合 → 拒绝并保持捕获态
         dispatch(&mut app, Message::HotkeyCaptureStarted("open"));
-        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+E".into()));
+        dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+V".into()));
         assert_eq!(app.hotkey_capture, Some("open"), "冲突保持捕获态");
         assert!(app.status.contains("占用"));
         assert!(
@@ -433,7 +434,7 @@ use super::*;
             handle_key_defaults(key, mods),
             Some(Message::SaveRequested)
         ), "恢复默认后 Ctrl+S 回归保存");
-        let (mods, key) = parse_combo_for_test("Ctrl+Shift+E");
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+V");
         assert!(
             handle_key_defaults(key, mods).is_none(),
             "恢复默认后 Ctrl+Shift+E 不再触发保存"

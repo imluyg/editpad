@@ -310,6 +310,44 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+Delete"],
         desc: "删除到词尾",
     },
+    // P124：行操作扩展与词首大写（对标主流编辑器行操作；数字带
+    // 1~5 = 排序/转换扩展助记，E=rEverse、Y=去连续重复，均空闲可重映射；
+    // Ctrl+Shift+Z 已被重做同义默认占用，故词首大写入数字带）
+    HotkeyAction {
+        id: "reverse_lines",
+        default_combos: &["Ctrl+Shift+E"],
+        desc: "行序反转（选区行/全文）",
+    },
+    HotkeyAction {
+        id: "sort_lines_numeric_asc",
+        default_combos: &["Ctrl+1"],
+        desc: "按数值升序（行首整数为键，无数字行排末尾）",
+    },
+    HotkeyAction {
+        id: "sort_lines_numeric_desc",
+        default_combos: &["Ctrl+2"],
+        desc: "按数值降序（行首整数为键）",
+    },
+    HotkeyAction {
+        id: "sort_lines_length_asc",
+        default_combos: &["Ctrl+3"],
+        desc: "按行长升序",
+    },
+    HotkeyAction {
+        id: "sort_lines_length_desc",
+        default_combos: &["Ctrl+4"],
+        desc: "按行长降序",
+    },
+    HotkeyAction {
+        id: "dedupe_consecutive_lines",
+        default_combos: &["Ctrl+Shift+Y"],
+        desc: "去连续重复行（保首次出现）",
+    },
+    HotkeyAction {
+        id: "to_titlecase",
+        default_combos: &["Ctrl+5"],
+        desc: "词首大写（选区/全文；数字带 = 扩展转换助记）",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -521,6 +559,14 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "word_right" => edit(EditOp::Motion(Motion::WordRight, mods.shift())),
         "del_word_left" => edit(EditOp::DeleteWordLeft),
         "del_word_right" => edit(EditOp::DeleteWordRight),
+        // P124：行操作扩展与词首大写
+        "reverse_lines" => edit(EditOp::ReverseLines),
+        "sort_lines_numeric_asc" => edit(EditOp::SortLinesNumeric(SortOrder::Ascending)),
+        "sort_lines_numeric_desc" => edit(EditOp::SortLinesNumeric(SortOrder::Descending)),
+        "sort_lines_length_asc" => edit(EditOp::SortLinesLength(SortOrder::Ascending)),
+        "sort_lines_length_desc" => edit(EditOp::SortLinesLength(SortOrder::Descending)),
+        "dedupe_consecutive_lines" => edit(EditOp::RemoveConsecutiveDuplicateLines),
+        "to_titlecase" => edit(EditOp::ConvertCase(CaseKind::Title)),
         _ => None,
     }
 }

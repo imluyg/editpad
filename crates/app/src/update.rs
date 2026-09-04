@@ -2292,6 +2292,11 @@ impl Editpad {
             // ---------- P122：词级删词（有选区退化为普通退格/删除） ----------
             E::DeleteWordLeft => editor.delete_word(true),
             E::DeleteWordRight => editor.delete_word(false),
+            // ---------- P124：行操作扩展 ----------
+            E::ReverseLines => editor.reverse_lines(),
+            E::SortLinesNumeric(order) => editor.sort_lines_numeric(order),
+            E::SortLinesLength(order) => editor.sort_lines_length(order),
+            E::RemoveConsecutiveDuplicateLines => editor.remove_consecutive_duplicate_lines(),
             // ---------- 插入日期时间（第 63 轮） ----------
             // 真编辑：走 insert_str 统一管线（置脏+快照+查找重扫由上层
             // changed 驱动）；时间戳文本给状态栏反馈
