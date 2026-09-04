@@ -987,13 +987,30 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 输入法预编辑串（组字中）：内联显示在光标处。P59：光标行不在
         // 可视范围（滚轮滚走）时不绘制；P66：半可见行也绘制（与正文行
         // 同规则），文字归 B 层（掩码裁边），下划线归 C 层压顶
+        // P89 勘误：preedit 曾直接画在 caret.y（= 行盒顶 + ink_offset），
+        // P88 把光标下移到墨迹顶后 preedit 跟着下移 ≈4px，组字中的字
+        // 比行内其他字低一截（用户复报「正在输入的字偏下没居中」）。
+        // 正文文字恒按行盒顶对齐绘制，preedit 必须同基准——用
+        // caret.y − ink_offset 还原行盒顶相对 y。
         if let Some(preedit) = core.preedit.clone() {
             if !preedit.is_empty() {
                 let caret = core.caret_rect_relative();
+                let row_top_y = caret.y - core.ink_offset;
                 let in_view =
                     caret.y + lh > 0.0 && caret.y < core.viewport_h;
                 if in_view {
                     let width = (display_cols(&preedit) * char_w).max(24.0);
+                    // P114：折行开态 preedit 是浮层、不受折行约束，组字中
+                    // 的拼音串会画出文本区右缘（用户复报「输入超右缘，没
+                    // 受换行影响」）——显示裁剪到折行边界（与 wrap_max_px
+                    // 同源预算，含滚动条让位）；关态保持控件右缘（B 层
+                    // 掩码）现状。只裁显示不裁 shaping（P46 口径）。
+                    let right_edge = if core.wrap_enabled() {
+                        bounds.x + core.gutter_width() + core.wrap_max_px() - core.scroll_left
+                    } else {
+                        bounds.x + bounds.width
+                    };
+                    let clip_w = (right_edge - bounds.x).max(0.0);
                     renderer.fill_text(
                         core_text::Text {
                             content: preedit,
@@ -1006,9 +1023,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             shaping: core_text::Shaping::Advanced,
                             wrapping: core_text::Wrapping::None,
                         },
-                        Point::new(bounds.x + caret.x, bounds.y + caret.y),
+                        Point::new(bounds.x + caret.x, bounds.y + row_top_y),
                         colors.preedit_text,
-                        bounds,
+                        Rectangle { x: bounds.x, y: bounds.y, width: clip_w, height: bounds.height },
                     );
                 }
             }
@@ -1020,20 +1037,30 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // C 层：压顶四边形——预编辑下划线、光标竖线、滚动条
         renderer.start_layer(bounds);
 
-        // 输入法下划线（与上方预编辑文字同门控）
+        // 输入法下划线（与上方预编辑文字同门控；y 同改行盒顶基准，
+        // 压行盒底 − 3px：修前随 caret 下移后反超出行盒底 1px）
         if let Some(preedit) = core.preedit.clone() {
             if !preedit.is_empty() {
                 let caret = core.caret_rect_relative();
+                let row_top_y = caret.y - core.ink_offset;
                 let in_view =
                     caret.y + lh > 0.0 && caret.y < core.viewport_h;
                 if in_view {
                     let width = (display_cols(&preedit) * char_w).max(24.0);
+                    // P114：同文字——下划线收窄到折行边界内（quad 无裁剪，
+                    // 直接控宽；起点已在右缘外则为 0 = 整条不画）
+                    let right_edge = if core.wrap_enabled() {
+                        bounds.x + core.gutter_width() + core.wrap_max_px() - core.scroll_left
+                    } else {
+                        bounds.x + bounds.width
+                    };
+                    let draw_w = width.min((right_edge - (bounds.x + caret.x)).max(0.0));
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
                                 x: bounds.x + caret.x,
-                                y: bounds.y + caret.y + lh - 3.0,
-                                width,
+                                y: bounds.y + row_top_y + lh - 3.0,
+                                width: draw_w,
                                 height: 2.0,
                             },
                             ..renderer::Quad::default()

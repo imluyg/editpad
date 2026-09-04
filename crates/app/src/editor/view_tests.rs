@@ -252,6 +252,213 @@ fn headless_single_char_selection_band_centered_on_glyph_ink() {
     );
 }
 
+/// P89 输入法预编辑串纵向定位回归（headless 像素级）：P88 把光标矩形
+/// 下移到字形墨迹顶（caret.y 含 ink_offset）后，preedit 一度直接画在
+/// caret.y——组字中的字比行内正文低 ink_offset（≈4px），用户复报
+/// 「正在输入的字偏下没居中」。正文恒按行盒顶对齐绘制，preedit 必须
+/// 同基准。本测试渲染「正文 1 个黑字 + 光标处 1 个蓝字 preedit」，
+/// 断言：preedit 蓝墨迹与正文黑墨迹的纵向行范围一致（±1px 取整/AA
+/// 容差；修前蓝比黑低 4px 必挂）。y 扫描上界避开 C 层预编辑下划线
+/// （行盒底 − 3px 处的 2px 蓝带，与字形带不混）。
+#[test]
+fn headless_preedit_text_same_vertical_band_as_body_text() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (400u32, 160u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 360.0f32, 120.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str("中"));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.cursor = CursorPos { line: 0, col: 1 };
+        assert!(c.ime_preedit("中".to_owned()));
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    let lh = core.borrow().line_height();
+    let gutter = core.borrow().gutter_width();
+    // 扫描首行字形带（y 上界留出 C 层下划线带：行盒底 − 3 起 2px；
+    // x 从行号栏右缘起，排除灰行号）
+    let scan_end = (ey + lh - 4.0) as i32;
+    let mut black_top = i32::MAX;
+    let mut black_bot = i32::MIN;
+    let mut blue_top = i32::MAX;
+    let mut blue_bot = i32::MIN;
+    for y in ey as i32..scan_end {
+        let mut black = false;
+        let mut blue = false;
+        for x in (ex + gutter) as i32..(ex + ew) as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                let avg = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                if avg < 180 {
+                    black = true;
+                }
+                // 预编辑蓝（PREEDIT_TEXT = #3366CC）。tiny_skia pixel() 在该平台
+        // 红蓝通道颠倒（下划线 #3366CC@0.6 实测读出 R224/B133），故用
+        // 交换后的判据：红通道高（>200）且蓝通道低（<160）。正文黑 AA
+        // 灰阶（R≈G≈B）天然不命中；C 层下划线带已被 scan_end 排除。
+        if p.red() >= 200 && p.blue() <= 160 && p.green() <= 200 {
+            blue = true;
+        }
+            }
+        }
+        if black {
+            black_top = black_top.min(y);
+            black_bot = black_bot.max(y);
+        }
+        if blue {
+            blue_top = blue_top.min(y);
+            blue_bot = blue_bot.max(y);
+        }
+    }
+    eprintln!(
+        "[P89] preedit 蓝字行 {blue_top}..{blue_bot} vs 正文黑字行 {black_top}..{black_bot}"
+    );
+    assert_ne!(black_top, i32::MAX, "正文黑字未渲染");
+    assert_ne!(blue_top, i32::MAX, "preedit 蓝字未渲染（IME 态未生效？）");
+    assert!(
+        (blue_top - black_top).abs() <= 2 && (blue_bot - black_bot).abs() <= 2,
+        "preedit 与正文纵向错位：蓝 {blue_top}..{blue_bot} vs 黑 {black_top}..{black_bot}（修前蓝低 ink_offset≈4px）"
+    );
+}
+
+/// P114 组字 preedit 超右缘回归（headless 像素级）：自动换行开态下
+/// preedit 是浮层、不受折行约束，组字中的拼音串会画出文本区右缘（用户
+/// 复报「输入超右缘，没受换行影响」）。修复 = 显示裁剪到折行边界
+/// （wrap_max_px 同源预算）内，下划线同宽收窄。测试：折行开 + 滚动条
+/// 预留 + 光标贴段尾 + 8 拼音字符 preedit——断言折行边界右侧无任何
+/// preedit 墨迹（蓝字/下划线），边界左侧（preedit 前部）仍可见。
+#[test]
+fn headless_preedit_clipped_at_wrap_right_edge_when_wrap_on() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (400u32, 160u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 300.0f32, 120.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        // 8 行 × 每行 2 视觉段 = 16 视觉行 × 22px > 视口 120px——
+        // 垂直滚动条 needed=true → 折行预算按 P99 让位（真实场景）
+        let doc = format!("{}\n", "中".repeat(20)).repeat(8);
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.set_word_wrap(true);
+        // 与 draw 内 P99 判定同向：内容超视口 → 预算让位
+        c.set_wrap_sb_reserve(true);
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    // 先 layout 一次：注入实测列宽/墨迹盒/行布局（px_of 真实字形基准）
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let (gutter, budget, tail_col, seg_tail_px) = {
+        let mut c = core.borrow_mut();
+        let g = c.gutter_width();
+        let px = c.wrap_max_px();
+        let text = c.line_text(0);
+        let n = text.chars().count();
+        // 段 0 尾字符 = 最后一个「右缘 ≤ 预算」的列（像素断行口径，
+        // 与段绘制同源；修前用 ASCII 半宽 char_width 算列数会错位）
+        let mut t = n.saturating_sub(1);
+        while t > 0 && c.px_of(0, &text, t + 1) > px {
+            t -= 1;
+        }
+        let tp = c.px_of(0, &text, t);
+        // 光标贴段尾，组一个超预算的长拼音 preedit
+        c.cursor = CursorPos { line: 0, col: t };
+        assert!(c.ime_preedit("zhongguo".to_owned()));
+        (g, px, t, tp)
+    };
+    // preedit 应被裁到折行边界：边界内仍有墨迹、边界外（含下划线带）零墨迹
+    let right_edge = ex + gutter + budget; // scroll_left 开态锁 0
+    assert!(
+        right_edge < ex + ew,
+        "测试前提失效：折行边界必须落在控件内（让位未生效？）"
+    );
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    // preedit 蓝判据（红蓝通道颠倒平台：R 高 B 低，见前一测试注释）
+    let is_blue = |p: tiny_skia::PremultipliedColorU8| {
+        p.red() >= 200 && p.blue() <= 160 && p.green() <= 200
+    };
+    let mut outside_blue = 0u32;
+    let mut inside_blue = 0u32;
+    for y in ey as i32..(ey + 2.0 * 22.0 + 12.0) as i32 {
+        for x in right_edge as i32..(ex + ew) as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                if is_blue(p) {
+                    outside_blue += 1;
+                }
+            }
+        }
+        // preedit 起点（段尾光标）到折行边界之间的前部
+        let start_x = (ex + gutter + seg_tail_px) as i32;
+        for x in start_x..right_edge as i32 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                if is_blue(p) {
+                    inside_blue += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[P114] gutter={gutter:.0} budget={budget:.0} 段尾col={tail_col} \
+         右缘={right_edge:.0} 界内蓝px={inside_blue} 界外蓝px={outside_blue}"
+    );
+    assert!(
+        outside_blue <= 4,
+        "preedit 墨迹越过折行边界（>{outside_blue}px；修前 ≈60px 超右缘可见，4px 内为裁剪边界 AA 残留）"
+    );
+    assert!(inside_blue > 0, "preedit 前部墨迹缺失（裁过头/未渲染）");
+}
+
 
     /// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
 /// tiny-skia 光栅化）下，41 汉字行 + 水平滚动（scroll_left=80），
