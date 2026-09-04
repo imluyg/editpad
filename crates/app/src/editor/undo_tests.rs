@@ -315,8 +315,12 @@ use super::tests::*;
                             .collect();
                         c.insert_str(&text);
                     }
-                    35..=49 => c.backspace(),
-                    50..=59 => c.delete_forward(),
+                    35..=49 => {
+                        c.backspace();
+                    }
+                    50..=59 => {
+                        c.delete_forward();
+                    }
                     60..=74 => {
                         let m = motions[rng.below(motions.len())];
                         c.apply_motion(m, rng.below(4) == 0); // 偶尔带 Shift 成选区

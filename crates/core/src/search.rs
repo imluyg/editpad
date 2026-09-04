@@ -417,12 +417,16 @@ pub fn replace_all(
     (out, count)
 }
 
-/// 在 [`Document`]（rope）上直接全部替换（P11/P19 协同项）。
+/// 在 [`Document`](crate::document::Document)（rope）上直接全部替换（P11/P19 协同项）。
 ///
 /// 与 `replace_all(&doc.to_text(), ..)` 相比省掉整份全文 String 拷贝：
 /// 按存储块零拷贝迭代、流式写入输出串，峰值内存 ≈ 输出文本自身 +
 /// 一个小于查询长度的跨块残段缓冲。匹配语义与 [`replace_all`] 完全
 /// 一致；空查询返回 (全文, 0)，保持 no-op 约定。
+///
+/// 行尾归一（P26「替换当前」同口径下沉至此）：查询与替换文本里的换行
+/// 一律先改写为文档主导行尾再匹配/写入——CRLF 文档上跨行查询 `a\nb`
+/// 才找得到，替换文本里的 `\n` 也不会在结果里制造混合行尾。
 pub fn replace_all_document(
     doc: &Document,
     query: &str,
@@ -436,6 +440,9 @@ pub fn replace_all_document(
         }
         return (whole, 0);
     }
+    let eol = doc.line_ending();
+    let query = eol.normalize(query);
+    let replacement = eol.normalize(replacement);
     let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
     let mut out = String::new();
     // 跨块残段：块边界可能落在任意位置，末尾不足一个查询长度的尾巴
@@ -444,9 +451,9 @@ pub fn replace_all_document(
     let mut count = 0usize;
     for chunk in doc.chunks() {
         carry.push_str(chunk);
-        count += drain_matches(&mut carry, &mut out, &fq, replacement, case_sensitive, false);
+        count += drain_matches(&mut carry, &mut out, &fq, &replacement, case_sensitive, false);
     }
-    count += drain_matches(&mut carry, &mut out, &fq, replacement, case_sensitive, true);
+    count += drain_matches(&mut carry, &mut out, &fq, &replacement, case_sensitive, true);
     (out, count)
 }
 
@@ -1035,11 +1042,14 @@ mod tests {
         ];
         for text in fixtures {
             let doc = Document::from_str(text);
+            // Document 路径的既定语义含行尾归一：对拍基准用同口径归一后
+            // 的查询（EOL 无关查询归一为恒等，等价性不受影响）
+            let eol = doc.line_ending();
             for query in ["a", "aa", "foo", "中", "🚀", "\r\n", "zz"] {
                 for cs in [true, false] {
                     assert_eq!(
                         replace_all_document(&doc, query, "X", cs),
-                        replace_all(text, query, "X", cs),
+                        replace_all(text, &eol.normalize(query), "X", cs),
                         "不一致: text={text:?} query={query:?} cs={cs}"
                     );
                 }
@@ -1057,11 +1067,29 @@ mod tests {
             let doc = Document::from_str(&text);
             for query in ["a", "ab", "c\n", "中", "xx", "a\r", "🚀"] {
                 let (streamed, n_streamed) = replace_all_document(&doc, query, "<R>", false);
-                let (plain, n_plain) = replace_all(&text, query, "<R>", false);
+                let (plain, n_plain) =
+                    replace_all(&text, &doc.line_ending().normalize(query), "<R>", false);
                 assert_eq!(streamed, plain, "seed={seed} query={query:?}");
                 assert_eq!(n_streamed, n_plain);
             }
         }
+    }
+
+    #[test]
+    fn replace_all_document_normalizes_query_and_replacement_eol() {
+        // 行尾归一（P26「替换当前」同口径下沉）：CRLF 文档上跨行查询
+        // 找得到（旧实现纯字节匹配恒零命中——查找侧归一、替换侧不归一
+        // 的「找得到换不掉」）；替换文本里的 \n 改写为主导行尾，
+        // 不再在结果里制造混合行尾。
+        let doc = Document::from_str("a\r\nX\r\nb\r\nX\r\nb");
+        let (out, n) = replace_all_document(&doc, "X\nb", "Y\nZ", true);
+        assert_eq!(n, 2);
+        assert_eq!(out, "a\r\nY\r\nZ\r\nY\r\nZ");
+        // 反向：LF 文档上 \r\n 形式的查询同样命中 LF 换行单元
+        let doc = Document::from_str("a\nX\nb");
+        let (out, n) = replace_all_document(&doc, "X\r\nb", "Y", true);
+        assert_eq!(n, 1);
+        assert_eq!(out, "a\nY");
     }
 
     #[test]

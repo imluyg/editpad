@@ -158,13 +158,15 @@ impl EditorCore {
         self.char_at(offset) == Some('\r') && self.char_at(offset + 1) == Some('\n')
     }
 
-    pub fn backspace(&mut self) {
+    /// 退格。返回是否真的删除了内容——文档原点且无选区时是静默 no-op，
+    /// 应用层须以返回值判定置脏/自动保存，不得把空操作当编辑。
+    pub fn backspace(&mut self) -> bool {
         self.goal_px = None; // 第 73 轮 ⑯：编辑 = 非竖向操作，清 goal
         if self.delete_selection() {
-            return;
+            return true;
         }
         if self.cursor == CursorPos::default() {
-            return;
+            return false;
         }
         self.snapshot();
         // 第 60 轮：col==0 且非首行 = 将删掉换行单元并上一行（书签取并集）
@@ -183,16 +185,19 @@ impl EditorCore {
         // P13：并行后的新行可能更宽（也可能只是收缩——高水位不回退）
         self.raise_max_line_cols(self.cursor.line..=self.cursor.line);
         self.ensure_visible();
+        true
     }
 
-    pub fn delete_forward(&mut self) {
+    /// 前向删除。返回是否真的删除了内容——文档末尾且无选区时是静默
+    /// no-op，应用层须以返回值判定置脏/自动保存，不得把空操作当编辑。
+    pub fn delete_forward(&mut self) -> bool {
         self.goal_px = None; // 第 73 轮 ⑯：编辑 = 非竖向操作，清 goal
         if self.delete_selection() {
-            return;
+            return true;
         }
         let offset = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
         if offset >= self.doc.text_len() {
-            return;
+            return false;
         }
         // 第 60 轮：光标已在行尾（显示口径）= 将删掉换行单元并下一行进来
         let merges_down = self.cursor.col >= self.line_display_len(self.cursor.line);
@@ -210,6 +215,7 @@ impl EditorCore {
         let merged = self.cursor.line;
         self.raise_max_line_cols(merged..=merged);
         self.ensure_visible();
+        true
     }
 
     /// 下发不可见字符标记开关（设置保存/建页时调用）。

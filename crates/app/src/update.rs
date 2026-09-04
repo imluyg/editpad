@@ -1825,6 +1825,11 @@ impl Editpad {
                     ) {
                         Ok((new_contents, count)) => {
                             if count > 0 {
+                                // 替换结果按主导行尾归一后整体入主：正则替换
+                                // 文本里的裸换行不得在 CRLF 文档里制造混合
+                                // 行尾（字面路径的归一已在 core 内完成）
+                                let eol = self.cur_handle.borrow().doc.line_ending();
+                                let new_contents = eol.normalize(&new_contents);
                                 self.cur().borrow_mut().replace_whole_document(
                                     editpad_core::Document::from_str(&new_contents),
                                 );
@@ -1974,20 +1979,20 @@ impl Editpad {
                 }
             }
             E::Backspace => {
-                // 列块态下退格 = 删块内容
+                // 列块态下退格 = 删块内容；返回值判定是否真删了内容
+                //（文档原点是静默 no-op，不得触发置脏/自动保存）
                 if editor.has_block() {
                     editor.delete_block_content()
                 } else {
-                    editor.backspace();
-                    true
+                    editor.backspace()
                 }
             }
             E::Delete => {
+                // 文档末尾的 Delete 同样可能是空操作
                 if editor.has_block() {
                     editor.delete_block_content()
                 } else {
-                    editor.delete_forward();
-                    true
+                    editor.delete_forward()
                 }
             }
             E::CancelBlock => {
@@ -2437,6 +2442,10 @@ impl Editpad {
             };
             let doc = self.tabs[idx].editor.borrow().doc.clone();
             let version = self.tabs[idx].version;
+            // 保存编码随任务快照下发（与手动保存同参，防静默转码）
+            let save_encoding = self.tabs[idx]
+                .save_encoding
+                .unwrap_or(editpad_core::SaveEncoding::Utf8);
             // P63：调度时刻的外部修改比对戳随任务下发——防抖线程醒来先
             // 校验再写（见 drive_autosave_once），绝不盲写覆盖外部改动
             let expected_stamp = self.tabs[idx].file_stamp;
@@ -2451,6 +2460,7 @@ impl Editpad {
                         idx,
                         path,
                         doc,
+                        save_encoding,
                         version,
                         expected_stamp,
                         delay,

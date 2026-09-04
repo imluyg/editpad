@@ -229,6 +229,27 @@ use super::*;
     }
 
     #[test]
+    fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
+        // 自动保存落盘必须按标签页的保存编码：旧实现恒 UTF-8，会把用户
+        // 选定 GBK 的文件静默转码覆写回磁盘。直击防抖线程体的落盘动作，
+        // 钉死 GBK 形态（磁盘字节 ≠ UTF-8，且能被嗅探加载回原文本）。
+        let dir = scratch_dir("autosave-encoding");
+        let path = dir.join("gbk.txt");
+        let text = "中文内容";
+        let doc = editpad_core::Document::from_str(text);
+        let outcome = write_to_disk(&path, &doc, editpad_core::SaveEncoding::Gbk, "off");
+        assert!(
+            matches!(outcome, AutosaveOutcome::Written),
+            "落盘应成功，实际 {outcome:?}"
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert_ne!(bytes, text.as_bytes(), "磁盘不得是 UTF-8 形态");
+        let loaded = editpad_core::load_document_streaming(&path, |_| {}).unwrap();
+        assert_eq!(loaded.doc.to_text(), text, "按 GBK 嗅探读回应无损");
+        assert_eq!(loaded.encoding, "GBK");
+    }
+
+    #[test]
     fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
         let mut app = loaded_txt_app();
         app.settings.autosave_enabled = true;

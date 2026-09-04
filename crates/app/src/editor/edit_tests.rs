@@ -84,6 +84,31 @@ use super::tests::*;
     }
 
     #[test]
+    fn backspace_and_delete_forward_report_whether_anything_was_deleted() {
+        // 返回值口径：空操作（原点退格 / 末尾前删）= false，真实删除 =
+        // true——应用层据此判定置脏与自动保存，空操作不得当编辑。
+        let mut c = core_with("abc");
+        assert!(!c.backspace(), "文档原点退格是 no-op");
+        assert_eq!(c.doc.to_text(), "abc");
+        c.cursor = CursorPos { line: 0, col: 3 };
+        assert!(!c.delete_forward(), "文档末尾前删是 no-op");
+        assert_eq!(c.doc.to_text(), "abc");
+
+        assert!(c.backspace(), "行内退格真实删除");
+        assert_eq!(c.doc.to_text(), "ab");
+        c.cursor = CursorPos { line: 0, col: 0 };
+        assert!(c.delete_forward(), "行内前删真实删除");
+        assert_eq!(c.doc.to_text(), "b");
+
+        // 选区删除同样算真实编辑
+        let mut s = core_with("abc");
+        s.anchor = Some(CursorPos { line: 0, col: 0 });
+        s.cursor = CursorPos { line: 0, col: 2 };
+        assert!(s.backspace(), "选区删除真实生效");
+        assert_eq!(s.doc.to_text(), "c");
+    }
+
+    #[test]
     fn enter_and_paste_follow_dominant_line_ending() {
         // CRLF 文档：回车（插 \n）与粘贴的混合行尾都归一为 \r\n
         let mut c = core_with("a\r\nb");

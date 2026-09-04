@@ -238,6 +238,29 @@ use super::*;
     }
 
     #[test]
+    fn noop_backspace_delete_do_not_dirty_clean_tabs() {
+        // 空操作的退格/前向删除不算编辑：干净文件在原点按 Backspace、
+        // 末尾按 Delete 不得置脏、不得排队自动保存重写磁盘。
+        let mut app = loaded_txt_app();
+        app.settings.autosave_enabled = true;
+        assert!(!app.tab().dirty);
+        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::DocStart, false)));
+        dispatch(&mut app, Message::Edit(EditOp::Backspace));
+        assert!(!app.tab().dirty, "原点 Backspace 是空操作");
+        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::DocEnd, false)));
+        dispatch(&mut app, Message::Edit(EditOp::Delete));
+        assert!(!app.tab().dirty, "文档末尾 Delete 是空操作");
+        assert!(!app.tabs[0].autosave_inflight, "空操作不得排队自动保存");
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "base");
+
+        // 真删除仍照常置脏并排队自动保存（退格吃掉末尾字符）
+        dispatch(&mut app, Message::Edit(EditOp::Backspace));
+        assert!(app.tab().dirty, "真实删除必须置脏");
+        assert!(app.tabs[0].autosave_inflight, "真实编辑应排队自动保存");
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "bas");
+    }
+
+    #[test]
     fn tab_key_inserts_literal_tab() {
         // P14：Tab 不再被吞——插入真实制表符（显示层展开，见 editor.rs）
         use iced::keyboard::{self, key::Named};

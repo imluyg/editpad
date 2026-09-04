@@ -23,6 +23,7 @@ pub(crate) async fn drive_autosave_once(
     tab: usize,
     path: PathBuf,
     doc: editpad_core::Document,
+    encoding: editpad_core::SaveEncoding,
     version: u64,
     expected_stamp: Option<(std::time::SystemTime, u64)>,
     delay: std::time::Duration,
@@ -35,13 +36,7 @@ pub(crate) async fn drive_autosave_once(
         let outcome = if autosave_must_skip(expected_stamp, file_stamp(&path)) {
             AutosaveOutcome::SkippedExternalChange
         } else {
-            // 第 64 轮 ⑭：写前备份磁盘旧版（自动保存静默口径——备份
-            // 提示不打扰，失败同样降级不阻断）
-            let _ = perform_backup_before_overwrite(&path, &backup_mode);
-            match editpad_core::save_document_atomic(&path, &doc) {
-                Ok(()) => AutosaveOutcome::Written,
-                Err(e) => AutosaveOutcome::Failed(e.to_string()),
-            }
+            write_to_disk(&path, &doc, encoding, &backup_mode)
         };
         let _ = tx.send(outcome);
     });
@@ -50,6 +45,22 @@ pub(crate) async fn drive_autosave_once(
         .unwrap_or_else(|_| AutosaveOutcome::Failed("自动保存线程意外终止".to_owned()));
     // 路径本体已随闭包移入写盘线程；回报携带同内容的克隆
     Message::TabAutosaved(tab, version, thread_path, outcome)
+}
+
+/// 防抖窗睡满后的实际落盘动作（线程体调用；同步函数便于测试直击磁盘
+/// 字节）。写前备份维持第 64 轮 ⑭ 的静默口径；按传入编码落盘（与手动
+/// 保存同参），编码附带的不可映射告警同样不上浮打扰。
+pub(crate) fn write_to_disk(
+    path: &Path,
+    doc: &editpad_core::Document,
+    encoding: editpad_core::SaveEncoding,
+    backup_mode: &str,
+) -> AutosaveOutcome {
+    let _ = perform_backup_before_overwrite(path, backup_mode);
+    match editpad_core::save_document_encoded(path, doc, encoding) {
+        Ok(_) => AutosaveOutcome::Written,
+        Err(e) => AutosaveOutcome::Failed(e.to_string()),
+    }
 }
 
 /// 自动保存写前判定（纯函数可单测，P63）：期望戳已知（Some）且与当前
