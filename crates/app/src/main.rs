@@ -135,6 +135,9 @@ enum Message {
     /// 控件层通知：光标/选区变了（刷新状态栏）
     EditorNavChanged,
 
+    /// P125：Insert 切换覆写/插入模式（每页独立，不入注册表）
+    ToggleOverwrite,
+
     /// 复制当前选区到系统剪贴板（Ctrl+C；无选区时无操作）
     CopyRequested,
     /// 剪切 = 复制 + 删除选区（Ctrl+X；无选区时无操作）

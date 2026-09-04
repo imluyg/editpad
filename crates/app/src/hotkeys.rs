@@ -624,6 +624,9 @@ pub(crate) fn handle_key(
         // 仍插真实制表符；显示层由 editor::char_cols 展开到制表位，
         // 文档字节保持原样（保存往返不失真）
         Key::Named(Named::Tab) => edit(EditOp::TabKey(mods.shift())),
+        // P125：Insert 切换覆写/插入（固定语义不入注册表——裸命名键
+        // 不参与热键系统，与 Enter/Tab 同口径）
+        Key::Named(Named::Insert) => Some(Message::ToggleOverwrite),
         Key::Named(Named::Escape) => Some(Message::BarsDismissed),
 
         Key::Named(Named::ArrowLeft) => edit(EditOp::Motion(Motion::Left, mods.shift())),

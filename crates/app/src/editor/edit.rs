@@ -57,6 +57,30 @@ impl EditorCore {
         }
         self.typing_run = None; // 插入成功且合格后在本函数末尾重立
 
+        // P125 覆写模式：单字符、无选区、行内有字符时先吃掉光标处字符
+        // 再走常规插入（净长度不变 → 打字成组/光标推进/书签映射全兼容）；
+        // 行尾与换行字符不参与（在行尾照常追加）。多字符（粘贴/IME 上屏）
+        // 恒为插入，与主流编辑器一致。
+        let overwrite_char = if self.overwrite {
+            match single {
+                Some(c) if c != '\n' && c != '\r' && self.selection_offsets().is_none() => {
+                    let body_len = self.line_display_len(self.cursor.line);
+                    if self.cursor.col < body_len {
+                        self.char_at(at)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(rc) = overwrite_char {
+            self.doc.remove_range(at, at + rc.len_utf8());
+        }
+
+
         // 第 60 轮：跨行选区将被替换——先记录 (起点行, 起点列>0, 终点行,
         // 消失行数) 供书签再映射（口径与 touched_lines 一致：末点在行首
         // 时该行不算触及，其内容整体并入结果行）

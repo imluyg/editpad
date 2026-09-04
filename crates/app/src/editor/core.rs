@@ -447,6 +447,10 @@ pub struct EditorCore {
     /// 行尾字符不被盖住/显得截断；内容放得下 → 零预留全宽贴边
     /// （P95 口径保留）。判定稳定性见 [`Self::set_wrap_sb_reserve`]。
     pub(crate) wrap_sb_reserve: bool,
+    /// 覆写模式（P125）：Insert 键切换；打字（单字符、无选区、行内有
+    /// 字符）替换光标处字符而非插入，行尾/换行/粘贴/IME 上屏照常插入。
+    /// 每页独立状态、不持久化、不入快照；换文档复位为插入。
+    pub(crate) overwrite: bool,
 }
 
 /// 光标闪烁半周期。
@@ -523,6 +527,7 @@ impl Default for EditorCore {
             wrap: RefCell::new(WrapCache::new()),
             goal_px: None,
             wrap_sb_reserve: false,
+            overwrite: false,
         }
     }
 }
@@ -715,6 +720,8 @@ impl EditorCore {
         // P123：旧文档的查找命中表一并作废（查找栏仍开时由下一次
         // FindScanDone 重新下发）
         self.find_hl.clear();
+        // P125：换文档复位覆写模式（新文档默认插入）
+        self.overwrite = false;
         self.recompute_max_line_cols();
         // 第 61 轮：经唯一汇点失效——顺带清括号匹配缓存（光标复位 (0,0)
         // 恰是常见缓存键，静默重载后不得吐旧文档的陈旧配对）

@@ -358,3 +358,57 @@ fn current_line_copy_text_includes_line_ending() {
             .match_line_pieces(&editpad_core::MatchPos { line: 9, col: 0, len_chars: 2 })
             .is_empty());
     }
+
+    // ---------- P125 覆写模式 ----------
+
+    #[test]
+    fn overwrite_typing_replaces_char_in_line() {
+        let mut c = core_with("abc");
+        c.overwrite = true;
+        c.cursor = CursorPos { line: 0, col: 1 };
+        c.insert_str("X");
+        assert_eq!(c.doc.to_text(), "aXc");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+    }
+
+    #[test]
+    fn overwrite_at_line_end_appends_and_newline_never_overwrites() {
+        let mut c = core_with("ab");
+        c.overwrite = true;
+        c.cursor = CursorPos { line: 0, col: 2 };
+        c.insert_str("c");
+        assert_eq!(c.doc.to_text(), "abc", "行尾无字符可替换：照常追加");
+        c.cursor = CursorPos { line: 0, col: 3 };
+        c.insert_str("\n");
+        assert_eq!(c.doc.to_text(), "abc\n", "换行永不参与覆写");
+    }
+
+    #[test]
+    fn overwrite_multi_char_paste_still_inserts() {
+        let mut c = core_with("abc");
+        c.overwrite = true;
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.insert_str("XY");
+        assert_eq!(c.doc.to_text(), "XYabc", "多字符（粘贴/IME 上屏）恒插入");
+    }
+
+    #[test]
+    fn overwrite_typing_groups_into_single_undo() {
+        let mut c = core_with("abcdef");
+        c.overwrite = true;
+        c.cursor = CursorPos { line: 0, col: 0 };
+        for ch in ["X", "Y", "Z"] {
+            c.insert_str(ch);
+        }
+        assert_eq!(c.doc.to_text(), "XYZdef");
+        assert!(c.undo(), "连续覆写打字成组：一次撤销");
+        assert_eq!(c.doc.to_text(), "abcdef");
+    }
+
+    #[test]
+    fn overwrite_resets_on_document_change() {
+        let mut c = core_with("a");
+        c.overwrite = true;
+        c.reset_document(Document::from_str("b"));
+        assert!(!c.overwrite, "换文档复位为插入模式");
+    }

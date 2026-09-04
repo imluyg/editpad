@@ -1264,3 +1264,17 @@ fn enter_and_tab_map_to_smart_indent_ops() {
             Some(Message::Edit(EditOp::DeleteWordRight))
         ));
     }
+
+    #[test]
+    fn insert_key_toggles_overwrite_mode() {
+        use iced::keyboard::{self, key::Named};
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::Insert), keyboard::Modifiers::empty()),
+            Some(Message::ToggleOverwrite)
+        ));
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::ToggleOverwrite);
+        assert!(app.cur_handle.borrow().overwrite);
+        dispatch(&mut app, Message::ToggleOverwrite);
+        assert!(!app.cur_handle.borrow().overwrite);
+    }

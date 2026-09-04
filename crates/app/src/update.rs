@@ -331,6 +331,7 @@ impl Editpad {
         match &message {
             // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
             Message::Edit(..)
+            | Message::ToggleOverwrite
             | Message::EditorNavChanged
             | Message::CopyRequested
             | Message::CutRequested
@@ -495,6 +496,23 @@ impl Editpad {
             Message::EditorNavChanged => Task::none(),
             // 视图重建即可刷新状态栏
 
+            // P125：覆写/插入切换（busy 加载中拒收——编辑同口径）
+            Message::ToggleOverwrite => {
+                if self.busy {
+                    return Task::none();
+                }
+                let now = {
+                    let mut handle = self.cur_handle.borrow_mut();
+                    handle.overwrite = !handle.overwrite;
+                    handle.overwrite
+                };
+                self.set_status(if now {
+                    "覆写模式（Insert 切回插入）：打字将逐字替换光标处字符".to_owned()
+                } else {
+                    "插入模式".to_owned()
+                });
+                Task::none()
+            }
             // ---------- 剪贴板（P4） ----------
             Message::CopyRequested => {
                 // 第 67 轮 ⑮：列块态优先复制块内容（各行 \n 连接）
