@@ -1007,6 +1007,26 @@ impl EditorCore {
         }
     }
 
+    /// P115：组字串在光标处的**可显示宽**（px）——软换行开态钳到段尾
+    /// 剩余像素（P114 裁剪口径：preedit 画到本段段尾为止、下段从段首
+    /// 原样起排，不重叠）；关态 = 原宽。`w` = 组字串实测宽（调用方量度）。
+    /// 供组字占位（后文右移/C 段起点）与光标/下划线偏移共用同一口径。
+    pub(crate) fn preedit_visual_w(&self, col: usize, w: f32) -> f32 {
+        if !self.wrap.borrow().enabled {
+            return w;
+        }
+        let line = self.cursor.line;
+        let text = self.line_text(line);
+        let lens = text.chars().count();
+        let col = col.min(lens);
+        let breaks = self.segments_of_line(line, &text);
+        let seg = segment_index(&breaks, col, lens);
+        let seg_end = breaks.get(seg + 1).copied().unwrap_or(lens);
+        let remain =
+            (self.px_of(line, &text, seg_end) - self.px_of(line, &text, col)).max(0.0);
+        w.min(remain)
+    }
+
     /// 相对控件的光标矩形（供输入法定位候选框，双宽感知）。
     /// P13：x 含水平滚动偏移的抵扣——返回值是视口系坐标。
     /// 第 73 轮 ⑯：软换行开态 y 走视觉行映射（光标所在段），x 走**段

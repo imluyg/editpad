@@ -252,14 +252,12 @@ fn headless_single_char_selection_band_centered_on_glyph_ink() {
     );
 }
 
-/// P89 输入法预编辑串纵向定位回归（headless 像素级）：P88 把光标矩形
+/// P89/P115 组字串纵向定位回归（headless 像素级）：P88 把光标矩形
 /// 下移到字形墨迹顶（caret.y 含 ink_offset）后，preedit 一度直接画在
 /// caret.y——组字中的字比行内正文低 ink_offset（≈4px），用户复报
-/// 「正在输入的字偏下没居中」。正文恒按行盒顶对齐绘制，preedit 必须
-/// 同基准。本测试渲染「正文 1 个黑字 + 光标处 1 个蓝字 preedit」，
-/// 断言：preedit 蓝墨迹与正文黑墨迹的纵向行范围一致（±1px 取整/AA
-/// 容差；修前蓝比黑低 4px 必挂）。y 扫描上界避开 C 层预编辑下划线
-/// （行盒底 − 3px 处的 2px 蓝带，与字形带不混）。
+/// 「正在输入的字偏下没居中」。正文恒按行盒顶对齐绘制，组字必须同
+/// 基准。P115 起组字与正文同色（黑，用户点单），按 x 分区区分两段
+/// 墨迹，断言纵向行范围一致（修前组字区低 4px 必挂）。
 #[test]
 fn headless_preedit_text_same_vertical_band_as_body_text() {
     use super::super::CursorPos;
@@ -303,48 +301,60 @@ fn headless_preedit_text_same_vertical_band_as_body_text() {
     renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
     let lh = core.borrow().line_height();
     let gutter = core.borrow().gutter_width();
-    // 扫描首行字形带（y 上界留出 C 层下划线带：行盒底 − 3 起 2px；
-    // x 从行号栏右缘起，排除灰行号）
+    // P115：组字与正文同色（黑）——按 x 分区统计深墨行：
+    // 正文区 = [gutter, gutter+16)（col 0 全宽字）；组字区 =
+    // [gutter+16, gutter+16+pre_w)（col 1 起，shape 同源实测宽）。
+    // 扫描 y 上界留出 C 层下划线带（行盒底 − 3 起 2px）。
+    let pre_w = shape_row_xs(font, 16.0, "中")
+        .expect("shape 失败")
+        .last()
+        .copied()
+        .unwrap();
+    assert!(pre_w > 4.0, "组字宽异常：{pre_w}");
+    let body_x0 = (ex + gutter) as i32;
+    let pre_x0 = body_x0 + 16; // NSimSun 全宽 16px（col 1 起点）
+    let pre_x1 = pre_x0 + pre_w as i32;
     let scan_end = (ey + lh - 4.0) as i32;
-    let mut black_top = i32::MAX;
-    let mut black_bot = i32::MIN;
-    let mut blue_top = i32::MAX;
-    let mut blue_bot = i32::MIN;
+    let mut body_top = i32::MAX;
+    let mut body_bot = i32::MIN;
+    let mut pre_top = i32::MAX;
+    let mut pre_bot = i32::MIN;
     for y in ey as i32..scan_end {
-        let mut black = false;
-        let mut blue = false;
-        for x in (ex + gutter) as i32..(ex + ew) as i32 {
+        let mut body_ink = false;
+        let mut pre_ink = false;
+        for x in body_x0..pre_x0 {
             if let Some(p) = pixels.pixel(x as u32, y as u32) {
                 let avg = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
                 if avg < 180 {
-                    black = true;
+                    body_ink = true;
                 }
-                // 预编辑蓝（PREEDIT_TEXT = #3366CC）。tiny_skia pixel() 在该平台
-        // 红蓝通道颠倒（下划线 #3366CC@0.6 实测读出 R224/B133），故用
-        // 交换后的判据：红通道高（>200）且蓝通道低（<160）。正文黑 AA
-        // 灰阶（R≈G≈B）天然不命中；C 层下划线带已被 scan_end 排除。
-        if p.red() >= 200 && p.blue() <= 160 && p.green() <= 200 {
-            blue = true;
-        }
             }
         }
-        if black {
-            black_top = black_top.min(y);
-            black_bot = black_bot.max(y);
+        for x in pre_x0..pre_x1 {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                let avg = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                if avg < 180 {
+                    pre_ink = true;
+                }
+            }
         }
-        if blue {
-            blue_top = blue_top.min(y);
-            blue_bot = blue_bot.max(y);
+        if body_ink {
+            body_top = body_top.min(y);
+            body_bot = body_bot.max(y);
+        }
+        if pre_ink {
+            pre_top = pre_top.min(y);
+            pre_bot = pre_bot.max(y);
         }
     }
     eprintln!(
-        "[P89] preedit 蓝字行 {blue_top}..{blue_bot} vs 正文黑字行 {black_top}..{black_bot}"
+        "[P89] 组字区深墨 {pre_top}..{pre_bot} vs 正文区深墨 {body_top}..{body_bot} (pre_w={pre_w:.1})"
     );
-    assert_ne!(black_top, i32::MAX, "正文黑字未渲染");
-    assert_ne!(blue_top, i32::MAX, "preedit 蓝字未渲染（IME 态未生效？）");
+    assert_ne!(body_top, i32::MAX, "正文区墨迹未渲染");
+    assert_ne!(pre_top, i32::MAX, "组字区墨迹未渲染（IME 态未生效？）");
     assert!(
-        (blue_top - black_top).abs() <= 2 && (blue_bot - black_bot).abs() <= 2,
-        "preedit 与正文纵向错位：蓝 {blue_top}..{blue_bot} vs 黑 {black_top}..{black_bot}（修前蓝低 ink_offset≈4px）"
+        (pre_top - body_top).abs() <= 2 && (pre_bot - body_bot).abs() <= 2,
+        "组字与正文纵向错位：组字 {pre_top}..{pre_bot} vs 正文 {body_top}..{body_bot}（修前组字低 ink_offset≈4px）"
     );
 }
 
@@ -375,6 +385,9 @@ fn headless_preedit_clipped_at_wrap_right_edge_when_wrap_on() {
         c.set_word_wrap(true);
         // 与 draw 内 P99 判定同向：内容超视口 → 预算让位
         c.set_wrap_sb_reserve(true);
+        // 滚动条恒隐藏（alpha 0）：P115 起组字与正文同色（黑），
+        // 深灰 thumb 会误判黑墨——强制不画，界外判据只认组字墨迹
+        c.sb_activity = None;
     }
     let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
@@ -424,39 +437,138 @@ fn headless_preedit_clipped_at_wrap_right_edge_when_wrap_on() {
         &viewport_rect,
     );
     renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
-    // preedit 蓝判据（红蓝通道颠倒平台：R 高 B 低，见前一测试注释）
-    let is_blue = |p: tiny_skia::PremultipliedColorU8| {
-        p.red() >= 200 && p.blue() <= 160 && p.green() <= 200
+    // P115：组字与正文同色（黑）——界外判据 = 深墨（avg < 230；正文
+    // 在该 x 区无字：段 0 右缘 ≤ 预算 < right_edge，第二视觉行从
+    // 文本区左缘起排；滚动条已禁画）。光标随组字停到折行边界
+    // （pre_dx → 竖线在 [right_edge, +2)），排除光标列
+    let is_ink = |p: tiny_skia::PremultipliedColorU8| {
+        (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230
     };
-    let mut outside_blue = 0u32;
-    let mut inside_blue = 0u32;
+    let mut outside_ink = 0u32;
+    let mut inside_ink = 0u32;
+    let caret_excl = right_edge as i32 + 3;
     for y in ey as i32..(ey + 2.0 * 22.0 + 12.0) as i32 {
-        for x in right_edge as i32..(ex + ew) as i32 {
+        for x in caret_excl..(ex + ew) as i32 {
             if let Some(p) = pixels.pixel(x as u32, y as u32) {
-                if is_blue(p) {
-                    outside_blue += 1;
+                if is_ink(p) {
+                    outside_ink += 1;
                 }
             }
         }
-        // preedit 起点（段尾光标）到折行边界之间的前部
+        // 组字起点（段尾光标原处）到折行边界之间的前部
         let start_x = (ex + gutter + seg_tail_px) as i32;
         for x in start_x..right_edge as i32 {
             if let Some(p) = pixels.pixel(x as u32, y as u32) {
-                if is_blue(p) {
-                    inside_blue += 1;
+                if is_ink(p) {
+                    inside_ink += 1;
                 }
             }
         }
     }
     eprintln!(
         "[P114] gutter={gutter:.0} budget={budget:.0} 段尾col={tail_col} \
-         右缘={right_edge:.0} 界内蓝px={inside_blue} 界外蓝px={outside_blue}"
+         右缘={right_edge:.0} 界内墨px={inside_ink} 界外墨px={outside_ink}（已除光标列）"
     );
     assert!(
-        outside_blue <= 4,
-        "preedit 墨迹越过折行边界（>{outside_blue}px；修前 ≈60px 超右缘可见，4px 内为裁剪边界 AA 残留）"
+        outside_ink <= 4,
+        "组字/后文墨迹越过折行边界（>{outside_ink}px；修前 ≈60px 超右缘可见，4px 内为裁剪边界 AA 残留）"
     );
-    assert!(inside_blue > 0, "preedit 前部墨迹缺失（裁过头/未渲染）");
+    assert!(inside_ink > 0, "组字前部墨迹缺失（裁过头/未渲染）");
+}
+
+/// P115 行中组字回归（headless 像素级）：组字串作为「虚拟插入文本」
+/// 参与行绘制——光标在**行中**时后文整体右移组字实测宽（不再与组字
+/// 重叠，用户复报「行中打字组字与已打的字重叠」；修前组字浮层直接
+/// 盖在后文上、后文原位不动）。关态行 `abcdefghij`、光标 col 3、
+/// 组字 `mn`——断言：①组字区 [px(3), px(3)+w) 有墨；②行尾字符 j
+/// 不在原位（被推开）；③j 出现在 [px(9)+w, px(9)+w+字宽)；④后文
+/// 首字 d 出现在 [px(3)+w, ...)（组字紧跟处起排）。
+#[test]
+fn headless_mid_line_preedit_pushes_tail_text() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (400u32, 120u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 360.0f32, 100.0f32);
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str("abcdefghij"));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.cursor = CursorPos { line: 0, col: 3 };
+        assert!(c.ime_preedit("mn".to_owned()));
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    let gutter = core.borrow().gutter_width();
+    let (px3, px8, px9, ch_w, pre_w) = {
+        let c = core.borrow();
+        let text = "abcdefghij";
+        let p3 = c.px_of(0, text, 3);
+        let p8 = c.px_of(0, text, 8);
+        let p9 = c.px_of(0, text, 9);
+        let cw = c.px_of(0, text, 1); // 1 个 ASCII 字符宽（等宽行）
+        let pw = shape_row_xs(font, 16.0, "mn")
+            .expect("shape 失败")
+            .last()
+            .copied()
+            .unwrap();
+        (p3, p8, p9, cw, pw)
+    };
+    let x_base = (ex + gutter) as i32;
+    let (y0, y1) = (ey as i32, (ey + 22.0) as i32);
+    // 深墨计数（avg < 200；字形内部命中，AA 边缘 220+ 不误计）
+    let ink_in = |x0: f32, x1: f32| -> u32 {
+        let mut n = 0u32;
+        for y in y0..y1 {
+            for x in (x_base + x0 as i32)..(x_base + x1 as i32) {
+                if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                    if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 200 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let pre_zone = ink_in(px3, px3 + pre_w); // 组字区
+    let i_new = ink_in(px8 + pre_w, px8 + pre_w + ch_w); // i 新位（修前该区为空）
+    let j_new = ink_in(px9 + pre_w, px9 + pre_w + ch_w); // j 新位
+    let tail_after = ink_in(px9 + pre_w + ch_w, px9 + pre_w + ch_w + 4.0); // 行尾后
+    let d_new = ink_in(px3 + pre_w, px3 + pre_w + ch_w); // 后文首字新位
+    eprintln!(
+        "[P115] px3={px3:.1} px8={px8:.1} px9={px9:.1} ch_w={ch_w:.1} pre_w={pre_w:.1} \
+         组字区墨px={pre_zone} i新位墨px={i_new} j新位墨px={j_new} 行尾后墨px={tail_after} d新位墨px={d_new}"
+    );
+    assert!(pre_zone > 0, "组字未渲染（IME 态未生效？）");
+    assert!(d_new > 0, "后文首字未移到组字之后（组字后有空隙/吞字）");
+    assert!(i_new > 0, "后文中段未右移组字宽（仍画在未被推开的位置）");
+    assert!(j_new > 0, "行尾字符未移到组字之后（后文未右移）");
+    assert_eq!(tail_after, 0, "行尾字符右缘之后出现墨迹（右移量异常）");
 }
 
 

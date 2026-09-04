@@ -134,6 +134,100 @@ pub(crate) fn wheel_zoom_step(accum: f32, delta_lines: f32, is_pixels: bool) -> 
     }
 }
 
+/// P115：组字串实测宽（px）：与正文绘制同源的整串 shaping 末项（连字/
+/// 混合宽度如实反映）；失败（字体未就绪）回退列模型保守宽（组字是
+/// 瞬态，占位偏移误差可接受）。
+fn measure_preedit_w(font: Font, size: f32, preedit: &str) -> f32 {
+    shape_row_xs(font, size, preedit)
+        .and_then(|xs| xs.last().copied())
+        .unwrap_or_else(|| display_cols(preedit) * size * 0.5625)
+}
+
+/// P115：正文列区间 `[lo, hi)` 的单片绘制（组字三段式复用；也承载原
+/// 折行/关态两分支的整段/整行路径，pixel 批守护等价）。`seg_start` =
+/// 段内像素基准列（关态 0）；`dx` = 段起点外的附加偏移（组字 C 段 =
+/// preedit 占位后移）；无 runs 时整片一色，有 runs 时逐 run 裁色。
+#[allow(clippy::too_many_arguments)]
+fn paint_text_slice(
+    renderer: &mut iced::Renderer,
+    core: &super::core::EditorCore,
+    font: Font,
+    x0: f32,
+    y: f32,
+    line: usize,
+    seg_start: usize,
+    text: &str,
+    lo: usize,
+    hi: usize,
+    dx: f32,
+    color: Color,
+    runs: &[editpad_core::StyledRun],
+    clip: Rectangle,
+) {
+    if lo >= hi {
+        return;
+    }
+    let lh = core.line_height();
+    let size = core.font_size();
+    if runs.is_empty() {
+        let segment: String = text.chars().skip(lo).take(hi - lo).collect();
+        if segment.is_empty() {
+            return;
+        }
+        renderer.fill_text(
+            core_text::Text {
+                content: segment,
+                bounds: Size::new(f32::INFINITY, lh),
+                size: Pixels(size),
+                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                font,
+                align_x: core_text::Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: core_text::Shaping::Advanced,
+                wrapping: core_text::Wrapping::None,
+            },
+            Point::new(x0 + dx, y),
+            color,
+            clip,
+        );
+    } else {
+        for run in runs {
+            let s = run.start_col.max(lo);
+            let e = run.end_col.min(hi);
+            if e <= s {
+                continue;
+            }
+            let segment: String = text.chars().skip(s).take(e - s).collect();
+            if segment.is_empty() {
+                continue;
+            }
+            let offset_px = core.px_of(line, text, s) - core.px_of(line, text, seg_start) + dx;
+            let [r, g, b, a] = run.color;
+            renderer.fill_text(
+                core_text::Text {
+                    content: segment,
+                    bounds: Size::new(f32::INFINITY, lh),
+                    size: Pixels(size),
+                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                    font,
+                    align_x: core_text::Alignment::Default,
+                    align_y: alignment::Vertical::Top,
+                    shaping: core_text::Shaping::Advanced,
+                    wrapping: core_text::Wrapping::None,
+                },
+                Point::new(x0 + offset_px, y),
+                Color::from_rgba8(
+                    (r * 255.0).round() as u8,
+                    (g * 255.0).round() as u8,
+                    (b * 255.0).round() as u8,
+                    a,
+                ),
+                clip,
+            );
+        }
+    }
+}
+
 struct EditorView {
     core: EditorHandle,
     /// 本帧正文/行号栏使用的字形族（P34；默认 = [`BODY_FONT`]）。
@@ -207,8 +301,9 @@ const SELECTION_COLOR: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.25);
 const CARET_COLOR: Color = Color::from_rgb8(0x11, 0x11, 0x11);
 const GUTTER_BG: Color = Color::from_rgb8(0xF2, 0xF2, 0xF2);
 const GUTTER_TEXT: Color = Color::from_rgb8(0x99, 0x99, 0x99);
-const PREEDIT_TEXT: Color = Color::from_rgb8(0x33, 0x66, 0xCC);
-const PREEDIT_UNDERLINE: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.6);
+/// P115：组字串视觉与正文同色（用户点单：不再蓝字）——浅/深主题统一
+/// 取 palette.text（见 EditorColors::resolve 两分支），下划线同色系
+/// 0.6 透明度，与深色主题既有口径一致。
 /// 书签圆点（第 60 轮）：琥珀色在浅灰行号栏与深色主题上都醒目，
 /// 深浅主题共用一值（与选区/光标不同，它不承担「正文可读性」职能）。
 const BOOKMARK_COLOR: Color = Color::from_rgb8(0xE0, 0x96, 0x2E);
@@ -246,8 +341,9 @@ impl EditorColors {
                 caret: CARET_COLOR,
                 gutter_bg: GUTTER_BG,
                 gutter_text: GUTTER_TEXT,
-                preedit_text: PREEDIT_TEXT,
-                preedit_underline: PREEDIT_UNDERLINE,
+                // P115：组字串与正文同色（正文恒用 palette.text）
+                preedit_text: palette.text,
+                preedit_underline: Color { a: 0.6, ..palette.text },
                 // 滚动条用前景色低透明度叠加，两种主题都自然成立
                 scrollbar_track: Color::from_rgba8(0x00, 0x00, 0x00, 0.05),
                 scrollbar_thumb: Color::from_rgba8(0x00, 0x00, 0x00, 0.30),
@@ -760,6 +856,23 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // P46 的 INFINITY bounds 对段依然成立，且段长天然 ≤ 视口，
         // 「超宽行 shaping 封顶」问题消失）；关态走既有逐逻辑行路径
         // （恒等退化，由既有像素批守护）
+        // P115：组字串作为「虚拟插入文本」参与行绘制（前文+组字+后文
+        // 三段式）——行中组字时后文被推开、光标跟到组字尾（用户复报
+        // 组字与已有文字重叠/光标不前进）。display_right_edge：
+        // 开态 = 折行边界（P114 让位后预算），关态 = 控件右缘。
+        let preedit_text: Option<String> = core.preedit.clone().filter(|s| !s.is_empty());
+        let display_right_edge = if core.wrap_enabled() {
+            bounds.x + gutter_w + core.wrap_max_px() - core.scroll_left
+        } else {
+            bounds.x + bounds.width
+        };
+        let preedit_clip = Rectangle {
+            x: bounds.x,
+            y: bounds.y,
+            width: (display_right_edge - bounds.x).max(0.0),
+            height: bounds.height,
+        };
+        let text_x0 = bounds.x + gutter_w - scroll_left;
         if core.wrap_enabled() {
             let total = core.visual_rows_total();
             if total > 0 {
@@ -802,78 +915,75 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         continue; // 空行/幻影行：仅首段且无正文
                     }
                     let runs = core.highlight_runs(line, &text);
-                    if runs.is_empty() {
-                        let segment: String = text
-                            .chars()
-                            .skip(seg_start)
-                            .take(seg_end - seg_start)
-                            .collect();
-                        if segment.is_empty() {
+                    // P115：本段含组字插入点 → 三段式：前文原样 + 组字
+                    // （正文同色，clip 到折行边界）+ 后文右移组字可显示
+                    // 宽（开态组字画到段尾为止、下段从段首原样起排；组字
+                    // 挤出的尾部由 B 层掩码硬裁，组字是瞬态可接受）
+                    let pre_slot: Option<(&str, usize, f32)> =
+                        preedit_text.as_deref().and_then(|p| {
+                            (core.cursor.line == line && core.cursor.col <= lens).then(|| {
+                                (
+                                    p,
+                                    core.cursor.col,
+                                    measure_preedit_w(body_font, core.font_size(), p),
+                                )
+                            })
+                        });
+                    if let Some((p, col_p, w)) = pre_slot {
+                        if seg_start <= col_p && col_p < seg_end {
+                            let rel = core.px_of(line, &text, col_p)
+                                - core.px_of(line, &text, seg_start);
+                            let remain = (core.px_of(line, &text, seg_end)
+                                - core.px_of(line, &text, col_p))
+                            .max(0.0);
+                            let vis = w.min(remain);
+                            paint_text_slice(
+                                renderer, &core, body_font, text_x0, y, line, seg_start, &text,
+                                seg_start, col_p, 0.0, palette.text, &runs, bounds,
+                            );
+                            // 组字 + 被挤出的后文放进「组字插入区」子层：
+                            // fill_text 的 clip 参数受 iced 文本缓存「首次
+                            // 绘制锁定」不可依赖（同内容先前以控件矩形缓存
+                            // 后，此处的窄 clip 不生效）——改用层掩码硬裁，
+                            // 右缘 = 折行边界（P115：后文被推到边界处截断，
+                            // 不再画进滚动条槽位/控件右缘）
+                            let zone = Rectangle {
+                                x: text_x0 + rel,
+                                y: bounds.y,
+                                width: (display_right_edge - text_x0 - rel).max(0.0),
+                                height: bounds.height,
+                            };
+                            renderer.start_layer(zone);
+                            if vis > 0.0 {
+                                renderer.fill_text(
+                                    core_text::Text {
+                                        content: p.to_owned(),
+                                        bounds: Size::new(f32::INFINITY, lh),
+                                        size: Pixels(core.font_size()),
+                                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                        font: body_font,
+                                        align_x: core_text::Alignment::Default,
+                                        align_y: alignment::Vertical::Top,
+                                        shaping: core_text::Shaping::Advanced,
+                                        wrapping: core_text::Wrapping::None,
+                                    },
+                                    Point::new(text_x0 + rel, y),
+                                    colors.preedit_text,
+                                    bounds,
+                                );
+                            }
+                            paint_text_slice(
+                                renderer, &core, body_font, text_x0, y, line, seg_start, &text,
+                                col_p, seg_end, rel + vis, palette.text, &runs, bounds,
+                            );
+                            renderer.end_layer();
                             continue;
                         }
-                        renderer.fill_text(
-                            core_text::Text {
-                                content: segment,
-                                bounds: Size::new(f32::INFINITY, lh),
-                                size: Pixels(core.font_size()),
-                                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                font: body_font,
-                                align_x: core_text::Alignment::Default,
-                                align_y: alignment::Vertical::Top,
-                                shaping: core_text::Shaping::Advanced,
-                                wrapping: core_text::Wrapping::None,
-                            },
-                            Point::new(
-                                // 段相对：续行从文本区左缘起排（关态首段
-                                // px_of(0)=0，语义一致）
-                                bounds.x + gutter_w - scroll_left,
-                                y,
-                            ),
-                            palette.text,
-                            bounds,
-                        );
-                    } else {
-                        for run in &runs {
-                            let s = run.start_col.max(seg_start);
-                            let e = run.end_col.min(seg_end);
-                            if e <= s {
-                                continue;
-                            }
-                            let segment: String =
-                                text.chars().skip(s).take(e - s).collect();
-                            if segment.is_empty() {
-                                continue;
-                            }
-                            // 段相对：run 起点像素 − 段起点像素
-                            let offset_px = core.px_of(line, &text, s)
-                                - core.px_of(line, &text, seg_start);
-                            let [r, g, b, a] = run.color;
-                            renderer.fill_text(
-                                core_text::Text {
-                                    content: segment,
-                                    bounds: Size::new(f32::INFINITY, lh),
-                                    size: Pixels(core.font_size()),
-                                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                    font: body_font,
-                                    align_x: core_text::Alignment::Default,
-                                    align_y: alignment::Vertical::Top,
-                                    shaping: core_text::Shaping::Advanced,
-                                    wrapping: core_text::Wrapping::None,
-                                },
-                                Point::new(
-                                    bounds.x + gutter_w + offset_px - scroll_left,
-                                    y,
-                                ),
-                                Color::from_rgba8(
-                                    (r * 255.0).round() as u8,
-                                    (g * 255.0).round() as u8,
-                                    (b * 255.0).round() as u8,
-                                    a,
-                                ),
-                                bounds,
-                            );
-                        }
                     }
+                    paint_text_slice(
+                        renderer, &core, body_font, text_x0, y, line, seg_start, &text,
+                        seg_start, seg_end, 0.0, palette.text, &runs, bounds,
+                    );
                 }
             }
         } else {
@@ -919,17 +1029,29 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             if text.is_empty() {
                 continue;
             }
+            let lens = text.chars().count();
             let runs = core.highlight_runs(line, &text);
-
-            if runs.is_empty() {
+            // P115：本行含组字插入点 → 三段式（关态无折行约束，后文整体
+            // 右移组字实测宽；超视口部分由 B 层掩码硬裁，可水平滚动查看）
+            let pre_slot: Option<(&str, usize, f32)> =
+                preedit_text.as_deref().and_then(|p| {
+                    (core.cursor.line == line && core.cursor.col <= lens).then(|| {
+                        (
+                            p,
+                            core.cursor.col,
+                            measure_preedit_w(body_font, core.font_size(), p),
+                        )
+                    })
+                });
+            if let Some((p, col_p, w)) = pre_slot {
+                let rel = core.px_of(line, &text, col_p);
+                paint_text_slice(
+                    renderer, &core, body_font, text_x0, y, line, 0, &text, 0, col_p, 0.0,
+                    palette.text, &runs, bounds,
+                );
                 renderer.fill_text(
                     core_text::Text {
-                        content: text,
-                        // P46 根因修复：bounds 宽度必须覆盖整行——iced 段落按
-                        // bounds 宽度 shaping，传视口宽会导致「视口外的字符
-                        // 没有生成字形」：水平滚动后看不到、行尾吞字、
-                        // 拖动出大段空缺（shaping 只到视口宽）。INFINITY =
-                        // 整行全量 shaping，绘制侧按视口裁剪，成本可忽略。
+                        content: p.to_owned(),
                         bounds: Size::new(f32::INFINITY, lh),
                         size: Pixels(core.font_size()),
                         line_height: core_text::LineHeight::Absolute(Pixels(lh)),
@@ -939,97 +1061,27 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         shaping: core_text::Shaping::Advanced,
                         wrapping: core_text::Wrapping::None,
                     },
-                    Point::new(bounds.x + gutter_w - scroll_left, y),
-                    palette.text,
-                    bounds,
+                    Point::new(text_x0 + rel, y),
+                    colors.preedit_text,
+                    preedit_clip,
                 );
-            } else {
-                for run in &runs {
-                    let segment: String = text
-                        .chars()
-                        .skip(run.start_col)
-                        .take(run.end_col.saturating_sub(run.start_col))
-                        .collect();
-                    if segment.is_empty() {
-                        continue;
-                    }
-                    let offset_px = core.px_of(line, &text, run.start_col);
-                    let [r, g, b, a] = run.color;
-                    renderer.fill_text(
-                        core_text::Text {
-                            content: segment,
-                            // P46 根因修复：同整行分支——分片 bounds 宽度按
-                            // 视口 shaping 会把片段右侧（滚动后可见部分）
-                            // 的字形截掉；INFINITY 全量 shape，按视口裁剪。
-                            bounds: Size::new(f32::INFINITY, lh),
-                            size: Pixels(core.font_size()),
-                            line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                            font: body_font,
-                            align_x: core_text::Alignment::Default,
-                            align_y: alignment::Vertical::Top,
-                            shaping: core_text::Shaping::Advanced,
-                            wrapping: core_text::Wrapping::None,
-                        },
-                        Point::new(bounds.x + gutter_w + offset_px - scroll_left, y),
-                        Color::from_rgba8(
-                            (r * 255.0).round() as u8,
-                            (g * 255.0).round() as u8,
-                            (b * 255.0).round() as u8,
-                            a,
-                        ),
-                        bounds,
-                    );
-                }
+                paint_text_slice(
+                    renderer, &core, body_font, text_x0, y, line, 0, &text, col_p, lens,
+                    rel + w, palette.text, &runs, preedit_clip,
+                );
+                continue;
             }
+            paint_text_slice(
+                renderer, &core, body_font, text_x0, y, line, 0, &text, 0, lens, 0.0,
+                palette.text, &runs, bounds,
+            );
         }
         }
 
-        // 输入法预编辑串（组字中）：内联显示在光标处。P59：光标行不在
-        // 可视范围（滚轮滚走）时不绘制；P66：半可见行也绘制（与正文行
-        // 同规则），文字归 B 层（掩码裁边），下划线归 C 层压顶
-        // P89 勘误：preedit 曾直接画在 caret.y（= 行盒顶 + ink_offset），
-        // P88 把光标下移到墨迹顶后 preedit 跟着下移 ≈4px，组字中的字
-        // 比行内其他字低一截（用户复报「正在输入的字偏下没居中」）。
-        // 正文文字恒按行盒顶对齐绘制，preedit 必须同基准——用
-        // caret.y − ink_offset 还原行盒顶相对 y。
-        if let Some(preedit) = core.preedit.clone() {
-            if !preedit.is_empty() {
-                let caret = core.caret_rect_relative();
-                let row_top_y = caret.y - core.ink_offset;
-                let in_view =
-                    caret.y + lh > 0.0 && caret.y < core.viewport_h;
-                if in_view {
-                    let width = (display_cols(&preedit) * char_w).max(24.0);
-                    // P114：折行开态 preedit 是浮层、不受折行约束，组字中
-                    // 的拼音串会画出文本区右缘（用户复报「输入超右缘，没
-                    // 受换行影响」）——显示裁剪到折行边界（与 wrap_max_px
-                    // 同源预算，含滚动条让位）；关态保持控件右缘（B 层
-                    // 掩码）现状。只裁显示不裁 shaping（P46 口径）。
-                    let right_edge = if core.wrap_enabled() {
-                        bounds.x + core.gutter_width() + core.wrap_max_px() - core.scroll_left
-                    } else {
-                        bounds.x + bounds.width
-                    };
-                    let clip_w = (right_edge - bounds.x).max(0.0);
-                    renderer.fill_text(
-                        core_text::Text {
-                            content: preedit,
-                            bounds: Size::new(width + 60.0, lh),
-                            size: Pixels(core.font_size()),
-                            line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                            font: body_font,
-                            align_x: core_text::Alignment::Default,
-                            align_y: alignment::Vertical::Top,
-                            shaping: core_text::Shaping::Advanced,
-                            wrapping: core_text::Wrapping::None,
-                        },
-                        Point::new(bounds.x + caret.x, bounds.y + row_top_y),
-                        colors.preedit_text,
-                        Rectangle { x: bounds.x, y: bounds.y, width: clip_w, height: bounds.height },
-                    );
-                }
-            }
-        }
+        // 组字串文字已并入 B 层正文三段式绘制（P115）：前文 + 组字（正文
+        // 同色，y = 行盒顶基准，clip 到折行边界）+ 后文右移组字可显示
+        // 宽。下划线归 C 层压顶，宽度与组字**可显示宽**一致（P115：
+        // 开态到段尾为止，与正文占位同口径）。
 
         // B 层（文本）收口
         renderer.end_layer();
@@ -1037,30 +1089,25 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // C 层：压顶四边形——预编辑下划线、光标竖线、滚动条
         renderer.start_layer(bounds);
 
-        // 输入法下划线（与上方预编辑文字同门控；y 同改行盒顶基准，
-        // 压行盒底 − 3px：修前随 caret 下移后反超出行盒底 1px）
-        if let Some(preedit) = core.preedit.clone() {
-            if !preedit.is_empty() {
-                let caret = core.caret_rect_relative();
-                let row_top_y = caret.y - core.ink_offset;
-                let in_view =
-                    caret.y + lh > 0.0 && caret.y < core.viewport_h;
-                if in_view {
-                    let width = (display_cols(&preedit) * char_w).max(24.0);
-                    // P114：同文字——下划线收窄到折行边界内（quad 无裁剪，
-                    // 直接控宽；起点已在右缘外则为 0 = 整条不画）
-                    let right_edge = if core.wrap_enabled() {
-                        bounds.x + core.gutter_width() + core.wrap_max_px() - core.scroll_left
-                    } else {
-                        bounds.x + bounds.width
-                    };
-                    let draw_w = width.min((right_edge - (bounds.x + caret.x)).max(0.0));
+        // 输入法下划线：与组字占位同门控同口径——起点 = 组字起点
+        // （caret.x 视口系含 gutter/滚动/段相对），宽度 = 可显示宽
+        // （P115：折行开态钳到段尾剩余，与 B 层占位一致，quad 无裁剪
+        // 直接控宽；为 0 则不画）
+        if let Some(preedit) = preedit_text.as_deref() {
+            let caret = core.caret_rect_relative();
+            let row_top_y = caret.y - core.ink_offset;
+            let in_view =
+                caret.y + lh > 0.0 && caret.y < core.viewport_h;
+            if in_view {
+                let w = measure_preedit_w(body_font, core.font_size(), preedit);
+                let vis = core.preedit_visual_w(core.cursor.col, w);
+                if vis > 0.0 {
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
                                 x: bounds.x + caret.x,
                                 y: bounds.y + row_top_y + lh - 3.0,
-                                width: draw_w,
+                                width: vis,
                                 height: 2.0,
                             },
                             ..renderer::Quad::default()
@@ -1074,13 +1121,19 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 光标竖线（静止期按闪烁相位隐现；活动窗口期内常显）。
         // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹；
         // P66：半可见行的光标也绘制，与正文行同规则
+        // P115：组字中光标画在组字**可显示尾**（后文右移起点）——
+        // 与主流编辑器「光标随组字前进」观感一致
         let caret = core.caret_rect_relative();
+        let pre_dx = preedit_text.as_deref().map_or(0.0f32, |p| {
+            let w = measure_preedit_w(body_font, core.font_size(), p);
+            core.preedit_visual_w(core.cursor.col, w)
+        });
         let caret_in_view = caret.y + caret.height > 0.0 && caret.y < core.viewport_h;
         if core.caret_visible() && caret_in_view {
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: bounds.x + caret.x,
+                        x: bounds.x + caret.x + pre_dx,
                         y: bounds.y + caret.y,
                         ..caret
                     },
