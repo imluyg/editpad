@@ -171,6 +171,39 @@ use super::*;
             handle_key_defaults(keyboard::Key::Named(Named::Tab), ctrl),
             Some(Message::SwitchTabNext)
         ));
+        // 上一标签页：Ctrl+Shift+Tab（与 next 互逆）
+        let ctrl_shift = ctrl | keyboard::Modifiers::SHIFT;
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::Tab), ctrl_shift),
+            Some(Message::SwitchTabPrev)
+        ));
+    }
+
+    #[test]
+    fn find_navigation_f3_family_and_prev_tab_cycle() {
+        use iced::keyboard::{self};
+        let none = keyboard::Modifiers::empty();
+        let shift = keyboard::Modifiers::SHIFT;
+
+        // F3 家族（裸功能键通道）映射查找导航
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::F3), none),
+            Some(Message::FindNext)
+        ));
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::F3), shift),
+            Some(Message::FindPrev)
+        ));
+
+        // SwitchTabPrev 循环切换：3 页时从页 0 反向切到最后一页
+        //（app_with_tabs 创建后活动页在最后一页，先切回页 0）
+        let mut app = app_with_tabs(3);
+        dispatch(&mut app, Message::SwitchTab(0));
+        assert_eq!(app.active_tab, 0);
+        dispatch(&mut app, Message::SwitchTabPrev);
+        assert_eq!(app.active_tab, 2, "从页 0 反向应回绕到最后一页");
+        dispatch(&mut app, Message::SwitchTabNext);
+        assert_eq!(app.active_tab, 0, "正向切回页 0");
     }
 
     // ---------- P38 撤销回基线清脏 ----------

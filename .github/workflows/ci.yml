@@ -35,7 +35,9 @@ jobs:
 
   clippy:
     name: clippy (-D warnings)
-    runs-on: ubuntu-latest
+    # 与 test 同平台：Windows 专属代码（kernel32 FFI、资源编译等 cfg 门控
+    # 路径）此前在 ubuntu 上被整体跳过，从未被 lint
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

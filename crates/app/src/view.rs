@@ -1078,15 +1078,21 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     );
                 }
                 let hovered = self.hovered_tab == Some(i);
-                strip = strip.push(
-                    mouse_area(
-                        container(pill)
-                            .style(move |theme| tab_pill_style(theme, active, hovered)),
-                    )
-                    .on_enter(Message::TabHovered(Some(i)))
-                    .on_exit(Message::TabHovered(None))
-                    .on_right_press(Message::TabContextMenu(i)),
-                );
+                let pill_area = mouse_area(
+                    container(pill)
+                        .style(move |theme| tab_pill_style(theme, active, hovered)),
+                )
+                .on_enter(Message::TabHovered(Some(i)))
+                .on_exit(Message::TabHovered(None))
+                .on_right_press(Message::TabContextMenu(i));
+                // 中键关闭（主流浏览器/编辑器手感）；置脏确认与固定页
+                // 豁免由 CloseTabAt 处理器统一判定，busy 守卫与 × 按钮同口径
+                let pill_area = if self.busy {
+                    pill_area
+                } else {
+                    pill_area.on_middle_press(Message::CloseTabAt(i))
+                };
+                strip = strip.push(pill_area);
             }
             // 第 76 轮（用户点单）：标签条右侧空白区双击新建标签页——
             // 命中面就是整条标签条本身（外层 mouse_area 的 on_double_click）：

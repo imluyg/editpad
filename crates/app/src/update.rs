@@ -313,7 +313,7 @@ impl Editpad {
         => self.update_editor(message),
         // ---------- 标签页/右键菜单/批关 ----------
         Message::CopyFilePath(..) | Message::CopyFileName(..) | Message::ReopenLastClosedFile | Message::NewTab
-        | Message::TabStripBlankPressed | Message::SwitchTabNext | Message::SwitchTab(..) | Message::CloseTabRequest
+        | Message::TabStripBlankPressed | Message::SwitchTabNext | Message::SwitchTabPrev | Message::SwitchTab(..) | Message::CloseTabRequest
         | Message::ConfirmCloseTabDiscard(..) | Message::CancelCloseTab | Message::CloseTabSave(..) | Message::TabContextMenu(..)
         | Message::TabContextMenuClosed | Message::TogglePinTab(..) | Message::SaveTabFromMenu(..) | Message::RenameOrSaveAsTab(..)
         | Message::TabRenameInputChanged(..) | Message::TabRenameCommitted | Message::TabRenameCancelled | Message::CloseTabAt(..)
@@ -640,6 +640,13 @@ impl Editpad {
             Message::SwitchTabNext => {
                 let next = (self.active_tab + 1) % self.tabs.len();
                 self.set_active_tab(next);
+                self.cancel_find_scan();
+                self.tab_context_menu = None;
+                Task::none()
+            }
+            Message::SwitchTabPrev => {
+                let prev = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+                self.set_active_tab(prev);
                 self.cancel_find_scan();
                 self.tab_context_menu = None;
                 Task::none()
@@ -1584,7 +1591,17 @@ impl Editpad {
                 self.recents_visible = !self.recents_visible;
                 Task::none()
             }
-            Message::RecentSelected(entry) => self.request_open(PathBuf::from(entry)),
+            Message::RecentSelected(entry) => {
+                // 存在性预检：文件已删除/移动时点开必然走完整加载失败
+                // 管线，直接明示；条目保留（可能只是暂时移动/离线盘符）
+                let path = PathBuf::from(&entry);
+                if path.exists() {
+                    self.request_open(path)
+                } else {
+                    self.set_status_error(format!("文件不存在或已被移动：{entry}"));
+                    Task::none()
+                }
+            }
             Message::RecentsCleared => {
                 // P20 隐私：立即写回空列表，config.toml 不再含历史路径
                 self.settings.clear_recent_files();

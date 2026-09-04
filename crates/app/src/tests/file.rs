@@ -585,6 +585,32 @@ use super::*;
     }
 
     #[test]
+    fn recent_selected_prechecks_existence() {
+        // 已删除/移动的最近文件条目：点击直接明示缺失，不进加载管线，
+        // 条目保留（可能是暂时移动）；存在的条目照常走打开管线
+        let (mut app, path) = loaded_real_file_app("recent-precheck");
+        let missing = scratch_dir("recent-missing").join("gone.txt");
+        app.settings.recent_files.push(missing.display().to_string());
+
+        dispatch(&mut app, Message::RecentSelected(missing.display().to_string()));
+        assert!(
+            app.status.contains("不存在"),
+            "应明示文件缺失，实际 {:?}",
+            app.status
+        );
+        assert!(!app.busy, "缺失文件不得进入加载管线");
+        assert_eq!(
+            app.settings.recent_files.len(),
+            2,
+            "缺失条目保留，不做静默剔除"
+        );
+
+        // 存在的条目照常打开（进入加载管线）
+        dispatch(&mut app, Message::RecentSelected(path.display().to_string()));
+        assert!(app.busy, "存在的文件应正常进入打开管线");
+    }
+
+    #[test]
     fn p67_convert_eol_rewrites_document_undoably() {
         let (mut app, _path) = loaded_real_file_app("p67-eol");
         {

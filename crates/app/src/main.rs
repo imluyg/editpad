@@ -226,6 +226,8 @@ enum Message {
     TabStripBlankPressed,
     /// 切到下一个标签页（Ctrl+Tab，循环）
     SwitchTabNext,
+    /// 切到上一个标签页（Ctrl+Shift+Tab，循环）
+    SwitchTabPrev,
     /// 切换到第 `i` 个标签页（标签条点击）
     SwitchTab(usize),
     /// 请求关闭当前标签页：干净即关；置脏则先弹放弃确认条

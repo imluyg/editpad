@@ -77,6 +77,11 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction { id: "format_json", default_combo: "Ctrl+Shift+F", desc: "格式化 JSON（仅 JSON 文件）" },
     HotkeyAction { id: "doc_start", default_combo: "Ctrl+Home", desc: "跳到文档首" },
     HotkeyAction { id: "doc_end", default_combo: "Ctrl+End", desc: "跳到文档尾" },
+    // 查找导航（F3 家族与主流编辑器同默认键；Shift+F3 走裸功能键通道）+
+    // 上一标签页（Ctrl+Shift+Tab 与 next_tab 互逆）
+    HotkeyAction { id: "find_next", default_combo: "F3", desc: "查找下一个" },
+    HotkeyAction { id: "find_prev", default_combo: "Shift+F3", desc: "查找上一个" },
+    HotkeyAction { id: "prev_tab", default_combo: "Ctrl+Shift+Tab", desc: "循环切换标签页（反向）" },
 ];
 
 /// 动作 id 的默认组合（未重映射时的组合键串）。
@@ -280,6 +285,9 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "new_tab" => Some(Message::NewTab),
         "close_tab" => Some(Message::CloseTabRequest),
         "next_tab" => Some(Message::SwitchTabNext),
+        "prev_tab" => Some(Message::SwitchTabPrev),
+        "find_next" => Some(Message::FindNext),
+        "find_prev" => Some(Message::FindPrev),
         "format_json" => Some(Message::FormatJson),
         "doc_start" => edit(EditOp::Motion(Motion::DocStart, mods.shift())),
         "doc_end" => edit(EditOp::Motion(Motion::DocEnd, mods.shift())),
