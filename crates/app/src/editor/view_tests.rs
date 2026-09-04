@@ -723,6 +723,134 @@ fn headless_preedit_at_wrapped_line_end_renders() {
     assert!(ink > 0, "折行开态行尾组字未渲染（修前段条件排除行尾必挂）");
 }
 
+/// P115 续：组字行「插入重排」回归（headless 像素级）——被挤出的后文
+/// **换行**到下段（修前在折行边界截断 → 行尾大片空白且缺字，用户复报
+/// 「后方让位让出一大片空白，而且没有做到换行」）。折行开态：行
+/// `中`×20（原 2 段）、光标 col 8、24 字母组字——合成串按预算重断
+/// ≥3 段：断言①第三视觉行（超过原段数）有组字/后文墨迹且末段右缘
+/// 与合成流一致（后文折行显示、不截断）；②后续逻辑行（`AB`）整体
+/// 下移 k 段（修前在原位必挂）。
+#[test]
+fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
+    use super::super::wrap::pixel_breaks;
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (400u32, 200u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 300.0f32, 180.0f32);
+    let preedit = "zhongguozhongguozhongguo"; // 24 字母 ≈212px
+    let doc = format!("{}\nAB", "中".repeat(20));
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.set_word_wrap(true);
+        c.cursor = CursorPos { line: 0, col: 8 };
+        assert!(c.ime_preedit(preedit.to_owned()));
+    }
+    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let node = node.translate(iced::Vector::new(ex, ey));
+    let lyt = Layout::new(&node);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let damage = vec![viewport_rect];
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    // 合成串与断点（与实现同口径，动态）
+    let s: String = "中".repeat(8)
+        .chars()
+        .chain(preedit.chars())
+        .chain("中".repeat(12).chars())
+        .collect();
+    let s_xs = shape_row_xs(font, 16.0, &s).expect("shape 失败");
+    let budget = core.borrow().wrap_max_px();
+    let breaks = pixel_breaks(&s_xs, budget, &s);
+    eprintln!(
+        "[P115续] budget={budget:.1} 合成段数={}（原 2 段）s_xs尾={:.1}",
+        breaks.len(),
+        s_xs.last().copied().unwrap_or(0.0)
+    );
+    assert!(breaks.len() >= 3, "测试前提失效：合成串应 ≥3 段，实际 {}", breaks.len());
+    let gutter = core.borrow().gutter_width();
+    let x0 = (ex + gutter) as i32;
+    let ink_in = |y0: f32, y1: f32, x0r: i32, x1r: i32| -> u32 {
+        let mut n = 0u32;
+        for y in y0 as i32..y1 as i32 {
+            for x in x0r..x1r {
+                if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                    if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    // ① 第三视觉行（重排新增）有后文墨迹
+    let row2 = ink_in(ey + 44.0, ey + 66.0, x0, x0 + 300);
+    assert!(row2 > 0, "合成流第三段未渲染（后文未换行到下段）");
+    // ② 末段右缘 ≈ 合成流（后文全量显示、未截断缺字）
+    let last = breaks.len() - 1;
+    let last_right = s_xs[s.chars().count()] - s_xs[breaks[last]];
+    let last_y = ey + last as f32 * 22.0;
+    let mut ink_right = x0;
+    for y in last_y as i32..(last_y + 22.0) as i32 {
+        for x in x0..(x0 + 320) {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
+                    ink_right = ink_right.max(x);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[P115续] 末段右缘期望 {last_right:.1}px（x0 起），实测 {}({:.1}px)",
+        ink_right,
+        (ink_right - x0) as f32
+    );
+    assert!(
+        (ink_right - x0) as f32 >= last_right - 8.0,
+        "后文未全量折行显示（截断缺字）：末段墨迹右缘 {}px < {}px",
+        (ink_right - x0) as f32,
+        last_right
+    );
+    // ③ 后续逻辑行下移 k = 合成段数 − 原段数（AB 应从 ey+44 移到
+    // ey+(2+k)*22）
+    let mut ab_shifted = 0u32;
+    for y in (ey + 66.0) as i32..(ey + 88.0) as i32 {
+        for x in x0..(x0 + 40) {
+            if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 230 {
+                    ab_shifted += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        ab_shifted > 0,
+        "后续逻辑行未随重排下移（k 偏移缺失；修前 AB 画在 ey+44 原位必挂）"
+    );
+}
+
 
     /// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
 /// tiny-skia 光栅化）下，41 汉字行 + 水平滚动（scroll_left=80），
@@ -1975,10 +2103,18 @@ fn headless_wrap_reaments_after_viewport_grow() {
     }
     let gap1 = (ew1 as u32).saturating_sub(ink_right(&p800) + 1);
     let gap2 = (1200u32).saturating_sub(ink_right(&p1200) + 1);
-    eprintln!("[P96] 800 宽右gap={gap1}px  1200 宽右gap={gap2}px");
-    assert!(gap1 <= 12, "800 宽折行应贴右缘，缺 {gap1}px");
-    // 拉宽后必须重新贴住新右缘（用户点单的适配要求）
-    assert!(gap2 <= 12, "扩宽后折行未重算：右缘缺 {gap2}px（断点停在旧宽度）");
+    eprintln!("[P96/P115] 800 宽右gap={gap1}px  1200 宽右gap={gap2}px");
+    // P115 用户点单：行尾与文本区右缘恒留一个汉字宽（= 正文字号）——
+    // 右缘余量 ∈ [16, 16+字符宽]，不再贴死右缘（修前 ≤12px 贴边口径）
+    assert!(
+        (14..=40).contains(&gap1),
+        "800 宽行尾距右缘应 ≈ 一个汉字宽（P115 余量），实测 {gap1}px"
+    );
+    // 拉宽后必须按新预算重新贴余量（断点随宽度重算）
+    assert!(
+        (14..=40).contains(&gap2),
+        "扩宽后行尾距右缘 ≈ 一个汉字宽，实测 {gap2}px（断点停在旧宽度？）"
+    );
 }
 
 /// P99 用户点单（headless 像素级）：折行文本贴满右缘后，行尾字符被

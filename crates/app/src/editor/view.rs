@@ -22,6 +22,7 @@ use super::scrollbars::{
     VScrollbar,
 };
 use super::wrap::segment_index as wrap_segment_index;
+use super::wrap::pixel_breaks;
 use super::{
     BOOKMARK_DOT, BOOKMARK_STRIP, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET,
 };
@@ -226,6 +227,139 @@ fn paint_text_slice(
             );
         }
     }
+}
+
+/// P115 续：组字行「插入重排」的预计算结果——合成串 S = 前文 + 组字 +
+/// 后文；`s_xs`/`breaks` 按真实字形宽（shape 同源）与折行预算（含右缘
+/// 一个汉字宽余量、P99 滚动条让位）断行；`k` = 该行视觉段数增量（后续
+/// 逻辑行绘制整体下移 k 行）；`v0` = 该行原首段视觉行号。
+struct ReflowLayout {
+    line: usize,
+    col_p: usize,
+    pel: usize,
+    s: String,
+    s_xs: Vec<f32>,
+    breaks: Vec<usize>,
+    k: isize,
+    v0: u32,
+}
+
+/// P115 续：组字重排段的绘制——合成串段 `[bs, be)` 内最多三块（前文/
+/// 组字/后文）逐块上屏，x 全按合成串真实 xs 定位；前/后文块继承原行
+/// runs 逐色（后文源列 = 合成索引 − pel），组字块用组字色。
+#[allow(clippy::too_many_arguments)]
+fn paint_composed_segment(
+    renderer: &mut iced::Renderer,
+    core: &super::core::EditorCore,
+    font: Font,
+    x0: f32,
+    y: f32,
+    s: &str,
+    s_xs: &[f32],
+    bs: usize,
+    be: usize,
+    col_p: usize,
+    pel: usize,
+    text_color: Color,
+    preedit_color: Color,
+    runs: &[editpad_core::StyledRun],
+    clip: Rectangle,
+) {
+    if be <= bs {
+        return;
+    }
+    let lh = core.line_height();
+    let size = core.font_size();
+    let mut paint = |lo: usize, hi: usize, color: Color| {
+        let seg: String = s.chars().skip(lo).take(hi - lo).collect();
+        if seg.is_empty() {
+            return;
+        }
+        let bx = s_xs[bs.min(s_xs.len().saturating_sub(1))];
+        let lo_x = s_xs[lo.min(s_xs.len().saturating_sub(1))];
+        renderer.fill_text(
+            core_text::Text {
+                content: seg,
+                bounds: Size::new(f32::INFINITY, lh),
+                size: Pixels(size),
+                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                font,
+                align_x: core_text::Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: core_text::Shaping::Advanced,
+                wrapping: core_text::Wrapping::None,
+            },
+            Point::new(x0 + (lo_x - bx), y),
+            color,
+            clip,
+        );
+    };
+    // 前文块 [bs, col_p)
+    if bs < col_p {
+        let hi = be.min(col_p);
+        if hi > bs {
+            if runs.is_empty() {
+                paint(bs, hi, text_color);
+            } else {
+                for run in runs {
+                    let s0 = run.start_col.max(bs);
+                    let e0 = run.end_col.min(hi);
+                    if e0 > s0 {
+                        paint(
+                            s0,
+                            e0,
+                            Color::from_rgba8(
+                                (run.color[0] * 255.0).round() as u8,
+                                (run.color[1] * 255.0).round() as u8,
+                                (run.color[2] * 255.0).round() as u8,
+                                run.color[3],
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // 组字块 [col_p, col_p + pel)
+    let blo = bs.max(col_p);
+    let bhi = be.min(col_p + pel);
+    if bhi > blo {
+        paint(blo, bhi, preedit_color);
+    }
+    // 后文块 [col_p + pel, ..)：源列 = 合成索引 − pel
+    let blo = bs.max(col_p + pel);
+    if be > blo {
+        if runs.is_empty() {
+            paint(blo, be, text_color);
+        } else {
+            for run in runs {
+                let s0 = run.start_col.max(blo - pel);
+                let e0 = run.end_col.min(be - pel);
+                if e0 > s0 {
+                    paint(
+                        s0 + pel,
+                        e0 + pel,
+                        Color::from_rgba8(
+                            (run.color[0] * 255.0).round() as u8,
+                            (run.color[1] * 255.0).round() as u8,
+                            (run.color[2] * 255.0).round() as u8,
+                            run.color[3],
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 合成流断点表中包含索引 `idx` 的段序号（断点向量首项恒 0）。
+fn reflow_seg_of(breaks: &[usize], idx: usize) -> Option<usize> {
+    breaks
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, &b)| b <= idx)
+        .map(|(i, _)| i)
 }
 
 struct EditorView {
@@ -873,15 +1007,72 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             height: bounds.height,
         };
         let text_x0 = bounds.x + gutter_w - scroll_left;
+        // P115 续：组字行「插入重排」预计算（仅折行开态）——合成串
+        // （前文+组字+后文）按真实字形宽与折行预算重断行，被挤出的
+        // 后文**换行**到下段（修前在折行边界截断 → 行尾大片空白，用户
+        // 复报）；k = 该行视觉段数增量，后续逻辑行绘制整体下移；shape
+        // 失败回退下方旧三段式/空行逻辑（pre_slot 分支仍在）；关态
+        // 不重排（右移+可滚动，既有口径）
+        let reflow: Option<ReflowLayout> = if core.wrap_enabled() {
+            preedit_text.as_deref().and_then(|p| {
+                let rl = core.cursor.line;
+                if rl >= core.doc.line_count() {
+                    return None;
+                }
+                let rtext = core.line_text(rl);
+                let rlens = rtext.chars().count();
+                let col_p = core.cursor.col.min(rlens);
+                let pel = p.chars().count();
+                let s: String = rtext
+                    .chars()
+                    .take(col_p)
+                    .chain(p.chars())
+                    .chain(rtext.chars().skip(col_p))
+                    .collect();
+                if s.is_empty() {
+                    return None;
+                }
+                let s_xs = shape_row_xs(body_font, core.font_size(), &s)?;
+                if s_xs.len() < 2 {
+                    return None;
+                }
+                let budget = (display_right_edge - text_x0).max(1.0);
+                let breaks = pixel_breaks(&s_xs, budget, &s);
+                let old_segs = core.segments_of_line(rl, &rtext).len() as isize;
+                let k = (breaks.len() as isize - old_segs).max(0);
+                Some(ReflowLayout {
+                    line: rl,
+                    col_p,
+                    pel,
+                    s,
+                    s_xs,
+                    breaks,
+                    k,
+                    v0: core.line_visual_base(rl),
+                })
+            })
+        } else {
+            None
+        };
         if core.wrap_enabled() {
             let total = core.visual_rows_total();
             if total > 0 {
                 let first_v = (core.scroll_top.floor() as i64).max(0) as u32;
                 let rows_v = (core.viewport_h / lh).ceil() as u32 + 1;
-                let last_v = first_v.saturating_add(rows_v).min(total - 1);
+                // 组字行重排多出的段数也纳入可见范围（后续行下移 k）
+                let k_vis = reflow.as_ref().map_or(0, |r| r.k.max(0) as u32);
+                let last_v = first_v
+                    .saturating_add(rows_v)
+                    .saturating_add(k_vis)
+                    .min(total - 1);
                 for v in first_v..=last_v {
                     let (line, seg, seg_start, seg_end) = core.locate_visual(v);
-                    let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                    // 后续逻辑行整体下移：该行原首段之前的一切（含组字
+                    // 行本身的旧表段）不动；组字行由首段全量重排绘制
+                    let y_off = reflow
+                        .as_ref()
+                        .map_or(0.0f32, |r| if line > r.line { r.k as f32 } else { 0.0 });
+                    let y = bounds.y + (v as f32 + y_off - core.scroll_top) * lh;
                     if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                         continue;
                     }
@@ -908,6 +1099,39 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             colors.gutter_text,
                             bounds,
                         );
+                    }
+                    // P115 续：组字行（含空行）由首段全量重排绘制——
+                    // 段 0 覆盖全部新段（掩码裁视口外），其余旧表段跳过
+                    if reflow.as_ref().is_some_and(|r| r.line == line) {
+                        if seg == 0 {
+                            let rtext = core.line_text(line);
+                            let rruns = core.highlight_runs(line, &rtext);
+                            if let Some(r) = &reflow {
+                                for (bi, &bs) in r.breaks.iter().enumerate() {
+                                    let be = r
+                                        .breaks
+                                        .get(bi + 1)
+                                        .copied()
+                                        .unwrap_or(r.s.chars().count());
+                                    if be <= bs {
+                                        continue;
+                                    }
+                                    let yv = bounds.y
+                                        + (r.v0 as f32 + bi as f32 - core.scroll_top) * lh;
+                                    if yv + lh <= bounds.y
+                                        || yv >= bounds.y + bounds.height
+                                    {
+                                        continue;
+                                    }
+                                    paint_composed_segment(
+                                        renderer, &core, body_font, text_x0, yv, &r.s,
+                                        &r.s_xs, bs, be, r.col_p, r.pel, palette.text,
+                                        colors.preedit_text, &rruns, bounds,
+                                    );
+                                }
+                            }
+                        }
+                        continue;
                     }
                     let text = core.line_text(line);
                     let lens = text.chars().count();
@@ -1148,31 +1372,59 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // C 层：压顶四边形——预编辑下划线、光标竖线、滚动条
         renderer.start_layer(bounds);
 
-        // 输入法下划线：与组字占位同门控同口径——起点 = 组字起点
-        // （caret.x 视口系含 gutter/滚动/段相对），宽度 = 可显示宽
-        // （P115：折行开态钳到段尾剩余，与 B 层占位一致，quad 无裁剪
-        // 直接控宽；为 0 则不画）
+        // 输入法下划线：与组字占位同门控同口径——默认 = 原段口径（caret.x +
+        // preedit_visual_w 可显示宽）；组字重排存在时按**合成流**定位：
+        // 组字起点所在段内 x、宽 = 段内可显示部分、y = 该段行盒底
         if let Some(preedit) = preedit_text.as_deref() {
-            let caret = core.caret_rect_relative();
-            let row_top_y = caret.y - core.ink_offset;
-            let in_view =
-                caret.y + lh > 0.0 && caret.y < core.viewport_h;
-            if in_view {
-                let w = measure_preedit_w(body_font, core.font_size(), preedit);
-                let vis = core.preedit_visual_w(core.cursor.col, w);
-                if vis > 0.0 {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: bounds.x + caret.x,
-                                y: bounds.y + row_top_y + lh - 3.0,
-                                width: vis,
-                                height: 2.0,
+            let w = measure_preedit_w(body_font, core.font_size(), preedit);
+            if let Some(r) = &reflow {
+                let s0 = r.col_p;
+                let s1 = (r.col_p + r.pel).min(r.s.chars().count());
+                if let Some(bi) = reflow_seg_of(&r.breaks, s0) {
+                    let seg_end = r
+                        .breaks
+                        .get(bi + 1)
+                        .copied()
+                        .unwrap_or(r.s.chars().count());
+                    let x = text_x0 + (r.s_xs[s0] - r.s_xs[r.breaks[bi]]);
+                    let vis = (r.s_xs[s1.min(seg_end)] - r.s_xs[s0]).max(0.0);
+                    let y = bounds.y + (r.v0 as f32 + bi as f32 - core.scroll_top) * lh;
+                    if vis > 0.0 && y + lh > bounds.y && y < bounds.y + bounds.height {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x,
+                                    y: y + lh - 3.0,
+                                    width: vis,
+                                    height: 2.0,
+                                },
+                                ..renderer::Quad::default()
                             },
-                            ..renderer::Quad::default()
-                        },
-                        colors.preedit_underline,
-                    );
+                            colors.preedit_underline,
+                        );
+                    }
+                }
+            } else {
+                let caret = core.caret_rect_relative();
+                let row_top_y = caret.y - core.ink_offset;
+                let in_view =
+                    caret.y + lh > 0.0 && caret.y < core.viewport_h;
+                if in_view {
+                    let vis = core.preedit_visual_w(core.cursor.col, w);
+                    if vis > 0.0 {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x: bounds.x + caret.x,
+                                    y: bounds.y + row_top_y + lh - 3.0,
+                                    width: vis,
+                                    height: 2.0,
+                                },
+                                ..renderer::Quad::default()
+                            },
+                            colors.preedit_underline,
+                        );
+                    }
                 }
             }
         }
@@ -1181,20 +1433,37 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹；
         // P66：半可见行的光标也绘制，与正文行同规则
         // P115：组字中光标画在组字**可显示尾**（后文右移起点）——
-        // 与主流编辑器「光标随组字前进」观感一致
+        // 与主流编辑器「光标随组字前进」观感一致；重排存在时按合成流
+        // 组字尾所在段定位（可能随重排折到下一段）
         let caret = core.caret_rect_relative();
-        let pre_dx = preedit_text.as_deref().map_or(0.0f32, |p| {
-            let w = measure_preedit_w(body_font, core.font_size(), p);
-            core.preedit_visual_w(core.cursor.col, w)
-        });
         let caret_in_view = caret.y + caret.height > 0.0 && caret.y < core.viewport_h;
         if core.caret_visible() && caret_in_view {
+            let (cx, cy) = if let Some(r) = &reflow {
+                let s1 = (r.col_p + r.pel).min(r.s.chars().count());
+                match reflow_seg_of(&r.breaks, s1) {
+                    Some(bj) => {
+                        let x = text_x0 + (r.s_xs[s1] - r.s_xs[r.breaks[bj]]);
+                        let y = bounds.y
+                            + (r.v0 as f32 + bj as f32 - core.scroll_top) * lh
+                            + core.ink_offset;
+                        (x, y)
+                    }
+                    None => (bounds.x + caret.x + 0.0, bounds.y + caret.y),
+                }
+            } else {
+                let pre_dx = preedit_text.as_deref().map_or(0.0f32, |p| {
+                    let w = measure_preedit_w(body_font, core.font_size(), p);
+                    core.preedit_visual_w(core.cursor.col, w)
+                });
+                (bounds.x + caret.x + pre_dx, bounds.y + caret.y)
+            };
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: bounds.x + caret.x + pre_dx,
-                        y: bounds.y + caret.y,
-                        ..caret
+                        x: cx,
+                        y: cy,
+                        width: caret.width,
+                        height: caret.height,
                     },
                     ..renderer::Quad::default()
                 },

@@ -1540,12 +1540,15 @@ fn p66_fractional_scroll_top_survives_clamp() {
     fn wrap_max_cols_fills_viewport_without_hscroll_reservation() {
         // P95 用户点单：开态**不预留水平滚动条槽位**——列预算 = 正文区
         // 可视宽 ÷ 列宽（无 SCROLLBAR_ZONE_W+2 扣除），折行文本贴窗右缘，
-        // 不再留出竖直空白带（水平条在软换行下恒隐藏）
+        // 不再留出竖直空白带（水平条在软换行下恒隐藏）。
+        // P115 用户点单叠加：行尾与文本区右缘恒留**一个汉字宽**（= 正
+        // 文字号）——英文半宽行尾不再贴右缘、组字挤出后文有右缘缓冲。
         let mut c = wrap_core("1234567890\n");
         wrap_converge(&mut c);
         let mc = c.wrap_max_cols();
-        let expect = (c.text_viewport_w() / c.char_width()).floor().max(1.0) as usize;
-        assert_eq!(mc, expect, "开态列预算不得预留滚动条槽位");
+        let expect =
+            ((c.text_viewport_w() - c.font_size()) / c.char_width()).floor().max(1.0) as usize;
+        assert_eq!(mc, expect, "开态列预算 = 可视宽 − 汉字宽余量（不预留滚动条槽位）");
         assert!(mc >= 20, "300 宽视窗应有充足列数，实际 {mc}");
     }
 
@@ -1595,18 +1598,19 @@ fn p66_fractional_scroll_top_survives_clamp() {
         // P99 用户点单：折行文本贴满右缘后行尾字符被垂直滚动条盖住。
         // 修复 = 内容超出视口（滚动条 needed）时折行预算扣除滚动条
         // 可视带宽；放得下（无滚动条）时零预留全宽贴边（P95 口径
-        // 不回归）。
+        // 不回归）。P115 叠加：全宽口径 = 可视宽 − 一个汉字宽（右缘
+        // 余量，用户点单）。
         let mut c = wrap_core("1234567890\n");
         wrap_converge(&mut c);
         assert!(!c.wrap_sb_reserve, "默认零预留（P95 贴边口径）");
-        let full = c.text_viewport_w();
+        let full = (c.text_viewport_w() - c.font_size()).max(4.0);
         assert!((c.wrap_max_px() - full).abs() < 0.01);
         assert_eq!(
             c.wrap_max_cols(),
             (full / c.char_width()).floor().max(1.0) as usize
         );
 
-        // 需要滚动条：预算 = 可视宽 − 滚动条可视带宽（≥4px 防御不变）
+        // 需要滚动条：预算 = 全宽 − 滚动条可视带宽（≥4px 防御不变）
         c.set_wrap_sb_reserve(true);
         assert!(c.wrap_sb_reserve);
         let reserved = (full - VERTICAL_SCROLLBAR_RESERVE).max(4.0);
@@ -1625,17 +1629,17 @@ fn p66_fractional_scroll_top_survives_clamp() {
     fn wrap_sb_reserve_rebreaks_at_smaller_budget() {
         // P99 像素口径：预留后断点按更小预算重算——每段右缘 ≤
         // 「文本区宽 − 滚动条带」，行尾字符整体在滑块左侧收尾。
-        // （真实字形场景：15.6px 半宽 → 975px 全宽 62 字符/段、
-        // 962px 预留 61 字符/段。）
+        // （真实字形场景：15.6px 半宽 → 975px 全宽、P115 右缘汉字宽
+        // 余量 −16px → 959px 全宽 61 字符/段、946px 预留 60 字符/段。）
         let mut c = core_with(&"a".repeat(100));
         c.set_viewport_width(1024.0);
         c.set_viewport_height(600.0);
         c.set_word_wrap(true);
         let xs: Vec<f32> = (0..=100).map(|i| i as f32 * 15.6).collect();
         c.set_row_layout(0, xs.clone());
-        let full = c.text_viewport_w();
+        let full = c.text_viewport_w() - c.font_size();
         let breaks_full = c.segments_of_line(0, &c.line_text(0));
-        assert_eq!(breaks_full[1], 62, "全宽预算 62 字符/段（967.2 ≤ 975）");
+        assert_eq!(breaks_full[1], 61, "全宽预算 61 字符/段（951.6 ≤ 959）");
         c.set_wrap_sb_reserve(true);
         let breaks = c.segments_of_line(0, &c.line_text(0));
         assert!(
@@ -1643,7 +1647,7 @@ fn p66_fractional_scroll_top_survives_clamp() {
             "预留后段宽更小：断点数不得少于全宽"
         );
         assert!(breaks[1] <= breaks_full[1], "首段断点不晚于全宽");
-        assert_eq!(breaks[1], 61, "预留预算 61 字符/段（951.6 ≤ 962）");
+        assert_eq!(breaks[1], 60, "预留预算 60 字符/段（936 ≤ 946）");
         // 每段右缘（含末段）都不越出预留预算
         let mut prev = 0usize;
         for &b in breaks.iter().skip(1) {
