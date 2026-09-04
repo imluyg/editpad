@@ -912,6 +912,12 @@ impl Editpad {
                 self.dark_mode = !self.dark_mode;
                 self.settings.set_theme(self.dark_mode);
                 self.persist_settings();
+                // 全部标签页的语法高亮随主题换档（新代次作废在途补建，
+                // 下一帧按新主题重铺/重算可视区配色）
+                let dark = self.dark_mode;
+                for tab in &self.tabs {
+                    tab.editor.borrow_mut().apply_highlight_theme(dark);
+                }
                 Task::none()
             }
             Message::FontSizeDelta(delta) => {
@@ -1138,6 +1144,8 @@ impl Editpad {
                             // P19：rope 直入，不再有 from_str 的二次全文拷贝
                             ed.reset_document(doc);
                             ed.set_language_by_name(language.as_deref());
+                            // 语法主题随应用明暗档（浅底/深底配色必须一致）
+                            ed.apply_highlight_theme(self.dark_mode);
                             // P30：恢复任务的视图回填——光标与滚动回到
                             // 上次退出时的位置（无副作用定位入口）
                             if let Some((line, col, scroll_top, scroll_left)) = pending_view {
@@ -2487,32 +2495,22 @@ impl Editpad {
             };
             let doc = self.tabs[idx].editor.borrow().doc.clone();
             let version = self.tabs[idx].version;
-            // 保存编码随任务快照下发（与手动保存同参，防静默转码）
-            let save_encoding = self.tabs[idx]
-                .save_encoding
-                .unwrap_or(editpad_core::SaveEncoding::Utf8);
-            // P63：调度时刻的外部修改比对戳随任务下发——防抖线程醒来先
-            // 校验再写（见 drive_autosave_once），绝不盲写覆盖外部改动
-            let expected_stamp = self.tabs[idx].file_stamp;
-            let delay =
-                std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs));
-            // 第 64 轮 ⑭：备份模式随任务快照下发（后台线程无 &Settings）
-            let self_backup_mode = self.settings.backup_mode.clone();
+            // 落盘配置随任务快照下发：保存编码（与手动保存同参，防静默
+            // 转码）、外部修改比对戳、防抖窗、备份模式（后台线程无
+            // &Settings/&Tab 可用）
+            let task = AutosaveTask {
+                encoding: self.tabs[idx]
+                    .save_encoding
+                    .unwrap_or(editpad_core::SaveEncoding::Utf8),
+                expected_stamp: self.tabs[idx].file_stamp,
+                delay: std::time::Duration::from_secs(u64::from(
+                    self.settings.autosave_delay_secs,
+                )),
+                backup_mode: self.settings.backup_mode.clone(),
+            };
             self.tabs[idx].autosave_inflight = true;
             tasks.push(Task::perform(
-                async move {
-                    drive_autosave_once(
-                        idx,
-                        path,
-                        doc,
-                        save_encoding,
-                        version,
-                        expected_stamp,
-                        delay,
-                        self_backup_mode.clone(),
-                    )
-                    .await
-                },
+                async move { drive_autosave_once(idx, path, doc, version, task).await },
                 |message| message,
             ));
         }

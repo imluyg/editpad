@@ -969,7 +969,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // 第 76 轮（用户点单）：按钮改纯文字扁平（menubar_text_style，
         // 无背景无边框无凸起），行高压缩（按钮 padding [1,8] + 行内
         // padding [0,4]）——看起来不像按钮、更紧凑。
-        let menu_names = ["文件", "编辑", "查看", "视图", "设置"];
+        let menu_names = ["文件", "编辑", "查看", "设置"];
         let mut menubar_inner = row![].spacing(4);
         for (idx, name) in menu_names.iter().enumerate() {
             let open = self.menu_bar_open == Some(idx);
@@ -1887,11 +1887,10 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         interactive.then_some(Message::SettingsWordWrapToggled(
                             !self.settings.word_wrap,
                         )),
-                    ));
-            }
-            // ---------- 视图 ----------
-            3 => {
-                panel = panel
+                    ))
+                    // 原「视图」菜单并入：MD 预览按当前语法门控（最近文件
+                    // 面板与文件菜单的「最近文件」重复，不再单列）
+                    .push(sep())
                     .push(item(
                         if self.preview_visible {
                             "关闭 MD 预览".to_owned()
@@ -1899,10 +1898,6 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                             "MD 预览".to_owned()
                         },
                         (interactive && is_markdown).then_some(Message::PreviewToggled),
-                    ))
-                    .push(item(
-                        "最近文件面板".to_owned(),
-                        interactive.then_some(Message::RecentsToggled),
                     ));
             }
             // ---------- 设置 ----------

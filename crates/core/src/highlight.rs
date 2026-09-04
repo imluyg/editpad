@@ -25,10 +25,13 @@ pub const STRIDE: usize = 128;
 /// 逐行状态缓存上限，超出即整体清空。
 const LINE_CACHE_CAP: usize = 8192;
 /// 浅色主题，配合编辑器的浅色背景。
-const THEME_NAME: &str = "InspiredGitHub";
+const LIGHT_THEME_NAME: &str = "InspiredGitHub";
+/// 深色主题（syntect 默认包内置），配合编辑器的深色背景。
+const DARK_THEME_NAME: &str = "base16-ocean.dark";
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static THEME: OnceLock<Theme> = OnceLock::new();
+static LIGHT_THEME: OnceLock<Theme> = OnceLock::new();
+static DARK_THEME: OnceLock<Theme> = OnceLock::new();
 /// 高亮器代次的全局单调计数（P12）。
 ///
 /// 代次必须跨实例单调：`set_language`/重新打开文件会整体换掉高亮器，
@@ -57,15 +60,20 @@ fn syntax_set() -> &'static SyntaxSet {
     })
 }
 
-fn theme() -> &'static Theme {
-    THEME.get_or_init(|| {
+fn theme(dark: bool) -> &'static Theme {
+    fn load(name: &str) -> Theme {
         let themes = ThemeSet::load_defaults();
         themes
             .themes
-            .get(THEME_NAME)
+            .get(name)
             .cloned()
             .unwrap_or_else(|| themes.themes.values().next().cloned().expect("内置主题非空"))
-    })
+    }
+    if dark {
+        DARK_THEME.get_or_init(|| load(DARK_THEME_NAME))
+    } else {
+        LIGHT_THEME.get_or_init(|| load(LIGHT_THEME_NAME))
+    }
 }
 
 /// 一段同色文本：行内字符列区间 `[start_col, end_col)` 与前景色（RGBA 0..1）。
@@ -81,6 +89,9 @@ type State = (ParseState, HighlightState);
 /// 可选语言下的懒高亮器。
 #[derive(Clone)]
 pub struct LazyHighlighter {    syntax_name: String,
+    /// 主题明暗档：配色在解析期由主题烘焙进 [`StyledRun`]，换主题必须
+    /// 走 [`Self::set_dark_mode`] 整体重建（状态、缓存、代次一并换新）。
+    dark: bool,
     /// checkpoints[k] = 解析完第 `k*STRIDE - 1` 行后的状态；`[0]` 为初始态。
     checkpoints: Vec<State>,
     /// 行后状态缓存：key = 已解析完的行号。
@@ -138,9 +149,14 @@ impl LazyHighlighter {
     }
 
     fn from_syntax(syntax: syntect::parsing::SyntaxReference) -> Self {
-        let highlighter = Highlighter::new(theme());
+        Self::from_syntax_in(syntax, false)
+    }
+
+    fn from_syntax_in(syntax: syntect::parsing::SyntaxReference, dark: bool) -> Self {
+        let highlighter = Highlighter::new(theme(dark));
         Self {
             syntax_name: syntax.name.clone(),
+            dark,
             checkpoints: vec![(
                 ParseState::new(&syntax),
                 HighlightState::new(&highlighter, ScopeStack::new()),
@@ -154,6 +170,24 @@ impl LazyHighlighter {
 
     pub fn syntax_name(&self) -> &str {
         &self.syntax_name
+    }
+
+    /// 当前明暗档。
+    pub fn is_dark(&self) -> bool {
+        self.dark
+    }
+
+    /// 切换明暗主题档：换主题必须整体重建——检查点里的解析状态与行
+    /// 缓存中的配色都由旧主题烘焙，绝不能复用。新实例自带新代次，
+    /// 在途的后台补建结果按代次过滤自然作废。同档调用是 no-op。
+    pub fn set_dark_mode(&mut self, dark: bool) {
+        if self.dark == dark {
+            return;
+        }
+        let syntax = syntax_set()
+            .find_syntax_by_name(&self.syntax_name)
+            .expect("语法名来自构造期，必然存在");
+        *self = Self::from_syntax_in(syntax.clone(), dark);
     }
 
     /// 当前代次（P12）：后台补建结果按它过滤。
@@ -226,7 +260,7 @@ impl LazyHighlighter {
         text_of: &mut dyn FnMut(usize) -> String,
     ) -> Vec<StyledRun> {
         let ss = syntax_set();
-        let highlighter = Highlighter::new(theme());
+        let highlighter = Highlighter::new(theme(self.dark));
 
         // 补齐缺失的检查点（大跳转时一次性补齐沿途所有档位）
         while self.checkpoints.len() * STRIDE <= line_idx {
@@ -353,7 +387,7 @@ impl LazyHighlighter {
         text_of: &mut dyn FnMut(usize) -> String,
     ) -> Vec<StyledRun> {
         let ss = syntax_set();
-        let highlighter = Highlighter::new(theme());
+        let highlighter = Highlighter::new(theme(self.dark));
         let syntax = syntax_set()
             .find_syntax_by_name(&self.syntax_name)
             .expect("语法名来自构造期，必然存在");
@@ -442,7 +476,7 @@ impl LazyHighlighter {
         text_of: &mut dyn FnMut(usize) -> String,
     ) -> usize {
         let ss = syntax_set();
-        let highlighter = Highlighter::new(theme());
+        let highlighter = Highlighter::new(theme(self.dark));
         let mut built = 0usize;
         while built < max_strides {
             let start = self.checkpoints.len() * STRIDE;
@@ -617,6 +651,32 @@ mod tests {
             assert_eq!(pair[0].end_col, pair[1].start_col);
         }
         assert_eq!(runs.last().unwrap().end_col, "fn main() { let x = 1; }".chars().count());
+    }
+
+    #[test]
+    fn dark_mode_switch_rebuilds_highlighter_with_new_colors() {
+        // 主题切换必须整体重建：明暗两档配色不同、代次换新（在途补建
+        // 结果作废）、旧主题的解析状态与行缓存不得复用
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        assert!(!hl.is_dark());
+        let line = "fn main() { let x = 1; }";
+        let light = hl.styled_line(0, line, usize::MAX, &mut |_| String::new());
+        let light_gen = hl.generation();
+
+        hl.set_dark_mode(true);
+        assert!(hl.is_dark(), "明暗档应翻转");
+        assert_ne!(hl.generation(), light_gen, "重建必须换新代次");
+        assert!(hl.line_cache.is_empty(), "旧主题的行缓存不得跨主题复用");
+        let dark = hl.styled_line(0, line, usize::MAX, &mut |_| String::new());
+        assert!(
+            light.iter().zip(dark.iter()).any(|(a, b)| a.color != b.color),
+            "明暗两档的 token 配色应有差异，light={light:?} dark={dark:?}"
+        );
+
+        // 同档切换是 no-op：不换代次
+        let gen = hl.generation();
+        hl.set_dark_mode(true);
+        assert_eq!(hl.generation(), gen);
     }
 
     #[test]

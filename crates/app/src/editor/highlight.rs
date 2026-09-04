@@ -16,6 +16,15 @@ impl EditorCore {
             .map(RefCell::new);
     }
 
+    /// 语法高亮主题随应用明暗档切换（编辑器配色与 syntect 主题都要
+    /// 换档；纯文本页无高亮器，no-op）。换主题经 core 整体重建高亮器，
+    /// 新代次让在途补建结果自然作废。
+    pub fn apply_highlight_theme(&mut self, dark: bool) {
+        if let Some(hl) = &self.highlight {
+            hl.borrow_mut().set_dark_mode(dark);
+        }
+    }
+
     /// 第 `offset` 字符偏移之后的高亮状态失效。
     pub(crate) fn invalidate_highlight_from(&mut self, offset: usize) {
         // 第 61 轮：本函数是全部正文突变路径的唯一汇点——括号匹配缓存
