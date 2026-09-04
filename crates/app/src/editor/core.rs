@@ -353,6 +353,11 @@ pub struct EditorCore {
     /// 分数宽度、连字、TAB 实际展开全部如实反映，静态列模型的任何假设
     /// 破缺（非等宽字体、非整倍字号）都不再产生累计漂移。
     pub(crate) row_layouts: HashMap<usize, Vec<f32>>,
+    /// P116 字号戳：row_layouts 注入时的字号——缩放下旧字号布局会
+    /// 「长度对齐但字宽过期」（旧 xs 在缩放帧被 px_of/断行误用 →
+    /// 缩小留白/放大超右缘，用户复报；trusted_xs/px_of 必须按字号
+    /// 过滤，失配回退按折算 char_w 的列模型，正确近似到下一帧注入）。
+    pub(crate) row_layouts_font_size: f32,
     /// 已注入行宽的最大值（与 row_layouts 同步维护）：水平行程钳制上界的
     /// 真实补充——列模型 `max_line_cols` 对分数/超宽字形可能欠估，
     /// 不补则超宽行滚不到头、光标越界。
@@ -466,6 +471,7 @@ impl Default for EditorCore {
             ink_height: 0.0,
             metric_key: None,
             row_layouts: HashMap::new(),
+            row_layouts_font_size: 0.0,
             max_row_width_px: 0.0,
             max_cols_stale: false,
             max_cols_checked: None,
@@ -511,10 +517,13 @@ impl EditorCore {
 
     /// 注入一行字符起点的真实像素 x（`xs[i]` = 第 i 个字符起点，末项 = 行尾）。
     /// 同时抬升真实行宽高水位（水平行程钳制用）。
+    /// P116：记录注入时的字号（row_layouts_font_size）——缩放帧旧 xs
+    /// 必须因字号失配失效。
     pub fn set_row_layout(&mut self, line: usize, xs: Vec<f32>) {
         if let Some(&w) = xs.last() {
             self.max_row_width_px = self.max_row_width_px.max(w);
         }
+        self.row_layouts_font_size = self.font_size;
         self.row_layouts.insert(line, xs);
     }
 
@@ -522,6 +531,7 @@ impl EditorCore {
     /// 保证无陈旧残留——编译/滚动后旧行布局不会冒充新内容）。
     pub fn clear_row_layouts(&mut self) {
         self.row_layouts.clear();
+        self.row_layouts_font_size = 0.0;
         self.max_row_width_px = 0.0;
     }
 
@@ -557,13 +567,16 @@ impl EditorCore {
     /// 若直接取用会得到旧行尾位置——光标可见性判断失灵，超宽后新字符
     /// 全部画在视口外，表现为「打字吞字」（P45 根因）。
     ///
-    /// 规则：行布局新鲜（长度覆盖到目标列）用真实字形位置；滞后回退
-    /// 列模型**实时文本**计算（`text` 必须为当前文档该行文本）。draw 期
-    /// 布局恒新鲜，此函数两期通用。
+    /// 规则：行布局新鲜（长度覆盖到目标列 **且字号与当前一致**）用真实
+    /// 字形位置；滞后回退列模型**实时文本**计算（`text` 必须为当前文档
+    /// 该行文本）。draw 期布局恒新鲜，此函数两期通用。
+    /// P116：字号失配（缩放帧旧布局）一律回退列模型——旧 xs 长度对齐
+    /// 但字宽过期，直接用即光标/选区/断行按旧字号错位。
     pub(crate) fn px_of(&self, line: usize, text: &str, col: usize) -> f32 {
         let col = col.min(text.chars().count());
+        let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
         match self.row_layouts.get(&line) {
-            Some(xs) if xs.len().saturating_sub(1) >= col => xs[col],
+            Some(xs) if size_ok && xs.len().saturating_sub(1) >= col => xs[col],
             _ => prefix_width(text, col) * self.char_width(),
         }
     }
@@ -621,10 +634,17 @@ impl EditorCore {
     /// （字号变大时可见行变少，光标必须仍落在视口内）。
     /// P42：实测列宽按字号比例折算（同一字体的 advance 与字号线性），
     /// 折算后仍落合法区间；控件层下一帧按新度量键重测校准。
+    /// P116 勘误：**先失效旧字号度量再收敛**——行布局（旧 xs 字宽过期，
+    /// px_of/trusted_xs 按字号戳自动回退折算列模型）与折行断点 memo
+    /// （键 = 代次+断行路径、不感知字号；ensure_visible 等即时查询会
+    /// 用旧 xs 固化错断点 → 缩放后缩小留白/放大超右缘不换行，用户复报）。
     pub fn set_font_size(&mut self, size: f32) {
         let old = self.font_size;
         self.font_size = normalize_font_size(size);
         if old > 0.0 && self.font_size != old {
+            self.row_layouts.clear();
+            self.row_layouts_font_size = 0.0;
+            self.wrap.borrow_mut().after_edit(self.doc.line_count());
             if let Some(w) = self.measured_char_w {
                 let scaled = w * self.font_size / old;
                 // 比例折算不改变 w/字号 倍率，校验恒应通过；万一浮点

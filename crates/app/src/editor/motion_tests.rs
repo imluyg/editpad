@@ -1628,8 +1628,7 @@ fn p66_fractional_scroll_top_survives_clamp() {
 
     #[test]
     fn wrap_sb_reserve_rebreaks_at_smaller_budget() {
-        // P99 像素口径：预留后断点按更小预算重算——每段右缘 ≤
-        // 「文本区宽 − 滚动条带」，行尾字符整体在滑块左侧收尾。
+        // P99 像素口径：预留后断点按更小预算重算——每段右缘 ≤ 「文本区宽 − 滚动条带」，行尾字符整体在滑块左侧收尾。
         // （真实字形场景：15.6px 半宽 → 975px 全宽、P115/P116 右缘汉字
         // 宽余量固定 16px → 959px 全宽 61 字符/段、946px 预留 60 字符/段。）
         let mut c = core_with(&"a".repeat(100));
@@ -1662,6 +1661,57 @@ fn p66_fractional_scroll_top_survives_clamp() {
             xs[100] - xs[prev] <= full - VERTICAL_SCROLLBAR_RESERVE + 0.01,
             "末段右缘不得越出预留预算"
         );
+    }
+
+    #[test]
+    fn wrap_font_zoom_rebreaks_against_current_glyph_widths() {
+        // P116 用户复报：Ctrl+滚轮缩放字号后与折行适配不行——缩小时
+        // 右侧偶发大片留白、放大时偶发超右缘不换行。根因 = 折行断点
+        // 的 memo（键 = 代次 + 断行路径）不感知字号：缩放后行布局 xs
+        // 已按新字号注入，但 memo 命中旧断点（旧字宽断点在新字宽下
+        // 或让每段塞不满 → 留白，或胀破预算 → 超右缘）。本测试：wrap
+        // 开态 220 字符行，16→32px 换字号（同字符数、xs 按新字宽
+        // 注入）——断点必须整体重算：段数变多、每段右缘 ≤ 预算，
+        // 且断点 ≠ 旧断言值（修前 memo 命中旧断点必挂）。
+        let mut c = core_with(&"a".repeat(220));
+        c.set_viewport_width(1024.0);
+        c.set_viewport_height(600.0);
+        c.set_word_wrap(true);
+        // 16px 字形布局注入 + 查询（固化 memo）
+        let xs16: Vec<f32> = (0..=220).map(|i| i as f32 * 8.86).collect();
+        c.set_row_layout(0, xs16.clone());
+        let breaks16 = c.segments_of_line(0, &c.line_text(0));
+        let budget = c.wrap_max_px();
+        assert!(breaks16.len() >= 2, "前提：16px 220 字符应 ≥2 段");
+        // 缩放字号（模拟 Ctrl+滚轮/设置步进）：列宽比例折算 + 换度量键
+        c.set_font_size(32.0);
+        // 下一帧行布局按新字号注入（同字符数——长度校验无法发现字号
+        // 变化，只能靠断点缓存失效）
+        let xs32: Vec<f32> = (0..=220).map(|i| i as f32 * 17.72).collect();
+        c.set_row_layout(0, xs32.clone());
+        let breaks32 = c.segments_of_line(0, &c.line_text(0));
+        eprintln!(
+            "[P116] 16px 段数 {}（首段 {} 字符）→ 32px 段数 {}（首段 {} 字符），预算 {budget:.1}",
+            breaks16.len(),
+            breaks16[1],
+            breaks32.len(),
+            breaks32[1],
+        );
+        assert_ne!(
+            breaks32, breaks16,
+            "缩放后断点未重算（memo 命中旧字号断点：缩小留白/放大超右缘）"
+        );
+        assert!(
+            breaks32.len() > breaks16.len(),
+            "32px 每段容纳更少字符，段数应增加"
+        );
+        // 每段右缘（按新字宽 xs）不得越出预算
+        let mut prev = 0usize;
+        for &b in breaks32.iter().skip(1) {
+            assert!(xs32[b] - xs32[prev] <= budget + 0.01, "新断点段右缘越出预算");
+            prev = b;
+        }
+        assert!(xs32[220] - xs32[prev] <= budget + 0.01, "末段右缘越出预算");
     }
 
     #[test]

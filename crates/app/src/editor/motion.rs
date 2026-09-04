@@ -603,16 +603,19 @@ impl EditorCore {
         w.index.total()
     }
 
-    /// 可信的真实字形布局：与正文**逐字符对齐**（字符数 + 1）才返回。
-    /// 所有 [`WrapCache::segments_of`] 调用点必须经此取 xs——换文档/
-    /// 换行内容的帧里 row_layouts 尚存上一帧布局，残缺 xs 会让像素断行
-    /// 在截断前缀上漏判溢出（boot 后 CJK 长行整行不折、滚动不自愈）。
+    /// 可信的真实字形布局：与正文**逐字符对齐**（字符数 + 1）**且字号与
+    /// 当前一致**才返回。所有 [`WrapCache::segments_of`] 调用点必须经此
+    /// 取 xs——换文档/换行内容的帧里 row_layouts 尚存上一帧布局，残缺 xs
+    /// 会让像素断行在截断前缀上漏判溢出（boot 后 CJK 长行整行不折、滚动
+    /// 不自愈）；P116：缩放帧旧字号 xs 长度对齐但字宽过期，同样不得
+    /// 用于断行（否者 break 按旧字宽计算 → 缩小留白/放大超右缘）。
     fn trusted_xs(&self, line: usize, body: &str) -> Option<&[f32]> {
         let n = body.chars().count();
+        let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
         self.row_layouts
             .get(&line)
             .map(|v| v.as_slice())
-            .filter(|xs| xs.len() == n + 1)
+            .filter(|xs| xs.len() == n + 1 && size_ok)
     }
 
     /// (line, col) 的视觉行号（开关关 = line）。
