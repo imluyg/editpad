@@ -502,7 +502,10 @@ impl Editpad {
                     return iced::clipboard::write(text);
                 }
                 let Some(text) = self.cur_handle.borrow().selected_text() else {
-                    return Task::none();
+                    // P122：无选区 Ctrl+C = 复制当前整行（含行尾，主流
+                    // VS 口径）；不改文档不置脏，幻影末行复制空串
+                    let text = self.cur_handle.borrow().current_line_copy_text();
+                    return iced::clipboard::write(text);
                 };
                 iced::clipboard::write(text)
             }
@@ -516,7 +519,11 @@ impl Editpad {
                     return write.chain(edit);
                 }
                 let Some(text) = self.cur_handle.borrow().selected_text() else {
-                    return Task::none();
+                    // P122：无选区 Ctrl+X = 剪切整行（复制含行尾 + 删触及
+                    // 行；幻影末行走 delete_current_lines 的幻影分支兜底）
+                    let text = self.cur_handle.borrow().current_line_copy_text();
+                    let write: Task<Message> = iced::clipboard::write(text);
+                    return write.chain(Task::done(Message::Edit(EditOp::DeleteLines)));
                 };
                 // 先写剪贴板，再走统一编辑入口删除选区（Delete 在有选区时只删选区）。
                 // clipboard::write 是泛型 Task<T>，直接以 Message 实例化后 chain。
@@ -2265,6 +2272,9 @@ impl Editpad {
                     editor.indent_touched_lines(outdent)
                 }
             }
+            // ---------- P122：词级删词（有选区退化为普通退格/删除） ----------
+            E::DeleteWordLeft => editor.delete_word(true),
+            E::DeleteWordRight => editor.delete_word(false),
             // ---------- 插入日期时间（第 63 轮） ----------
             // 真编辑：走 insert_str 统一管线（置脏+快照+查找重扫由上层
             // changed 驱动）；时间戳文本给状态栏反馈

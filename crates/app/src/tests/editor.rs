@@ -1240,3 +1240,27 @@ fn enter_and_tab_map_to_smart_indent_ops() {
         Some(Message::Edit(EditOp::TabKey(true)))
     ));
 }
+
+    #[test]
+    fn word_motion_and_delete_word_hotkeys_dispatch() {
+        // P122：Ctrl+←/→ 词导航、Ctrl+Backspace/Delete 删词（Backspace
+        // 新入组合键白名单）
+        use iced::keyboard::{self, key::Named};
+        let ctrl = keyboard::Modifiers::CTRL;
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::ArrowLeft), ctrl),
+            Some(Message::Edit(EditOp::Motion(Motion::WordLeft, false)))
+        ));
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::ArrowRight), ctrl),
+            Some(Message::Edit(EditOp::Motion(Motion::WordRight, false)))
+        ));
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::Backspace), ctrl),
+            Some(Message::Edit(EditOp::DeleteWordLeft))
+        ));
+        assert!(matches!(
+            handle_key_defaults(keyboard::Key::Named(Named::Delete), ctrl),
+            Some(Message::Edit(EditOp::DeleteWordRight))
+        ));
+    }

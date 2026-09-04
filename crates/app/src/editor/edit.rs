@@ -140,6 +140,37 @@ impl EditorCore {
         self.insert_str(&text);
     }
 
+    /// P122 无选区 Ctrl+C/X 的整行取词：当前行原文（含本行行尾单元，
+    /// 幻影末行返回空串）。复制/剪切共用，不改文档、不置脏。
+    pub fn current_line_copy_text(&self) -> String {
+        self.doc.line_str(self.cursor.line).to_string()
+    }
+
+    /// P122 删词：Ctrl+Backspace 删到词首 / Ctrl+Delete 删到词尾。
+    ///
+    /// - 有选区：退化为普通退格/删除（删选区，主流口径）；
+    /// - 词边界复用 [`Self::word_neighbor`]（与 Ctrl+←/→ 同源）；
+    /// - 删除经 delete_selection 统一管线（快照、跨行书签再映射、
+    ///   光标落点全部继承），删除前先打断打字组（P37）。
+    pub fn delete_word(&mut self, left: bool) -> bool {
+        if self.selection_offsets().is_some() {
+            return if left {
+                self.backspace()
+            } else {
+                self.delete_forward()
+            };
+        }
+        let Some((line, col)) = self.word_neighbor(left) else {
+            return false; // 文档边缘无从删
+        };
+        if line == self.cursor.line && col == self.cursor.col {
+            return false;
+        }
+        self.break_typing(); // P37：删词打断打字组
+        self.anchor = Some(CursorPos { line, col });
+        self.delete_selection()
+    }
+
     /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
     pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
         self.break_typing(); // P37：选区变更打断组（查找跳转/替换当前都经此）

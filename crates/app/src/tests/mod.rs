@@ -113,6 +113,9 @@
             "PageDown" => keyboard::Key::Named(Named::PageDown),
             "Insert" => keyboard::Key::Named(Named::Insert),
             "Delete" => keyboard::Key::Named(Named::Delete),
+            // P122：Ctrl+Backspace 删到词首（与 combo_string/normalize_combo
+            // 白名单同步）
+            "Backspace" => keyboard::Key::Named(Named::Backspace),
             // 第 60 轮：书签导航引入裸/Shift 功能键组合
             name if name.len() >= 2 && name.starts_with('F') => {
                 let n: u8 = name[1..]

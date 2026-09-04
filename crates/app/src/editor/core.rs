@@ -114,6 +114,9 @@ pub enum Motion {
     PageDown,
     DocStart,
     DocEnd,
+    // P122：词级导航（Ctrl+←/→；词边界口径见 motion::word_neighbor）
+    WordLeft,
+    WordRight,
 }
 
 /// 应用层按键编辑操作。
@@ -191,6 +194,11 @@ pub enum EditOp {
     /// 无选区 = 加缩进仍是插入制表符（原语义），反缩进作用于当前行。
     /// 列块态下加缩进仍走块内插制表符（apply_edit 白名单保路）
     TabKey(bool),
+    // ---------- P122：词级删词（Ctrl+Backspace / Ctrl+Delete） ----------
+    /// 删到词首（有选区退化为普通退格）
+    DeleteWordLeft,
+    /// 删到词尾（有选区退化为普通删除）
+    DeleteWordRight,
 }
 
 /// 大小写转换方向（第 58 轮）。

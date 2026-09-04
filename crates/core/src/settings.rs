@@ -113,7 +113,7 @@ pub struct Settings {
     #[serde(default)]
     pub word_wrap: bool,
     /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
-    /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/ 
+    /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/
     /// [`BACKUP_MODE_TIMESTAMPED`]（`name.bak/` 目录内时间戳历史）。
     /// 非法值在加载时归一为 none。
     #[serde(default = "default_backup_mode")]
@@ -250,8 +250,11 @@ pub const BACKUP_MODE_SIMPLE: &str = "simple";
 pub const BACKUP_MODE_TIMESTAMPED: &str = "timestamped";
 
 #[cfg(test)]
-pub(crate) const BACKUP_MODES: [&str; 3] =
-    [BACKUP_MODE_NONE, BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED];
+pub(crate) const BACKUP_MODES: [&str; 3] = [
+    BACKUP_MODE_NONE,
+    BACKUP_MODE_SIMPLE,
+    BACKUP_MODE_TIMESTAMPED,
+];
 
 fn default_backup_mode() -> String {
     BACKUP_MODE_NONE.to_string()
@@ -269,9 +272,33 @@ pub fn normalize_backup_mode(value: &str) -> &'static str {
 // ---------- P62 组合键串归一 ----------
 
 /// 可作热键的命名键（大小写不敏感匹配，规范形如列首大写形式）。
-const COMBO_NAMED_KEYS: [&str; 23] = [
-    "Home", "End", "PageUp", "PageDown", "Tab", "Insert", "Delete", "Up", "Down", "Left", "Right",
-    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+/// P122 增补 `Backspace`（Ctrl+Backspace 删到词首）——与 app 侧
+/// combo_string 白名单同步（两侧契约一致，注册表合法性测试把关）。
+const COMBO_NAMED_KEYS: [&str; 24] = [
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "Tab",
+    "Insert",
+    "Delete",
+    "Backspace",
+    "Up",
+    "Down",
+    "Left",
+    "Right",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9",
+    "F10",
+    "F11",
+    "F12",
 ];
 
 /// 组合键串归一（纯函数可单测）：`ctrl+shift+f` → `Ctrl+Shift+F`。
@@ -337,7 +364,10 @@ pub fn normalize_combo(value: &str) -> Option<String> {
     // 键名已过 COMBO_NAMED_KEYS 白名单规范化，这里只再验「F + 1~12」形态。
     let is_function_key = key.len() >= 2
         && key.starts_with('F')
-        && key[1..].parse::<u8>().map(|n| (1..=12).contains(&n)).unwrap_or(false);
+        && key[1..]
+            .parse::<u8>()
+            .map(|n| (1..=12).contains(&n))
+            .unwrap_or(false);
     if !is_function_key {
         return None;
     }
@@ -454,15 +484,14 @@ impl Settings {
         }
         // P62：热键重映射逐条归一——非法组合条目删除（动作 id 的合法性
         // 由 app 层过滤，core 不掌握动作清单）
-        self.hotkeys.retain(|_, combo| {
-            match normalize_combo(combo) {
+        self.hotkeys
+            .retain(|_, combo| match normalize_combo(combo) {
                 Some(canonical) => {
                     *combo = canonical;
                     true
                 }
                 None => false,
-            }
-        });
+            });
     }
 
     /// 切换正文字体族（P34）：None = 回退默认等宽。Some 值经与加载归一
@@ -603,7 +632,13 @@ mod tests {
         // 再次打开旧文件 → 提到最前且不重复
         s.push_recent(Path::new("C:/f/5.txt"));
         assert_eq!(s.recent_files[0], "C:/f/5.txt");
-        assert_eq!(s.recent_files.iter().filter(|p| **p == "C:/f/5.txt").count(), 1);
+        assert_eq!(
+            s.recent_files
+                .iter()
+                .filter(|p| **p == "C:/f/5.txt")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -616,7 +651,10 @@ mod tests {
         s.save_to(&path).expect("保存应成功");
 
         let loaded = Settings::load_from(&path);
-        assert_eq!(loaded.recent_files, vec!["D:/笔记/中文 文件名.md".to_string()]);
+        assert_eq!(
+            loaded.recent_files,
+            vec!["D:/笔记/中文 文件名.md".to_string()]
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -814,8 +852,14 @@ mod tests {
         // P63：默认反转——对标主流编辑器，已有文件的修改不自动写盘；
         // 防抖秒数默认值不变（重新开启的用户沿用 2s）。
         let s = Settings::default();
-        assert!(!s.autosave_enabled, "P63 起默认关闭：原文件只在显式保存时被写");
-        assert_eq!(s.settings_version, SETTINGS_VERSION, "新装用户直接落在当前策略版本");
+        assert!(
+            !s.autosave_enabled,
+            "P63 起默认关闭：原文件只在显式保存时被写"
+        );
+        assert_eq!(
+            s.settings_version, SETTINGS_VERSION,
+            "新装用户直接落在当前策略版本"
+        );
         assert_eq!(s.autosave_delay_secs, 2);
 
         // 旧配置缺字段 → 同样得到默认关 + 当前版本号
@@ -838,9 +882,16 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let legacy = dir.join("v0.toml");
-        fs::write(&legacy, "autosave_enabled = true\nautosave_delay_secs = 5\n").unwrap();
+        fs::write(
+            &legacy,
+            "autosave_enabled = true\nautosave_delay_secs = 5\n",
+        )
+        .unwrap();
         let migrated = Settings::load_from(&legacy);
-        assert!(!migrated.autosave_enabled, "v0 持久化的 true 必须被一次性重置");
+        assert!(
+            !migrated.autosave_enabled,
+            "v0 持久化的 true 必须被一次性重置"
+        );
         assert_eq!(migrated.autosave_delay_secs, 5, "非策略字段不受迁移影响");
         assert_eq!(migrated.settings_version, SETTINGS_VERSION);
 
@@ -876,7 +927,10 @@ mod tests {
         let path = dir.join("config.toml");
         let s = Settings::default();
         s.save_to(&path).expect("保存应成功");
-        assert_eq!(Settings::load_from(&path).settings_version, SETTINGS_VERSION);
+        assert_eq!(
+            Settings::load_from(&path).settings_version,
+            SETTINGS_VERSION
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -887,7 +941,11 @@ mod tests {
 
         let zero = dir.join("zero.toml");
         fs::write(&zero, "autosave_enabled = true\nautosave_delay_secs = 0\n").unwrap();
-        assert_eq!(Settings::load_from(&zero).autosave_delay_secs, 1, "0 秒会变成写盘风暴，收敛到下界");
+        assert_eq!(
+            Settings::load_from(&zero).autosave_delay_secs,
+            1,
+            "0 秒会变成写盘风暴，收敛到下界"
+        );
 
         let huge = dir.join("huge.toml");
         fs::write(&huge, "autosave_delay_secs = 9999\n").unwrap();
@@ -952,7 +1010,10 @@ mod tests {
     #[test]
     fn remember_session_defaults_on_and_legacy_config_compatible() {
         let s = Settings::default();
-        assert!(s.remember_session, "会话恢复默认开启（「重开还是上次的界面」）");
+        assert!(
+            s.remember_session,
+            "会话恢复默认开启（「重开还是上次的界面」）"
+        );
 
         // 旧 config.toml 缺 P30 字段 → 默认 true，行为与升级前一致
         let dir = scratch_dir("p30-legacy");
@@ -1004,12 +1065,18 @@ mod tests {
         // 过密 → 收敛到下界（防写盘风暴）
         let dense = dir.join("dense.toml");
         fs::write(&dense, "snapshot_interval_secs = 0\n").unwrap();
-        assert_eq!(Settings::load_from(&dense).snapshot_interval_secs, MIN_SNAPSHOT_INTERVAL_SECS);
+        assert_eq!(
+            Settings::load_from(&dense).snapshot_interval_secs,
+            MIN_SNAPSHOT_INTERVAL_SECS
+        );
 
         // 过疏 → 收敛到上界（防丢失窗口过大）
         let sparse = dir.join("sparse.toml");
         fs::write(&sparse, "snapshot_interval_secs = 99999\n").unwrap();
-        assert_eq!(Settings::load_from(&sparse).snapshot_interval_secs, MAX_SNAPSHOT_INTERVAL_SECS);
+        assert_eq!(
+            Settings::load_from(&sparse).snapshot_interval_secs,
+            MAX_SNAPSHOT_INTERVAL_SECS
+        );
 
         // 合法值原样保留
         let legal = dir.join("legal.toml");
@@ -1086,13 +1153,21 @@ mod tests {
         let mut s = legacy;
         s.set_recent_view(
             Path::new("C:/old.txt"),
-            RecentView { line: 42, col: 7, scroll_top: 128.5 },
+            RecentView {
+                line: 42,
+                col: 7,
+                scroll_top: 128.5,
+            },
         );
         s.save_to(&path).expect("保存应成功");
         let loaded = Settings::load_from(&path);
         assert_eq!(
             loaded.recent_view(Path::new("C:/old.txt")),
-            Some(RecentView { line: 42, col: 7, scroll_top: 128.5 }),
+            Some(RecentView {
+                line: 42,
+                col: 7,
+                scroll_top: 128.5
+            }),
             "光标记忆必须参与 roundtrip"
         );
 
@@ -1107,7 +1182,11 @@ mod tests {
         // 未在最近列表中的路径：不记账（避免记忆无界增长）
         assert!(!s.set_recent_view(
             Path::new("C:/never-opened.txt"),
-            RecentView { line: 1, col: 0, scroll_top: 0.0 },
+            RecentView {
+                line: 1,
+                col: 0,
+                scroll_top: 0.0
+            },
         ));
         assert!(s.recent_views.is_empty());
 
@@ -1115,7 +1194,11 @@ mod tests {
         s.remember_recent_files = false;
         assert!(!s.set_recent_view(
             Path::new("C:/listed.txt"),
-            RecentView { line: 1, col: 0, scroll_top: 0.0 },
+            RecentView {
+                line: 1,
+                col: 0,
+                scroll_top: 0.0
+            },
         ));
     }
 
@@ -1123,18 +1206,33 @@ mod tests {
     fn recent_view_updates_in_place_and_reports_changes() {
         let mut s = Settings::default();
         s.push_recent(Path::new("C:/doc.txt"));
-        let v1 = RecentView { line: 3, col: 0, scroll_top: 10.0 };
+        let v1 = RecentView {
+            line: 3,
+            col: 0,
+            scroll_top: 10.0,
+        };
 
-        assert!(s.set_recent_view(Path::new("C:/doc.txt"), v1), "首次记录应报告变化");
+        assert!(
+            s.set_recent_view(Path::new("C:/doc.txt"), v1),
+            "首次记录应报告变化"
+        );
         // 相同值再写：无变化（调用方据此跳过落盘）
         assert!(!s.set_recent_view(Path::new("C:/doc.txt"), v1));
         // 值变化：再次报告
-        let v2 = RecentView { line: 9, col: 2, scroll_top: 20.0 };
+        let v2 = RecentView {
+            line: 9,
+            col: 2,
+            scroll_top: 20.0,
+        };
         assert!(s.set_recent_view(Path::new("C:/doc.txt"), v2));
         assert_eq!(s.recent_view(Path::new("C:/doc.txt")), Some(v2));
 
         // 非有限滚动值消毒为 0
-        let bad = RecentView { line: 1, col: 0, scroll_top: f32::NAN };
+        let bad = RecentView {
+            line: 1,
+            col: 0,
+            scroll_top: f32::NAN,
+        };
         assert!(s.set_recent_view(Path::new("C:/doc.txt"), bad));
         assert_eq!(
             s.recent_view(Path::new("C:/doc.txt")).unwrap().scroll_top,
@@ -1150,7 +1248,11 @@ mod tests {
             s.push_recent(Path::new(&format!("C:/f/{i}.txt")));
             s.set_recent_view(
                 Path::new(&format!("C:/f/{i}.txt")),
-                RecentView { line: i as usize, col: 0, scroll_top: 0.0 },
+                RecentView {
+                    line: i as usize,
+                    col: 0,
+                    scroll_top: 0.0,
+                },
             );
         }
         assert_eq!(s.recent_views.len(), MAX_RECENT_FILES);
@@ -1163,7 +1265,10 @@ mod tests {
         );
         // 剩余记忆 = f1..f9 共 9 条（new 刚打开尚无光标记录）
         assert_eq!(s.recent_views.len(), MAX_RECENT_FILES - 1);
-        assert!(s.recent_view(Path::new("C:/f/new.txt")).is_none(), "新文件尚无记忆");
+        assert!(
+            s.recent_view(Path::new("C:/f/new.txt")).is_none(),
+            "新文件尚无记忆"
+        );
 
         // 清空记录按钮：列表与记忆一起清（键即路径，不能留痕）
         s.clear_recent_files();
@@ -1203,7 +1308,10 @@ mod tests {
 
         let loaded = Settings::load_from(&path);
         assert!(loaded.recent_files.is_empty());
-        assert!(loaded.recent_views.is_empty(), "关闭开关后记忆必须随加载清空");
+        assert!(
+            loaded.recent_views.is_empty(),
+            "关闭开关后记忆必须随加载清空"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1234,7 +1342,13 @@ mod tests {
         for (tag, raw) in [
             ("empty", "font_family = \"\"\n"),
             ("blank", "font_family = \"   \\t \"\n"),
-            ("long", &format!("font_family = \"{}\"\n", "F".repeat(MAX_FONT_FAMILY_LEN + 1))),
+            (
+                "long",
+                &format!(
+                    "font_family = \"{}\"\n",
+                    "F".repeat(MAX_FONT_FAMILY_LEN + 1)
+                ),
+            ),
             ("control", "font_family = \"Con\\ntrol\"\n"),
         ] {
             let path = dir.join(format!("{tag}.toml"));
@@ -1289,7 +1403,10 @@ mod tests {
         // 合法键透传，未知/空白归一默认（函数保留仅为公开 API 兼容，
         // app 侧已不再持久化/恢复分类位置）
         assert_eq!(normalize_settings_page("hotkeys"), SETTINGS_PAGE_HOTKEYS);
-        assert_eq!(normalize_settings_page(" no-such "), SETTINGS_PAGE_APPEARANCE);
+        assert_eq!(
+            normalize_settings_page(" no-such "),
+            SETTINGS_PAGE_APPEARANCE
+        );
         assert_eq!(normalize_settings_page(""), SETTINGS_PAGE_APPEARANCE);
         // 六个注册键全部合法（注册表完整性）
         for key in SETTINGS_PAGES {
@@ -1342,7 +1459,10 @@ mod tests {
     fn normalize_combo_contract() {
         // 规范化：大小写/修饰键顺序收敛为「Ctrl [+Shift] +键名」
         assert_eq!(normalize_combo("ctrl+s"), Some("Ctrl+S".to_owned()));
-        assert_eq!(normalize_combo("CTRL + shift + f"), Some("Ctrl+Shift+F".to_owned()));
+        assert_eq!(
+            normalize_combo("CTRL + shift + f"),
+            Some("Ctrl+Shift+F".to_owned())
+        );
         assert_eq!(normalize_combo("Ctrl+Home"), Some("Ctrl+Home".to_owned()));
         assert_eq!(normalize_combo("ctrl+8"), Some("Ctrl+8".to_owned()));
         // 必须含 Ctrl
@@ -1380,7 +1500,8 @@ mod tests {
 
         // 合法条目规范化保留；非法条目删除；旧 config 无字段 → 空
         let mut s = Settings::default();
-        s.hotkeys.insert("save".to_owned(), "ctrl+shift+s".to_owned());
+        s.hotkeys
+            .insert("save".to_owned(), "ctrl+shift+s".to_owned());
         s.hotkeys.insert("bogus".to_owned(), "ctrl+foo".to_owned());
         s.save_to(&path).expect("保存应成功");
         let loaded = Settings::load_from(&path);

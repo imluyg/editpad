@@ -288,6 +288,28 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+Shift+Tab"],
         desc: "循环切换标签页（反向）",
     },
+    // P122：词级导航与删词（Ctrl+←/→ 与主流编辑器同默认键；
+    // Ctrl+Backspace/Delete 删到词首/词尾，Backspace 补入组合键白名单）
+    HotkeyAction {
+        id: "word_left",
+        default_combos: &["Ctrl+Left"],
+        desc: "跳到上一个词首",
+    },
+    HotkeyAction {
+        id: "word_right",
+        default_combos: &["Ctrl+Right"],
+        desc: "跳到下一个词尾",
+    },
+    HotkeyAction {
+        id: "del_word_left",
+        default_combos: &["Ctrl+Backspace"],
+        desc: "删除到词首",
+    },
+    HotkeyAction {
+        id: "del_word_right",
+        default_combos: &["Ctrl+Delete"],
+        desc: "删除到词尾",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -343,6 +365,8 @@ pub(crate) fn combo_string(mods: keyboard::Modifiers, key: &keyboard::Key) -> Op
                 Named::Tab => "Tab",
                 Named::Insert => "Insert",
                 Named::Delete => "Delete",
+                // P122：Ctrl+Backspace 删到词首（Delete 原在白名单）
+                Named::Backspace => "Backspace",
                 Named::ArrowUp => "Up",
                 Named::ArrowDown => "Down",
                 Named::ArrowLeft => "Left",
@@ -491,6 +515,12 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "format_json" => Some(Message::FormatJson),
         "doc_start" => edit(EditOp::Motion(Motion::DocStart, mods.shift())),
         "doc_end" => edit(EditOp::Motion(Motion::DocEnd, mods.shift())),
+        // P122：词级导航与删词（词边界与删词共用 word_neighbor 口径；
+        // Shift 透传 = 从光标扩展选区到词边界）
+        "word_left" => edit(EditOp::Motion(Motion::WordLeft, mods.shift())),
+        "word_right" => edit(EditOp::Motion(Motion::WordRight, mods.shift())),
+        "del_word_left" => edit(EditOp::DeleteWordLeft),
+        "del_word_right" => edit(EditOp::DeleteWordRight),
         _ => None,
     }
 }

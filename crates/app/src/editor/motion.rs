@@ -86,7 +86,12 @@ impl EditorCore {
     /// DoubleEndedIterator），故按 64K 字符分块取切片、块内逆序计数——
     /// 缓冲有界（块大小 × 1），不产生全文 String；总步数受
     /// [`MAX_BRACKET_SCAN_CHARS`] 封顶（与正向同口径）。
-    pub(crate) fn scan_backward_chunks(&self, boff: usize, open: char, close: char) -> Option<usize> {
+    pub(crate) fn scan_backward_chunks(
+        &self,
+        boff: usize,
+        open: char,
+        close: char,
+    ) -> Option<usize> {
         const CHUNK: usize = 65536;
         let mut consumed = 0usize;
         let mut depth = 1usize;
@@ -195,15 +200,13 @@ impl EditorCore {
             Motion::Up => {
                 if self.cursor.line > 0 {
                     self.cursor.line -= 1;
-                    self.cursor.col =
-                        self.cursor.col.min(self.line_display_len(self.cursor.line));
+                    self.cursor.col = self.cursor.col.min(self.line_display_len(self.cursor.line));
                 }
             }
             Motion::Down => {
                 if self.cursor.line < last_line {
                     self.cursor.line += 1;
-                    self.cursor.col =
-                        self.cursor.col.min(self.line_display_len(self.cursor.line));
+                    self.cursor.col = self.cursor.col.min(self.line_display_len(self.cursor.line));
                 }
             }
             Motion::Home => {
@@ -216,13 +219,11 @@ impl EditorCore {
             }
             Motion::PageUp => {
                 self.cursor.line = self.cursor.line.saturating_sub(page_rows);
-                self.cursor.col =
-                    self.cursor.col.min(self.line_display_len(self.cursor.line));
+                self.cursor.col = self.cursor.col.min(self.line_display_len(self.cursor.line));
             }
             Motion::PageDown => {
                 self.cursor.line = (self.cursor.line + page_rows).min(last_line);
-                self.cursor.col =
-                    self.cursor.col.min(self.line_display_len(self.cursor.line));
+                self.cursor.col = self.cursor.col.min(self.line_display_len(self.cursor.line));
             }
             Motion::DocStart => {
                 self.goal_px = None;
@@ -235,6 +236,90 @@ impl EditorCore {
                     col: self.line_display_len(last_line),
                 };
             }
+            // P122：词级导航（行首空白再往左落列 0，下一拍才跨行）
+            Motion::WordLeft | Motion::WordRight => {
+                self.goal_px = None;
+                if let Some((line, col)) = self.word_neighbor(motion == Motion::WordLeft) {
+                    self.cursor = CursorPos { line, col };
+                }
+            }
+        }
+    }
+
+    /// P122：从光标出发的词级移动目标（Ctrl+←/→ 与删词共用同一口径）。
+    ///
+    /// - 词字符 = Unicode 字母数字或 `_`（CJK 连续段视为一个词）；
+    /// - 行内先跳过紧邻的空白（空格/Tab），再按「词字符连续段整体一步、
+    ///   单个标点一步」前进/后退——与主流编辑器的词移动手感一致；
+    /// - 行首再往左 = 上一行行尾，行尾再往右 = 下一行行首（跨行不截断）；
+    ///   缩进内再往左落到列 0（下一拍才跨行）；
+    /// - 到文档边缘返回 None。返回 `(line, col)`，col 为字符列（与
+    ///   `CursorPos` 同口径）。
+    pub(crate) fn word_neighbor(&self, left: bool) -> Option<(usize, usize)> {
+        fn is_word_char(c: char) -> bool {
+            c.is_alphanumeric() || c == '_'
+        }
+        let count = self.doc.line_count();
+        let (line, col) = (self.cursor.line, self.cursor.col);
+        let body_len = self.line_display_len(line);
+        let start = self.doc.line_to_char(line);
+        if left {
+            if col == 0 {
+                return if line == 0 {
+                    None
+                } else {
+                    Some((line - 1, self.line_display_len(line - 1)))
+                };
+            }
+            let mut o = start + col;
+            while o > start {
+                match self.char_at(o - 1) {
+                    Some(' ') | Some('\t') => o -= 1,
+                    _ => break,
+                }
+            }
+            if o == start {
+                return Some((line, 0)); // 行内只剩空白：落列 0
+            }
+            if self.char_at(o - 1).is_some_and(is_word_char) {
+                while o > start && self.char_at(o - 1).is_some_and(is_word_char) {
+                    o -= 1;
+                }
+            } else {
+                o -= 1; // 单个标点一步
+            }
+            Some((line, o - start))
+        } else {
+            if col >= body_len {
+                return if line + 1 < count {
+                    Some((line + 1, 0))
+                } else {
+                    None
+                };
+            }
+            let end = start + body_len;
+            let mut o = start + col;
+            while o < end {
+                match self.char_at(o) {
+                    Some(' ') | Some('\t') => o += 1,
+                    _ => break,
+                }
+            }
+            if o == end {
+                return if line + 1 < count {
+                    Some((line + 1, 0))
+                } else {
+                    Some((line, body_len))
+                };
+            }
+            if self.char_at(o).is_some_and(is_word_char) {
+                while o < end && self.char_at(o).is_some_and(is_word_char) {
+                    o += 1;
+                }
+            } else {
+                o += 1;
+            }
+            Some((line, o - start))
         }
     }
 
@@ -242,8 +327,7 @@ impl EditorCore {
     pub fn jump_to_line(&mut self, line_1based: usize) {
         self.break_typing(); // P37：跳转打断组
         self.goal_px = None; // 第 73 轮 ⑯：跳转 = 非竖向操作
-        let target =
-            (line_1based.saturating_sub(1)).min(self.doc.line_count().saturating_sub(1));
+        let target = (line_1based.saturating_sub(1)).min(self.doc.line_count().saturating_sub(1));
         self.anchor = None;
         self.cursor = CursorPos {
             line: target,
@@ -267,8 +351,16 @@ impl EditorCore {
         let col = col.min(self.line_display_len(line));
         self.anchor = None;
         self.cursor = CursorPos { line, col };
-        self.scroll_top = if scroll_top.is_finite() { scroll_top } else { 0.0 };
-        self.scroll_left = if scroll_left.is_finite() { scroll_left } else { 0.0 };
+        self.scroll_top = if scroll_top.is_finite() {
+            scroll_top
+        } else {
+            0.0
+        };
+        self.scroll_left = if scroll_left.is_finite() {
+            scroll_left
+        } else {
+            0.0
+        };
         self.clamp_scroll();
         self.clamp_scroll_horizontal();
     }
@@ -599,7 +691,11 @@ impl EditorCore {
             return self.doc.line_count() as u32;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
+        w.ensure_synced(
+            self.doc.line_count(),
+            self.wrap_max_cols(),
+            self.wrap_max_px(),
+        );
         w.index.total()
     }
 
@@ -624,7 +720,11 @@ impl EditorCore {
             return line as u32;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
+        w.ensure_synced(
+            self.doc.line_count(),
+            self.wrap_max_cols(),
+            self.wrap_max_px(),
+        );
         let lines = self.doc.line_count();
         let line = line.min(lines);
         let prefix = w.index.prefix_rows(line);
@@ -645,7 +745,11 @@ impl EditorCore {
             return 1;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
+        w.ensure_synced(
+            self.doc.line_count(),
+            self.wrap_max_cols(),
+            self.wrap_max_px(),
+        );
         let body = self.line_text(line);
         let real_xs = self.trusted_xs(line, &body);
         w.segments_of(line, &body, real_xs).len() as u32
@@ -658,7 +762,11 @@ impl EditorCore {
     /// locate_visual 等其余调用点漏防——boot 后 CJK 长行整行不折）。
     pub(crate) fn segments_of_line(&self, line: usize, body: &str) -> Rc<Vec<usize>> {
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
+        w.ensure_synced(
+            self.doc.line_count(),
+            self.wrap_max_cols(),
+            self.wrap_max_px(),
+        );
         let real_xs = self.trusted_xs(line, body);
         w.segments_of(line, body, real_xs)
     }
@@ -708,7 +816,11 @@ impl EditorCore {
             return line as u32;
         }
         let mut w = self.wrap.borrow_mut();
-        w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
+        w.ensure_synced(
+            self.doc.line_count(),
+            self.wrap_max_cols(),
+            self.wrap_max_px(),
+        );
         w.index.prefix_rows(line.min(self.doc.line_count()))
     }
 
@@ -737,7 +849,11 @@ impl EditorCore {
 
     /// 竖向移动的目标解析：目标视觉行内按 goal 像素列反解字符列。
     /// 返回 (line, col, visual)。视觉行越界（首行上/末行下）返回 None。
-    pub(crate) fn vertical_target(&mut self, motion: Motion, page_rows: usize) -> Option<(usize, usize)> {
+    pub(crate) fn vertical_target(
+        &mut self,
+        motion: Motion,
+        page_rows: usize,
+    ) -> Option<(usize, usize)> {
         let total = self.visual_rows_total();
         let cur_v = self.visual_row_of(self.cursor.line, self.cursor.col);
         let step: i64 = match motion {
@@ -796,8 +912,7 @@ impl EditorCore {
                 if k < s0 {
                     base += w;
                 } else {
-                    let mid_rel = (acc + w * 0.5) * self.char_width()
-                        - base * self.char_width();
+                    let mid_rel = (acc + w * 0.5) * self.char_width() - base * self.char_width();
                     if mid_rel > goal_seg {
                         c = k;
                         break;
@@ -882,7 +997,14 @@ impl EditorCore {
     /// 折行开态：在段字符区间 `[s0, s1)` 内按**段相对** x（已扣 gutter/
     /// 水平偏移与段起点像素）反解字符列。真实布局新鲜走字形中点；
     /// 滞后回退列模型（段内累计从零起步）。
-    pub(crate) fn hit_col_in_range(&self, line: usize, text: &str, s0: usize, s1: usize, rel: f32) -> usize {
+    pub(crate) fn hit_col_in_range(
+        &self,
+        line: usize,
+        text: &str,
+        s0: usize,
+        s1: usize,
+        rel: f32,
+    ) -> usize {
         let char_w = self.char_width();
         let lens = text.chars().count();
         if s1 <= s0 {
@@ -953,9 +1075,9 @@ impl EditorCore {
 
     /// [`Self::tick_blink`] 的可注入时钟版（单测用）。
     pub(crate) fn tick_blink_at(&mut self, now: std::time::Instant) {
-        let blink_due = self.last_blink_at.is_none_or(|t| {
-            now.duration_since(t).as_millis() >= CARET_BLINK_MS as u128
-        });
+        let blink_due = self
+            .last_blink_at
+            .is_none_or(|t| now.duration_since(t).as_millis() >= CARET_BLINK_MS as u128);
         if blink_due {
             if self
                 .last_activity
@@ -1050,7 +1172,11 @@ impl EditorCore {
         let x_px = self.px_of(self.cursor.line, &text, col);
         let (v, seg_start) = if self.wrap.borrow().enabled {
             let mut w = self.wrap.borrow_mut();
-            w.ensure_synced(self.doc.line_count(), self.wrap_max_cols(), self.wrap_max_px());
+            w.ensure_synced(
+                self.doc.line_count(),
+                self.wrap_max_cols(),
+                self.wrap_max_px(),
+            );
             let lens = text.chars().count();
             let real_xs = self.trusted_xs(self.cursor.line, &text);
             let breaks = w.segments_of(self.cursor.line, &text, real_xs);

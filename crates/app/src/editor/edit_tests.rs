@@ -269,3 +269,68 @@ fn enter_uses_dominant_eol_and_is_undoable() {
     assert!(c.undo());
     assert_eq!(c.doc.to_text(), "  a\r\nb");
 }
+
+// ---------- P122 删词（Ctrl+Backspace / Ctrl+Delete） ----------
+
+#[test]
+fn delete_word_left_removes_to_word_start_and_is_undoable() {
+    let mut c = core_with("foo   bar");
+    c.cursor = CursorPos { line: 0, col: 9 };
+    assert!(c.delete_word(true));
+    assert_eq!(c.doc.to_text(), "foo   ", "只删词本身，行中空白保留");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 6 });
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), "foo   bar");
+}
+
+#[test]
+fn delete_word_left_crosses_line_and_merges() {
+    let mut c = core_with("ab\n");
+    c.cursor = CursorPos { line: 1, col: 0 }; // 幻影行
+    assert!(c.delete_word(true));
+    assert_eq!(c.doc.to_text(), "ab", "删掉幻影行前的换行单元");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+}
+
+#[test]
+fn delete_word_right_removes_to_word_end() {
+    let mut c = core_with("ab  cd");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    assert!(c.delete_word(false));
+    assert_eq!(c.doc.to_text(), "  cd", "词尾删词不动行中空白");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 0 });
+}
+
+#[test]
+fn delete_word_with_selection_deletes_selection_instead() {
+    let mut c = core_with("abcdef");
+    c.anchor = Some(CursorPos { line: 0, col: 0 });
+    c.cursor = CursorPos { line: 0, col: 2 };
+    assert!(c.delete_word(true));
+    assert_eq!(c.doc.to_text(), "cdef", "有选区退化为删选区");
+}
+
+#[test]
+fn delete_word_at_document_edge_is_noop() {
+    let mut c = core_with("ab");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    assert!(!c.delete_word(true));
+    c.cursor = CursorPos { line: 0, col: 2 };
+    assert!(!c.delete_word(false));
+    assert_eq!(c.doc.to_text(), "ab");
+}
+
+#[test]
+fn current_line_copy_text_includes_line_ending() {
+    let mut c = core_with("a\r\nb\nc");
+    c.cursor = CursorPos { line: 0, col: 1 };
+    assert_eq!(c.current_line_copy_text(), "a\r\n", "CRLF 行按原样取整行");
+    c.cursor = CursorPos { line: 1, col: 0 };
+    assert_eq!(c.current_line_copy_text(), "b\n");
+    c.cursor = CursorPos { line: 2, col: 1 };
+    assert_eq!(c.current_line_copy_text(), "c", "无行尾的末行只取正文");
+    // 幻影末行 = 空串
+    let mut p = core_with("x\n");
+    p.cursor = CursorPos { line: 1, col: 0 };
+    assert_eq!(p.current_line_copy_text(), "");
+}
