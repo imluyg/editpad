@@ -1,95 +1,98 @@
 use super::*;
 
-/// 热键动作：持久化主键 `id` + 默认组合 + 说明。
+/// 热键动作：持久化主键 `id` + 默认组合（可多个）+ 说明。
 ///
 /// `id` 是 config.toml `hotkeys` 映射的键——**改 id = 破坏用户配置**，
 /// 禁止；改默认组合只影响未重映射的用户。新增动作 = 追加一行 +
 /// [`dispatch_action`] 加一个分支（测试清单自动覆盖）。
 pub(crate) struct HotkeyAction {
     pub(crate) id: &'static str,
-    pub(crate) default_combo: &'static str,
+    /// 默认组合列表：首个是设置页展示的主键位，其余为同义附加默认
+    /// （如重做的 `Ctrl+Y` 与主流的 `Ctrl+Shift+Z`）。
+    pub(crate) default_combos: &'static [&'static str],
     pub(crate) desc: &'static str,
 }
 
 /// 键盘热键动作注册表（展示顺序 = 设置热键页顺序）。
 /// Shift+滚轮 / Ctrl+滚轮为鼠标动作，不可重映射，仅 README 展示。
 pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
-    HotkeyAction { id: "open", default_combo: "Ctrl+O", desc: "打开文件" },
-    HotkeyAction { id: "save", default_combo: "Ctrl+S", desc: "保存" },
-    HotkeyAction { id: "select_all", default_combo: "Ctrl+A", desc: "全选" },
-    HotkeyAction { id: "find", default_combo: "Ctrl+F", desc: "查找/替换栏" },
-    HotkeyAction { id: "goto", default_combo: "Ctrl+G", desc: "跳转到行" },
-    HotkeyAction { id: "undo", default_combo: "Ctrl+Z", desc: "撤销" },
-    HotkeyAction { id: "redo", default_combo: "Ctrl+Y", desc: "重做" },
-    HotkeyAction { id: "copy", default_combo: "Ctrl+C", desc: "复制选区" },
-    HotkeyAction { id: "cut", default_combo: "Ctrl+X", desc: "剪切选区" },
-    HotkeyAction { id: "paste", default_combo: "Ctrl+V", desc: "粘贴" },
+    HotkeyAction { id: "open", default_combos: &["Ctrl+O"], desc: "打开文件" },
+    HotkeyAction { id: "save", default_combos: &["Ctrl+S"], desc: "保存" },
+    HotkeyAction { id: "select_all", default_combos: &["Ctrl+A"], desc: "全选" },
+    HotkeyAction { id: "find", default_combos: &["Ctrl+F"], desc: "查找/替换栏" },
+    HotkeyAction { id: "goto", default_combos: &["Ctrl+G"], desc: "跳转到行" },
+    HotkeyAction { id: "undo", default_combos: &["Ctrl+Z"], desc: "撤销" },
+    HotkeyAction { id: "redo", default_combos: &["Ctrl+Y", "Ctrl+Shift+Z"], desc: "重做（Ctrl+Y 或主流的 Ctrl+Shift+Z）" },
+    HotkeyAction { id: "copy", default_combos: &["Ctrl+C"], desc: "复制选区" },
+    HotkeyAction { id: "cut", default_combos: &["Ctrl+X"], desc: "剪切选区" },
+    HotkeyAction { id: "paste", default_combos: &["Ctrl+V"], desc: "粘贴" },
     // 行操作套件（第 57 轮，仿主流编辑器编辑菜单）
-    HotkeyAction { id: "dup_line", default_combo: "Ctrl+D", desc: "在下方复制当前行" },
-    HotkeyAction { id: "del_line", default_combo: "Ctrl+L", desc: "删除当前行" },
-    HotkeyAction { id: "move_line_up", default_combo: "Ctrl+Shift+Up", desc: "当前行上移" },
-    HotkeyAction { id: "move_line_down", default_combo: "Ctrl+Shift+Down", desc: "当前行下移" },
+    HotkeyAction { id: "dup_line", default_combos: &["Ctrl+D"], desc: "在下方复制当前行" },
+    HotkeyAction { id: "del_line", default_combos: &["Ctrl+L"], desc: "删除当前行" },
+    HotkeyAction { id: "move_line_up", default_combos: &["Ctrl+Shift+Up"], desc: "当前行上移" },
+    HotkeyAction { id: "move_line_down", default_combos: &["Ctrl+Shift+Down"], desc: "当前行下移" },
     // 大小写转换与行首尾清理（第 58 轮；大小写默认键与主流编辑器一致，
     // Trim 在主流编辑器无默认键——取 Ctrl+Shift+T/L/B 助记：Trim/Leading/Both）
-    HotkeyAction { id: "to_uppercase", default_combo: "Ctrl+Shift+U", desc: "转为大写（选区/全文）" },
-    HotkeyAction { id: "to_lowercase", default_combo: "Ctrl+U", desc: "转为小写（选区/全文）" },
-    HotkeyAction { id: "trim_trailing", default_combo: "Ctrl+Shift+T", desc: "去除行尾空白（选区行/全文）" },
-    HotkeyAction { id: "trim_leading", default_combo: "Ctrl+Shift+L", desc: "去除行首空白（选区行/全文）" },
-    HotkeyAction { id: "trim_both", default_combo: "Ctrl+Shift+B", desc: "去除行首尾空白（选区行/全文）" },
+    HotkeyAction { id: "to_uppercase", default_combos: &["Ctrl+Shift+U"], desc: "转为大写（选区/全文）" },
+    HotkeyAction { id: "to_lowercase", default_combos: &["Ctrl+U"], desc: "转为小写（选区/全文）" },
+    HotkeyAction { id: "trim_trailing", default_combos: &["Ctrl+Shift+T"], desc: "去除行尾空白（选区行/全文）" },
+    HotkeyAction { id: "trim_leading", default_combos: &["Ctrl+Shift+L"], desc: "去除行首空白（选区行/全文）" },
+    HotkeyAction { id: "trim_both", default_combos: &["Ctrl+Shift+B"], desc: "去除行首尾空白（选区行/全文）" },
     // 行排序与去重（第 59 轮，仿主流编辑器行操作菜单；S/D=升/降序助记，K=去重）
-    HotkeyAction { id: "sort_lines_asc", default_combo: "Ctrl+Shift+S", desc: "行升序排序（选区行/全文）" },
-    HotkeyAction { id: "sort_lines_desc", default_combo: "Ctrl+Shift+D", desc: "行降序排序（选区行/全文）" },
-    HotkeyAction { id: "dedupe_lines", default_combo: "Ctrl+Shift+K", desc: "去除重复行（选区行/全文）" },
+    HotkeyAction { id: "sort_lines_asc", default_combos: &["Ctrl+Shift+S"], desc: "行升序排序（选区行/全文）" },
+    HotkeyAction { id: "sort_lines_desc", default_combos: &["Ctrl+Shift+D"], desc: "行降序排序（选区行/全文）" },
+    HotkeyAction { id: "dedupe_lines", default_combos: &["Ctrl+Shift+K"], desc: "去除重复行（选区行/全文）" },
     // 书签套件（第 60 轮，仿主流编辑器书签导航）。F2 家族与主流编辑器
     // 同默认键；Alt 系键位因 AltGr 保护不可用，清除全部取 Ctrl+Shift+F2；
     // 标记行批量操作无主流默认键，取 C/X 助记 = 复制/删除
-    HotkeyAction { id: "bookmark_toggle", default_combo: "Ctrl+F2", desc: "切换当前行书签" },
-    HotkeyAction { id: "bookmark_next", default_combo: "F2", desc: "跳到下一个书签" },
-    HotkeyAction { id: "bookmark_prev", default_combo: "Shift+F2", desc: "跳到上一个书签" },
-    HotkeyAction { id: "bookmark_clear_all", default_combo: "Ctrl+Shift+F2", desc: "清除全部书签" },
-    HotkeyAction { id: "copy_marked_lines", default_combo: "Ctrl+Shift+C", desc: "复制全部标记行" },
-    HotkeyAction { id: "del_marked_lines", default_combo: "Ctrl+Shift+X", desc: "删除全部标记行" },
+    HotkeyAction { id: "bookmark_toggle", default_combos: &["Ctrl+F2"], desc: "切换当前行书签" },
+    HotkeyAction { id: "bookmark_next", default_combos: &["F2"], desc: "跳到下一个书签" },
+    HotkeyAction { id: "bookmark_prev", default_combos: &["Shift+F2"], desc: "跳到上一个书签" },
+    HotkeyAction { id: "bookmark_clear_all", default_combos: &["Ctrl+Shift+F2"], desc: "清除全部书签" },
+    HotkeyAction { id: "copy_marked_lines", default_combos: &["Ctrl+Shift+C"], desc: "复制全部标记行" },
+    HotkeyAction { id: "del_marked_lines", default_combos: &["Ctrl+Shift+X"], desc: "删除全部标记行" },
     // 括号匹配（第 61 轮，仿主流编辑器；M=Matching 助记——主流的 Ctrl+\
     // 因反斜杠非字母/数字不入组合键白名单）
-    HotkeyAction { id: "jump_bracket", default_combo: "Ctrl+Shift+M", desc: "跳到配对括号" },
+    HotkeyAction { id: "jump_bracket", default_combos: &["Ctrl+Shift+M"], desc: "跳到配对括号" },
     // 行操作扩充（第 62 轮；空闲字母键取 I/O/P/J/H/N/R，均可在设置页重映射）
-    HotkeyAction { id: "tabs_to_spaces_leading", default_combo: "Ctrl+Shift+I", desc: "行首制表符转空格（选区行/全文）" },
-    HotkeyAction { id: "tabs_to_spaces_all", default_combo: "Ctrl+Shift+O", desc: "全部制表符转空格（选区行/全文）" },
-    HotkeyAction { id: "spaces_to_tabs_leading", default_combo: "Ctrl+Shift+P", desc: "行首空格转制表符（选区行/全文）" },
-    HotkeyAction { id: "merge_lines", default_combo: "Ctrl+Shift+J", desc: "合并行（触及块合成一行/并入下一行）" },
-    HotkeyAction { id: "split_line", default_combo: "Ctrl+Shift+H", desc: "拆分行（光标处断行/选区独立成行）" },
-    HotkeyAction { id: "del_empty_lines", default_combo: "Ctrl+Shift+N", desc: "删除空行（选区行/全文）" },
-    HotkeyAction { id: "del_blank_lines", default_combo: "Ctrl+Shift+R", desc: "删除空白行（含纯空白行）" },
+    HotkeyAction { id: "tabs_to_spaces_leading", default_combos: &["Ctrl+Shift+I"], desc: "行首制表符转空格（选区行/全文）" },
+    HotkeyAction { id: "tabs_to_spaces_all", default_combos: &["Ctrl+Shift+O"], desc: "全部制表符转空格（选区行/全文）" },
+    HotkeyAction { id: "spaces_to_tabs_leading", default_combos: &["Ctrl+Shift+P"], desc: "行首空格转制表符（选区行/全文）" },
+    HotkeyAction { id: "merge_lines", default_combos: &["Ctrl+Shift+J"], desc: "合并行（触及块合成一行/并入下一行）" },
+    HotkeyAction { id: "split_line", default_combos: &["Ctrl+Shift+H"], desc: "拆分行（光标处断行/选区独立成行）" },
+    HotkeyAction { id: "del_empty_lines", default_combos: &["Ctrl+Shift+N"], desc: "删除空行（选区行/全文）" },
+    HotkeyAction { id: "del_blank_lines", default_combos: &["Ctrl+Shift+R"], desc: "删除空白行（含纯空白行）" },
     // 查找全部结果面板（A = All matches 助记；数据源复用查找栏的后台扫描命中表）
-    HotkeyAction { id: "find_all_panel", default_combo: "Ctrl+Shift+A", desc: "查找全部结果面板" },
+    HotkeyAction { id: "find_all_panel", default_combos: &["Ctrl+Shift+A"], desc: "查找全部结果面板" },
     // 第 63 轮：F5 插入日期时间（记事本同款裸功能键）+ 复制路径/文件名
     // （G/Q 为空闲字母，弱助记但 desc 明示；均可在设置页重映射）
-    HotkeyAction { id: "insert_date_time", default_combo: "F5", desc: "插入日期时间（YYYY-MM-DD HH:MM）" },
-    HotkeyAction { id: "copy_file_path", default_combo: "Ctrl+Shift+G", desc: "复制完整路径（当前页）" },
-    HotkeyAction { id: "copy_file_name", default_combo: "Ctrl+Shift+Q", desc: "复制文件名（当前页）" },
+    HotkeyAction { id: "insert_date_time", default_combos: &["F5"], desc: "插入日期时间（YYYY-MM-DD HH:MM）" },
+    HotkeyAction { id: "copy_file_path", default_combos: &["Ctrl+Shift+G"], desc: "复制完整路径（当前页）" },
+    HotkeyAction { id: "copy_file_name", default_combos: &["Ctrl+Shift+Q"], desc: "复制文件名（当前页）" },
     // 第 64 轮：行注释切换（Ctrl+Q，多编辑器通用的注释切换键位）+
     // 恢复上次关闭的标签页（W=与 Ctrl+W 关页互逆的助记）
-    HotkeyAction { id: "toggle_line_comment", default_combo: "Ctrl+Q", desc: "切换行注释（按语法选 // # -- 等）" },
-    HotkeyAction { id: "reopen_closed_tab", default_combo: "Ctrl+Shift+W", desc: "恢复上次关闭的标签页" },
-    HotkeyAction { id: "new_tab", default_combo: "Ctrl+T", desc: "新建标签页" },
-    HotkeyAction { id: "close_tab", default_combo: "Ctrl+W", desc: "关闭当前标签页" },
-    HotkeyAction { id: "next_tab", default_combo: "Ctrl+Tab", desc: "循环切换标签页" },
-    HotkeyAction { id: "format_json", default_combo: "Ctrl+Shift+F", desc: "格式化 JSON（仅 JSON 文件）" },
-    HotkeyAction { id: "doc_start", default_combo: "Ctrl+Home", desc: "跳到文档首" },
-    HotkeyAction { id: "doc_end", default_combo: "Ctrl+End", desc: "跳到文档尾" },
+    HotkeyAction { id: "toggle_line_comment", default_combos: &["Ctrl+Q"], desc: "切换行注释（按语法选 // # -- 等）" },
+    HotkeyAction { id: "reopen_closed_tab", default_combos: &["Ctrl+Shift+W"], desc: "恢复上次关闭的标签页" },
+    HotkeyAction { id: "new_tab", default_combos: &["Ctrl+T"], desc: "新建标签页" },
+    HotkeyAction { id: "close_tab", default_combos: &["Ctrl+W"], desc: "关闭当前标签页" },
+    HotkeyAction { id: "next_tab", default_combos: &["Ctrl+Tab"], desc: "循环切换标签页" },
+    HotkeyAction { id: "format_json", default_combos: &["Ctrl+Shift+F"], desc: "格式化 JSON（仅 JSON 文件）" },
+    HotkeyAction { id: "doc_start", default_combos: &["Ctrl+Home"], desc: "跳到文档首" },
+    HotkeyAction { id: "doc_end", default_combos: &["Ctrl+End"], desc: "跳到文档尾" },
     // 查找导航（F3 家族与主流编辑器同默认键；Shift+F3 走裸功能键通道）+
     // 上一标签页（Ctrl+Shift+Tab 与 next_tab 互逆）
-    HotkeyAction { id: "find_next", default_combo: "F3", desc: "查找下一个" },
-    HotkeyAction { id: "find_prev", default_combo: "Shift+F3", desc: "查找上一个" },
-    HotkeyAction { id: "prev_tab", default_combo: "Ctrl+Shift+Tab", desc: "循环切换标签页（反向）" },
+    HotkeyAction { id: "find_next", default_combos: &["F3"], desc: "查找下一个" },
+    HotkeyAction { id: "find_prev", default_combos: &["Shift+F3"], desc: "查找上一个" },
+    HotkeyAction { id: "prev_tab", default_combos: &["Ctrl+Shift+Tab"], desc: "循环切换标签页（反向）" },
 ];
 
-/// 动作 id 的默认组合（未重映射时的组合键串）。
+/// 动作 id 的首个默认组合（未重映射时的展示主键位）。
 pub(crate) fn default_combo_of(id: &str) -> Option<&'static str> {
     HOTKEY_ACTIONS
         .iter()
         .find(|a| a.id == id)
-        .map(|a| a.default_combo)
+        .and_then(|a| a.default_combos.first())
+        .copied()
 }
 
 /// 动作 id 的当前生效组合：用户重映射优先，否则默认。
@@ -209,7 +212,8 @@ pub(crate) fn effective_action(
         }
     }
     for action in HOTKEY_ACTIONS {
-        if !remap.contains_key(action.id) && action.default_combo == combo {
+        // 未重映射的动作按全部默认组合匹配（多默认同义键位）
+        if !remap.contains_key(action.id) && action.default_combos.contains(&combo) {
             return Some(action.id);
         }
     }

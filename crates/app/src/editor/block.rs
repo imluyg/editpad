@@ -753,20 +753,34 @@ impl EditorCore {
         true
     }
 
-    /// 向块内插入文本（v1：单行文本；含换行时只取首段，文档披露的
-    /// 简化口径）。逐行把 [c0, c1) 替换为该文本；行数不变 → 书签原位。
+    /// 向块内插入文本（v2）：
+    /// * 单行文本 → 逐行填入同一内容（v1 口径）；
+    /// * 多行文本 → **循环填充**，块内第 i 行取文本第 `i % 文本行数` 行
+    ///   （行数一致时逐行对应，不足时循环续用，主流列块粘贴手感）；
+    /// * 文本行数多于块行数 → **块扩展**，余下行作为新行插到块末行
+    ///   下方（下方内容与书签整体下移；新行以主导行尾收尾）。
+    ///
+    /// 行尾一律归一到主导行尾再切行；尾部孤立换行视为分隔符而非填充行。
     /// 产快照；成功后清块、光标落首行插入文本之后。返回是否改动。
     pub fn insert_into_block(&mut self, text: &str) -> bool {
-        let first_line = text.split('\n').next().unwrap_or("");
-        if first_line.is_empty() {
-            return false;
-        }
         let Some((r0, r1, c0, c1)) = self.active_block() else {
             return false;
         };
+        let eol = self.doc.line_ending();
+        let normalized = eol.normalize(text);
+        let mut lines: Vec<&str> = normalized.split(eol.newline()).collect();
+        if lines.last() == Some(&"") {
+            lines.pop();
+        }
+        if lines.is_empty() || lines.iter().all(|l| l.is_empty()) {
+            return false;
+        }
         self.snapshot();
-        // 先删旧块内容（从后往前），再从后往前逐行插入新文本
-        for line in (r0..=r1).rev() {
+        let rows = r1 - r0 + 1;
+        // 逐行删旧块内容 [c0, c1) 再填入（从后往前，前面的偏移不受影响）
+        for offset in (0..rows).rev() {
+            let line = r0 + offset;
+            let fill = lines[offset % lines.len()];
             let start = self.doc.line_to_char(line);
             let len = self.line_display_len(line);
             let a = start + c0.min(len);
@@ -774,12 +788,31 @@ impl EditorCore {
             if b > a {
                 self.doc.remove_range(a, b);
             }
-            self.doc.insert(a, first_line);
+            self.doc.insert(a, fill);
+        }
+        // 块扩展：文本行数多于块行数 → 余下行插到块末行下方。
+        // 块末行本身无行尾时先补一个换行单元把它与新增行隔开
+        if lines.len() > rows {
+            let extra = &lines[rows..];
+            let eol_str = eol.newline();
+            let bare_last = {
+                let last = self.doc.line_str(r1);
+                !(last.ends_with('\n') || last.ends_with('\r'))
+            };
+            let mut insert = String::new();
+            if bare_last {
+                insert.push_str(eol_str);
+            }
+            insert.push_str(&extra.join(eol_str));
+            insert.push_str(eol_str);
+            let at = self.doc.line_to_char((r1 + 1).min(self.doc.line_count()));
+            self.doc.insert(at, &insert);
+            self.shift_bookmarks_below(r1, extra.len() as isize);
         }
         self.invalidate_highlight_from(self.doc.line_to_char(r0));
         self.max_cols_stale = true;
         self.block_sel = None;
-        let new_col = c0 + first_line.chars().count();
+        let new_col = c0 + lines[0].chars().count();
         self.cursor = CursorPos { line: r0, col: new_col.min(self.line_display_len(r0)) };
         self.ensure_visible();
         true

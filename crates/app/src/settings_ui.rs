@@ -769,9 +769,14 @@ impl Editpad {
                     page,
                     key: a.id.to_owned(),
                     title: a.desc.to_owned(),
-                    desc: effective_combo(a.id, &self.settings.hotkeys)
-                        .unwrap_or(a.default_combo)
-                        .to_owned(),
+                    // 未重映射时展示全部默认组合（多默认同义键位，如重做
+                    // 的 Ctrl+Y / Ctrl+Shift+Z）；重映射后只展示当前生效值
+                    desc: self
+                        .settings
+                        .hotkeys
+                        .get(a.id)
+                        .cloned()
+                        .unwrap_or_else(|| a.default_combos.join(" / ")),
                 })
                 .collect();
         }

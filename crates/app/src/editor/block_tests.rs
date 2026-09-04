@@ -1128,6 +1128,56 @@ use super::tests::*;
     }
 
     #[test]
+    fn block_insert_multiline_cycles_and_extends() {
+        // v2 循环填充：文本 2 行填 3 行块 → 第 3 行循环回文本第 1 行；
+        // 行数一致 → 逐行对应；撤销完整还原
+        let mut c = core_with("111\n222\n333");
+        c.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 0 },
+            head: CursorPos { line: 2, col: 1 },
+        });
+        assert!(c.insert_into_block("A\nB"));
+        assert_eq!(c.doc.to_text(), "A11\nB22\nA33", "循环填充：行 2 回用文本行 0");
+        assert!(c.undo());
+        assert_eq!(c.doc.to_text(), "111\n222\n333");
+
+        // 逐行对应：文本 3 行填 3 行块
+        let mut d = core_with("111\n222\n333");
+        d.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 0 },
+            head: CursorPos { line: 2, col: 1 },
+        });
+        assert!(d.insert_into_block("A\nB\nC"));
+        assert_eq!(d.doc.to_text(), "A11\nB22\nC33");
+
+        // 块扩展：文本 3 行填 2 行块 → 余下行插到块末行下方，
+        // 下方内容与书签整体下移
+        let mut e = core_with("111\n222\n尾");
+        e.toggle_bookmark(); // 行 0
+        e.cursor = CursorPos { line: 2, col: 0 };
+        e.toggle_bookmark(); // 行 2（块末行下方，扩展后应下移）
+        e.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 0 },
+            head: CursorPos { line: 1, col: 1 },
+        });
+        assert!(e.insert_into_block("A\nB\nC"));
+        assert_eq!(e.doc.to_text(), "A11\nB22\nC\n尾", "余下行插到块末行下方");
+        assert_eq!(e.bookmarked_lines(), vec![0, 3], "书签随扩展下移");
+        assert!(e.undo());
+        assert_eq!(e.doc.to_text(), "111\n222\n尾");
+        assert_eq!(e.bookmarked_lines(), vec![0, 2], "撤销连书签一并还原");
+
+        // 块末行无行尾时扩展：先补换行单元再插新行
+        let mut g = core_with("111\n222");
+        g.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 0 },
+            head: CursorPos { line: 1, col: 1 },
+        });
+        assert!(g.insert_into_block("A\nB\nC"));
+        assert_eq!(g.doc.to_text(), "A11\nB22\nC\n", "文档末尾补齐行尾");
+    }
+
+    #[test]
     fn block_cleared_by_nav_undo_and_esc_op() {
         let mk = || {
             let mut c = core_with("abcd\n");

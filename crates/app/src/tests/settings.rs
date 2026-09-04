@@ -23,10 +23,11 @@ use super::*;
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), total, "动作 id 存在重复");
-        // 默认组合全部可归一（格式合法）且互不冲突
+        // 默认组合全部可归一（格式合法）且互不冲突（多默认逐个检查）
         let mut combos: Vec<_> = HOTKEY_ACTIONS
             .iter()
-            .map(|a| editpad_core::normalize_combo(a.default_combo).expect("默认组合必须合法"))
+            .flat_map(|a| a.default_combos)
+            .map(|c| editpad_core::normalize_combo(c).expect("默认组合必须合法"))
             .collect();
         let combo_total = combos.len();
         combos.sort_unstable();
@@ -39,17 +40,19 @@ use super::*;
 
     #[test]
     fn hotkey_actions_all_dispatch_through_handle_key() {
-        // 注册表的每个默认组合都必须经 handle_key（默认表）产生消息——
-        // 注册表与分发器任何一侧改动漏同步，本测试当场暴露（防漂移）
+        // 注册表的每个默认组合（含多默认同义键位）都必须经 handle_key
+        // （默认表）产生消息——注册表与分发器任何一侧改动漏同步，
+        // 本测试当场暴露（防漂移）
         for action in HOTKEY_ACTIONS {
-            let (mods, key) = parse_combo_for_test(action.default_combo);
-            let dispatched = handle_key_defaults(key, mods);
-            assert!(
-                dispatched.is_some(),
-                "动作 {}（{}）在 handle_key 中无对应分支",
-                action.id,
-                action.default_combo
-            );
+            for combo in action.default_combos {
+                let (mods, key) = parse_combo_for_test(combo);
+                let dispatched = handle_key_defaults(key, mods);
+                assert!(
+                    dispatched.is_some(),
+                    "动作 {}（{combo}）在 handle_key 中无对应分支",
+                    action.id
+                );
+            }
         }
     }
 
@@ -74,6 +77,35 @@ use super::*;
         assert!(matches!(
             handle_key(key, mods, &remap),
             Some(Message::OpenRequested)
+        ));
+    }
+
+    #[test]
+    fn redo_has_two_default_combos_and_remap_frees_both() {
+        // 多默认同义键位：重做同时支持 Ctrl+Y 与主流的 Ctrl+Shift+Z；
+        // 用户重映射后两个默认组合一并让出（显式放弃 = 全部放弃）
+        let (mods, key) = parse_combo_for_test("Ctrl+Y");
+        assert!(matches!(
+            handle_key_defaults(key, mods),
+            Some(Message::Edit(EditOp::Redo))
+        ));
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+Z");
+        assert!(matches!(
+            handle_key_defaults(key, mods),
+            Some(Message::Edit(EditOp::Redo)
+        )));
+
+        // 重映射 redo → Ctrl+R：两个默认组合都让出
+        let mut remap = std::collections::HashMap::new();
+        remap.insert("redo".to_owned(), "Ctrl+R".to_owned());
+        let (mods, key) = parse_combo_for_test("Ctrl+Y");
+        assert!(handle_key(key, mods, &remap).is_none(), "重映射后主默认让出");
+        let (mods, key) = parse_combo_for_test("Ctrl+Shift+Z");
+        assert!(handle_key(key, mods, &remap).is_none(), "重映射后附加默认一并让出");
+        let (mods, key) = parse_combo_for_test("Ctrl+R");
+        assert!(matches!(
+            handle_key(key, mods, &remap),
+            Some(Message::Edit(EditOp::Redo))
         ));
     }
 
@@ -304,7 +336,11 @@ use super::*;
         for (action, r) in HOTKEY_ACTIONS.iter().zip(&hotkey_rows) {
             assert_eq!(r.key, action.id, "热键行键必须与动作 id 一致");
             assert_eq!(r.title, action.desc);
-            assert_eq!(r.desc, action.default_combo, "未重映射时描述 = 默认组合");
+            assert_eq!(
+                r.desc,
+                action.default_combos.join(" / "),
+                "未重映射时描述 = 全部默认组合"
+            );
         }
 
         // 控件覆盖：功能行必有控件；热键行有「修改」控件、关于为纯展示行
