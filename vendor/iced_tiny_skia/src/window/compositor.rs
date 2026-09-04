@@ -173,7 +173,14 @@ pub fn present(
     // 待上游定位损伤失步根因后可还原。
     let damage = vec![Rectangle::with_size(viewport.logical_size())];
 
+    // P119：层栈限深。P117 禁用部分损伤呈现时删掉了上游 present 里的
+    // truncate(max_age)，却保留了逐帧 push_front——每帧整棵层栈深拷贝
+    // 入队且永不弹出，窗口可见期间空闲闪烁即以 ~KB/帧 无限堆积
+    // （实测空文档怠速 ~2MB/分钟；最小化不渲染则零增长）。上游语义 =
+    // 队列仅保留最近数帧供损伤差分；本后端损伤呈现已禁用，保留最近
+    // 2 帧仅为未来还原损伤优化留底，内存有界（configure_surface 清场不变）。
     surface.layer_stack.push_front(renderer.layers().to_vec());
+    surface.layer_stack.truncate(2);
     surface.background_color = background_color;
 
     let mut pixels = tiny_skia::PixmapMut::from_bytes(
