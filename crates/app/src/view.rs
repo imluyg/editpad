@@ -607,6 +607,8 @@ impl Editpad {
             }
         }
         let regex = self.regex_enabled;
+        // 整词只作用于字面模式（正则的边界语义由模式自身表达）
+        let whole_word = self.whole_word && !self.regex_enabled;
         let payload = FindScanPayload {
             seq: self.find_seq,
             doc: self.cur_handle.borrow().doc.clone(),
@@ -617,14 +619,19 @@ impl Editpad {
             debounce_ms: FIND_DEBOUNCE_MS,
         };
         self.find_scan = Some(self.find_seq);
-        Task::perform(drive_find_scan(payload, |doc, q, cs, rx| {
+        Task::perform(drive_find_scan(payload, move |doc, q, cs, rx| {
             if rx {
                 // P70：正则走全文扫描（to_text 拷贝发生在后台线程）；
                 // 编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
                 editpad_core::find_all_regex(&doc.to_text(), q, cs)
                     .unwrap_or_default()
             } else {
-                editpad_core::find_all_document(doc, q, cs)
+                let hits = editpad_core::find_all_document(doc, q, cs);
+                if whole_word {
+                    editpad_core::filter_whole_word(doc, hits)
+                } else {
+                    hits
+                }
             }
         }), |message| message)
     }
@@ -1249,6 +1256,13 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         .text_size(uipx)
                         .font(uifont)
                         .on_toggle(Message::RegexToggled),
+                    // 整词匹配：命中前后均非词字符（正则模式下不参与——
+                    // 扫描与替换路径均按 regex 分支先行返回）
+                    checkbox(self.whole_word)
+                        .label("整词")
+                        .text_size(uipx)
+                        .font(uifont)
+                        .on_toggle(Message::WholeWordToggled),
                     // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用）
                     button(text("查找全部").size(uipx).font(uifont))
                         .style(chrome_button_style)

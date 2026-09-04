@@ -348,6 +348,7 @@ impl Editpad {
         // ---------- 查找/替换/跳转/查找全部 ----------
         Message::FindToggled | Message::FindQueryChanged(..) | Message::FindNext | Message::FindPrev
         | Message::FindAllToggled | Message::FindAllGoto(..) | Message::CaseToggled(..) | Message::RegexToggled(..)
+        | Message::WholeWordToggled(..)
         | Message::ReplaceQueryChanged(..) | Message::ReplaceCurrent | Message::ReplaceCurrentRegex | Message::ReplaceAll
         | Message::FindScanDone(..) | Message::GotoToggled | Message::GotoInputChanged(..) | Message::GotoSubmit
         => self.update_find(message),
@@ -1788,6 +1789,10 @@ impl Editpad {
                 }
                 self.schedule_find_scan()
             }
+            Message::WholeWordToggled(value) => {
+                self.whole_word = value;
+                self.schedule_find_scan()
+            }
             Message::ReplaceQueryChanged(query) => {
                 self.replace_query = query;
                 Task::none()
@@ -1912,6 +1917,41 @@ impl Editpad {
                     if tasks.is_empty() {
                         return Task::none();
                     }
+                    return Task::batch(tasks);
+                }
+                // 整词模式（仅字面查询）：rope 流式路径不做词边界判定，
+                // 改走全文两遍法；文档上限与正则分支同口径防冻结
+                if self.whole_word {
+                    const WHOLE_WORD_MAX_CHARS: usize = 4_000_000;
+                    let (text, chars, eol) = {
+                        let ed = self.cur_handle.borrow();
+                        (ed.doc.to_text(), ed.doc.text_len(), ed.doc.line_ending())
+                    };
+                    if chars > WHOLE_WORD_MAX_CHARS {
+                        self.set_status_error(format!(
+                            "文档过大（{chars} 字符），整词替换暂不支持（上限 {WHOLE_WORD_MAX_CHARS}）；可关闭整词后重试"
+                        ));
+                        return Task::none();
+                    }
+                    let query = eol.normalize(&unescape_query(&self.find_query));
+                    let replacement = eol.normalize(&unescape_query(&self.replace_query));
+                    let (new_contents, count) = editpad_core::replace_all_word(
+                        &text,
+                        &query,
+                        &replacement,
+                        self.case_sensitive,
+                    );
+                    let mut tasks: Vec<Task<Message>> = Vec::new();
+                    if count > 0 {
+                        self.cur().borrow_mut().replace_whole_document(
+                            editpad_core::Document::from_str(&new_contents),
+                        );
+                        self.tab_mut().dirty = true;
+                        self.tab_mut().note_mutation();
+                        tasks.push(self.schedule_find_scan());
+                        tasks.push(self.maybe_schedule_autosave());
+                    }
+                    self.set_status(format!("已替换 {count} 处"));
                     return Task::batch(tasks);
                 }
                 // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝

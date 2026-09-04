@@ -168,6 +168,8 @@ enum Message {
     FindNext,
     FindPrev,
     CaseToggled(bool),
+    /// 整词匹配开关（命中前后均非词字符；正则模式下不参与）
+    WholeWordToggled(bool),
     ReplaceQueryChanged(String),
     ReplaceCurrent,
     /// P70：正则模式的「替换当前」（对当前命中做 $1 展开替换）

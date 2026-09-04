@@ -172,6 +172,46 @@ use super::*;
     }
 
     #[test]
+    fn whole_word_replace_all_and_scan_filter() {
+        // 整词模式：全部替换走整词路径（concat 内部的 cat 不动）；
+        // 扫描命中表经 filter_whole_word 过滤词内命中
+        let (mut app, _path) = loaded_real_file_app("whole-word");
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.reset_document(editpad_core::Document::from_str("cat concat cat"));
+        }
+        app.find_visible = true;
+        app.find_query = "cat".to_owned();
+        app.replace_query = "dog".to_owned();
+        dispatch(&mut app, Message::WholeWordToggled(true));
+        assert!(app.whole_word, "开关应置位");
+        // 开关排队的扫描 Task 被 dispatch 丢弃：模拟扫描已完成，
+        // 否则「扫描在途禁全部替换」守卫会拦截下面的 ReplaceAll
+        app.find_scan = None;
+
+        // 全部替换（整词路径）：首尾两个独立 cat 被替换
+        dispatch(&mut app, Message::ReplaceAll);
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "dog concat dog",
+            "concat 内部的 cat 不得被替换"
+        );
+        assert!(
+            app.status.contains("已替换 2 处"),
+            "实际 {:?}",
+            app.status
+        );
+
+        // 扫描过滤语义：替换后唯一剩余的 cat 在 concat 内部，
+        // 整词过滤应将其剔除
+        let doc = app.cur_handle.borrow().doc.clone();
+        let hits = editpad_core::find_all_document(&doc, "cat", true);
+        assert_eq!(hits.len(), 1);
+        let filtered = editpad_core::filter_whole_word(&doc, hits);
+        assert!(filtered.is_empty(), "词内命中应被过滤");
+    }
+
+    #[test]
     fn p70_regex_replace_current_zero_width_expands_not_literal_fallback() {
         // 零宽命中（如 a*/b* 的空匹配）：旧实现 selected_text() 为 None
         // 时静默回落字面 replace_current——拿正则串当字面量匹配。钉死：

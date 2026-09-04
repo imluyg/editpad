@@ -54,6 +54,9 @@ pub(crate) struct Editpad {
     pub(crate) eol_menu: bool,
     /// P70：正则查找模式（查找栏「.*」开关；会话态不持久化）。
     pub(crate) regex_enabled: bool,
+    /// 整词匹配开关（查找栏「整词」；命中前后均非词字符。正则模式
+    /// 下不参与。会话态不持久化，与大小写开关同口径）。
+    pub(crate) whole_word: bool,
     /// P65 双击重命名：标签条上最近一次左键点击的 (页下标, 时刻)。
     /// 同页在 [`TAB_DOUBLE_CLICK_MS`] 窗内再点一次 = 重命名意图。
     /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
@@ -226,6 +229,7 @@ impl Default for Editpad {
             encoding_menu: false,
             eol_menu: false,
             regex_enabled: false,
+            whole_word: false,
             last_tab_click: None,
             hovered_tab: None,
             hotkey_capture: None,

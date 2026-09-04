@@ -36,6 +36,12 @@ pub fn ascii_case_eq(a: char, b: char, case_sensitive: bool) -> bool {
     }
 }
 
+/// 整词判定的词字符：Unicode 字母/数字 + 下划线（`\w` 的宽松近似；
+/// CJK 连续段落同属一个词，与主流编辑器的整词口径一致）。
+pub fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 fn char_eq(a: char, b: char, case_sensitive: bool) -> bool {
     ascii_case_eq(a, b, case_sensitive)
 }
@@ -185,6 +191,32 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
     }
     scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
     out
+}
+
+/// 整词过滤：只保留命中起点前一字符与终点后一字符**均非词字符**的
+/// 命中（行首/文档首与行尾/文档尾视为边界）。
+///
+/// 跨行命中的 `len_chars` 含行界单元，行内边界语义不成立，一律保留；
+/// 正则模式不适用整词（边界语义由正则自身表达），调用方自行判定。
+pub fn filter_whole_word(doc: &Document, hits: Vec<MatchPos>) -> Vec<MatchPos> {
+    hits.into_iter()
+        .filter(|hit| {
+            // 行内容不含行尾换行单元；行内显示列与字符索引一一对应
+            //（行界后行内不再有 \r/\n，显示列与原始列同源）
+            let content: Vec<char> = doc
+                .line_str(hit.line)
+                .chars()
+                .take_while(|&c| c != '\n' && c != '\r')
+                .collect();
+            let end = hit.col + hit.len_chars;
+            if end > content.len() {
+                return true; // 跨行命中：保留
+            }
+            let before_ok = hit.col == 0 || !is_word_char(content[hit.col - 1]);
+            let after_ok = end == content.len() || !is_word_char(content[end]);
+            before_ok && after_ok
+        })
+        .collect()
 }
 
 /// 单行窗口扫描：在 `line` 的字符序列上滑动长度 `q.len()` 的窗口逐一比较。
@@ -503,7 +535,52 @@ pub fn replace_all(
     (out, count)
 }
 
-/// 在 [`Document`](crate::document::Document)（rope）上直接全部替换（P11/P19 协同项）。
+/// 整词全部替换：与 [`replace_all`] 同语义，但命中起点前一字符与终点
+/// 后一字符**均非词字符**才替换（行首/文档首与行尾/文档尾视为边界）。
+/// 仅字面查询适用；正则模式的整词由模式自身表达。
+///
+/// 与流式 [`replace_all_document`] 不同，本函数工作在全文 `&str` 上——
+/// 边界判定需要窥视命中两侧字符，调用方负责文档规模上限（与正则
+/// 替换同款防冻结口径）。
+pub fn replace_all_word(
+    text: &str,
+    query: &str,
+    replacement: &str,
+    case_sensitive: bool,
+) -> (String, usize) {
+    if query.is_empty() {
+        return (text.to_owned(), 0);
+    }
+    let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
+    let mut out = String::with_capacity(text.len());
+    let mut count = 0usize;
+    let mut pos = 0usize; // 已确认写出的原文边界
+    let mut i = 0usize; // 下一个搜索起点
+    while let Some(hit) = find_next(text.as_bytes(), &fq, case_sensitive, i) {
+        // UTF-8 自同步性保证 hit 与 hit+len 均为字符边界（find_next 契约）
+        let before_ok = hit == 0
+            || !text[..hit].chars().next_back().is_some_and(is_word_char);
+        let after_ok = !text[hit + fq.len()..]
+            .chars()
+            .next()
+            .is_some_and(is_word_char);
+        if before_ok && after_ok {
+            out.push_str(&text[pos..hit]);
+            out.push_str(replacement);
+            pos = hit + fq.len();
+            count += 1;
+            i = pos;
+        } else {
+            // 边界失格：只前进一个字符继续扫，保持与 find_all 的
+            // 非重叠命中序列可对拍
+            i = hit + 1;
+        }
+    }
+    out.push_str(&text[pos..]);
+    (out, count)
+}
+
+/// 在 [`Document`]（rope）上直接全部替换（P11/P19 协同项）。
 ///
 /// 与 `replace_all(&doc.to_text(), ..)` 相比省掉整份全文 String 拷贝：
 /// 按存储块零拷贝迭代、流式写入输出串，峰值内存 ≈ 输出文本自身 +
@@ -1337,6 +1414,48 @@ mod tests {
 
         // 非法模式 → Err
         assert!(replace_all_regex(text, "[", "x", true).is_err());
+    }
+
+    #[test]
+    fn filter_whole_word_checks_both_boundaries() {
+        // 词字符包围的命中剔除；行首/行尾/标点边界保留；下划线算词字符
+        let doc = Document::from_str("cat concat scat cat_\ncat");
+        let hits = find_all_document(&doc, "cat", true);
+        assert_eq!(hits.len(), 5);
+        let words = filter_whole_word(&doc, hits);
+        // 独立的 cat：行 0 首位与行 1；cat_ 的 cat 后随下划线（词字符）剔除
+        assert_eq!(
+            words,
+            vec![
+                MatchPos { line: 0, col: 0, len_chars: 3 },
+                MatchPos { line: 1, col: 0, len_chars: 3 },
+            ]
+        );
+        // 行尾命中：后边界 = 行尾，保留
+        let doc = Document::from_str("x cat");
+        assert_eq!(
+            filter_whole_word(&doc, find_all_document(&doc, "cat", true)),
+            vec![MatchPos { line: 0, col: 2, len_chars: 3 }]
+        );
+    }
+
+    #[test]
+    fn replace_all_word_respects_boundaries() {
+        // 词内命中不替换（concat 内部的 cat 前邻 n，非词边界）；
+        // 文首独立词替换
+        let (out, n) = replace_all_word("cat concat scat", "cat", "dog", true);
+        assert_eq!((out.as_str(), n), ("dog concat scat", 1));
+        // 标点/行尾边界保留命中
+        let (out, n) = replace_all_word("(cat), cat", "cat", "dog", true);
+        assert_eq!((out.as_str(), n), ("(dog), dog", 2));
+        // 与 find_all + filter_whole_word 的命中序列对拍（不重叠语义一致）
+        for text in ["aa a aa", "aaa", "aaba", "cat concat cat cat"] {
+            let doc = Document::from_str(text);
+            let hits = filter_whole_word(&doc, find_all_document(&doc, "cat", true));
+            let expected = hits.len();
+            let (_, n) = replace_all_word(text, "cat", "X", true);
+            assert_eq!(n, expected, "text={text:?}");
+        }
     }
 
     #[test]
