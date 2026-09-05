@@ -145,6 +145,16 @@ enum Message {
     ToggleFullscreen,
     /// P126：切换窗口置顶（F9）
     ToggleAlwaysOnTop,
+    /// P129：打开/切换/关闭命令面板（目标模式；同模式再按 = 关闭）
+    PaletteToggled(crate::state::PaletteMode),
+    /// P129：面板查询串变化（重置选中行）
+    PaletteInputChanged(String),
+    /// P129：面板选中行移动（true = 向下）
+    PaletteMove(bool),
+    /// P129：执行面板当前选中项并关闭
+    PaletteExecute,
+    /// P129：鼠标点击面板某行 = 选中并立即执行
+    PalettePick(usize),
 
     /// 复制当前选区到系统剪贴板（Ctrl+C；无选区时无操作）
     CopyRequested,
@@ -545,6 +555,12 @@ fn is_double_click(
 /// 操作在下一帧视图含输入框后生效），用户可直接键入覆盖预填旧名。
 pub(crate) fn rename_input_id() -> iced::widget::Id {
     iced::widget::Id::new("editpad-tab-rename")
+}
+
+/// P129：命令面板查询输入框的固定 id——打开时经 operation::focus
+/// 自动聚焦（P64 重命名输入框同款手法）。
+pub(crate) fn palette_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("editpad-palette-input")
 }
 
 /// 取外部修改比对戳 (mtime, size)：元数据或 mtime 不可得（文件已被删/

@@ -1681,6 +1681,10 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if self.settings_visible {
             layered = layered.push(self.settings_overlay());
         }
+        // P129：命令面板/快速标签切换浮层（顶部居中卡片）
+        if self.palette_visible {
+            layered = layered.push(self.palette_overlay());
+        }
         // P67：状态栏编码/行尾弹出菜单（互斥，update 层保证）
         if self.encoding_menu {
             layered = layered.push(self.encoding_menu_overlay());
@@ -1966,6 +1970,145 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
     /// 查找后台扫描的全量命中表，重扫刷新自动跟随。渲染行数封顶
     /// [`FIND_ALL_MAX_ROWS`]：chrome 行按钮无虚拟化，10 万级命中全量
     /// 渲染会拖垮帧率，超出部分明示截断提示。
+    // ---------- P129：命令面板 / 快速标签切换 ----------
+
+    /// 面板全部条目（未过滤）：命令模式 = 注册表全量；标签模式 = 当前
+    /// 会话全部页。title 参与模糊匹配，detail 仅展示。
+    pub(crate) fn palette_all_entries(&self) -> Vec<crate::view::PaletteEntry> {
+        match self.palette_mode {
+            crate::state::PaletteMode::Commands => palette_commands()
+                .into_iter()
+                .map(|c| PaletteEntry {
+                    command_id: Some(c.id),
+                    tab_index: None,
+                    title: c.title.to_owned(),
+                    detail: c.detail,
+                })
+                .collect(),
+            crate::state::PaletteMode::Tabs => self
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| PaletteEntry {
+                    command_id: None,
+                    tab_index: Some(i),
+                    title: t.display_name(),
+                    detail: t
+                        .path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "（未保存）".to_owned()),
+                })
+                .collect(),
+        }
+    }
+
+    /// 面板过滤条目（fuzzy_filter 稳定降序）。查询串对 title 与 detail
+    /// 拼接匹配——命令可用 id 片段检索（如 readonly），标签可用路径检索。
+    pub(crate) fn palette_filtered(&self) -> Vec<PaletteEntry> {
+        let pairs: Vec<(PaletteEntry, String)> = self
+            .palette_all_entries()
+            .into_iter()
+            .map(|e| {
+                let hay = format!("{} {}", e.title, e.detail);
+                (e, hay)
+            })
+            .collect();
+        fuzzy_filter(&pairs, &self.palette_input)
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect()
+    }
+
+    /// 执行当前选中条目并关闭面板。命令经 dispatch_action 复用既有
+    /// 映射（空修饰键——Shift 选区透传不适用面板执行）；标签模式直接
+    /// SwitchTab；列表为空时 no-op（面板保持打开）。
+    pub(crate) fn palette_execute(&mut self) -> Task<Message> {
+        let entries = self.palette_filtered();
+        if entries.is_empty() {
+            return Task::none();
+        }
+        let idx = self.palette_idx.min(entries.len() - 1);
+        let entry = &entries[idx];
+        let msg = match (entry.command_id, entry.tab_index) {
+            (Some(id), _) => dispatch_action(id, keyboard::Modifiers::empty()),
+            (_, Some(i)) => Some(Message::SwitchTab(i)),
+            _ => None,
+        };
+        self.palette_visible = false;
+        match msg {
+            Some(m) => self.update(m),
+            None => Task::none(),
+        }
+    }
+
+    /// 面板浮层：顶部居中卡片 = 查询输入框 + 过滤结果（选中行 ▶ 标记，
+    /// 滑动窗口最多 12 行保证选中可见）。opaque 背板点击即收起，
+    /// 卡片自身 opaque 防穿透（右键菜单同款双层）。
+    fn palette_overlay(&self) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let entries = self.palette_filtered();
+        let total = entries.len();
+        let sel = self.palette_idx.min(total.saturating_sub(1));
+        let win_start = sel.saturating_sub(11);
+        let mut rows = column![].spacing(0).width(Fill);
+        if total == 0 {
+            rows = rows.push(
+                text("无匹配命令或标签").size(uipx).font(uifont).width(Fill),
+            );
+        }
+        for (i, e) in entries.iter().enumerate().skip(win_start).take(12) {
+            let marker = if i == sel { "▶ " } else { "　 " };
+            let detail: String = if e.detail.chars().count() > 48 {
+                let t: String = e.detail.chars().take(47).collect();
+                format!("{t}…")
+            } else {
+                e.detail.clone()
+            };
+            rows = rows.push(
+                button(
+                    text(format!("{marker}{}　{}", e.title, detail))
+                        .size(uipx)
+                        .font(uifont)
+                        .width(Fill),
+                )
+                .width(Fill)
+                .padding([3, 10])
+                .style(chrome_menu_item_style)
+                .on_press(Message::PalettePick(i)),
+            );
+        }
+        let card = opaque(container(
+            column![
+                text_input("输入命令或标签名…", &self.palette_input)
+                    .id(palette_input_id())
+                    .size(uipx)
+                    .font(uifont)
+                    .on_input(Message::PaletteInputChanged)
+                    .on_submit(Message::PaletteExecute)
+                    .padding([4, 8]),
+                rule::horizontal(1),
+                scrollable(rows).height(360.0),
+            ]
+            .spacing(4)
+            .padding(6)
+            .width(Fill)
+        )
+        .width(560)
+        .style(popup_card_style));
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding { top: 64.0, right: 0.0, bottom: 0.0, left: 0.0 }),
+        )
+        .on_press(Message::PaletteToggled(self.palette_mode))
+            .into()
+    }
+
     fn find_all_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
         let total = self.matches.len();
         let scanning = self.find_scanning();
@@ -2168,4 +2311,14 @@ pub(crate) fn match_excerpt(line_text: &str, col: usize, max_cols: usize) -> Str
         out.push('…');
     }
     out
+}
+
+/// P129：命令面板条目——命令模式带 command_id（经 dispatch_action
+/// 执行），标签模式带 tab_index（SwitchTab 执行）。
+#[derive(Clone)]
+pub(crate) struct PaletteEntry {
+    pub(crate) command_id: Option<&'static str>,
+    pub(crate) tab_index: Option<usize>,
+    pub(crate) title: String,
+    pub(crate) detail: String,
 }

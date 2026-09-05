@@ -444,7 +444,12 @@ impl Editpad {
             | Message::ToggleAlwaysOnTop
             | Message::WindowMoved(..) => self.update_session(message),
             // ---------- 查找/替换/跳转/查找全部 ----------
-            Message::FindToggled
+            Message::PaletteToggled(_)
+            | Message::PaletteInputChanged(_)
+            | Message::PaletteMove(_)
+            | Message::PaletteExecute
+            | Message::PalettePick(_)
+            | Message::FindToggled
             | Message::FindQueryChanged(..)
             | Message::FindNext
             | Message::FindPrev
@@ -594,6 +599,26 @@ impl Editpad {
                         return Task::done(Message::HotkeyCaptureKey(combo));
                     }
                     return Task::none();
+                }
+                // P129：面板可见时拦截导航/执行/关闭。输入框捕获的字符
+                // 键不会到达本层（订阅只转发 Ignored 事件）——打字不串。
+                if self.palette_visible {
+                    match (&key, modifiers) {
+                        (keyboard::Key::Named(Named::ArrowUp), _) => {
+                            return Task::done(Message::PaletteMove(false))
+                        }
+                        (keyboard::Key::Named(Named::ArrowDown), _) => {
+                            return Task::done(Message::PaletteMove(true))
+                        }
+                        (keyboard::Key::Named(Named::Enter), _) => {
+                            return Task::done(Message::PaletteExecute)
+                        }
+                        (keyboard::Key::Named(Named::Escape), _) => {
+                            self.palette_visible = false;
+                            return Task::none();
+                        }
+                        _ => {}
+                    }
                 }
                 // 第 67 轮 ⑮：列块选区时 Esc 先清块并消费按键
                 // （不与热键捕获/状态栏菜单的 Esc 语义叠加）。同步清除 +
@@ -2248,6 +2273,43 @@ impl Editpad {
             Message::GotoInputChanged(value) => {
                 self.goto_input = value;
                 Task::none()
+            }
+            // ---------- P129：命令面板 / 快速标签切换 ----------
+            Message::PaletteToggled(mode) => {
+                if self.palette_visible && self.palette_mode == mode {
+                    self.palette_visible = false; // 同模式再按 = 关闭
+                } else {
+                    self.palette_visible = true;
+                    self.palette_mode = mode;
+                    self.palette_input.clear(); // 模式各用各的查询语境
+                    self.palette_idx = 0;
+                }
+                if self.palette_visible {
+                    iced::widget::operation::focus(crate::palette_input_id())
+                } else {
+                    Task::none()
+                }
+            }
+            Message::PaletteInputChanged(value) => {
+                self.palette_input = value;
+                self.palette_idx = 0;
+                Task::none()
+            }
+            Message::PaletteMove(down) => {
+                let n = self.palette_filtered().len();
+                if n > 0 {
+                    self.palette_idx = if down {
+                        (self.palette_idx + 1).min(n - 1)
+                    } else {
+                        self.palette_idx.saturating_sub(1)
+                    };
+                }
+                Task::none()
+            }
+            Message::PaletteExecute => self.palette_execute(),
+            Message::PalettePick(i) => {
+                self.palette_idx = i;
+                self.palette_execute()
             }
             Message::GotoSubmit => match self.goto_input.trim().parse::<usize>() {
                 Ok(n) if n >= 1 => {

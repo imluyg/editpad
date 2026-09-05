@@ -132,6 +132,14 @@ pub(crate) struct Editpad {
     pub(crate) fullscreen: bool,
     /// P126：置顶态（F9）。
     pub(crate) always_on_top: bool,
+    /// P129：命令面板/快速标签切换浮层可见性
+    pub(crate) palette_visible: bool,
+    /// P129：面板模式（命令 = 全部注册表动作；标签 = 当前会话页间跳转）
+    pub(crate) palette_mode: PaletteMode,
+    /// P129：面板查询串（跨开合保留，主流编辑器同口径）
+    pub(crate) palette_input: String,
+    /// P129：当前选中行（过滤后列表下标）
+    pub(crate) palette_idx: usize,
 
     // ---------- 打开确认 ----------
     /// dirty 时暂存待打开的路径；Some 即打开确认条可见
@@ -264,6 +272,10 @@ impl Default for Editpad {
             pending_close: false,
             main_window: None,
             fullscreen: false,
+            palette_visible: false,
+            palette_mode: PaletteMode::Commands,
+            palette_input: String::new(),
+            palette_idx: 0,
             always_on_top: false,
             open_confirm: None,
             close_tab_confirm: None,
@@ -312,4 +324,14 @@ impl Editpad {
         self.status = text.into();
         self.status_is_error = true;
     }
+}
+
+
+/// P129：命令面板模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteMode {
+    /// 全部注册表命令（Ctrl+Shift+P）
+    Commands,
+    /// 当前会话标签页间跳转（Ctrl+P）
+    Tabs,
 }

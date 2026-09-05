@@ -29,10 +29,11 @@ fn altgr_character_falls_through_to_text_insert() {
         Some(Message::OpenRequested)
     ));
 
-    // Ctrl+未绑定字母仍返回 None（不插入；注意 x 已是 P4 剪切键、
-    // q 已是第 64 轮行注释键、v 是粘贴——探针用至今无主的 e）
-    let e = keyboard::Key::Character("e".into());
-    assert!(handle_key_defaults(e, ctrl).is_none());
+    // Ctrl+不可组合字符仍返回 None（不插入）。P129 后 26 个字母与数字
+    // 全部入注册表（e 已是命令面板），探针改用组合键白名单外的字符——
+    // combo_string 返回 None → 按键放行
+    let dash = keyboard::Key::Character("-".into());
+    assert!(handle_key_defaults(dash, ctrl).is_none());
 
     // Shift+字符（无 Ctrl）照常插入
     let bang = keyboard::Key::Character("!".into());
@@ -1328,4 +1329,65 @@ fn enter_and_tab_map_to_smart_indent_ops() {
         assert!(!crate::update::edit_op_mutates(&EditOp::CopyBookmarkedLines));
         assert!(!crate::update::edit_op_mutates(&EditOp::JumpToMatchingBracket));
         assert!(!crate::update::edit_op_mutates(&EditOp::CancelBlock));
+    }
+
+    #[test]
+    fn fuzzy_score_ranks_subsequence_and_rejects_missing() {
+        // 子序列命中、连续串加分、词首加分、完全不匹配拒绝
+        assert!(crate::fuzzy_score("切换只读锁定（Ctrl+R 解除）", "只读").is_some());
+        assert!(crate::fuzzy_score("切换只读锁定", "read").is_none(), "中文标题不命中英文");
+        let direct = crate::fuzzy_score("command_palette", "cpal");
+        assert!(direct.is_some());
+        // 连续命中得分高于离散命中（同为子序列）
+        let consecutive = crate::fuzzy_score("abcdef", "abc").unwrap();
+        let discrete = crate::fuzzy_score("aXbXc", "abc").unwrap();
+        assert!(consecutive > discrete);
+        // 空查询全过
+        assert_eq!(crate::fuzzy_score("任意", ""), Some(0));
+    }
+
+    #[test]
+    fn palette_open_filter_execute_and_tabs_mode() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("base"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        // 命令模式：打开即列出全部注册表动作，聚焦自动请求
+        dispatch(&mut app, Message::PaletteToggled(crate::state::PaletteMode::Commands));
+        assert!(app.palette_visible);
+        let all = app.palette_filtered().len();
+        assert!(all > 60, "注册表全量命令应入面板，实际 {all}");
+        // 过滤：只读命令可被中文检索
+        dispatch(&mut app, Message::PaletteInputChanged("只读".into()));
+        let filtered = app.palette_filtered();
+        assert!(!filtered.is_empty(), "中文模糊检索应命中只读命令");
+        assert!(filtered.iter().all(|e| e.command_id.is_some()));
+        // 执行选中命令（首个含「只读」的应为 toggle_read_only）
+        dispatch(&mut app, Message::PaletteExecute);
+        assert!(!app.palette_visible, "执行后面板关闭");
+        assert!(
+            app.cur_handle.borrow().read_only,
+            "「只读」首条应执行 toggle_read_only"
+        );
+        // 标签模式：列出当前会话页并执行 SwitchTab
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::PaletteToggled(crate::state::PaletteMode::Tabs));
+        assert_eq!(app.palette_mode, crate::state::PaletteMode::Tabs);
+        assert_eq!(app.palette_filtered().len(), 2, "两个标签页全部列出");
+        dispatch(&mut app, Message::PaletteInputChanged("a.txt".into()));
+        assert_eq!(app.palette_filtered().len(), 1, "按文件名过滤");
+        dispatch(&mut app, Message::PaletteExecute);
+        assert!(!app.palette_visible);
+        // 选中第 0 页（a.txt 是唯一过滤结果）
+        assert_eq!(app.tabs.len(), 2);
     }

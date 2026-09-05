@@ -401,6 +401,19 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["F7"],
         desc: "计算 SHA-256 替换选区",
     },
+    // P129：命令面板 / 快速标签切换。Ctrl+Shift+P（主流编辑器同款）已被
+    // spaces_to_tabs_leading 占用、26 个 Ctrl+Shift 字母全部用尽，命令
+    // 面板取空闲的 Ctrl+E；Ctrl+P 为 同类编辑器/浏览器通用快速切换键位。
+    HotkeyAction {
+        id: "command_palette",
+        default_combos: &["Ctrl+E"],
+        desc: "命令面板（模糊搜全部命令）",
+    },
+    HotkeyAction {
+        id: "quick_switch_tab",
+        default_combos: &["Ctrl+P"],
+        desc: "快速切换标签页（模糊跳转）",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -632,6 +645,9 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "tool_url_decode" => edit(EditOp::ApplyTool(ToolKind::ToolUrlDecode)),
         "tool_md5" => edit(EditOp::ApplyTool(ToolKind::ToolMd5)),
         "tool_sha256" => edit(EditOp::ApplyTool(ToolKind::ToolSha256)),
+        // P129：命令面板 / 快速标签切换
+        "command_palette" => Some(Message::PaletteToggled(crate::state::PaletteMode::Commands)),
+        "quick_switch_tab" => Some(Message::PaletteToggled(crate::state::PaletteMode::Tabs)),
         _ => None,
     }
 }
@@ -705,4 +721,73 @@ pub(crate) fn handle_key(
 
         _ => None,
     }
+}
+
+
+// ---------- P129：命令面板数据源与模糊匹配 ----------
+
+/// 面板条目：动作 id + 展示标题（desc）+ 次行细节（默认键位）。
+pub(crate) struct PaletteCommand {
+    pub(crate) id: &'static str,
+    pub(crate) title: &'static str,
+    pub(crate) detail: String,
+}
+
+/// 命令面板数据源 = 热键注册表全量（id/desc/默认键位），执行经
+/// dispatch_action 复用既有映射——注册表加动作即自动入面板，零双维护。
+pub(crate) fn palette_commands() -> Vec<PaletteCommand> {
+    HOTKEY_ACTIONS
+        .iter()
+        .map(|a| PaletteCommand {
+            id: a.id,
+            title: a.desc,
+            detail: default_combo_of(a.id).unwrap_or("—").to_owned(),
+        })
+        .collect()
+}
+
+/// 模糊匹配：大小写不敏感的贪心子序列匹配。
+///
+/// 计分：命中 +1、与上次命中相邻 +7（连续串）、词首（行首或前一字符
+/// 非字母数字）+5、 haystack 相对长度惩罚（每 8 字符 -1，封顶 -10）。
+/// needle 为空 = 全部入选、得分 0（保持注册表原序）。匹配不进只取
+/// 子序列首见位置，不做最优对齐——命令面板场景足够且 O(n)。
+pub(crate) fn fuzzy_score(haystack: &str, needle: &str) -> Option<i32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let h: Vec<char> = haystack.to_lowercase().chars().collect();
+    let n: Vec<char> = needle.to_lowercase().chars().collect();
+    let mut score = 0i32;
+    let mut hi = 0usize;
+    let mut last_hit: Option<usize> = None;
+    for nc in &n {
+        while hi < h.len() && h[hi] != *nc {
+            hi += 1;
+        }
+        if hi >= h.len() {
+            return None;
+        }
+        score += 1;
+        if last_hit == Some(hi.wrapping_sub(1)) {
+            score += 7;
+        }
+        if hi == 0 || !h[hi - 1].is_alphanumeric() {
+            score += 5;
+        }
+        last_hit = Some(hi);
+        hi += 1;
+    }
+    score -= (((h.len() - n.len()) / 8) as i32).min(10);
+    Some(score)
+}
+
+/// 通用过滤：按 fuzzy_score 过滤并稳定降序排序（同分保持原序）。
+pub(crate) fn fuzzy_filter<T: Clone>(items: &[(T, String)], input: &str) -> Vec<(T, i32)> {
+    let mut scored: Vec<(T, i32)> = items
+        .iter()
+        .filter_map(|(item, title)| fuzzy_score(title, input).map(|sc| (item.clone(), sc)))
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored
 }
