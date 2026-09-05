@@ -370,6 +370,37 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["F9"],
         desc: "切换窗口置顶",
     },
+    // P128：选区文本工具（数字带 6~0 续编；SHA-256 取空闲 F7）
+    HotkeyAction {
+        id: "tool_base64_encode",
+        default_combos: &["Ctrl+6"],
+        desc: "Base64 编码（选区）",
+    },
+    HotkeyAction {
+        id: "tool_base64_decode",
+        default_combos: &["Ctrl+7"],
+        desc: "Base64 解码（选区）",
+    },
+    HotkeyAction {
+        id: "tool_url_encode",
+        default_combos: &["Ctrl+8"],
+        desc: "URL 编码（选区）",
+    },
+    HotkeyAction {
+        id: "tool_url_decode",
+        default_combos: &["Ctrl+9"],
+        desc: "URL 解码（选区）",
+    },
+    HotkeyAction {
+        id: "tool_md5",
+        default_combos: &["Ctrl+0"],
+        desc: "计算 MD5 替换选区",
+    },
+    HotkeyAction {
+        id: "tool_sha256",
+        default_combos: &["F7"],
+        desc: "计算 SHA-256 替换选区",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -594,6 +625,13 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "open_containing_folder" => Some(Message::OpenContainingFolder),
         "toggle_fullscreen" => Some(Message::ToggleFullscreen),
         "toggle_always_on_top" => Some(Message::ToggleAlwaysOnTop),
+        // P128：选区文本工具
+        "tool_base64_encode" => edit(EditOp::ApplyTool(ToolKind::ToolBase64Encode)),
+        "tool_base64_decode" => edit(EditOp::ApplyTool(ToolKind::ToolBase64Decode)),
+        "tool_url_encode" => edit(EditOp::ApplyTool(ToolKind::ToolUrlEncode)),
+        "tool_url_decode" => edit(EditOp::ApplyTool(ToolKind::ToolUrlDecode)),
+        "tool_md5" => edit(EditOp::ApplyTool(ToolKind::ToolMd5)),
+        "tool_sha256" => edit(EditOp::ApplyTool(ToolKind::ToolSha256)),
         _ => None,
     }
 }

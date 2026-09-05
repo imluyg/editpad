@@ -208,6 +208,27 @@ pub enum EditOp {
     SortLinesLength(SortOrder),
     /// 去连续重复行：每段连续重复只保留首次出现
     RemoveConsecutiveDuplicateLines,
+    // ---------- P128：选区文本工具 ----------
+    /// 应用选区文本工具（Base64/URL 编解码、MD5/SHA-256；语义见
+    /// [`ToolKind`]，错误与幂等口径在 `EditorCore::apply_tool`）
+    ApplyTool(ToolKind),
+}
+
+/// P128：选区文本工具种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolKind {
+    /// Base64 编码（选区）
+    ToolBase64Encode,
+    /// Base64 解码（选区；解码失败由 apply_tool 报 Err）
+    ToolBase64Decode,
+    /// URL 百分号编码（选区，RFC 3986 strict）
+    ToolUrlEncode,
+    /// URL 解码（选区；`+`→空格）
+    ToolUrlDecode,
+    /// MD5 摘要替换选区（小写十六进制）
+    ToolMd5,
+    /// SHA-256 摘要替换选区（小写十六进制）
+    ToolSha256,
 }
 
 /// 大小写转换方向（第 58 轮；P124 增补词首大写）。

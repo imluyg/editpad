@@ -28,7 +28,7 @@ pub(crate) use iced::widget::{button, checkbox, container, mouse_area, opaque, p
 pub(crate) use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
     Font, Padding, Point, Shadow, Subscription, Task, Theme};
 
-use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSpaceKind, TrimMode};
+use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSpaceKind, ToolKind, TrimMode};
 
 fn main() -> iced::Result {
     // P103：命令行参数 = 待打开文件。资源管理器「双击文件」/右键

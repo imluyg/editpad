@@ -194,6 +194,59 @@ impl EditorCore {
         self.anchor = Some(CursorPos { line, col });
         self.delete_selection()
     }
+    /// P128 选区文本工具：Base64/URL 编解码与 MD5/SHA-256 摘要。
+    ///
+    /// - 仅作用于非空选区（无选区 → Err 提示）；
+    /// - 摘要输出小写十六进制并替换选区；解码失败 → Err 不动文档；
+    /// - 结果与原文相同时幂等 no-op（Ok(false) 不产快照）；
+    /// - 转换后选区保持覆盖新文本（与 convert_case 同款偏移重建）。
+    pub fn apply_tool(&mut self, kind: ToolKind) -> Result<bool, String> {
+        let (start, end) = match self.selection_offsets() {
+            Some((s, e)) if s < e => (s, e),
+            _ => return Err("请先选中要处理的文本".to_owned()),
+        };
+        let src = self.doc.slice_text(start, end);
+        let out = match kind {
+            ToolKind::ToolBase64Encode => {
+                editpad_core::toolkit::base64_encode(src.as_bytes())
+            }
+            ToolKind::ToolBase64Decode => {
+                let bytes = editpad_core::toolkit::base64_decode(&src).ok_or_else(|| {
+                    "Base64 解码失败：选区不是有效的 Base64 文本".to_owned()
+                })?;
+                String::from_utf8(bytes)
+                    .map_err(|_| "Base64 解码结果不是有效的 UTF-8 文本".to_owned())?
+            }
+            ToolKind::ToolUrlEncode => editpad_core::toolkit::url_encode(&src),
+            ToolKind::ToolUrlDecode => editpad_core::toolkit::url_decode(&src)
+                .ok_or_else(|| "URL 解码失败：选区含有无效的百分号转义".to_owned())?,
+            ToolKind::ToolMd5 => editpad_core::toolkit::md5_hex(src.as_bytes()),
+            ToolKind::ToolSha256 => editpad_core::toolkit::sha256_hex(src.as_bytes()),
+        };
+        if out == src {
+            return Ok(false); // 幂等 no-op
+        }
+        let had_selection = self.anchor.is_some();
+        self.snapshot();
+        self.doc.remove_range(start, end);
+        self.doc.insert(start, &out);
+        self.invalidate_highlight_from(start);
+        // 摘要/编码可能大幅改变长度——列高水位交惰性收敛（P45 口径）
+        self.max_cols_stale = true;
+        if had_selection {
+            let end_off = start + out.chars().count();
+            let sl = self.doc.char_to_line(start);
+            let sc = start - self.doc.line_to_char(sl);
+            let el = self.doc.char_to_line(end_off.min(self.doc.text_len()));
+            let ec = end_off.min(self.doc.text_len()) - self.doc.line_to_char(el);
+            self.anchor = Some(CursorPos { line: sl, col: sc });
+            self.cursor = CursorPos { line: el, col: ec };
+        } else {
+            self.anchor = None;
+        }
+        self.ensure_visible();
+        Ok(true)
+    }
 
     /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
     pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {

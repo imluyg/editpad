@@ -3,6 +3,7 @@
 //! 零 GUI 依赖——文档模型、编码加载、搜索、设置持久化都在这里，
 //! 方便单独测试，将来做终端版时也能直接复用。
 
+pub mod toolkit;
 pub mod brackets;
 pub mod document;
 pub mod error;

@@ -406,6 +406,36 @@ fn current_line_copy_text_includes_line_ending() {
     }
 
     #[test]
+    fn apply_tool_transforms_selection_and_reselects() {
+        let mut c = core_with("foo bar");
+        c.select_span(0, 4, 3); // 选中 "bar"
+        assert!(c.apply_tool(ToolKind::ToolBase64Encode).unwrap());
+        assert_eq!(c.doc.to_text(), "foo YmFy");
+        assert_eq!(c.selected_text().as_deref(), Some("YmFy"), "选区保持覆盖新文本");
+        // 解码往返
+        assert!(c.apply_tool(ToolKind::ToolBase64Decode).unwrap());
+        assert_eq!(c.doc.to_text(), "foo bar");
+        // 无选区 → Err
+        c.anchor = None;
+        c.cursor = CursorPos { line: 0, col: 7 };
+        assert!(c.apply_tool(ToolKind::ToolMd5).is_err());
+        // 无效 Base64 → Err 不动文档
+        c.select_span(0, 0, 1);
+        assert!(c.apply_tool(ToolKind::ToolBase64Decode).is_err());
+        assert_eq!(c.doc.to_text(), "foo bar");
+    }
+
+    #[test]
+    fn apply_tool_hash_replaces_selection_with_hex() {
+        let mut c = core_with("abc");
+        c.select_span(0, 0, 3);
+        assert!(c.apply_tool(ToolKind::ToolSha256).unwrap());
+        assert_eq!(
+            c.doc.to_text(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+    #[test]
     fn overwrite_resets_on_document_change() {
         let mut c = core_with("a");
         c.overwrite = true;

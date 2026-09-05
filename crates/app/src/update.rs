@@ -2438,6 +2438,14 @@ impl Editpad {
                 hint = Some(format!("已插入 {stamp}"));
                 true
             }
+            // ---------- P128：选区文本工具（无选区/解码失败给状态栏提示） ----------
+            E::ApplyTool(kind) => match editor.apply_tool(kind) {
+                Ok(changed) => changed,
+                Err(msg) => {
+                    hint = Some(msg);
+                    false
+                }
+            },
         };
         drop(editor);
 
