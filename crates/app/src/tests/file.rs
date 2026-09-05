@@ -970,3 +970,46 @@ use super::*;
         assert!(app.busy, "下一个文件已开始加载（失败不中断排队链）");
     }
 
+
+    // ---------- P126：.LOG 首行自动时间戳 ----------
+
+    #[test]
+    fn log_file_open_appends_timestamp_at_end() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/log/app.LOG")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(".LOG\nentry"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        let text = app.cur_handle.borrow().doc.to_text();
+        assert!(text.starts_with(".LOG\nentry\n"), "无行尾先补一行");
+        assert!(text.len() > ".LOG\nentry\n".len(), "时间戳已追加");
+        assert!(app.tab().dirty, "追加是普通编辑：置脏（默认不自动写盘）");
+    }
+
+    #[test]
+    fn non_log_file_open_is_untouched() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/note.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("hello"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "hello", "非 .LOG 不追加");
+    }

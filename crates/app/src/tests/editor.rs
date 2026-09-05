@@ -1278,3 +1278,54 @@ fn enter_and_tab_map_to_smart_indent_ops() {
         dispatch(&mut app, Message::ToggleOverwrite);
         assert!(!app.cur_handle.borrow().overwrite);
     }
+
+    #[test]
+    fn read_only_lock_blocks_edits_but_allows_navigation() {
+        // P126：只读总闸——输入/撤销拒收且不置脏，导航/书签照常
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("abc"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::ToggleReadOnly);
+        assert!(app.cur_handle.borrow().read_only);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abc", "只读拒收输入");
+        assert!(!app.tab().dirty, "被拒动作不得置脏");
+        dispatch(&mut app, Message::Edit(EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abc", "只读拒收撤销");
+        // 纯导航照常
+        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::End, false)));
+        assert_eq!(app.cur_handle.borrow().cursor.col, 3);
+        // 解除后恢复编辑
+        dispatch(&mut app, Message::ToggleReadOnly);
+        assert!(!app.cur_handle.borrow().read_only);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcX");
+    }
+
+    #[test]
+    fn edit_op_mutates_classification_is_failsafe() {
+        // P126：白名单外默认按可变拒绝（fail-safe）——新变体忘登记时
+        // 只读误伤导航会被本测试的显式断言暴露
+        assert!(crate::update::edit_op_mutates(&EditOp::InsertText("a".into())));
+        assert!(crate::update::edit_op_mutates(&EditOp::Undo));
+        assert!(crate::update::edit_op_mutates(&EditOp::Redo));
+        assert!(crate::update::edit_op_mutates(&EditOp::Enter));
+        assert!(crate::update::edit_op_mutates(&EditOp::DeleteWordLeft));
+        assert!(!crate::update::edit_op_mutates(&EditOp::Motion(Motion::Left, false)));
+        assert!(!crate::update::edit_op_mutates(&EditOp::SelectAll));
+        assert!(!crate::update::edit_op_mutates(&EditOp::ToggleBookmark));
+        assert!(!crate::update::edit_op_mutates(&EditOp::CopyBookmarkedLines));
+        assert!(!crate::update::edit_op_mutates(&EditOp::JumpToMatchingBracket));
+        assert!(!crate::update::edit_op_mutates(&EditOp::CancelBlock));
+    }

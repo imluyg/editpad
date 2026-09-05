@@ -137,6 +137,14 @@ enum Message {
 
     /// P125：Insert 切换覆写/插入模式（每页独立，不入注册表）
     ToggleOverwrite,
+    /// P126：切换当前页只读锁定（Ctrl+R）
+    ToggleReadOnly,
+    /// P126：资源管理器定位当前文件所在文件夹（Ctrl+Shift+V）
+    OpenContainingFolder,
+    /// P126：切换全屏（F11；全屏期间窗口几何不记忆）
+    ToggleFullscreen,
+    /// P126：切换窗口置顶（F9）
+    ToggleAlwaysOnTop,
 
     /// 复制当前选区到系统剪贴板（Ctrl+C；无选区时无操作）
     CopyRequested,

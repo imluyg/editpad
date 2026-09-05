@@ -348,6 +348,28 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+5"],
         desc: "词首大写（选区/全文；数字带 = 扩展转换助记）",
     },
+    // P126：文档与窗口（Ctrl+R 只读锁定；Ctrl+Shift+V 资源管理器定位；
+    // F11 全屏与主流一致；F9 置顶，均空闲可重映射）
+    HotkeyAction {
+        id: "toggle_read_only",
+        default_combos: &["Ctrl+R"],
+        desc: "切换只读锁定（编辑与撤销拒收）",
+    },
+    HotkeyAction {
+        id: "open_containing_folder",
+        default_combos: &["Ctrl+Shift+V"],
+        desc: "打开所在文件夹（资源管理器定位当前文件）",
+    },
+    HotkeyAction {
+        id: "toggle_fullscreen",
+        default_combos: &["F11"],
+        desc: "切换全屏（全屏期间不记忆窗口几何）",
+    },
+    HotkeyAction {
+        id: "toggle_always_on_top",
+        default_combos: &["F9"],
+        desc: "切换窗口置顶",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -567,6 +589,11 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "sort_lines_length_desc" => edit(EditOp::SortLinesLength(SortOrder::Descending)),
         "dedupe_consecutive_lines" => edit(EditOp::RemoveConsecutiveDuplicateLines),
         "to_titlecase" => edit(EditOp::ConvertCase(CaseKind::Title)),
+        // P126：只读 / 所在文件夹 / 全屏 / 置顶
+        "toggle_read_only" => Some(Message::ToggleReadOnly),
+        "open_containing_folder" => Some(Message::OpenContainingFolder),
+        "toggle_fullscreen" => Some(Message::ToggleFullscreen),
+        "toggle_always_on_top" => Some(Message::ToggleAlwaysOnTop),
         _ => None,
     }
 }

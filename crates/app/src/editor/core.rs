@@ -451,6 +451,11 @@ pub struct EditorCore {
     /// 字符）替换光标处字符而非插入，行尾/换行/粘贴/IME 上屏照常插入。
     /// 每页独立状态、不持久化、不入快照；换文档复位为插入。
     pub(crate) overwrite: bool,
+    /// 只读锁定（P126）：Ctrl+R 切换；一切改内容动作在 apply_edit 总闸
+    /// 拒收（判定清单 edit_op_mutates，未识别变体 fail-safe 默认拒绝），
+    /// 光标导航/书签标注照常。每页独立、不持久化，跨重载保持（用户
+    /// 显式设定，静默重载不得擅改）。
+    pub(crate) read_only: bool,
 }
 
 /// 光标闪烁半周期。
@@ -528,6 +533,7 @@ impl Default for EditorCore {
             goal_px: None,
             wrap_sb_reserve: false,
             overwrite: false,
+            read_only: false,
         }
     }
 }

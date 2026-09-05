@@ -127,6 +127,11 @@ pub(crate) struct Editpad {
     pub(crate) pending_close: bool,
     /// 主窗口 id。iced 0.14 没有 Id::MAIN 之类的常量，只能从 close_requests 订阅捕获
     pub(crate) main_window: Option<window::Id>,
+    /// P126：全屏态（F11）。全屏期间窗口几何不记忆（尺寸是全屏值，
+    /// 退出后按它恢复会错）。
+    pub(crate) fullscreen: bool,
+    /// P126：置顶态（F9）。
+    pub(crate) always_on_top: bool,
 
     // ---------- 打开确认 ----------
     /// dirty 时暂存待打开的路径；Some 即打开确认条可见
@@ -258,6 +263,8 @@ impl Default for Editpad {
             confirm_visible: false,
             pending_close: false,
             main_window: None,
+            fullscreen: false,
+            always_on_top: false,
             open_confirm: None,
             close_tab_confirm: None,
             tab_context_menu: None,

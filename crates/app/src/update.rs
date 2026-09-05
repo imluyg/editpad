@@ -332,6 +332,7 @@ impl Editpad {
             // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
             Message::Edit(..)
             | Message::ToggleOverwrite
+            | Message::ToggleReadOnly
             | Message::EditorNavChanged
             | Message::CopyRequested
             | Message::CutRequested
@@ -347,7 +348,8 @@ impl Editpad {
             | Message::CursorMoved(..)
             | Message::ViewportResized(..) => self.update_editor(message),
             // ---------- 标签页/右键菜单/批关 ----------
-            Message::CopyFilePath(..)
+            Message::OpenContainingFolder
+            | Message::CopyFilePath(..)
             | Message::CopyFileName(..)
             | Message::ReopenLastClosedFile
             | Message::NewTab
@@ -438,6 +440,8 @@ impl Editpad {
             | Message::SessionRecoverDiscarded
             | Message::SnapshotHeartbeatTick
             | Message::HeartbeatDone(..)
+            | Message::ToggleFullscreen
+            | Message::ToggleAlwaysOnTop
             | Message::WindowMoved(..) => self.update_session(message),
             // ---------- 查找/替换/跳转/查找全部 ----------
             Message::FindToggled
@@ -510,6 +514,23 @@ impl Editpad {
                     "覆写模式（Insert 切回插入）：打字将逐字替换光标处字符".to_owned()
                 } else {
                     "插入模式".to_owned()
+                });
+                Task::none()
+            }
+            // P126：只读锁定切换（Ctrl+R；busy 加载中拒收——编辑同口径）
+            Message::ToggleReadOnly => {
+                if self.busy {
+                    return Task::none();
+                }
+                let now = {
+                    let mut handle = self.cur_handle.borrow_mut();
+                    handle.read_only = !handle.read_only;
+                    handle.read_only
+                };
+                self.set_status(if now {
+                    "已锁定只读：编辑与撤销被拒收（Ctrl+R 解除）".to_owned()
+                } else {
+                    "已解除只读".to_owned()
                 });
                 Task::none()
             }
@@ -719,6 +740,18 @@ impl Editpad {
             // 未命名页无路径可写，给状态栏提示
             Message::CopyFilePath(target) => self.copy_tab_ident(target, true),
             Message::CopyFileName(target) => self.copy_tab_ident(target, false),
+            // P126：资源管理器定位当前文件（未命名页提示先保存）
+            Message::OpenContainingFolder => {
+                let path = self.tab().path.clone();
+                match path {
+                    Some(path) => match reveal_in_explorer(&path) {
+                        Ok(()) => self.set_status("已在资源管理器中定位文件".to_owned()),
+                        Err(e) => self.set_status_error(format!("打开所在文件夹失败：{e}")),
+                    },
+                    None => self.set_status("未命名页需先保存才能定位所在文件夹".to_owned()),
+                }
+                Task::none()
+            }
             // ---------- 恢复上次关闭 / 显示标记（第 64 轮） ----------
             Message::ReopenLastClosedFile => {
                 // busy 与打开确认流共用守卫语义；栈空静默
@@ -1264,6 +1297,8 @@ impl Editpad {
                 let pending_view = self.restore_views.remove(&job_id);
                 let is_restore = pending_view.is_some();
                 let mut tasks: Vec<Task<Message>> = Vec::new();
+                // P126：.LOG 首行时间戳是否已追加（Ok 臂内置位，装载尾部重新置脏）
+                let mut log_appended = false;
                 match result {
                     // P30 防串写护栏（第二半在 Ok(_) 分支）：普通打开照旧；
                     // 恢复任务要求目标仍是空净无名占位页，否则走丢弃分支
@@ -1293,6 +1328,36 @@ impl Editpad {
                                 if let Some(view) = self.settings.recent_view(&job.path) {
                                     ed.restore_view(view.line, view.col, view.scroll_top, 0.0);
                                 }
+                                // P126：.LOG 首行自动时间戳（经典记事本行为）：
+                                // 首行恰为 .LOG 的文件在文末追加当前日期时间。
+                                // 文本照常置脏（默认不自动写盘，落盘仍由用户
+                                // 决定）；会话恢复路径不追加（防快照滚雪球）。
+                                if ed
+                                    .doc
+                                    .line_str(0)
+                                    .trim_end_matches(char::is_control)
+                                    == ".LOG"
+                                {
+                                    let last = ed.doc.line_count() - 1;
+                                    let tlen = ed.doc.text_len();
+                                    let ends_nl = tlen > 0
+                                        && ed
+                                            .doc
+                                            .slice_text(tlen - 1, tlen)
+                                            .chars()
+                                            .all(char::is_control);
+                                    ed.cursor = crate::editor::CursorPos {
+                                        line: last,
+                                        col: ed.line_display_len(last),
+                                    };
+                                    ed.anchor = None;
+                                    if !ends_nl {
+                                        let nl = char::from_u32(10).unwrap().to_string();
+                                        ed.insert_str(&nl);
+                                    }
+                                    ed.insert_date_time();
+                                    log_appended = true;
+                                }
                             }
                         }
                         tab.path = Some(job.path.clone());
@@ -1301,6 +1366,11 @@ impl Editpad {
                         // 上一次打开的会话上下文）
                         tab.save_encoding = None;
                         tab.dirty = false;
+                        // P126：.LOG 追加发生在装载链内、上方 dirty=false 之后——
+                        // 重新置脏如实反映「磁盘内容与窗口内容已不同」
+                        if log_appended {
+                            tab.dirty = true;
+                        }
                         // P50：载入成功即记外部修改比对戳
                         tab.file_stamp = file_stamp(&job.path);
                         // P25：真实文件已就位，未命名序号使命完成
@@ -1845,6 +1915,44 @@ impl Editpad {
                 self.heartbeat_apply(outcome);
                 Task::none()
             }
+            // P126：全屏切换（F11）。iced 0.14：window::set_mode。
+            Message::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
+                let mode = if self.fullscreen {
+                    iced::window::Mode::Fullscreen
+                } else {
+                    iced::window::Mode::Windowed
+                };
+                let task: Task<Message> = match self.main_window {
+                    Some(id) => iced::window::set_mode(id, mode),
+                    None => Task::none(),
+                };
+                self.set_status(if self.fullscreen {
+                    "已进入全屏（F11 退出；全屏期间不记忆窗口几何）".to_owned()
+                } else {
+                    "已退出全屏".to_owned()
+                });
+                task
+            }
+            // P126：置顶切换（F9）。iced 0.14：window::set_level。
+            Message::ToggleAlwaysOnTop => {
+                self.always_on_top = !self.always_on_top;
+                let level = if self.always_on_top {
+                    iced::window::Level::AlwaysOnTop
+                } else {
+                    iced::window::Level::Normal
+                };
+                let task: Task<Message> = match self.main_window {
+                    Some(id) => iced::window::set_level(id, level),
+                    None => Task::none(),
+                };
+                self.set_status(if self.always_on_top {
+                    "窗口已置顶（F9 取消）".to_owned()
+                } else {
+                    "已取消置顶".to_owned()
+                });
+                task
+            }
             Message::WindowMoved(p) => {
                 // P102：窗口位置记忆（逻辑坐标，iced 与建窗 Specific 同空间）
                 self.settings.window_x = Some(p.x as i32);
@@ -2163,6 +2271,13 @@ impl Editpad {
     fn apply_edit(&mut self, op: EditOp) -> bool {
         // 加载进行中不接收编辑，避免打到即将被替换的旧文档上
         if self.active_load.is_some() {
+            return false;
+        }
+        // P126：只读锁定总闸——改内容动作拒收（判定 fail-safe：未列入
+        // 「纯导航/纯标注」白名单的变体一律视为可变拒绝），被拒动作
+        // 不清列块、不留任何状态痕迹
+        if self.cur_handle.borrow().read_only && edit_op_mutates(&op) {
+            self.set_status("文档已锁定只读（Ctrl+R 解除）".to_owned());
             return false;
         }
 
@@ -2773,6 +2888,10 @@ impl Editpad {
     /// [`GEOMETRY_PERSIST_INTERVAL`] 才写一次盘；关闭路径在
     /// `handle_close_request` 里兜底补一次（见 view.rs）。
     fn persist_geometry_if_due(&mut self) {
+        // P126：全屏期间不记忆几何——尺寸是全屏值，退出全屏按它恢复会错
+        if self.fullscreen {
+            return;
+        }
         let now = std::time::Instant::now();
         let due = self
             .last_geometry_persist
@@ -2786,3 +2905,40 @@ impl Editpad {
 
 /// P102：窗口几何落盘节流窗（2 秒一道；最后一次状态由关闭路径兜底）。
 const GEOMETRY_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+
+// ---------- P126：只读判定与资源管理器定位 ----------
+
+/// P126：只读锁定的动作分类——true = 会改动文档内容（只读下拒收）。
+/// 白名单只列「纯导航/纯标注/纯状态」动作；**默认 true**（fail-safe）：
+/// 未来新增变体若忘登记将自动被只读拒收，如属纯导航需显式加入白名单。
+pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
+    !matches!(
+        op,
+        EditOp::SelectAll
+            | EditOp::Motion(..)
+            | EditOp::ToggleBookmark
+            | EditOp::BookmarkNext
+            | EditOp::BookmarkPrev
+            | EditOp::BookmarksClearAll
+            | EditOp::CopyBookmarkedLines
+            | EditOp::JumpToMatchingBracket
+            | EditOp::CancelBlock
+    )
+}
+
+/// P126：在资源管理器中定位并选中文件（explorer /select,路径）。
+/// explorer 自身退出码不可靠，只校验进程能否启动。
+#[cfg(windows)]
+fn reveal_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map(|_| ())
+}
+
+/// 非 Windows 平台暂无对应实现（本编辑器以 Windows 为一等公民）。
+#[cfg(not(windows))]
+fn reveal_in_explorer(_path: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("仅支持 Windows"))
+}
