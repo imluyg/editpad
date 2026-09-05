@@ -6,6 +6,7 @@ members = ["crates/core", "crates/app"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/imluyg/editpad"
 
 [workspace.dependencies]
 editpad-core = { path = "crates/core" }

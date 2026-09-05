@@ -79,24 +79,6 @@ impl Renderer {
         for &damage_bounds in damage {
             let damage_bounds = damage_bounds * scale_factor;
 
-            // ⚠️ 临时探针（P117 排障，随 vendor 移除）：呈现区域与层裁剪
-            let probe = std::env::var_os("EDITPAD_QUAD_LOG").is_some();
-            if probe {
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(std::env::temp_dir().join("editpad-quad.log"))
-                {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        f,
-                        "PRESENT region=[{:.1},{:.1},{:.1},{:.1}]",
-                        damage_bounds.x, damage_bounds.y, damage_bounds.width,
-                        damage_bounds.height
-                    );
-                }
-            }
-
             let path = tiny_skia::PathBuilder::from_rect(
                 tiny_skia::Rect::from_xywh(
                     damage_bounds.x,
@@ -128,27 +110,6 @@ impl Renderer {
                 else {
                     continue;
                 };
-
-                // ⚠️ 临时探针：层裁剪与每个 quad 的 within 判定
-                if probe {
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(std::env::temp_dir().join("editpad-quad.log"))
-                    {
-                        use std::io::Write;
-                        for (quad, _) in &layer.quads {
-                            let pb = quad.bounds * scale_factor;
-                            let _ = writeln!(
-                                f,
-                                "  LAYER[{:.1},{:.1},{:.1},{:.1}] quad[{:.1},{:.1},{:.1},{:.1}] within={}",
-                                layer_bounds.x, layer_bounds.y, layer_bounds.width,
-                                layer_bounds.height, pb.x, pb.y, pb.width, pb.height,
-                                pb.is_within(&layer_bounds)
-                            );
-                        }
-                    }
-                }
 
                 engine::adjust_clip_mask(clip_mask, layer_bounds);
 

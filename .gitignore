@@ -40,3 +40,26 @@ dev-assets/
 # ===== 设计文档 =====
 # 本地保留（含交接文档），不入库
 docs/
+
+# ===== 平台 / 工具目录 =====
+# 代码托管与 CI 平台配置：.github/ 随仓库发布（GitHub Actions 需要），
+# 其余平台的本地配置不入库
+.gitlab/
+.circleci/
+*.yml.local
+
+# AI 助手 / 编辑器的工作目录与说明文件：属个人环境，不入库
+.claude/
+.cursor/
+.dsh/
+.opencode/
+.windsurf/
+.aider*
+CLAUDE.md
+AGENTS.md
+
+# 本机临时脚本与转储（点开头的一次性文件）
+.hk*.txt
+.msgs.txt
+.menu.txt
+.*_dump.py

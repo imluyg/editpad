@@ -4,6 +4,7 @@ description = "Editpad 轻量文本编辑器 GUI 壳（iced）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 # P71：图标与版本信息经 build.rs 调 Windows SDK rc.exe 编进资源段
 build = "build.rs"
 

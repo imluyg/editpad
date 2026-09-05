@@ -4,6 +4,7 @@ description = "Editpad 纯逻辑核心：rope 文档模型、编码识别加载�
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ropey.workspace = true
