@@ -2085,6 +2085,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             item("以 UTF-8 保存", editpad_core::SaveEncoding::Utf8),
             item("以 UTF-8(BOM) 保存", editpad_core::SaveEncoding::Utf8Bom),
             item("以 GBK 保存", editpad_core::SaveEncoding::Gbk),
+            // P127：CJK 传统编码扩展（无法映射字符照旧按数值实体写入）
+            item("以 Big5 保存", editpad_core::SaveEncoding::Big5),
+            item("以 Shift_JIS 保存", editpad_core::SaveEncoding::ShiftJis),
+            item("以 EUC-JP 保存", editpad_core::SaveEncoding::EucJp),
+            item("以 EUC-KR 保存", editpad_core::SaveEncoding::EucKr),
         ]
         .spacing(2);
         self.status_menu_overlay(W, ITEM_H * 3.0 + 12.0, panel.into())

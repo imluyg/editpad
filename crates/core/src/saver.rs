@@ -28,6 +28,15 @@ pub enum SaveEncoding {
     /// GBK。无法映射的字符（如 emoji）按 WHATWG 规则以 `&#N;` 数值
     /// 实体写入，[`EncodeNotice::unmappable`] 置位供 UI 告知。
     Gbk,
+    // ---------- P127：CJK 传统编码扩展（encoding_rs 全部内置） ----------
+    /// Big5（繁体中文）。
+    Big5,
+    /// Shift_JIS（日文）。
+    ShiftJis,
+    /// EUC-JP（日文）。
+    EucJp,
+    /// EUC-KR（韩文）。
+    EucKr,
 }
 
 impl SaveEncoding {
@@ -37,6 +46,10 @@ impl SaveEncoding {
             SaveEncoding::Utf8 => "UTF-8",
             SaveEncoding::Utf8Bom => "UTF-8(BOM)",
             SaveEncoding::Gbk => "GBK",
+            SaveEncoding::Big5 => "Big5",
+            SaveEncoding::ShiftJis => "Shift_JIS",
+            SaveEncoding::EucJp => "EUC-JP",
+            SaveEncoding::EucKr => "EUC-KR",
         }
     }
 }
@@ -75,7 +88,33 @@ pub fn save_document_encoded(
             source,
         }),
         SaveEncoding::Gbk => {
-            let mut encoder = encoding_rs::GBK.new_encoder();
+            save_with_legacy_encoder(path, doc, &encoding_rs::GBK)
+        }
+        SaveEncoding::Big5 => {
+            save_with_legacy_encoder(path, doc, &encoding_rs::BIG5)
+        }
+        SaveEncoding::ShiftJis => {
+            save_with_legacy_encoder(path, doc, &encoding_rs::SHIFT_JIS)
+        }
+        SaveEncoding::EucJp => {
+            save_with_legacy_encoder(path, doc, &encoding_rs::EUC_JP)
+        }
+        SaveEncoding::EucKr => {
+            save_with_legacy_encoder(path, doc, &encoding_rs::EUC_KR)
+        }
+    }
+}
+
+/// P127：CJK 传统编码的通用落盘路径（GBK 原实现泛化）：有状态编码器
+    /// 逐 rope 块流式转换，无法映射字符按数值实体写入（encoding_rs
+    /// encode 语义），原子性与 [`write_atomic_with`] 一致。GBK/Big5/
+    /// Shift_JIS/EUC 系均为无跨块状态编码器，分块喂入安全。
+    fn save_with_legacy_encoder(
+        path: &Path,
+        doc: &Document,
+        enc: &'static encoding_rs::Encoding,
+    ) -> Result<EncodeNotice, CoreError> {
+            let mut encoder = enc.new_encoder();
             let mut buf: Vec<u8> = Vec::new();
             let mut unmappable = false;
             write_atomic_with(path, |file| {
@@ -105,9 +144,7 @@ pub fn save_document_encoded(
                 path: path.to_path_buf(),
                 source,
             })
-        }
     }
-}
 
 /// 文档原子保存（P19 行动项 3）：按 rope 存储块逐块写临时文件，
 /// 全程不产生全文 String——50MB 文档的保存峰值从「rope + 全文拷贝」
@@ -368,5 +405,44 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P127：CJK 传统编码扩展 ----------
+
+    #[test]
+    fn legacy_cjk_encodings_round_trip_and_flag_unmappable() {
+        // 各编码一个代表性字符 + ASCII：编码后用 encoding_rs 解码应还原
+        let cases = [
+            (SaveEncoding::Big5, encoding_rs::BIG5, "繁體測試 ascii"),
+            (SaveEncoding::ShiftJis, encoding_rs::SHIFT_JIS, "日本語テスト"),
+            (SaveEncoding::EucJp, encoding_rs::EUC_JP, "日本語EUC"),
+            (SaveEncoding::EucKr, encoding_rs::EUC_KR, "한국어"),
+            (SaveEncoding::Gbk, encoding_rs::GBK, "简体中文"),
+        ];
+        for (enc, rs, text) in cases {
+            let dir = std::env::temp_dir().join("editpad-p127-test");
+            let _ = std::fs::create_dir_all(&dir);
+            let target = dir.join(format!("{}.bin", enc.label()));
+            let notice = save_document_encoded(&target, &Document::from_str(text), enc)
+                .expect("编码落盘应成功");
+            assert!(!notice.unmappable, "{:?} 全部字符可映射", enc);
+            let bytes = std::fs::read(&target).expect("读回");
+            let (decoded, _, had_errors) = rs.decode(&bytes);
+            assert_eq!(decoded, text, "{:?} 往返一致", enc);
+            assert!(!had_errors);
+            let _ = std::fs::remove_file(&target);
+        }
+        // emoji 对任何传统编码都不可映射 → 数值实体 + unmappable 置位
+        let dir = std::env::temp_dir().join("editpad-p127-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("big5-emoji.bin");
+        let notice =
+            save_document_encoded(&target, &Document::from_str("ok🚀"), SaveEncoding::Big5)
+                .expect("落盘成功");
+        assert!(notice.unmappable);
+        let bytes = std::fs::read(&target).expect("读回");
+        let (decoded, _, _) = encoding_rs::BIG5.decode(&bytes);
+        assert!(decoded.contains("&#"), "emoji 应以数值实体写入");
+        assert!(decoded.starts_with("ok"));
     }
 }
