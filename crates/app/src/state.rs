@@ -140,6 +140,9 @@ pub(crate) struct Editpad {
     pub(crate) palette_input: String,
     /// P129：当前选中行（过滤后列表下标）
     pub(crate) palette_idx: usize,
+    /// P130：待归页的监视重载（tab 下标, 是否 tail 跟随, 重载前视图）——
+    /// check_external_changes 发起监视重载时捕获，Loaded 归页时消费
+    pub(crate) monitor_pending: Option<(usize, bool, Option<(usize, usize, f32, f32)>)>,
 
     // ---------- 打开确认 ----------
     /// dirty 时暂存待打开的路径；Some 即打开确认条可见
@@ -276,6 +279,7 @@ impl Default for Editpad {
             palette_mode: PaletteMode::Commands,
             palette_input: String::new(),
             palette_idx: 0,
+            monitor_pending: None,
             always_on_top: false,
             open_confirm: None,
             close_tab_confirm: None,

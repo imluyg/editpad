@@ -46,6 +46,8 @@ pub(crate) struct Tab {
     /// 全局单调不复用——杜绝两个同名未命名页的保存歧义；
     /// 另存为成功或加载真实文件后清除。
     pub(crate) untitled_num: Option<u64>,
+    /// P130：文件监视（tail 跟随日志场景）——仅会话内有效，不入快照。
+    pub(crate) monitor: bool,
     /// P31 心跳账目：本页最后一次被心跳快照收录时的 (内容版本, 页文件名)。
     /// None = 从未参与。版本与文件名成对维护，保证「版本没变 → 旧文件
     /// 仍有效 → 沿用不重写」的复用判定不会错位；账目随页走（增删页/
@@ -75,6 +77,7 @@ impl Tab {
             autosave_inflight: false,
             last_edit_at: None,
             untitled_num: None,
+            monitor: false,
             heartbeat_snap: None,
             pinned: false,
             file_stamp: None,

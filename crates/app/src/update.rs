@@ -327,6 +327,14 @@ impl Editpad {
         )
     }
 
+    /// P130：文件监视巡检链（自我续期，CaretTick/心跳同款）：每 2s 一拍
+    /// ——有监视页时 stat 比对 (mtime, size)，干净活动页被改则静默重载。
+    fn schedule_monitor_tick(&mut self) -> Task<Message> {
+        Task::perform(
+            async { std::thread::sleep(std::time::Duration::from_millis(2000)) },
+            |_| Message::MonitorTick,
+        )
+    }
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match &message {
             // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
@@ -444,7 +452,9 @@ impl Editpad {
             | Message::ToggleAlwaysOnTop
             | Message::WindowMoved(..) => self.update_session(message),
             // ---------- 查找/替换/跳转/查找全部 ----------
-            Message::PaletteToggled(_)
+            Message::ToggleMonitorFile
+            | Message::MonitorTick
+            | Message::PaletteToggled(_)
             | Message::PaletteInputChanged(_)
             | Message::PaletteMove(_)
             | Message::PaletteExecute
@@ -1383,6 +1393,26 @@ impl Editpad {
                                     ed.insert_date_time();
                                     log_appended = true;
                                 }
+                                // P130：监视重载归页——曾在底部则 tail 跟随
+                                // （滚到文末+光标落尾），否则还原重载前视图
+                                if let Some((tab_idx, follow, pre_view)) =
+                                    self.monitor_pending.take()
+                                {
+                                    if tab_idx == target {
+                                        if follow {
+                                            let last = ed.doc.line_count() - 1;
+                                            ed.cursor = crate::editor::CursorPos {
+                                                line: last,
+                                                col: ed.line_display_len(last),
+                                            };
+                                            ed.anchor = None;
+                                            ed.scroll_top = f32::MAX;
+                                            ed.clamp_scroll();
+                                        } else if let Some((l, c, st, sl)) = pre_view {
+                                            ed.restore_view(l, c, st, sl);
+                                        }
+                                    }
+                                }
                             }
                         }
                         tab.path = Some(job.path.clone());
@@ -2274,6 +2304,37 @@ impl Editpad {
                 self.goto_input = value;
                 Task::none()
             }
+            // ---------- P130：文件监视（tail 跟随） ----------
+            Message::ToggleMonitorFile => {
+                if self.busy {
+                    return Task::none();
+                }
+                let on = {
+                    let tab = self.tab_mut();
+                    tab.monitor = !tab.monitor;
+                    tab.monitor
+                };
+                self.set_status(if on {
+                    "已开启文件监视：磁盘变化时自动重载（干净页）并跟随文末（F8 关闭）".to_owned()
+                } else {
+                    "已关闭文件监视".to_owned()
+                });
+                if on {
+                    self.schedule_monitor_tick()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::MonitorTick => {
+                if !self.busy
+                    && self.active_load.is_none()
+                    && self.tabs.iter().any(|t| t.monitor)
+                {
+                    self.check_external_changes();
+                    return self.schedule_monitor_tick(); // 自我续期链
+                }
+                Task::none()
+            }
             // ---------- P129：命令面板 / 快速标签切换 ----------
             Message::PaletteToggled(mode) => {
                 if self.palette_visible && self.palette_mode == mode {
@@ -2673,6 +2734,16 @@ impl Editpad {
                 continue;
             }
             if idx == self.active_tab && !tab.dirty {
+                // P130：监视页——重载前捕获 tail 跟随判定与原视图
+                if tab.monitor {
+                    let ed = self.cur_handle.borrow();
+                    let total_h = ed.visual_rows_total() as f32 * ed.line_height();
+                    let max_scroll = (total_h - ed.viewport_h).max(0.0);
+                    let follow = ed.scroll_top >= max_scroll - ed.line_height() * 1.5;
+                    let pre_view =
+                        (ed.cursor.line, ed.cursor.col, ed.scroll_top, ed.scroll_left);
+                    self.monitor_pending = Some((idx, follow, Some(pre_view)));
+                }
                 let path = tab.path.clone().expect("上方已判 Some");
                 // 加载流由 subscription 依据 active_load 重建接管，返回的
                 // Task 恒为 none——显式弃置（加载管线语义见 start_loading）

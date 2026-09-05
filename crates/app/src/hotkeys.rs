@@ -414,6 +414,12 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+P"],
         desc: "快速切换标签页（模糊跳转）",
     },
+    // P130：文件监视（Monitor 同语义：干净页自动重载 + 文末跟随）
+    HotkeyAction {
+        id: "toggle_monitor_file",
+        default_combos: &["F8"],
+        desc: "切换当前页文件监视（tail 跟随）",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -648,6 +654,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         // P129：命令面板 / 快速标签切换
         "command_palette" => Some(Message::PaletteToggled(crate::state::PaletteMode::Commands)),
         "quick_switch_tab" => Some(Message::PaletteToggled(crate::state::PaletteMode::Tabs)),
+        // P130：文件监视开关
+        "toggle_monitor_file" => Some(Message::ToggleMonitorFile),
         _ => None,
     }
 }

@@ -1013,3 +1013,114 @@ use super::*;
         );
         assert_eq!(app.cur_handle.borrow().doc.to_text(), "hello", "非 .LOG 不追加");
     }
+
+    // ---------- P130：文件监视（tail 跟随） ----------
+
+    #[test]
+    fn monitor_toggle_and_tick_reload_with_tail_follow() {
+        let dir = std::env::temp_dir().join("editpad-p130-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("monitor.log");
+        std::fs::write(&path, "line1
+line2
+").unwrap();
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(path.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("line1
+line2
+"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        // 开启监视
+        dispatch(&mut app, Message::ToggleMonitorFile);
+        assert!(app.tab().monitor);
+        // 外部改写文件（size+mtime 均变）
+        std::fs::write(&path, "line1
+line2
+line3
+line4
+").unwrap();
+        // 用户在底部 → tail 跟随：巡检发起重载，归页后光标落文末
+        dispatch(&mut app, Message::MonitorTick);
+        assert!(app.active_load.is_some(), "巡检应发现变化并发起重载");
+        let job = app.active_load.clone().unwrap();
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                job.id,
+                Ok((
+                    editpad_core::Document::from_str("line1
+line2
+line3
+line4
+"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        {
+            let ed = app.cur_handle.borrow();
+            assert_eq!(ed.doc.to_text(), "line1
+line2
+line3
+line4
+");
+            assert_eq!(ed.cursor.line, 4, "tail 跟随：光标落文末（幻影行首=最后换行之后）");
+        }
+        // 关闭监视后巡检不再触发
+        dispatch(&mut app, Message::ToggleMonitorFile);
+        std::fs::write(&path, "line1
+").unwrap();
+        dispatch(&mut app, Message::MonitorTick);
+        assert!(app.active_load.is_none(), "监视关闭后巡检不动");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn monitor_skips_dirty_page() {
+        let dir = std::env::temp_dir().join("editpad-p130-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dirty.log");
+        std::fs::write(&path, "a
+").unwrap();
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(path.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("a
+"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::ToggleMonitorFile);
+        // 置脏 + 外部修改：巡检绝不能静默重载丢用户工作
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("user edit".into())));
+        assert!(app.tab().dirty);
+        std::fs::write(&path, "a
+external
+").unwrap();
+        dispatch(&mut app, Message::MonitorTick);
+        assert!(app.active_load.is_none(), "置脏页不得被监视重载");
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "user edita
+",
+        );
+        let _ = std::fs::remove_file(&path);
+    }

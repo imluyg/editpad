@@ -155,6 +155,10 @@ enum Message {
     PaletteExecute,
     /// P129：鼠标点击面板某行 = 选中并立即执行
     PalettePick(usize),
+    /// P130：切换当前页文件监视（F8；tail 跟随日志场景）
+    ToggleMonitorFile,
+    /// P130：监视巡检拍（自我续期链，2s 一拍）
+    MonitorTick,
 
     /// 复制当前选区到系统剪贴板（Ctrl+C；无选区时无操作）
     CopyRequested,
