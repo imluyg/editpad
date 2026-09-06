@@ -61,7 +61,7 @@ pub fn base64_decode(src: &str) -> Option<Vec<u8>> {
         3 => 2,
         _ => 3,
     };
-    while vals.len() % 4 != 0 {
+    while !vals.len().is_multiple_of(4) {
         vals.push(0);
     }
     let mut out = Vec::with_capacity(vals.len() / 4 * 3);

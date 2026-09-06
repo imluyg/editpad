@@ -88,19 +88,19 @@ pub fn save_document_encoded(
             source,
         }),
         SaveEncoding::Gbk => {
-            save_with_legacy_encoder(path, doc, &encoding_rs::GBK)
+            save_with_legacy_encoder(path, doc, encoding_rs::GBK)
         }
         SaveEncoding::Big5 => {
-            save_with_legacy_encoder(path, doc, &encoding_rs::BIG5)
+            save_with_legacy_encoder(path, doc, encoding_rs::BIG5)
         }
         SaveEncoding::ShiftJis => {
-            save_with_legacy_encoder(path, doc, &encoding_rs::SHIFT_JIS)
+            save_with_legacy_encoder(path, doc, encoding_rs::SHIFT_JIS)
         }
         SaveEncoding::EucJp => {
-            save_with_legacy_encoder(path, doc, &encoding_rs::EUC_JP)
+            save_with_legacy_encoder(path, doc, encoding_rs::EUC_JP)
         }
         SaveEncoding::EucKr => {
-            save_with_legacy_encoder(path, doc, &encoding_rs::EUC_KR)
+            save_with_legacy_encoder(path, doc, encoding_rs::EUC_KR)
         }
     }
 }

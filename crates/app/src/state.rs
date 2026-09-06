@@ -142,6 +142,8 @@ pub(crate) struct Editpad {
     pub(crate) palette_idx: usize,
     /// P130：待归页的监视重载（tab 下标, 是否 tail 跟随, 重载前视图）——
     /// check_external_changes 发起监视重载时捕获，Loaded 归页时消费
+    ///（元组即重载前视图快照，一次性搬运不设类型别名）
+    #[allow(clippy::type_complexity)]
     pub(crate) monitor_pending: Option<(usize, bool, Option<(usize, usize, f32, f32)>)>,
 
     // ---------- 打开确认 ----------

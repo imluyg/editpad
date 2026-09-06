@@ -796,6 +796,6 @@ pub(crate) fn fuzzy_filter<T: Clone>(items: &[(T, String)], input: &str) -> Vec<
         .iter()
         .filter_map(|(item, title)| fuzzy_score(title, input).map(|sc| (item.clone(), sc)))
         .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
     scored
 }
