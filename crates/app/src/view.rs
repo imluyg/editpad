@@ -70,6 +70,9 @@ impl Editpad {
             cursor_col: ed.cursor.col,
             scroll_top: ed.scroll_top,
             scroll_left: ed.scroll_left,
+            // P134：每页显示覆盖随会话保存（C7）
+            wrap_override: t.wrap_override,
+            font_size_override: t.font_size_override,
         }
     }
 
@@ -344,6 +347,18 @@ impl Editpad {
         for &i in &kept {
             let meta = &manifest.tabs[i];
             let mut tab = self.fresh_tab();
+            // P134：每页显示覆盖随会话恢复（C7）——fresh_tab 落的是全局
+            // 有效值，此处按清单覆盖并回填编辑器（三个分支共用同一占位
+            // 页编辑器；Loaded 路径不触碰换行/字号，无需再补发）
+            tab.wrap_override = meta.wrap_override;
+            tab.font_size_override = meta.font_size_override;
+            {
+                let mut ed = tab.editor.borrow_mut();
+                ed.set_word_wrap(tab.wrap_override.unwrap_or(self.settings.word_wrap));
+                ed.set_font_size(editor::normalize_font_size(
+                    tab.font_size_override.unwrap_or(self.settings.font_size),
+                ));
+            }
             match (&meta.path, meta.file.as_deref()) {
                 // ---- 未命名页：内容只可能来自快照 ----
                 (None, _) => {
@@ -1928,6 +1943,22 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         interactive.then_some(Message::SettingsWordWrapToggled(
                             !self.settings.word_wrap,
                         )),
+                    ))
+                    // P134（C7）：本页自动换行三态循环——跟随全局/本页开/
+                    // 本页关；有覆盖时全局项旁标注（标签条目自身即状态显示）
+                    .push(item(
+                        match self.tab().wrap_override {
+                            None => "本页自动换行（跟随全局）".to_owned(),
+                            Some(true) => "✓ 本页自动换行（开）".to_owned(),
+                            Some(false) => "本页自动换行（关）".to_owned(),
+                        },
+                        interactive.then_some(Message::TabWrapOverrideToggled),
+                    ))
+                    // P134（C7）：本页字号重置——仅在有覆盖时可用
+                    .push(item(
+                        "本页字号重置（跟随全局）".to_owned(),
+                        (interactive && self.tab().font_size_override.is_some())
+                            .then_some(Message::TabFontSizeReset),
                     ))
                     // 原「视图」菜单并入：MD 预览按当前语法门控（最近文件
                     // 面板与文件菜单的「最近文件」重复，不再单列）

@@ -211,9 +211,37 @@ impl EditorCore {
             }
             Motion::Home => {
                 self.goal_px = None;
-                self.cursor.col = 0
+                // P134（路线图 C8）：软换行开态到**视觉行**首（主流
+                // wrapping-aware 口径）；关态恒等退化为逻辑行首
+                if self.wrap_enabled() {
+                    let v = self.visual_row_of(self.cursor.line, self.cursor.col);
+                    let (line, _, seg_start, _) = self.locate_visual(v);
+                    self.cursor.line = line;
+                    self.cursor.col = seg_start;
+                } else {
+                    self.cursor.col = 0
+                }
             }
             Motion::End => {
+                self.goal_px = None;
+                // P134（C8）：开态到视觉行尾（末段 = 逻辑行尾，段末列已
+                // 按 line_text 剥 EOL 口径，与 line_display_len 一致）
+                if self.wrap_enabled() {
+                    let v = self.visual_row_of(self.cursor.line, self.cursor.col);
+                    let (line, _, _, seg_end) = self.locate_visual(v);
+                    self.cursor.line = line;
+                    self.cursor.col = seg_end;
+                } else {
+                    self.cursor.col = self.line_display_len(self.cursor.line)
+                }
+            }
+            // P134（C8）：逻辑行首/尾（Alt+Home/End）——开态穿越折行段
+            // 直达逻辑行边界，关态与 Home/End 恒等
+            Motion::LogicalHome => {
+                self.goal_px = None;
+                self.cursor.col = 0
+            }
+            Motion::LogicalEnd => {
                 self.goal_px = None;
                 self.cursor.col = self.line_display_len(self.cursor.line)
             }

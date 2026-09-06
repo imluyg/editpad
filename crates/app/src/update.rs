@@ -405,6 +405,9 @@ impl Editpad {
             | Message::HotkeysResetAll
             | Message::ThemeToggled
             | Message::FontSizeDelta(..)
+            | Message::TabFontSizeDelta(..)
+            | Message::TabFontSizeReset
+            | Message::TabWrapOverrideToggled
             | Message::SettingsToggled
             | Message::SettingsPageSelected(..)
             | Message::SettingsSearchChanged(..)
@@ -1078,12 +1081,13 @@ impl Editpad {
                 self.persist_settings();
                 Task::none()
             }
-            // 第 73 轮 ⑯：自动换行开关——全标签页即时生效（列块清、水平
-            // 滚动锁 0、视觉行映射接管，关闭即恒等退化回现状路径）
+            // 第 73 轮 ⑯：自动换行开关——全局默认变更只影响「跟随全局」
+            // 的页（P134：有本页覆盖的页保持其覆盖，C7）
             Message::SettingsWordWrapToggled(value) => {
                 self.settings.word_wrap = value;
                 for tab in &self.tabs {
-                    tab.editor.borrow_mut().set_word_wrap(value);
+                    let effective = tab.wrap_override.unwrap_or(value);
+                    tab.editor.borrow_mut().set_word_wrap(effective);
                 }
                 self.persist_settings();
                 Task::none()
@@ -1146,11 +1150,56 @@ impl Editpad {
                 }
                 Task::none()
             }
+            // P134（C7）：全局默认字号（设置步进器入口）——「跟随全局」
+            // 的页全部生效；有本页覆盖的页保持其覆盖
             Message::FontSizeDelta(delta) => {
                 let next = editor::normalize_font_size(self.display_font_size() + delta);
                 self.settings.font_size = next;
                 self.persist_settings();
-                self.cur_handle.borrow_mut().set_font_size(next);
+                for tab in &self.tabs {
+                    if tab.font_size_override.is_none() {
+                        tab.editor.borrow_mut().set_font_size(next);
+                    }
+                }
+                Task::none()
+            }
+            // ---------- P134：每页显示覆盖（C7） ----------
+            Message::TabFontSizeDelta(delta) => {
+                // Ctrl+滚轮：当前页覆盖字号——不动全局默认、不落盘
+                //（随会话快照保存）；normalize 与全局链路同一 clamp 规则
+                let cur = self
+                    .tab()
+                    .font_size_override
+                    .unwrap_or(self.settings.font_size);
+                let next = editor::normalize_font_size(cur + delta);
+                let tab = self.tab_mut();
+                tab.font_size_override = Some(next);
+                tab.editor.borrow_mut().set_font_size(next);
+                self.set_status(format!(
+                    "本页字号 {next:.0}（全局默认 {:.0}；查看菜单可重置）",
+                    self.settings.font_size
+                ));
+                Task::none()
+            }
+            Message::TabFontSizeReset => {
+                let global = editor::normalize_font_size(self.settings.font_size);
+                let tab = self.tab_mut();
+                tab.font_size_override = None;
+                tab.editor.borrow_mut().set_font_size(global);
+                self.set_status(format!("本页字号已重置为全局默认 {global:.0}"));
+                Task::none()
+            }
+            Message::TabWrapOverrideToggled => {
+                // 三态循环：跟随全局 → 本页开 → 本页关 → 跟随全局
+                let next = match self.tab().wrap_override {
+                    None => Some(true),
+                    Some(true) => Some(false),
+                    Some(false) => None,
+                };
+                let effective = next.unwrap_or(self.settings.word_wrap);
+                let tab = self.tab_mut();
+                tab.wrap_override = next;
+                tab.editor.borrow_mut().set_word_wrap(effective);
                 Task::none()
             }
             // ---------- 设置弹窗（P27） ----------

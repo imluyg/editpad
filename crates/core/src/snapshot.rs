@@ -86,6 +86,12 @@ pub struct SessionTab {
     /// 水平滚动位置（像素）。
     #[serde(default)]
     pub scroll_left: f32,
+    /// P134：本页自动换行覆盖（None = 跟随全局设置；C7 随会话保存）。
+    #[serde(default)]
+    pub wrap_override: Option<bool>,
+    /// P134：本页字号覆盖（None = 跟随全局设置；C7 随会话保存）。
+    #[serde(default)]
+    pub font_size_override: Option<f32>,
 }
 
 /// 会话清单：一次快照的提交点。存在且可解析 = 有会话可恢复（P30 消费）；
@@ -429,6 +435,8 @@ mod tests {
             cursor_col: 0,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         }
     }
 
@@ -442,6 +450,8 @@ mod tests {
             cursor_col: 0,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         }
     }
 

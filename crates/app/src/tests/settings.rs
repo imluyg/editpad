@@ -751,3 +751,35 @@ use super::*;
         assert_eq!(app.settings.font_family, None);
     }
 
+    #[test]
+    fn home_end_with_alt_route_to_logical_motion() {
+        // P134（C8）：Alt 系不入注册表（AltGr 保护契约，见 hotkeys.rs）——
+        // 裸命名键通道按 mods.alt() 分流到逻辑行变体
+        use iced::keyboard::{key::Named, Key};
+        let alt = iced::keyboard::Modifiers::ALT;
+        let none = iced::keyboard::Modifiers::empty();
+        let remap = std::collections::HashMap::new();
+        assert!(matches!(
+            handle_key(Key::Named(Named::Home), alt, &remap),
+            Some(Message::Edit(crate::editor::EditOp::Motion(
+                crate::editor::Motion::LogicalHome,
+                false
+            )))
+        ));
+        assert!(matches!(
+            handle_key(Key::Named(Named::End), alt, &remap),
+            Some(Message::Edit(crate::editor::EditOp::Motion(
+                crate::editor::Motion::LogicalEnd,
+                false
+            )))
+        ));
+        // 无 Alt 恒 Home/End
+        assert!(matches!(
+            handle_key(Key::Named(Named::Home), none, &remap),
+            Some(Message::Edit(crate::editor::EditOp::Motion(
+                crate::editor::Motion::Home,
+                false
+            )))
+        ));
+    }
+

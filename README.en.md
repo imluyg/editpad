@@ -40,6 +40,8 @@ Large-file acceptance: open `dev-assets/bench-50mb.log` (68MB / 600k lines) — 
 - **Session restore**: closing a dirty window asks nothing — snapshots flush in write-ahead order, then it exits; a runtime heartbeat does incremental backups; on startup the last UI is silently restored (tabs / cursors / scroll / unnamed content); abnormal exits are detected with a one-time restore prompt
 - **Windows & tabs**: multiple tabs (double-click blank to create, × close button, middle-click close, pin, context menu, restore last closed, `Ctrl+P` fuzzy quick-switch), command palette, menu bar consolidating common commands, fixed status-bar sections, globally remappable hotkeys, window position & size memory, fullscreen / always-on-top, automatic data isolation between copies, single-instance mutex and file forwarding, window title-bar icon, open files from the command line / double-click in Explorer / "Open with" ("打开方式")
 - **Log scenarios**: file watching (tail follow), files whose first line is `.LOG` auto-append a timestamp when opened, Log syntax coloring, `F5` insert date/time
+- **Navigation aids**: scrollbar mark strip (orange hit / amber bookmark ticks, click to jump), indent guides, right-edge ruler column, link detection (URL / `file:///` open externally, `path:line` open in-editor with line jump)
+- **Per-tab display**: per-tab word wrap three-state (follow global / on / off, View menu), per-tab font-size override (Ctrl+scroll affects only the current tab, reset via View menu), both saved with the session snapshot; with soft wrap on, `Home` / `End` move by visual row and `Alt+Home` / `Alt+End` go to the logical line edges
 
 ## Keyboard Shortcuts
 
@@ -102,6 +104,8 @@ With a selection only the touched lines are processed; without one the operation
 | Ctrl+Shift+A | "Find All" ("查找全部") results panel (line:col + line excerpt, click to jump; huge result sets show only the first 500) |
 | Ctrl+G | Go to line |
 | Ctrl+Home / Ctrl+End | Go to start / end of document |
+| Home / End | Start / end of line (with soft wrap on: start / end of the current **visual** row) |
+| Alt+Home / Alt+End | Start / end of the **logical** line (crosses wrapped segments; fixed semantics, not remappable) |
 | Ctrl+Shift+M | Jump to the other side of a matching bracket (works when the cursor is adjacent to `()` `[]` `{}`; both sides show an underline simultaneously) |
 | Ctrl+F2 / F2 / Shift+F2 | Toggle bookmark on current line / Next / Previous (wraps around at the edges; amber dot on the left of the line-number gutter) |
 | Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | Clear all bookmarks / Copy all marked lines / Delete all marked lines |
@@ -110,9 +114,12 @@ With a selection only the touched lines are processed; without one the operation
 
 | Default combo | Action |
 |------|------|
-| Ctrl+scroll / Shift+scroll | Zoom body font size (10–48px) / horizontal scroll |
+| Ctrl+scroll / Shift+scroll | Zoom **current tab** font size (10–48px, per-tab override; the global default lives in Settings → Font) / horizontal scroll |
 | F11 / F9 | Toggle fullscreen / always-on-top |
 | Ctrl+Shift+F | Format JSON (JSON files only; errors point to line:col) |
+
+The View menu also offers a per-tab word-wrap three-state switch (follow global / on / off)
+and "reset tab font size"; both overrides are saved with the session snapshot.
 
 ## Interface
 

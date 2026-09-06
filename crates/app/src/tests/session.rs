@@ -308,7 +308,40 @@ use super::*;
             cursor_col: 0,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         }
+    }
+
+    #[test]
+    fn session_restore_applies_per_tab_display_overrides() {
+        // P134（C7）：换行/字号覆盖随清单恢复并回填编辑器
+        let dir = snapshot_scratch_dir("p134-overrides");
+        let mut named = clean_named_tab("C:/w/log.txt");
+        named.wrap_override = Some(true);
+        named.font_size_override = Some(24.0);
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[editpad_core::snapshot::SessionPage {
+                tab: named,
+                doc: editpad_core::Document::new(),
+            }],
+            0,
+            2,
+        )
+        .expect("写会话应成功");
+
+        let mut app = Editpad::default();
+        let _ = app.restore_from_manifest(&dir, &manifest);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].wrap_override, Some(true));
+        assert_eq!(app.tabs[0].font_size_override, Some(24.0));
+        assert!(
+            app.tabs[0].editor.borrow().wrap_enabled(),
+            "覆盖开 → 编辑器折行（区别于全局默认关）"
+        );
+        assert!((app.tabs[0].editor.borrow().font_size() - 24.0).abs() < 0.01);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -325,6 +358,8 @@ use super::*;
             cursor_col: 2,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         };
         let named = editpad_core::snapshot::SessionTab {
             path: Some("C:/w/notes.md".to_owned()),
@@ -335,6 +370,8 @@ use super::*;
             cursor_col: 3,
             scroll_top: 50.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         };
         let manifest = editpad_core::snapshot::write_session(
             &dir,
@@ -443,6 +480,8 @@ use super::*;
             cursor_col: 2,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         };
         let manifest = editpad_core::snapshot::write_session(
             &dir,
@@ -482,6 +521,8 @@ use super::*;
             cursor_col: 4,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         };
         let manifest = editpad_core::snapshot::write_session(
             &dir,
@@ -526,6 +567,8 @@ use super::*;
             cursor_col: 2,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         };
         let named = editpad_core::snapshot::SessionTab {
             path: Some("C:/w/report.txt".to_owned()),
@@ -536,6 +579,8 @@ use super::*;
             cursor_col: 0,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
         };
         let manifest = editpad_core::snapshot::write_session(
             &dir,
@@ -1231,6 +1276,8 @@ use super::*;
                     cursor_col: 0,
                     scroll_top: 0.0,
                     scroll_left: 0.0,
+                    wrap_override: None,
+                    font_size_override: None,
                 }],
                 active: 0,
                 next_untitled: 2,

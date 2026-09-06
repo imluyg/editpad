@@ -246,6 +246,14 @@ enum Message {
     /// 设置：右缘标尺列步进（P132，外观页；0 = 关，±4 步进，上限
     /// core::settings::MAX_EDGE_COLUMN）
     SettingsEdgeColumnDelta(i32),
+    // ---------- P134：每页显示覆盖（路线图 C7） ----------
+    /// Ctrl+滚轮：当前页字号覆盖步进（不动全局默认、不落盘；随会话快照）
+    TabFontSizeDelta(f32),
+    /// 查看菜单：清除当前页字号覆盖（回到跟随全局；无覆盖时禁用）
+    TabFontSizeReset,
+    /// 查看菜单：当前页自动换行三态循环（跟随全局 → 本页开 → 本页关
+    /// → 跟随全局）
+    TabWrapOverrideToggled,
     /// Ctrl+点击链接（P133，路线图 E2）：URL/file URI 外开，文件路径
     /// 内开（可选 `:行号` 跳行）
     LinkClicked(editor::LinkTarget),

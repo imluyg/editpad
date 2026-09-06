@@ -2130,3 +2130,35 @@ fn scrollbar_hit_marks_cap_for_draw_budget() {
         "命中刻度应按 MARK_MAX_PER_KIND 封顶"
     );
 }
+
+// ---------- P134：折行视觉行 Home/End（路线图 C8） ----------
+
+#[test]
+fn wrap_home_end_operate_on_visual_row_and_logical_variants() {
+    let mut c = wrap_core("0123456789012345678901234567890123456789\nsecond\n");
+    wrap_converge(&mut c);
+    let mc = c.wrap_max_cols();
+    assert!(mc < 40, "测试前提：40 字符行应折多段（mc={mc}）");
+    // 开态 End：第一段内 → 视觉段尾（≠ 逻辑行尾 40）
+    c.cursor = CursorPos { line: 0, col: 3 };
+    c.apply_motion(Motion::End, false);
+    assert_eq!(c.cursor.col, mc, "开态 End 应到第一视觉段尾");
+    // 开态 Home：段 1 内 → 所在视觉段首
+    c.cursor = CursorPos { line: 0, col: mc + 5 };
+    c.apply_motion(Motion::Home, false);
+    assert_eq!(c.cursor.col, mc, "开态 Home 应到所在视觉段首");
+    // Alt+Home/End：穿越折行段直达逻辑行边界
+    c.cursor = CursorPos { line: 0, col: mc + 5 };
+    c.apply_motion(Motion::LogicalHome, false);
+    assert_eq!(c.cursor.col, 0, "LogicalHome 直达逻辑行首");
+    c.apply_motion(Motion::LogicalEnd, false);
+    assert_eq!(c.cursor.col, c.line_display_len(0), "LogicalEnd 直达逻辑行尾");
+    // 关态恒等退化（与 Home/End 同义）
+    c.set_word_wrap(false);
+    c.cursor = CursorPos { line: 0, col: 7 };
+    c.apply_motion(Motion::Home, false);
+    assert_eq!(c.cursor.col, 0);
+    c.cursor = CursorPos { line: 0, col: 2 };
+    c.apply_motion(Motion::End, false);
+    assert_eq!(c.cursor.col, c.line_display_len(0));
+}

@@ -271,6 +271,9 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+End"],
         desc: "跳到文档尾",
     },
+    // P134（路线图 C8）：Alt+Home/End = 逻辑行首/尾——⚠️ 不入注册表：
+    // 热键契约禁含 Alt（AltGr 保护，见 handle_key 文档），走裸命名键
+    // 固定语义通道（Insert/Esc 同先例），在 handle_key 按 mods.alt() 分流
     // 查找导航（F3 家族与主流编辑器同默认键；Shift+F3 走裸功能键通道）+
     // 上一标签页（Ctrl+Shift+Tab 与 next_tab 互逆）
     HotkeyAction {
@@ -722,8 +725,16 @@ pub(crate) fn handle_key(
         Key::Named(Named::ArrowRight) => edit(EditOp::Motion(Motion::Right, mods.shift())),
         Key::Named(Named::ArrowUp) => edit(EditOp::Motion(Motion::Up, mods.shift())),
         Key::Named(Named::ArrowDown) => edit(EditOp::Motion(Motion::Down, mods.shift())),
-        Key::Named(Named::Home) => edit(EditOp::Motion(Motion::Home, mods.shift())),
-        Key::Named(Named::End) => edit(EditOp::Motion(Motion::End, mods.shift())),
+        // P134（C8）：Home/End 开态走视觉行（wrapping-aware）；Alt+Home/End
+        // 到逻辑行首/尾（Alt 系不入注册表，见上方注记）。Shift 透传选区。
+        Key::Named(Named::Home) => edit(EditOp::Motion(
+            if mods.alt() { Motion::LogicalHome } else { Motion::Home },
+            mods.shift(),
+        )),
+        Key::Named(Named::End) => edit(EditOp::Motion(
+            if mods.alt() { Motion::LogicalEnd } else { Motion::End },
+            mods.shift(),
+        )),
         Key::Named(Named::PageUp) => edit(EditOp::Motion(Motion::PageUp, mods.shift())),
         Key::Named(Named::PageDown) => edit(EditOp::Motion(Motion::PageDown, mods.shift())),
 

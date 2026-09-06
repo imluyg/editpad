@@ -2225,7 +2225,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         wheel_zoom_step(self.zoom_accum, lines, is_pixels);
                     self.zoom_accum = accum;
                     if step != 0.0 {
-                        shell.publish(crate::Message::FontSizeDelta(
+                        // P134（C7）：Ctrl+滚轮改走「当前页覆盖」语义——
+                        // 全局默认由设置面板步进器承担，不再被缩放改写
+                        shell.publish(crate::Message::TabFontSizeDelta(
                             FONT_ZOOM_STEP * step.signum(),
                         ));
                     }

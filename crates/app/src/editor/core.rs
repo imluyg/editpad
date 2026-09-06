@@ -117,6 +117,10 @@ pub enum Motion {
     // P122：词级导航（Ctrl+←/→；词边界口径见 motion::word_neighbor）
     WordLeft,
     WordRight,
+    // P134（路线图 C8）：逻辑行首/尾——关态与 Home/End 恒等，开态区分
+    // 视觉行（Home/End 走视觉行，Alt+Home/End 到逻辑行）
+    LogicalHome,
+    LogicalEnd,
 }
 
 /// 应用层按键编辑操作。

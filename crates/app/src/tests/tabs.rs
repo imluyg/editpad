@@ -818,3 +818,50 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         let _ = app.view();
     }
 
+    // ---------- P134：每页换行/字号独立（路线图 C7） ----------
+
+    #[test]
+    fn tab_wrap_override_cycles_three_states_and_gates_global() {
+        let mut app = loaded_txt_app();
+        assert_eq!(app.tab().wrap_override, None);
+        assert!(!app.cur_handle.borrow().wrap_enabled(), "初始跟随全局（关）");
+        // 三态循环：跟随全局 → 本页开 → 本页关 → 跟随全局
+        dispatch(&mut app, Message::TabWrapOverrideToggled);
+        assert_eq!(app.tab().wrap_override, Some(true));
+        assert!(app.cur_handle.borrow().wrap_enabled(), "本页开");
+        dispatch(&mut app, Message::TabWrapOverrideToggled);
+        assert_eq!(app.tab().wrap_override, Some(false));
+        // 有覆盖时全局变更不影响本页
+        dispatch(&mut app, Message::SettingsWordWrapToggled(true));
+        assert!(
+            !app.cur_handle.borrow().wrap_enabled(),
+            "本页关覆盖住全局开"
+        );
+        // 清除覆盖后跟随全局（已开）
+        dispatch(&mut app, Message::TabWrapOverrideToggled);
+        assert_eq!(app.tab().wrap_override, None);
+        assert!(app.cur_handle.borrow().wrap_enabled(), "回到跟随全局");
+    }
+
+    #[test]
+    fn tab_font_zoom_overrides_and_reset_follows_global() {
+        let mut app = loaded_txt_app();
+        let global = app.settings.font_size;
+        // Ctrl+滚轮 = 本页覆盖：全局默认不动
+        dispatch(&mut app, Message::TabFontSizeDelta(2.0));
+        assert_eq!(app.settings.font_size, global, "Ctrl+滚轮不改全局默认");
+        assert_eq!(app.tab().font_size_override, Some(global + 2.0));
+        assert!((app.cur_handle.borrow().font_size() - (global + 2.0)).abs() < 0.01);
+        // 设置步进器（全局）：覆盖页保持本页字号
+        dispatch(&mut app, Message::FontSizeDelta(-2.0));
+        assert!((app.settings.font_size - (global - 2.0)).abs() < 0.01);
+        assert!(
+            (app.cur_handle.borrow().font_size() - (global + 2.0)).abs() < 0.01,
+            "有覆盖的页不受全局步进影响"
+        );
+        // 重置回跟随全局
+        dispatch(&mut app, Message::TabFontSizeReset);
+        assert_eq!(app.tab().font_size_override, None);
+        assert!((app.cur_handle.borrow().font_size() - (global - 2.0)).abs() < 0.01);
+    }
+

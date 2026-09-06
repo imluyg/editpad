@@ -57,6 +57,12 @@ pub(crate) struct Tab {
     /// 标签条以 📌 标识。v1 取舍：不自动前置排序（保持用户手动排列的
     /// 稳定顺序）；不入会话快照清单（会话内临时状态）。
     pub(crate) pinned: bool,
+    /// P134（路线图 C7）：本页自动换行覆盖——None = 跟随全局设置；
+    /// Some = 查看菜单「本页自动换行」三态循环写入。随会话快照保存。
+    pub(crate) wrap_override: Option<bool>,
+    /// P134（路线图 C7）：本页字号覆盖（Ctrl+滚轮写入）——None = 跟随
+    /// 全局设置。随会话快照保存；查看菜单「本页字号重置」清除。
+    pub(crate) font_size_override: Option<f32>,
     /// P50 外部修改检测戳：载入/保存成功时刻的 (mtime, size)。
     /// None = 从未记录（未命名页/会话恢复占位页未落地的），不参与判定。
     pub(crate) file_stamp: Option<(std::time::SystemTime, u64)>,
@@ -80,6 +86,9 @@ impl Tab {
             monitor: false,
             heartbeat_snap: None,
             pinned: false,
+            // P134：每页显示覆盖默认跟随全局（None）
+            wrap_override: None,
+            font_size_override: None,
             file_stamp: None,
             save_encoding: None,
         }
