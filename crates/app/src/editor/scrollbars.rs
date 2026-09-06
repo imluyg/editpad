@@ -110,6 +110,70 @@ impl VScrollbar {
     }
 }
 
+// ---------- 滚动条标记条（P131） ----------
+//
+// 命中（橙）与书签（琥珀）在竖直滚动条轨道上画刻度、点击跳转
+//（同类编辑器 / 某商业编辑器 同类能力）。数据源 = EditorCore::find_hl
+//（P123 命中表）与 bookmarks（第 60 轮书签集）；几何换算与点击解析
+// 在此保持纯函数，随条淡入淡出（刻度属于滚动条的一部分）。
+
+/// 刻度厚度（像素）。
+pub(crate) const MARK_HEIGHT: f32 = 2.0;
+/// 刻度宽度（右对齐贴轨道内缘）。
+pub(crate) const MARK_WIDTH: f32 = 4.0;
+/// 点击刻度的命中容差（刻度本体 ± 此值；2px 刻度太细不好点中）。
+pub(crate) const MARK_HIT_TOLERANCE: f32 = 5.0;
+/// 单类刻度封顶（防御性：命中表异常巨大时保护绘制与解析预算）。
+pub(crate) const MARK_MAX_PER_KIND: usize = 1000;
+
+/// 视觉行 → 轨道 y（相对控件）。口径与滑块一致：ratio = row / range_lines
+/// 恰为「该行滚到视口顶」时滑块顶缘的比例，y = track_y + ratio × travel；
+/// 超出行程的末尾行钳到轨道底。软换行开态调用方必须传视觉行（§7.6：
+/// 禁逻辑行直乘行高）。
+pub(crate) fn mark_y_for_row(row: u32, sb: &VScrollbar) -> f32 {
+    let travel = (sb.track_h - sb.thumb_h).max(0.0);
+    let ratio = if sb.range_lines > 0.0 {
+        (row as f32 / sb.range_lines).min(1.0)
+    } else {
+        0.0
+    };
+    (sb.track_y + ratio * travel).clamp(sb.track_y, sb.track_y + sb.track_h)
+}
+
+/// 点击落点解析出的刻度目标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MarkTarget {
+    /// 命中刻度：载荷为 find_hl / matches 表中的索引
+    /// （应用层复用 FindAllGoto 同口径跳转）。
+    Hit(usize),
+    /// 书签刻度：载荷为逻辑行号（0 起）。
+    Bookmark(usize),
+}
+
+/// 在两类刻度里找容差内距点击 y 最近者；同距命中优先（命中表通常更密、
+/// 可点窗口更窄，且命中随查找消失属临时态）。线性扫描即可，单类封顶
+/// [`MARK_MAX_PER_KIND`]。
+pub(crate) fn resolve_mark_click(
+    hits: &[(f32, usize)],
+    bookmarks: &[(f32, usize)],
+    click_y: f32,
+) -> Option<MarkTarget> {
+    let mut best: Option<(f32, MarkTarget)> = None;
+    for &(y, idx) in hits {
+        let d = (y - click_y).abs();
+        if d <= MARK_HIT_TOLERANCE && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((d, MarkTarget::Hit(idx)));
+        }
+    }
+    for &(y, line) in bookmarks {
+        let d = (y - click_y).abs();
+        if d <= MARK_HIT_TOLERANCE && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
+            best = Some((d, MarkTarget::Bookmark(line)));
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
 /// 超宽内容下水平滑块的最小宽度（与垂直侧同理由：必须抓得住）。
 pub(crate) const THUMB_MIN_W: f32 = 32.0;
 /// 滑块/轨道的可视厚度（垂直条的厚度常量复用于水平条的高度）。

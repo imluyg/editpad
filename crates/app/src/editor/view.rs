@@ -19,8 +19,8 @@ use super::metrics::{
     char_cols, display_cols, measure_char_width, measure_ink_box, shape_row_xs,
 };
 use super::scrollbars::{
-    HScrollbar, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
-    VScrollbar,
+    mark_y_for_row, resolve_mark_click, HScrollbar, MarkTarget, MARK_HEIGHT, MARK_WIDTH,
+    SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH, VScrollbar,
 };
 use super::wrap::segment_index as wrap_segment_index;
 use super::wrap::pixel_breaks;
@@ -442,6 +442,10 @@ const GUTTER_TEXT: Color = Color::from_rgb8(0x99, 0x99, 0x99);
 /// 书签圆点（第 60 轮）：琥珀色在浅灰行号栏与深色主题上都醒目，
 /// 深浅主题共用一值（与选区/光标不同，它不承担「正文可读性」职能）。
 const BOOKMARK_COLOR: Color = Color::from_rgb8(0xE0, 0x96, 0x2E);
+/// 滚动条命中刻度（P131）：橙色，与书签刻度（琥珀 = BOOKMARK_COLOR）
+/// 区分——命中随查找消失属临时态、书签常驻。深浅主题共用一值
+///（与书签圆点同款取舍：装饰性标注，不承担正文可读性职能）。
+const FIND_MARK_COLOR: Color = Color::from_rgb8(0xE0, 0x5A, 0x1E);
 /// 括号匹配下划线（第 61 轮）：浅色主题用与查找/预编辑同族的蓝，
 /// 深色主题从前景派生（EditorColors::resolve）。
 const BRACKET_LIGHT: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.85);
@@ -1625,6 +1629,40 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 };
                 thumb_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
                 renderer.fill_quad(thumb_quad, thumb_color);
+
+                // P131 标记条：命中（橙）与书签（琥珀）刻度画在轨道上
+                //（thumb 之上——thumb 半透明不遮挡刻度），随条淡入淡出
+                //（刻度属于滚动条的一部分，闲置隐藏与条一致）。位置 =
+                // 视觉行口径换算（软换行开态经 WrapIndex，禁逻辑行直乘行
+                // 高），右对齐贴轨道内缘、y 居中于换算点。
+                let hit_marks = core.scrollbar_hit_marks();
+                let bm_marks = core.scrollbar_bookmark_marks();
+                if !hit_marks.is_empty() || !bm_marks.is_empty() {
+                    let mark_x = bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - MARK_WIDTH;
+                    let mut mark_quad = renderer::Quad::default();
+                    mark_quad.bounds = Rectangle {
+                        x: mark_x,
+                        width: MARK_WIDTH,
+                        height: MARK_HEIGHT,
+                        y: 0.0,
+                    };
+                    for &(row, _) in &bm_marks {
+                        mark_quad.bounds.y =
+                            bounds.y + mark_y_for_row(row, &sb) - MARK_HEIGHT * 0.5;
+                        renderer.fill_quad(
+                            mark_quad,
+                            Color { a: colors.bookmark.a * sb_alpha, ..colors.bookmark },
+                        );
+                    }
+                    for &(row, _) in &hit_marks {
+                        mark_quad.bounds.y =
+                            bounds.y + mark_y_for_row(row, &sb) - MARK_HEIGHT * 0.5;
+                        renderer.fill_quad(
+                            mark_quad,
+                            Color { a: FIND_MARK_COLOR.a * sb_alpha, ..FIND_MARK_COLOR },
+                        );
+                    }
+                }
             }
         }
 
@@ -1749,11 +1787,51 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     if sb.hits(local_x, local_y, bounds.width)
                         && core.scrollbar_visibility() > 0.05
                     {
+                        // P131：刻度解析只在「非滑块」时才需要——滑块抓取
+                        // 仍最优先；命中/书签刻度是精确目标，优先于轨道
+                        // 粗定位跳转。
+                        let (hit_marks, bm_marks) =
+                            if local_y >= sb.thumb_y && local_y <= sb.thumb_y + sb.thumb_h {
+                                (Vec::new(), Vec::new())
+                            } else {
+                                // 视觉行 → 轨道 y（与绘制同源换算）
+                                let to_ys = |marks: &[(u32, usize)]| {
+                                    marks.iter()
+                                        .map(|&(row, i)| (mark_y_for_row(row, &sb), i))
+                                        .collect::<Vec<_>>()
+                                };
+                                (
+                                    to_ys(&core.scrollbar_hit_marks()),
+                                    to_ys(&core.scrollbar_bookmark_marks()),
+                                )
+                            };
                         drop(core);
                         let mut core = self.core.borrow_mut();
                         core.touch_scrollbar_activity();
                         if local_y >= sb.thumb_y && local_y <= sb.thumb_y + sb.thumb_h {
                             core.scrollbar_grab = Some(local_y - sb.thumb_y);
+                        } else if let Some(target) =
+                            resolve_mark_click(&hit_marks, &bm_marks, local_y)
+                        {
+                            core.dragging = false; // 绝不因此进入文本拖选
+                            match target {
+                                // 书签刻度：跳到该行行首（jump_to_line 收口
+                                // 打断组/清 goal/ensure_visible）
+                                MarkTarget::Bookmark(line) => {
+                                    core.jump_to_line(line + 1);
+                                    drop(core);
+                                    shell.publish(crate::Message::EditorNavChanged);
+                                }
+                                // 命中刻度：与查找全部面板点击同口径
+                                //（busy/扫描中守卫由 FindAllGoto 处理器把关）
+                                MarkTarget::Hit(idx) => {
+                                    drop(core);
+                                    shell.publish(crate::Message::FindAllGoto(idx));
+                                }
+                            }
+                            shell.request_redraw();
+                            shell.capture_event();
+                            return;
                         } else {
                             core.scroll_top = sb.scroll_for_track_click(local_y);
                             core.clamp_scroll();

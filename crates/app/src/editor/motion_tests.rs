@@ -2080,3 +2080,53 @@ fn word_motion_at_document_edge_is_noop() {
     c.apply_motion(Motion::WordRight, false);
     assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
 }
+
+// ---------- P131：滚动条标记条数据源 ----------
+
+#[test]
+fn scrollbar_marks_dedupe_by_row_and_skip_dangling_bookmarks() {
+    let mut c = core_with("aa\nbb\ncc\ndd\nee\n");
+    // 命中表按扫描序（行升序）下发；行 1 两条命中 → 同视觉行去重留首个
+    c.set_find_highlights(vec![
+        editpad_core::MatchPos { line: 1, col: 0, len_chars: 1 },
+        editpad_core::MatchPos { line: 1, col: 1, len_chars: 1 },
+        editpad_core::MatchPos { line: 3, col: 0, len_chars: 1 },
+    ]);
+    assert_eq!(c.scrollbar_hit_marks(), vec![(1, 0), (3, 2)]);
+    c.bookmarks.insert(0);
+    c.bookmarks.insert(4);
+    c.bookmarks.insert(99); // 悬空行号不参与（防御）
+    assert_eq!(c.scrollbar_bookmark_marks(), vec![(0, 0), (4, 4)]);
+}
+
+#[test]
+fn scrollbar_hit_marks_follow_visual_rows_when_wrap_on() {
+    let mut c = wrap_core("0123456789012345678901234567890123456789\nsecond\n");
+    wrap_converge(&mut c);
+    let segs0 = c.line_visual_segments(0);
+    assert!(segs0 >= 2, "40 字符行在窄视口应折 ≥2 段，实际 {segs0}");
+    c.set_find_highlights(vec![
+        editpad_core::MatchPos { line: 1, col: 0, len_chars: 1 },
+    ]);
+    let marks = c.scrollbar_hit_marks();
+    assert_eq!(marks.len(), 1);
+    // 折行开态刻度 = 所在视觉行（行 1 基座 = 行 0 段数），禁逻辑行直乘
+    assert_eq!(marks[0].0 as usize, c.line_visual_base(1) as usize);
+    assert_eq!(marks[0].0 as usize, segs0 as usize);
+}
+
+#[test]
+fn scrollbar_hit_marks_cap_for_draw_budget() {
+    let text: String = (0..3000).map(|i| format!("x{i}\n")).collect();
+    let mut c = core_with(&text);
+    c.set_find_highlights(
+        (0..3000)
+            .map(|i| editpad_core::MatchPos { line: i, col: 0, len_chars: 1 })
+            .collect(),
+    );
+    assert_eq!(
+        c.scrollbar_hit_marks().len(),
+        super::super::scrollbars::MARK_MAX_PER_KIND,
+        "命中刻度应按 MARK_MAX_PER_KIND 封顶"
+    );
+}

@@ -2684,3 +2684,178 @@ fn headless_large_font_48_wrap_keeps_right_margin() {
         text_right.saturating_sub(max_x)
     );
 }
+
+// ---------- P131：滚动条标记条 ----------
+
+/// P131 纯函数：刻度 y 换算单调、钳到轨道内、首行贴轨道顶。
+#[test]
+fn mark_track_y_monotonic_and_clamped() {
+    let sb = VScrollbar::measure(1000, 200.0, 20.0, 400.0, 0.0);
+    assert!(sb.needed, "测试前提：滚动条需要出现");
+    let y0 = mark_y_for_row(0, &sb);
+    assert!((y0 - sb.track_y).abs() < 0.01, "首行刻度应贴轨道顶");
+    let mut prev = y0;
+    for row in (0..=1000u32).step_by(37) {
+        let y = mark_y_for_row(row, &sb);
+        assert!(y >= prev - 1e-3, "刻度 y 应随视觉行单调不减");
+        assert!(y >= sb.track_y - 1e-3 && y <= sb.track_y + sb.track_h + 1e-3);
+        prev = y;
+    }
+    // 超出行程的行钳到 ratio=1（= 滑块顶位 track_y + travel，非轨道底：
+    // 口径与滑块一致，末行滚到视口顶即行程尽头）
+    let y_end = mark_y_for_row(50_000, &sb);
+    let travel = (sb.track_h - sb.thumb_h).max(0.0);
+    assert!((y_end - (sb.track_y + travel)).abs() < 0.01);
+}
+
+/// P131 纯函数：点击解析取容差内最近者；同距命中优先；容差外拒绝。
+#[test]
+fn resolve_mark_click_nearest_within_tolerance_hit_wins_ties() {
+    let hits = [(100.0f32, 3usize), (200.0, 7)];
+    let bms = [(102.0f32, 5usize)];
+    // 命中更近
+    assert_eq!(resolve_mark_click(&hits, &bms, 100.5), Some(MarkTarget::Hit(3)));
+    // 书签更近
+    assert_eq!(resolve_mark_click(&hits, &bms, 102.0), Some(MarkTarget::Bookmark(5)));
+    // 同距（两刻度中点）→ 命中优先
+    assert_eq!(resolve_mark_click(&hits, &bms, 101.0), Some(MarkTarget::Hit(3)));
+    // 容差外 → None
+    assert_eq!(resolve_mark_click(&hits, &bms, 120.0), None);
+    // 空表恒 None
+    assert_eq!(resolve_mark_click(&[], &[], 100.0), None);
+}
+
+/// P131（headless 像素级）：命中（橙）与书签（琥珀）刻度画在竖直滚动条
+/// 轨道上，y = 行的视觉行号经 mark_y_for_row 换算；同一视觉行多条命中
+/// 只出一枚刻度；滚动条淡出（无活动）时不画。
+/// 采样口径：刻度带中心列逐行扫描；⚠️ 无头 tiny_skia::Pixmap 的 pixel()
+/// 通道序为 BGRA（第 60 轮先例）——橙 (0xE0,0x5A,0x1E) 读出
+/// blue()≈224 / green()≈90 / red()≈30，琥珀 (0xE0,0x96,0x2E) 读出
+/// blue()≈224 / green()≈150 / red()≈46，按 green() 分界两类。
+#[test]
+fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    let handle = EditorHandle::default();
+    let render = |core: &EditorHandle, fade_out: bool| -> tiny_skia::Pixmap {
+        {
+            let mut c = core.borrow_mut();
+            let doc_text: String = (0..100).map(|i| format!("line {i} abc\n")).collect();
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            // 命中：行 10 两条（同视觉行 → 一枚刻度）+ 行 40 一条
+            c.set_find_highlights(vec![
+                editpad_core::MatchPos { line: 10, col: 0, len_chars: 4 },
+                editpad_core::MatchPos { line: 10, col: 6, len_chars: 3 },
+                editpad_core::MatchPos { line: 40, col: 0, len_chars: 4 },
+            ]);
+            c.bookmarks.insert(3);
+            c.bookmarks.insert(60);
+            if fade_out {
+                // 活动戳拨回远超淡出窗口（set_viewport_* 会点亮滚动条，
+                // 必须在其后覆盖；新 handle 初始即点亮态，不存在
+                // 「从未活动」，None 断言不可测）
+                c.sb_activity =
+                    Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
+            }
+        }
+        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    let frame = render(&handle, false);
+    // 期望 y 与 draw 同源换算：视觉行 → mark_y_for_row
+    let sb = {
+        let c = handle.borrow();
+        VScrollbar::measure(
+            c.scroll_content_lines(),
+            c.viewport_h,
+            c.line_height(),
+            eh,
+            c.scroll_top,
+        )
+    };
+    assert!(sb.needed, "测试前提：100 行文档在 260px 视口下滚动条出现");
+    let expected_y = |line: usize| -> f32 {
+        let c = handle.borrow();
+        ey + mark_y_for_row(c.visual_row_of(line, 0), &sb)
+    };
+    // 刻度带中心列逐行分类
+    let mark_cx = (ex + ew - SCROLLBAR_EDGE_INSET - MARK_WIDTH / 2.0) as u32;
+    let mut orange_groups: Vec<(i32, i32)> = Vec::new();
+    let mut amber_groups: Vec<(i32, i32)> = Vec::new();
+    for y in (ey as u32)..(ey + eh) as u32 {
+        let Some(p) = frame.pixel(mark_cx, y) else { continue };
+        let (bch, gch, rch) = (p.blue(), p.green(), p.red());
+        // 全不透明像素判定；抗锯齿半透边缘混白底后 green 上浮——橙 ≈90
+        // 的边缘会落入 115~135 中性带之外，故意留空挡防两类互串
+        let kind = if bch > 180 && (60..115).contains(&gch) && rch < 80 {
+            Some(0) // 橙（命中）
+        } else if bch > 180 && (135..180).contains(&gch) && rch < 80 {
+            Some(1) // 琥珀（书签）
+        } else {
+            None
+        };
+        let groups = match kind {
+            Some(0) => &mut orange_groups,
+            Some(1) => &mut amber_groups,
+            _ => continue,
+        };
+        match groups.last_mut() {
+            Some(g) if y as i32 - g.1 <= 2 => g.1 = y as i32,
+            _ => groups.push((y as i32, y as i32)),
+        }
+    }
+    let center = |g: (i32, i32)| (g.0 + g.1) as f32 / 2.0;
+    assert_eq!(orange_groups.len(), 2, "橙色命中刻度应有 2 枚（行 10 同视觉行去重为一枚）");
+    for (g, line) in orange_groups.iter().zip([10usize, 40]) {
+        assert!(
+            (center(*g) - expected_y(line)).abs() <= 3.0,
+            "命中刻度 y 偏离换算位（行 {line}）：{} vs {}",
+            center(*g),
+            expected_y(line)
+        );
+    }
+    assert_eq!(amber_groups.len(), 2, "琥珀书签刻度应有 2 枚");
+    for (g, line) in amber_groups.iter().zip([3usize, 60]) {
+        assert!(
+            (center(*g) - expected_y(line)).abs() <= 3.0,
+            "书签刻度 y 偏离换算位（行 {line}）"
+        );
+    }
+    // 淡出隐藏时不画刻度——活动戳在渲染闭包内拨回（见 fade_out 分支）
+    let idle_handle = EditorHandle::default();
+    let idle = render(&idle_handle, true);
+    let mut idle_ink = 0u32;
+    for y in (ey as u32)..(ey + eh) as u32 {
+        if let Some(p) = idle.pixel(mark_cx, y) {
+            if p.blue() > 180 && p.red() < 100 {
+                idle_ink += 1;
+            }
+        }
+    }
+    assert_eq!(idle_ink, 0, "滚动条淡出时不应绘制任何刻度墨迹");
+}

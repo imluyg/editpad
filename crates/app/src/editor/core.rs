@@ -763,6 +763,38 @@ impl EditorCore {
         self.find_hl = hits;
     }
 
+    /// P131：滚动条标记条数据源——命中刻度 `(视觉行, find_hl 索引)`。
+    /// 同一视觉行只留首个命中（命中表按扫描序升序、视觉行随 (line, col)
+    /// 单调不减，故只与上一条比较即可去重）；封顶
+    /// [`super::scrollbars::MARK_MAX_PER_KIND`]。软换行开态走视觉行口径
+    /// （路线图 §7.6：禁逻辑行直乘行高）。
+    pub(crate) fn scrollbar_hit_marks(&self) -> Vec<(u32, usize)> {
+        let cap = super::scrollbars::MARK_MAX_PER_KIND;
+        let mut out: Vec<(u32, usize)> = Vec::new();
+        for (i, hit) in self.find_hl.iter().enumerate() {
+            if out.len() >= cap {
+                break;
+            }
+            let row = self.visual_row_of(hit.line, hit.col);
+            if out.last().is_none_or(|&(last_row, _)| last_row != row) {
+                out.push((row, i));
+            }
+        }
+        out
+    }
+
+    /// P131：书签刻度 `(视觉行, 逻辑行号)`。悬空行号不参与（防御，
+    /// 正常路径书签随编辑再映射不会悬空）。
+    pub(crate) fn scrollbar_bookmark_marks(&self) -> Vec<(u32, usize)> {
+        let cap = super::scrollbars::MARK_MAX_PER_KIND;
+        self.bookmarks
+            .iter()
+            .filter(|&&l| l < self.doc.line_count())
+            .map(|&l| (self.visual_row_of(l, 0), l))
+            .take(cap)
+            .collect()
+    }
+
     /// P123：把命中 (line, col, len_chars) 拆成逐行 `[c0, c1)` 片段
     /// （显示跨度口径：行尾换行单元计 1，与 `select_span` 同款走线）。
     /// 供视口命中高亮按行/视觉段绘制；零宽命中产出空表。
