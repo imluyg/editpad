@@ -2588,8 +2588,16 @@ impl Editpad {
             E::CancelBlock => {
                 // 第 67 轮 ⑮：Esc 取消列块（固定语义不入注册表）
                 editor.clear_block();
+                // P135：Esc 同时取消拖拽会话（选区保留）
+                editor.cancel_dnd();
                 false
             }
+            // P135（路线图 B8）：拖拽释放——移动/复制当前选区到落点
+            //（busy/只读守卫已在本函数头部把关）
+            E::DropSelection { line, col, copy } => editor.finish_drop_selection(
+                crate::editor::CursorPos { line, col },
+                copy,
+            ),
             // ---------- 行操作套件（第 57 轮） ----------
             E::DeleteLines => editor.delete_current_lines(),
             E::DuplicateLines => editor.duplicate_current_lines(),
@@ -3180,6 +3188,9 @@ pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
             | EditOp::CopyBookmarkedLines
             | EditOp::JumpToMatchingBracket
             | EditOp::CancelBlock
+            // P135：DropSelection 的 copy 变体不改内容，但 move 变体改——
+            // fail-safe 口径一律按可变处理（只读态拖拽本就禁启动）
+            | EditOp::DropSelection { .. }
     )
 }
 

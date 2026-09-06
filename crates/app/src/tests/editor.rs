@@ -1391,3 +1391,58 @@ fn enter_and_tab_map_to_smart_indent_ops() {
         // 选中第 0 页（a.txt 是唯一过滤结果）
         assert_eq!(app.tabs.len(), 2);
     }
+
+    // ---------- P135：拖拽移动/复制选区（路线图 B8） ----------
+
+    #[test]
+    fn drop_selection_move_via_apply_edit_marks_dirty_and_single_undo() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dnd.txt")));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("abcd\nefgh\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        // 造选区 "bc"（0,1)-(0,3)
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+            ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+        }
+        // 拖拽移动到行 1 列 2（"ef" 之后）
+        dispatch(
+            &mut app,
+            Message::Edit(crate::editor::EditOp::DropSelection {
+                line: 1,
+                col: 2,
+                copy: false,
+            }),
+        );
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "ad\nefbcgh\n");
+        assert!(app.tab().dirty, "移动 = 编辑，应置脏");
+        // 单快照：一次撤销整体还原
+        dispatch(&mut app, Message::Edit(crate::editor::EditOp::Undo));
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcd\nefgh\n");
+        // 复制变体：源保留
+        {
+            let mut ed = app.cur_handle.borrow_mut();
+            ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+            ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+        }
+        dispatch(
+            &mut app,
+            Message::Edit(crate::editor::EditOp::DropSelection {
+                line: 1,
+                col: 2,
+                copy: true,
+            }),
+        );
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcd\nefbcgh\n");
+    }

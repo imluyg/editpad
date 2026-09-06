@@ -29,6 +29,7 @@ mod highlight;
 mod metrics;
 mod scrollbars;
 mod links;
+mod dnd;
 mod view;
 // 第 72 轮：软换行（候选池⑯ Phase 1）地基组件；第 73 轮接线完成
 // （EditorCore 视觉映射 / hit_test / motion / 滚动 / draw 全部消费），

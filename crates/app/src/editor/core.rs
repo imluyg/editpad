@@ -128,6 +128,15 @@ pub enum Motion {
 pub enum EditOp {
     /// 插入文本（可多行；输入法上屏与普通字符共用）
     InsertText(String),
+    // ---------- P135：文档内拖拽移动/复制选区（路线图 B8） ----------
+    /// 拖拽释放：把当前选区落到 (line, col)——copy=true 复制仅插入，
+    /// false 移动先删后插（单快照一次撤销）。执行体 EditorCore::
+    /// finish_drop_selection；选区/落点均以按下后保持不变为前提。
+    DropSelection {
+        line: usize,
+        col: usize,
+        copy: bool,
+    },
     Backspace,
     Delete,
     SelectAll,
@@ -460,6 +469,9 @@ pub struct EditorCore {
     /// P133：相对路径链接的解析基准（本页文件所在目录）。经 set_base_dir
     /// 由应用层在 tab.path 变更处下发；None = 只按原样路径判定存在性。
     pub(crate) base_dir: Option<std::path::PathBuf>,
+    /// P135：拖拽移动/复制选区的瞬态会话（None = 无拖拽）。仅会话内，
+    /// 不入快照；编辑后随失效汇点自然作废（finish 时清）。
+    pub(crate) dnd: Option<super::dnd::DndState>,
     /// P132：缩进参考线开关（路线图 C4）。经 set_indent_guides 由应用层
     /// 从 Settings 下发，仅影响绘制。
     pub(crate) indent_guides: bool,
@@ -574,6 +586,8 @@ impl Default for EditorCore {
             link_hover: None,
             last_link_probe: None,
             base_dir: None,
+            // P135：无拖拽会话
+            dnd: None,
             block_sel: None,
             block_dragging: false,
             wrap: RefCell::new(WrapCache::new()),

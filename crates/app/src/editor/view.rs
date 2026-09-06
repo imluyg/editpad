@@ -1731,6 +1731,37 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             );
         }
 
+        // P135：拖拽落点指示器——插入点竖线（拖拽中恒显不闪烁，颜色
+        // 同光标；折行开态按所在视觉段段相对定位）
+        if let Some(d) = &core.dnd {
+            if d.started {
+                let text = core.line_text(d.drop.line);
+                let v = core.visual_row_of(d.drop.line, d.drop.col);
+                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                if y >= bounds.y - lh && y <= bounds.y + bounds.height {
+                    let x_rel = if core.wrap_enabled() {
+                        let (_, _, s0, _) = core.locate_visual(v);
+                        core.px_of(d.drop.line, &text, d.drop.col)
+                            - core.px_of(d.drop.line, &text, s0)
+                    } else {
+                        core.px_of(d.drop.line, &text, d.drop.col)
+                    };
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: bounds.x + gutter_w + x_rel - scroll_left,
+                                y,
+                                width: 1.5,
+                                height: lh,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        colors.caret,
+                    );
+                }
+            }
+        }
+
         // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）。
         // P53：按活动淡入淡出——闲置滑块自动隐藏，不再常驻遮挡行尾；
         // alpha≈0 时整条跳绘（含命中门控，隐藏即不可点）
@@ -2020,6 +2051,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         }
                     }
                     drop(core);
+                    // P135（B8）：选区内左键按下 = 拖拽候选——不动光标
+                    // 不清选区；超阈值成拖拽，原地释放由 ButtonReleased
+                    // 按普通点击兜底
+                    {
+                        let mut core = self.core.borrow_mut();
+                        if core.begin_dnd_press(pos.x - bounds.x, pos.y - bounds.y) {
+                            drop(core);
+                            shell.capture_event();
+                            return;
+                        }
+                    }
                     {
                         let mut core = self.core.borrow_mut();
                         let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
@@ -2167,6 +2209,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     }
                 }
 
+                // P135：拖拽移动/复制选区——候选态超阈值成拖拽，拖拽中
+                // 更新落点 + 贴缘自动推进（阈值内仍是候选，走后续路径）
+                if core.dnd.is_some()
+                    && core.update_dnd(pos.x - bounds.x, pos.y - bounds.y)
+                {
+                    drop(core);
+                    shell.request_redraw();
+                    shell.capture_event();
+                    return;
+                }
+
                 if !core.is_dragging() {
                     return;
                 }
@@ -2205,6 +2258,35 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 core.dragging = false;
                 core.scrollbar_grab = None;
                 core.hscrollbar_grab = None;
+                // P135：拖拽释放分流——拖拽中 = 执行（copy 随 Ctrl），
+                // 走 apply_edit 管线；候选态 = 普通点击语义补齐
+                if let Some(d) = core.dnd.take() {
+                    if d.started {
+                        let copy = core.mods.control();
+                        drop(core);
+                        shell.publish(crate::Message::Edit(EditOp::DropSelection {
+                            line: d.drop.line,
+                            col: d.drop.col,
+                            copy,
+                        }));
+                        shell.publish(crate::Message::EditorNavChanged);
+                        shell.request_redraw();
+                        shell.capture_event();
+                    } else {
+                        core.cursor = d.drop;
+                        core.anchor = None;
+                        core.break_typing();
+                        core.clear_vertical_goal();
+                        drop(core);
+                        shell.publish(crate::Message::EditorNavChanged);
+                        shell.request_redraw();
+                        shell.capture_event();
+                    }
+                }
+            }
+            // P135：非左键按下取消拖拽会话（右键菜单/中键不与拖拽并存）
+            iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => {
+                self.core.borrow_mut().cancel_dnd();
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if !cursor.is_over(bounds) {
@@ -2309,6 +2391,10 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         let bounds = layout.bounds();
         if let Some(pos) = cursor.position_over(bounds) {
             let core = self.core.borrow();
+            // P135：拖拽中 = 抓取手势（优先级最高）
+            if core.dnd.as_ref().is_some_and(|d| d.started) {
+                return mouse::Interaction::Grabbing;
+            }
             // 链接悬停：手型（行号栏内不算——那里没有链接）
             if core.link_hover.is_some() && pos.x - bounds.x >= core.gutter_width() {
                 return mouse::Interaction::Pointer;
