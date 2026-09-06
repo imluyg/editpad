@@ -16,7 +16,8 @@ use super::core::{
     WRAP_SB_RESERVE_HYSTERESIS_LINES,
 };
 use super::metrics::{
-    char_cols, display_cols, measure_char_width, measure_ink_box, shape_row_xs,
+    char_cols, display_cols, leading_indent_cols, measure_char_width, measure_ink_box,
+    shape_row_xs, TAB_STOP_COLS,
 };
 use super::scrollbars::{
     mark_y_for_row, resolve_mark_click, HScrollbar, MarkTarget, MARK_HEIGHT, MARK_WIDTH,
@@ -470,6 +471,10 @@ struct EditorColors {
     bracket: Color,
     /// 查找命中底色（P123）：查找栏开态全部命中的视口内高亮。
     find: Color,
+    /// 缩进参考线（P132）：制表位倍数处的淡竖线。
+    indent_guide: Color,
+    /// 右缘标尺线（P132）：固定显示列处的纵向辅助线。
+    edge_ruler: Color,
     /// 不可见字符标记（第 64 轮）：与选区同族的淡蓝（低透明度），
     /// 深浅主题都足够「隐」又不至于在白/黑底上消失。
     invisibles: Color,
@@ -497,6 +502,10 @@ impl EditorColors {
                 bookmark: BOOKMARK_COLOR,
                 bracket: BRACKET_LIGHT,
                 find: FIND_MATCH_LIGHT,
+                // P132：辅助线族——前景低透明度（参考线比标尺更淡），
+                // 两种主题都「隐而不失」
+                indent_guide: Color { a: 0.14, ..palette.text },
+                edge_ruler: Color { a: 0.22, ..palette.text },
                 // 与选区同族的淡蓝（更淡），像素对拍可复用蓝色判据
                 invisibles: Color::from_rgba8(0x33, 0x66, 0xCC, 0.30),
             };
@@ -514,6 +523,8 @@ impl EditorColors {
             bookmark: BOOKMARK_COLOR,
             bracket: Color { a: 0.85, ..text },
             find: FIND_MATCH_DARK,
+            indent_guide: Color { a: 0.14, ..text },
+            edge_ruler: Color { a: 0.22, ..text },
             invisibles: Color { a: 0.32, ..text },
         }
     }
@@ -673,6 +684,64 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 },
                 colors.bookmark,
             );
+        }
+
+        // 缩进参考线（P132，路线图 C4）：行首缩进制表位倍数处的淡竖线，
+        // 画在正文之下（A 层）。每个可见逻辑行各自绘制（覆盖本行行盒
+        // 高度，连续同缩进行自然连成一条）；制表位倍数 ≤ 行首缩进列数
+        // 才画（与制表位/Tab↔空格转换同源口径）。软换行开态锚定逻辑行
+        // 首段（行首空白恒在段 0），x 只含空白字符（全半宽）故按列模型
+        // 换算精确，无字形布局依赖。
+        if core.indent_guides {
+            let (g_first, g_last) = core.visible_range();
+            let tab = TAB_STOP_COLS;
+            for line in g_first..=g_last {
+                let cols = leading_indent_cols(&core.line_text(line));
+                if cols < tab {
+                    continue;
+                }
+                let v = core.visual_row_of(line, 0);
+                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                let mut g = tab;
+                while g <= cols {
+                    let x = bounds.x + gutter_w + g as f32 * char_w - scroll_left;
+                    if x >= bounds.x + gutter_w - 1.0 {
+                        // 不画进行号栏（参考线属正文区）
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle { x, y, width: 1.0, height: lh },
+                                ..renderer::Quad::default()
+                            },
+                            colors.indent_guide,
+                        );
+                    }
+                    g += tab;
+                }
+            }
+        }
+
+        // 右缘标尺（P132，路线图 C5）：固定显示列处的纵向辅助线（0=关），
+        // 画在正文之下、横贯整个正文区高度；随横向滚动移动（它标记的是
+        // 文档列而非屏幕位置），滚出行号栏右侧即被剔除。
+        if core.edge_column > 0 {
+            let x = bounds.x + gutter_w + core.edge_column as f32 * char_w - scroll_left;
+            if x >= bounds.x + gutter_w && x < bounds.x + bounds.width {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x,
+                            y: bounds.y,
+                            width: 1.0,
+                            height: bounds.height,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.edge_ruler,
+                );
+            }
         }
 
         // 查找命中高亮（P123）：查找栏开态的全部命中在视口内上底色。

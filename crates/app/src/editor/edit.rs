@@ -355,6 +355,16 @@ impl EditorCore {
         self.show_line_endings = line_endings;
     }
 
+    /// P132：下发缩进参考线开关（设置保存/建页时调用，仅影响绘制）。
+    pub fn set_indent_guides(&mut self, on: bool) {
+        self.indent_guides = on;
+    }
+
+    /// P132：下发右缘标尺列（0 = 关，设置保存/建页时调用，仅影响绘制）。
+    pub fn set_edge_column(&mut self, col: u32) {
+        self.edge_column = col;
+    }
+
     /// 光标的全文字符偏移（第 69 轮状态栏「位置」用，1 起显示由调用方
     /// +1）。列即行内字符索引，无宽字符折算——与查找偏移同口径。
     pub fn cursor_offset(&self) -> usize {

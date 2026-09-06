@@ -114,6 +114,18 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         desc: "在每行末尾画一个短标，标出换行位置。",
     },
     StaticRow {
+        page: SettingsPage::Appearance,
+        key: "缩进参考线",
+        title: "缩进参考线",
+        desc: "在行首缩进的每个制表位层级画淡竖线，辅助对齐嵌套层级。",
+    },
+    StaticRow {
+        page: SettingsPage::Appearance,
+        key: "右缘标尺列",
+        title: "右缘标尺列",
+        desc: "在指定显示列处画一条纵向辅助线（如 80 列限宽提醒）；0 = 关闭。",
+    },
+    StaticRow {
         page: SettingsPage::Font,
         key: FONT_ROW_KEY,
         title: FONT_ROW_KEY,
@@ -919,6 +931,21 @@ impl Editpad {
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsWordWrapToggled)
                 .into(),
+            // ---- P132：缩进参考线 / 右缘标尺 ----
+            "缩进参考线" => checkbox(s.indent_guides)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsIndentGuidesToggled)
+                .into(),
+            "右缘标尺列" => self.settings_stepper(
+                if s.edge_column == 0 {
+                    "关".to_owned()
+                } else {
+                    format!("{}", s.edge_column)
+                },
+                (s.edge_column > 0).then_some(Message::SettingsEdgeColumnDelta(-4)),
+                (s.edge_column < editpad_core::settings::MAX_EDGE_COLUMN)
+                    .then_some(Message::SettingsEdgeColumnDelta(4)),
+            ),
             "记住最近打开的文件" => checkbox(s.remember_recent_files)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsRememberRecentToggled)

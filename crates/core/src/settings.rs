@@ -112,6 +112,14 @@ pub struct Settings {
     /// scroll_left 锁 0、列块编辑禁用（设计文档）。
     #[serde(default)]
     pub word_wrap: bool,
+    /// P132（路线图 C4）：缩进参考线——行首缩进制表位倍数处的淡竖线。
+    /// 默认开（主流编辑器同款初始态）。
+    #[serde(default = "default_indent_guides")]
+    pub indent_guides: bool,
+    /// P132（路线图 C5）：右缘标尺列——固定显示列处的纵向辅助线。
+    /// 0 = 关闭（默认）。加载归一钳到 [`MAX_EDGE_COLUMN`]。
+    #[serde(default)]
+    pub edge_column: u32,
     /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
     /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/
     /// [`BACKUP_MODE_TIMESTAMPED`]（`name.bak/` 目录内时间戳历史）。
@@ -172,6 +180,9 @@ impl Default for Settings {
             show_line_endings: false,
             // 第 73 轮 ⑯：自动换行默认关（恒等退化回退路径）
             word_wrap: false,
+            // P132：参考线默认开（主流同款），右缘标尺默认关（0）
+            indent_guides: true,
+            edge_column: 0,
             // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
             backup_mode: BACKUP_MODE_NONE.to_string(),
             hotkeys: HashMap::new(),
@@ -191,6 +202,8 @@ pub const DEFAULT_AUTOSAVE_DELAY_SECS: u32 = 2;
 /// 防抖秒数允许范围（闭区间），越界值加载时被 clamp。
 pub const MIN_AUTOSAVE_DELAY_SECS: u32 = 1;
 pub const MAX_AUTOSAVE_DELAY_SECS: u32 = 60;
+/// P132：右缘标尺列上限（超宽行对齐到 1000 列已无对齐意义）。
+pub const MAX_EDGE_COLUMN: u32 = 1000;
 
 /// 快照心跳间隔默认秒数（P31）：10 秒 ≈ 崩溃丢失窗口与 IO 频率的折中
 /// （§3 P31 第 1 条）。
@@ -258,6 +271,11 @@ pub(crate) const BACKUP_MODES: [&str; 3] = [
 
 fn default_backup_mode() -> String {
     BACKUP_MODE_NONE.to_string()
+}
+
+/// P132：缩进参考线 serde 默认（默认开，主流编辑器同款初始态）。
+fn default_indent_guides() -> bool {
+    true
 }
 
 /// 备份模式归一（纯函数可单测）：未知/空白收敛为 none。
@@ -459,6 +477,8 @@ impl Settings {
         self.autosave_delay_secs = self
             .autosave_delay_secs
             .clamp(MIN_AUTOSAVE_DELAY_SECS, MAX_AUTOSAVE_DELAY_SECS);
+        // P132：右缘标尺列钳到合法区间（0 = 关闭）
+        self.edge_column = self.edge_column.min(MAX_EDGE_COLUMN);
         // P29：关窗模式只认两个规范值，手改/旧文件非法值归一为快照直退
         if self.exit_mode != EXIT_MODE_SNAPSHOT && self.exit_mode != EXIT_MODE_ASK {
             self.exit_mode = EXIT_MODE_SNAPSHOT.to_string();
@@ -671,6 +691,36 @@ mod tests {
         assert_eq!(loaded.recent_files, vec!["C:/old.txt".to_string()]);
         assert_eq!(loaded.theme, "light");
         assert_eq!(loaded.font_size, 16.0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn indent_guides_and_edge_column_defaults_roundtrip_and_clamp() {
+        // P132：默认 = 参考线开（主流同款）、标尺关
+        let d = Settings::default();
+        assert!(d.indent_guides);
+        assert_eq!(d.edge_column, 0);
+
+        // serde 零迁移 roundtrip：缺字段落默认，有值原样保留
+        let dir = scratch_dir("p132-roundtrip");
+        let path = dir.join("config.toml");
+        let mut s = Settings::default();
+        s.indent_guides = false;
+        s.edge_column = 80;
+        s.save_to(&path).expect("保存应成功");
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.indent_guides);
+        assert_eq!(loaded.edge_column, 80);
+
+        // 手改超限值加载归一钳到上限
+        fs::write(
+            &path,
+            "indent_guides = true\nedge_column = 5000\nrecent_files = []",
+        )
+        .unwrap();
+        let clamped = Settings::load_from(&path);
+        assert_eq!(clamped.edge_column, MAX_EDGE_COLUMN);
 
         fs::remove_dir_all(&dir).ok();
     }

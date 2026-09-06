@@ -68,6 +68,22 @@ pub(crate) fn char_cols(c: char, col: usize) -> f32 {
     }
 }
 
+/// P132（路线图 C4）：行首缩进的**显示列数**（缩进参考线定位用）。
+/// 口径与渲染制表位同源：空格计 1 列、Tab 跳到下一个 [`TAB_STOP_COLS`]
+/// 制表位——只统计行首连续空白（首个非空白字符即止；宽字符属内容，
+/// 一律不算缩进）。
+pub(crate) fn leading_indent_cols(text: &str) -> usize {
+    let mut col = 0usize;
+    for ch in text.chars() {
+        match ch {
+            ' ' => col += 1,
+            '\t' => col += TAB_STOP_COLS - (col % TAB_STOP_COLS),
+            _ => break,
+        }
+    }
+    col
+}
+
 /// 文本的显示列数（1 列 = [`EditorCore::char_width`] 像素）。
     pub(crate) fn display_cols(text: &str) -> f32 {
     let mut col = 0usize;

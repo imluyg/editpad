@@ -2859,3 +2859,177 @@ fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
     }
     assert_eq!(idle_ink, 0, "滚动条淡出时不应绘制任何刻度墨迹");
 }
+
+// ---------- P132：缩进参考线 + 右缘标尺 ----------
+
+#[test]
+fn leading_indent_cols_counts_display_columns() {
+    use super::super::metrics::TAB_STOP_COLS;
+    assert_eq!(leading_indent_cols(""), 0);
+    assert_eq!(leading_indent_cols("abc"), 0);
+    assert_eq!(leading_indent_cols("    code"), 4);
+    // Tab 补齐到制表位：1 空格 + Tab = 4 列；两个 Tab = 8 列
+    assert_eq!(leading_indent_cols("\tcode"), TAB_STOP_COLS);
+    assert_eq!(leading_indent_cols(" \tcode"), TAB_STOP_COLS);
+    assert_eq!(leading_indent_cols("\t\tcode"), 2 * TAB_STOP_COLS);
+    // 行中 Tab 不算缩进
+    assert_eq!(leading_indent_cols("a\tb"), 0);
+    // 宽字符属内容非缩进
+    assert_eq!(leading_indent_cols("中文"), 0);
+}
+
+/// P132（headless 像素级）：缩进参考线——8 空格缩进行的制表位 4/8 列
+/// 处应有贯穿行盒高的淡竖线，关闭后同列零墨迹（正文「deep」从列 8 起，
+/// 与采样列 4 无字形重叠；空白不产生墨迹，判定干净）。
+#[test]
+fn headless_indent_guides_ink_at_tab_stops_and_toggle_off() {
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    let handle = EditorHandle::default();
+    let render = |guides: bool| -> tiny_skia::Pixmap {
+        {
+            let mut c = handle.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str("        deep\nx\n"));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.set_indent_guides(guides);
+        }
+        let mut view = EditorView { core: handle.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    // 先渲染一帧让 layout 注入实测列宽（未注入前 char_width 是固定假设，
+    // draw 实际用实测值），再取度量算期望 x
+    let on = render(true);
+    let (gutter_w, char_w) = {
+        let c = handle.borrow();
+        (c.gutter_width(), c.char_width())
+    };
+    // 制表位 4 列的参考线 x（与 draw 同源换算）
+    let gx = (ex + gutter_w + 4.0 * char_w).round() as u32;
+    let line0_top = ey as u32; // 行 0 首段 y（scroll_top=0）
+    let ink = |px: &tiny_skia::Pixmap, x0: u32, y0: u32, y1: u32| -> u32 {
+        let mut n = 0u32;
+        for y in y0..y1 {
+            for x in x0.saturating_sub(1)..=(x0 + 1) {
+                if let Some(p) = px.pixel(x, y) {
+                    // 参考线 = 14% 前景叠白底 ≈ 219 灰；白底 255
+                    if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 245 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let g_ink = ink(&on, gx, line0_top, line0_top + 22);
+    eprintln!("[P132] 参考线墨迹 {g_ink}px @x={gx}");
+    assert!(
+        g_ink >= 30,
+        "8 空格缩进行在制表位 4 列处应有贯穿行高的参考线（墨迹 {g_ink}px）"
+    );
+    let off = render(false);
+    assert_eq!(
+        ink(&off, gx, line0_top, line0_top + 22),
+        0,
+        "关闭参考线后该列不应有任何墨迹（空白行首无字形）"
+    );
+}
+
+/// P132（headless 像素级）：右缘标尺——edge_column=8 时在列 8 处有贯穿
+/// 正文区高度的 1px 竖线，0（关）后同列零墨迹（文档行都很短，无字形重叠）。
+#[test]
+fn headless_edge_ruler_ink_at_column_and_toggle_off() {
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    let handle = EditorHandle::default();
+    let render = |col: u32| -> tiny_skia::Pixmap {
+        {
+            let mut c = handle.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str("abc\ndef\n"));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.set_edge_column(col);
+        }
+        let mut view = EditorView { core: handle.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    // 先渲染一帧注入实测列宽再取度量（同参考线测试）
+    let on = render(8);
+    let (gutter_w, char_w) = {
+        let c = handle.borrow();
+        (c.gutter_width(), c.char_width())
+    };
+    let rx = (ex + gutter_w + 8.0 * char_w).round() as u32;
+    let ink = |px: &tiny_skia::Pixmap, x0: u32| -> u32 {
+        let mut n = 0u32;
+        for y in ey as u32..(ey + eh) as u32 {
+            for x in x0.saturating_sub(1)..=(x0 + 1) {
+                if let Some(p) = px.pixel(x, y) {
+                    // 标尺 = 22% 前景叠白底 ≈ 199 灰
+                    if (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3 < 245 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let r_ink = ink(&on, rx);
+    eprintln!("[P132] 标尺墨迹 {r_ink}px @x={rx}");
+    assert!(
+        r_ink >= ((eh as u32) - 8) * 2,
+        "edge_column=8 应有贯穿正文区高度的标尺线（墨迹 {r_ink}px）"
+    );
+    let off = render(0);
+    assert_eq!(
+        ink(&off, rx),
+        0,
+        "标尺关闭后该列不应有任何墨迹（短行无字形）"
+    );
+}

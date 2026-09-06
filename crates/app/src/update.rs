@@ -27,6 +27,13 @@ impl Editpad {
         tab.editor
             .borrow_mut()
             .set_word_wrap(self.settings.word_wrap);
+        // P132：缩进参考线 / 右缘标尺同口径下发（fresh_tab 幂等）
+        tab.editor
+            .borrow_mut()
+            .set_indent_guides(self.settings.indent_guides);
+        tab.editor
+            .borrow_mut()
+            .set_edge_column(self.settings.edge_column);
         tab
     }
 
@@ -249,6 +256,9 @@ impl Editpad {
                 state.settings.show_line_endings,
             );
             ed.set_word_wrap(state.settings.word_wrap);
+            // P132：同口径兜底（漏下发则重启后参考线/标尺失效但设置仍显示开启）
+            ed.set_indent_guides(state.settings.indent_guides);
+            ed.set_edge_column(state.settings.edge_column);
         }
         if configured_font_missing {
             if let Some(name) = state.settings.font_family.as_deref() {
@@ -387,6 +397,8 @@ impl Editpad {
             Message::SettingsShowWhitespaceToggled(..)
             | Message::SettingsShowLineEndingsToggled(..)
             | Message::SettingsWordWrapToggled(..)
+            | Message::SettingsIndentGuidesToggled(..)
+            | Message::SettingsEdgeColumnDelta(..)
             | Message::HotkeyCaptureStarted(..)
             | Message::HotkeyCaptureKey(..)
             | Message::HotkeyCaptureCancel
@@ -1069,6 +1081,26 @@ impl Editpad {
                 self.settings.word_wrap = value;
                 for tab in &self.tabs {
                     tab.editor.borrow_mut().set_word_wrap(value);
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            // P132：缩进参考线 / 右缘标尺——全标签页即时生效（纯绘制开关）
+            Message::SettingsIndentGuidesToggled(value) => {
+                self.settings.indent_guides = value;
+                for tab in &self.tabs {
+                    tab.editor.borrow_mut().set_indent_guides(value);
+                }
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsEdgeColumnDelta(delta) => {
+                let next = (self.settings.edge_column as i32 + delta)
+                    .clamp(0, editpad_core::settings::MAX_EDGE_COLUMN as i32)
+                    as u32;
+                self.settings.edge_column = next;
+                for tab in &self.tabs {
+                    tab.editor.borrow_mut().set_edge_column(next);
                 }
                 self.persist_settings();
                 Task::none()

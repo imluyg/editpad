@@ -447,6 +447,11 @@ pub struct EditorCore {
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
     pub(crate) show_line_endings: bool,
+    /// P132：缩进参考线开关（路线图 C4）。经 set_indent_guides 由应用层
+    /// 从 Settings 下发，仅影响绘制。
+    pub(crate) indent_guides: bool,
+    /// P132：右缘标尺列（路线图 C5），0 = 关。经 set_edge_column 下发。
+    pub(crate) edge_column: u32,
     /// 列块选区（第 67 轮 ⑮）：None = 普通模式。与单选区（anchor/cursor）
     /// 互斥——建立/存在期间任何普通导航或编辑先清除块态。
     /// pub(crate) 仅限测试直接构造状态；生产路径走 begin/update/finish。
@@ -548,6 +553,10 @@ impl Default for EditorCore {
             sel_span_cache: RefCell::new(None),
             show_whitespace: false,
             show_line_endings: false,
+            // P132：绘制开关默认关（Settings 默认 true 在应用层下发时生效；
+            // 无头测试构造的裸 core 不画参考线）
+            indent_guides: false,
+            edge_column: 0,
             block_sel: None,
             block_dragging: false,
             wrap: RefCell::new(WrapCache::new()),
