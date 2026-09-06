@@ -3033,3 +3033,87 @@ fn headless_edge_ruler_ink_at_column_and_toggle_off() {
         "标尺关闭后该列不应有任何墨迹（短行无字形）"
     );
 }
+
+// ---------- P133：链接悬停下划线（headless 像素级） ----------
+
+/// 悬停 token 下方应有 1.5px 下划线（BRACKET_LIGHT 同族蓝，BGRA 判色
+/// 先例：red()=我们的 B 通道 ≈204）；清空悬停后同区域零蓝墨。span 字符
+/// 区间直接注入 link_hover（探测逻辑已由 links 纯函数测试覆盖）。
+#[test]
+fn headless_link_hover_underline_ink_under_token() {
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    let handle = EditorHandle::default();
+    let render = |hover: Option<(usize, usize, usize)>| -> tiny_skia::Pixmap {
+        {
+            let mut c = handle.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str(
+                "go to https://x.io/a ok\n",
+            ));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.link_hover = hover;
+        }
+        let mut view = EditorView { core: handle.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        pixels
+    };
+
+    // 首帧热身注入实测列宽（P132 教训），再取 px_of 换算 token 的 x 区间
+    let _ = render(None);
+    let text = "go to https://x.io/a ok";
+    let (c0, c1) = (6usize, 19usize); // "https://x.io/a"
+    let (gutter_w, x0, x1) = {
+        let c = handle.borrow();
+        (
+            c.gutter_width(),
+            c.px_of(0, text, c0),
+            c.px_of(0, text, c1),
+        )
+    };
+    assert!(x1 > x0, "测试前提：URL 区间有像素宽度");
+    let blue_ink = |px: &tiny_skia::Pixmap| -> u32 {
+        let mut n = 0u32;
+        // 下划线 y = 行盒底 − 3px（lh=22）±3 容差；x 与 draw 同源
+        //（正文原点 = 控件左缘 + 行号栏宽）
+        for y in (ey as u32 + 16)..=(ey as u32 + 24) {
+            for x in (ex as u32 + gutter_w as u32 + x0 as u32)
+                ..(ex as u32 + gutter_w as u32 + x1 as u32)
+            {
+                if let Some(p) = px.pixel(x, y) {
+                    if p.red() > 180 && (80..140).contains(&p.green()) && p.blue() < 120 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let on = render(Some((0, c0, c1)));
+    let ink = blue_ink(&on);
+    eprintln!("[P133] 链接下划线墨迹 {ink}px");
+    assert!(ink >= 12, "悬停 URL 下方应有下划线墨迹（{ink}px）");
+    let off = render(None);
+    assert_eq!(blue_ink(&off), 0, "无悬停时该区域不应有下划线蓝墨");
+}

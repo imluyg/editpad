@@ -32,6 +32,10 @@ impl EditorCore {
         self.bracket_cache.borrow_mut().take();
         // 第 63 轮：选区跨度缓存同汇点失效（偏移键控对「同位异文」同理）
         self.sel_span_cache.borrow_mut().take();
+        // P133：链接悬停跨度同汇点清空——编辑后字符区间可能失配，
+        // 下一次鼠标移动重新探测
+        self.link_hover = None;
+        self.last_link_probe = None;
         // 第 73 轮 ⑯：软换行缓存同汇点失效——行数变化整表重置，
         // 否则只推代次（memo 过期由下次查询懒惰重算）
         self.wrap.borrow_mut().after_edit(self.doc.line_count());

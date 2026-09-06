@@ -447,6 +447,15 @@ pub struct EditorCore {
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
     pub(crate) show_line_endings: bool,
+    /// P133：悬停链接的字符区间 `(line, c0, c1)`（下划线绘制数据源）。
+    /// 鼠标移动探测写入；编辑后经失效汇点清空（跨度可能失配）。
+    pub(crate) link_hover: Option<(usize, usize, usize)>,
+    /// P133：上次链接探测的 `(line, col)`——相同则跳过重探测（鼠标移动
+    /// 事件高频，探测含路径存在性 stat，须去抖）。
+    pub(crate) last_link_probe: Option<(usize, usize)>,
+    /// P133：相对路径链接的解析基准（本页文件所在目录）。经 set_base_dir
+    /// 由应用层在 tab.path 变更处下发；None = 只按原样路径判定存在性。
+    pub(crate) base_dir: Option<std::path::PathBuf>,
     /// P132：缩进参考线开关（路线图 C4）。经 set_indent_guides 由应用层
     /// 从 Settings 下发，仅影响绘制。
     pub(crate) indent_guides: bool,
@@ -557,6 +566,10 @@ impl Default for EditorCore {
             // 无头测试构造的裸 core 不画参考线）
             indent_guides: false,
             edge_column: 0,
+            // P133：链接悬停/基准目录默认无
+            link_hover: None,
+            last_link_probe: None,
+            base_dir: None,
             block_sel: None,
             block_dragging: false,
             wrap: RefCell::new(WrapCache::new()),

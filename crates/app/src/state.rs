@@ -145,6 +145,9 @@ pub(crate) struct Editpad {
     ///（元组即重载前视图快照，一次性搬运不设类型别名）
     #[allow(clippy::type_complexity)]
     pub(crate) monitor_pending: Option<(usize, bool, Option<(usize, usize, f32, f32)>)>,
+    /// P133：链接点击的待跳行号（1 起）——Ctrl+点击 `file.c:42` 时暂存，
+    /// 下一次 Loaded 装载结算后一次性消费（jump_to_line）
+    pub(crate) pending_link_goto: Option<u32>,
 
     // ---------- 打开确认 ----------
     /// dirty 时暂存待打开的路径；Some 即打开确认条可见
@@ -282,6 +285,7 @@ impl Default for Editpad {
             palette_input: String::new(),
             palette_idx: 0,
             monitor_pending: None,
+            pending_link_goto: None,
             always_on_top: false,
             open_confirm: None,
             close_tab_confirm: None,

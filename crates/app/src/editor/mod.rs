@@ -28,6 +28,7 @@ mod highlight;
 
 mod metrics;
 mod scrollbars;
+mod links;
 mod view;
 // 第 72 轮：软换行（候选池⑯ Phase 1）地基组件；第 73 轮接线完成
 // （EditorCore 视觉映射 / hit_test / motion / 滚动 / draw 全部消费），
@@ -36,6 +37,8 @@ mod wrap;
 
 pub use core::*;
 pub use view::*;
+// P133：链接识别（E2）——update.rs 消费 LinkTarget，view.rs 消费 link_at
+pub(crate) use links::{link_at, LinkTarget};
 
 // ---------- 视觉常量（core/view 共用） ----------
 

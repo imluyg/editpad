@@ -1124,3 +1124,59 @@ external
         );
         let _ = std::fs::remove_file(&path);
     }
+
+    // ---------- P133：链接 Ctrl+点击（路线图 E2） ----------
+
+    #[test]
+    fn link_clicked_url_reports_and_keeps_tabs() {
+        let mut app = loaded_txt_app();
+        let tabs = app.tabs.len();
+        dispatch(
+            &mut app,
+            Message::LinkClicked(crate::editor::LinkTarget::Url(
+                "https://example.com/a".to_string(),
+            )),
+        );
+        assert_eq!(app.tabs.len(), tabs, "URL 外开不改标签页");
+        assert!(
+            app.status.contains("example.com"),
+            "状态栏应反馈打开动作，实际：{}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn link_clicked_file_opens_then_jumps_to_line() {
+        let path = scratch_dir("p133-link").join("target.txt");
+        std::fs::write(&path, "first\nsecond\nthird\n").unwrap();
+        let mut app = loaded_txt_app();
+        dispatch(
+            &mut app,
+            Message::LinkClicked(crate::editor::LinkTarget::File {
+                path: path.clone(),
+                line: Some(3),
+            }),
+        );
+        assert_eq!(app.pending_link_goto, Some(3), "行号应暂存待装载结算");
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("first\nsecond\nthird\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.pending_link_goto, None, "装载结算后应一次性消费");
+        let cursor = app.cur_handle.borrow().cursor;
+        assert_eq!((cursor.line, cursor.col), (2, 0), "应跳到第 3 行行首（1 起）");
+        // base_dir 随装载下发 = 文件所在目录（相对路径链接的解析基准）
+        assert_eq!(
+            app.cur_handle.borrow().base_dir,
+            path.parent().map(|p| p.to_path_buf())
+        );
+        let _ = std::fs::remove_file(&path);
+    }

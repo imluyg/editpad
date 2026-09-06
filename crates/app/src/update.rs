@@ -427,6 +427,7 @@ impl Editpad {
             | Message::PendingOpenTick
             | Message::LoadProgress(..)
             | Message::Loaded(..)
+            | Message::LinkClicked(..)
             | Message::SaveRequested
             | Message::SaveAsRequested
             | Message::SaveTargetChosen(..)
@@ -897,6 +898,7 @@ impl Editpad {
                     let tab = &mut self.tabs[idx];
                     tab.dirty = false;
                     tab.path = None;
+                    tab.editor.borrow_mut().set_base_dir(None);
                     tab.editor
                         .borrow_mut()
                         .reset_document(editpad_core::Document::new());
@@ -1032,6 +1034,7 @@ impl Editpad {
                         if let Some(tab) = self.tabs.get_mut(idx) {
                             tab.dirty = false;
                             tab.path = None;
+                            tab.editor.borrow_mut().set_base_dir(None);
                             tab.editor
                                 .borrow_mut()
                                 .reset_document(editpad_core::Document::new());
@@ -1448,6 +1451,10 @@ impl Editpad {
                             }
                         }
                         tab.path = Some(job.path.clone());
+                        // P133：相对路径链接的解析基准 = 本页文件所在目录
+                        tab.editor
+                            .borrow_mut()
+                            .set_base_dir(job.path.parent().map(|p| p.to_path_buf()));
                         tab.encoding_label = encoding;
                         // P67：新载入的文件回到默认 UTF-8 偏好（旧偏好属于
                         // 上一次打开的会话上下文）
@@ -1511,11 +1518,30 @@ impl Editpad {
                 if !self.pending_cli.is_empty() && !self.busy {
                     let _ = self.update(Message::OpenNextCliFile);
                 }
+                // P133：链接点击的「打开后跳行」——装载结算后一次性消费
+                //（1 起行号；行号越界由 jump_to_line 钳制兜底）
+                if let Some(line) = self.pending_link_goto.take() {
+                    self.cur_handle.borrow_mut().jump_to_line(line as usize);
+                }
                 if tasks.is_empty() {
                     Task::none()
                 } else {
                     Task::batch(tasks)
                 }
+            }
+            // ---------- P133：链接 Ctrl+点击（路线图 E2） ----------
+            Message::LinkClicked(editor::LinkTarget::Url(url)) => {
+                match open_external(&url) {
+                    Ok(()) => self.set_status(format!("已用系统默认程序打开 {url}")),
+                    Err(e) => self.set_status_error(format!("打开失败：{e}")),
+                }
+                Task::none()
+            }
+            Message::LinkClicked(editor::LinkTarget::File { path, line }) => {
+                // 行号暂存，装载结算（Loaded）后一次性消费跳行；打开
+                // 守卫（dirty 确认/busy）与普通打开同管线
+                self.pending_link_goto = line;
+                self.request_open(path)
             }
             // ---------- 保存 ----------
             Message::SaveRequested => match self.tab().path.clone() {
@@ -1532,6 +1558,10 @@ impl Editpad {
             Message::SaveTargetChosen(Some(path)) => {
                 let tab = self.tab_mut();
                 tab.path = Some(path.clone());
+                // P133：相对路径链接的解析基准 = 本页文件所在目录
+                tab.editor
+                    .borrow_mut()
+                    .set_base_dir(path.parent().map(|p| p.to_path_buf()));
                 // P25：另存为转正后未命名序号使命完成
                 tab.untitled_num = None;
                 // P67：新路径回到默认 UTF-8 偏好（旧偏好属于旧路径）
@@ -2823,6 +2853,10 @@ impl Editpad {
             Ok(()) => {
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     tab.path = Some(target.clone());
+                    // P133：解析基准随改名迁移
+                    tab.editor
+                        .borrow_mut()
+                        .set_base_dir(target.parent().map(|p| p.to_path_buf()));
                     // P50：路径变了旧戳作废，按新路径重记
                     tab.file_stamp = file_stamp(&target);
                 }
@@ -3114,4 +3148,35 @@ fn reveal_in_explorer(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn reveal_in_explorer(_path: &std::path::Path) -> std::io::Result<()> {
     Err(std::io::Error::other("仅支持 Windows"))
+}
+
+/// P133：用系统默认处理程序打开 URL / file URI（http(s) → 默认浏览器，
+/// file:/// → 资源管理器/浏览器）。Windows 走 explorer.exe 转交默认
+/// 关联（与 reveal_in_explorer 同款：只校验进程能否启动）；非 Windows
+/// 用 xdg-open。
+#[cfg(windows)]
+fn open_external(target: &str) -> std::io::Result<()> {
+    // 测试态不真开系统程序（LinkClicked 处理链路可达本函数）
+    #[cfg(test)]
+    let _ = target;
+    #[cfg(test)]
+    return Ok(());
+    #[cfg(not(test))]
+    {
+        std::process::Command::new("explorer").arg(target).spawn().map(|_| ())
+    }
+}
+
+/// 非 Windows 平台走 xdg-open。
+#[cfg(not(windows))]
+fn open_external(target: &str) -> std::io::Result<()> {
+    // 测试态不真开系统程序（与 Windows 分支同口径）
+    #[cfg(test)]
+    let _ = target;
+    #[cfg(test)]
+    return Ok(());
+    #[cfg(not(test))]
+    {
+        std::process::Command::new("xdg-open").arg(target).spawn().map(|_| ())
+    }
 }

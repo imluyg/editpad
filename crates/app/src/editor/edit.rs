@@ -365,6 +365,36 @@ impl EditorCore {
         self.edge_column = col;
     }
 
+    /// P133：下发相对路径链接的解析基准（本页文件所在目录）。
+    /// tab.path 变更的所有位点（装载/另存/改名/关闭）调用。
+    pub fn set_base_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        self.base_dir = dir;
+    }
+
+    /// P133：在 (line, col) 处探测链接（列 = 行内字符索引，hit_test 同
+    /// 口径）。路径存在性判定含 base_dir 回退（原样不存在时试「本页文件
+    /// 所在目录 + 路径」，构建日志里的相对路径主要靠它）。返回
+    /// `(c0, c1, target)`。
+    pub(crate) fn resolve_link_at(
+        &self,
+        line: usize,
+        col: usize,
+    ) -> Option<(usize, usize, super::LinkTarget)> {
+        let text = self.line_text(line);
+        let base = self.base_dir.clone();
+        let resolve = move |p: &str| -> Option<std::path::PathBuf> {
+            let path = std::path::Path::new(p);
+            if path.exists() {
+                return Some(path.to_path_buf());
+            }
+            base.as_deref().and_then(|b| {
+                let joined = b.join(p);
+                joined.exists().then_some(joined)
+            })
+        };
+        super::link_at(&text, col, &resolve)
+    }
+
     /// 光标的全文字符偏移（第 69 轮状态栏「位置」用，1 起显示由调用方
     /// +1）。列即行内字符索引，无宽字符折算——与查找偏移同口径。
     pub fn cursor_offset(&self) -> usize {

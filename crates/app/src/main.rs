@@ -246,6 +246,9 @@ enum Message {
     /// 设置：右缘标尺列步进（P132，外观页；0 = 关，±4 步进，上限
     /// core::settings::MAX_EDGE_COLUMN）
     SettingsEdgeColumnDelta(i32),
+    /// Ctrl+点击链接（P133，路线图 E2）：URL/file URI 外开，文件路径
+    /// 内开（可选 `:行号` 跳行）
+    LinkClicked(editor::LinkTarget),
     /// 设置：保存时备份模式循环切换（第 64 轮 ⑭，none→simple→
     /// timestamped→none，仿关窗行为的三态按钮）
     SettingsBackupModeToggled,

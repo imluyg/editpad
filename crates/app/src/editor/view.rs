@@ -475,6 +475,8 @@ struct EditorColors {
     indent_guide: Color,
     /// 右缘标尺线（P132）：固定显示列处的纵向辅助线。
     edge_ruler: Color,
+    /// 链接悬停下划线（P133）：与括号匹配同族的蓝。
+    link_underline: Color,
     /// 不可见字符标记（第 64 轮）：与选区同族的淡蓝（低透明度），
     /// 深浅主题都足够「隐」又不至于在白/黑底上消失。
     invisibles: Color,
@@ -506,6 +508,7 @@ impl EditorColors {
                 // 两种主题都「隐而不失」
                 indent_guide: Color { a: 0.14, ..palette.text },
                 edge_ruler: Color { a: 0.22, ..palette.text },
+                link_underline: BRACKET_LIGHT,
                 // 与选区同族的淡蓝（更淡），像素对拍可复用蓝色判据
                 invisibles: Color::from_rgba8(0x33, 0x66, 0xCC, 0.30),
             };
@@ -525,6 +528,7 @@ impl EditorColors {
             find: FIND_MATCH_DARK,
             indent_guide: Color { a: 0.14, ..text },
             edge_ruler: Color { a: 0.22, ..text },
+            link_underline: Color { a: 0.85, ..text },
             invisibles: Color { a: 0.32, ..text },
         }
     }
@@ -684,6 +688,69 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 },
                 colors.bookmark,
             );
+        }
+
+        // 链接悬停下划线（P133，路线图 E2）：悬停 token 下方 1.5px 线
+        //（与括号匹配/预编辑下划线同族）。折行开态按视觉段拆分（URL 可
+        // 能跨段，几何与命中高亮同款：段相对 x、与控件边界求交）。
+        if let Some((line, c0, c1)) = core.link_hover {
+            let text = core.line_text(line);
+            let lens = text.chars().count();
+            let (c0, c1) = (c0.min(lens), c1.min(lens));
+            if c0 < c1 {
+                let underline_y = |row: f32| -> f32 {
+                    bounds.y + (row - core.scroll_top) * lh + lh - 3.0
+                };
+                let mut draw_piece = |x: f32, w: f32, row: f32| {
+                    let Some(rect) = Rectangle {
+                        x: bounds.x + gutter_w + x - scroll_left,
+                        y: underline_y(row),
+                        width: w.max(char_w * 0.4),
+                        height: 1.5,
+                    }
+                    .intersection(&bounds)
+                    else {
+                        return;
+                    };
+                    renderer.fill_quad(
+                        renderer::Quad { bounds: rect, ..renderer::Quad::default() },
+                        colors.link_underline,
+                    );
+                };
+                if core.wrap_enabled() {
+                    let base_v = core.line_visual_base(line);
+                    let breaks = core.segments_of_line(line, &text);
+                    for (s, &seg_start) in breaks.iter().enumerate() {
+                        let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
+                        let cs = c0.max(seg_start);
+                        let ce = c1.min(seg_end);
+                        if ce <= cs {
+                            continue;
+                        }
+                        let row = base_v as f32 + s as f32;
+                        if row < core.scroll_top
+                            || row > core.scroll_top + core.viewport_h / lh
+                        {
+                            continue;
+                        }
+                        let seg_base = core.px_of(line, &text, seg_start);
+                        let x0 = core.px_of(line, &text, cs) - seg_base;
+                        let x1 = core.px_of(line, &text, ce) - seg_base;
+                        draw_piece(x0, x1 - x0, row);
+                    }
+                } else {
+                    let row = line as f32;
+                    if row >= core.scroll_top
+                        && row <= core.scroll_top + core.viewport_h / lh
+                    {
+                        draw_piece(
+                            core.px_of(line, &text, c0),
+                            core.px_of(line, &text, c1) - core.px_of(line, &text, c0),
+                            row,
+                        );
+                    }
+                }
+            }
         }
 
         // 缩进参考线（P132，路线图 C4）：行首缩进制表位倍数处的淡竖线，
@@ -1941,6 +2008,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     }
 
                     // 未命中任何滚动条：走普通文本按下流程
+                    // P133：Ctrl+点击链接优先于文本选区（无 Ctrl / 非链接
+                    // 回落普通流程）；命中即消费，不移动光标
+                    if core.mods.control() && pos.x - bounds.x >= core.gutter_width() {
+                        let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                        if let Some((_, _, target)) = core.resolve_link_at(hit.line, hit.col) {
+                            drop(core);
+                            shell.publish(crate::Message::LinkClicked(target));
+                            shell.capture_event();
+                            return;
+                        }
+                    }
                     drop(core);
                     {
                         let mut core = self.core.borrow_mut();
@@ -1968,6 +2046,13 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let Some(pos) = cursor.position_over(bounds) else {
+                    // P133：移出控件清悬停下划线（否则离开后残留）
+                    let mut core = self.core.borrow_mut();
+                    if core.link_hover.take().is_some() {
+                        core.last_link_probe = None;
+                        drop(core);
+                        shell.request_redraw();
+                    }
                     return;
                 };
                 let mut core = self.core.borrow_mut();
@@ -2054,6 +2139,32 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     shell.publish(crate::Message::EditorNavChanged);
                     shell.request_redraw();
                     return;
+                }
+
+                // P133：链接悬停探测——非拖拽/非滚动条交互态才探测；
+                // (line, col) 未变则跳过（探测含路径存在性 stat，鼠标移动
+                // 事件高频须去抖）。跨度变化才重绘（普通悬停零重绘开销）。
+                if !core.is_dragging()
+                    && !core.block_dragging
+                    && core.scrollbar_grab.is_none()
+                    && core.hscrollbar_grab.is_none()
+                {
+                    let probe = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                    if core.last_link_probe != Some((probe.line, probe.col)) {
+                        core.last_link_probe = Some((probe.line, probe.col));
+                        let detected = if pos.x - bounds.x < core.gutter_width() {
+                            None
+                        } else {
+                            core.resolve_link_at(probe.line, probe.col)
+                                .map(|(c0, c1, _)| (probe.line, c0, c1))
+                        };
+                        if core.link_hover != detected {
+                            core.link_hover = detected;
+                            drop(core);
+                            shell.request_redraw();
+                            return;
+                        }
+                    }
                 }
 
                 if !core.is_dragging() {
@@ -2183,6 +2294,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         }
     }
 
+    /// P133：指针手势——悬停链接 = 手型（优先级最高），正文 = 文本 I 型
+    /// （iced 默认 None；主流编辑器同款 affordance）。
     fn mouse_interaction(
         &self,
         _tree: &Tree,
@@ -2194,6 +2307,10 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         let bounds = layout.bounds();
         if let Some(pos) = cursor.position_over(bounds) {
             let core = self.core.borrow();
+            // 链接悬停：手型（行号栏内不算——那里没有链接）
+            if core.link_hover.is_some() && pos.x - bounds.x >= core.gutter_width() {
+                return mouse::Interaction::Pointer;
+            }
             let sb = VScrollbar::measure(
                 core.scroll_content_lines(),
                 core.viewport_h,
