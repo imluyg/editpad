@@ -1,4 +1,5 @@
 use super::tests::*;
+use crate::editor::block::sequence_lines;
 use super::*;
 
 // ---------- 第 57 轮：行操作套件 ----------
@@ -1113,6 +1114,90 @@ fn apply_line_block_clamps_cursor_into_new_row_count() {
 }
 
 // ---------- 第 67 轮 ⑮：列块编辑 ----------
+
+// ---------- B9 Phase 1：列编辑器序号纯函数 ----------
+
+#[test]
+fn sequence_lines_formats_all_bases_with_pad_and_step() {
+    // 十进制基础 + 负步长
+    assert_eq!(sequence_lines(3, 5, -2, NumBase::Dec, 0, false), ["5", "3", "1"]);
+    // 补零定宽（十进制）
+    assert_eq!(sequence_lines(3, 1, 1, NumBase::Dec, 3, false), ["001", "002", "003"]);
+    // 补零只作用于数字部分，负号在补零之外
+    assert_eq!(sequence_lines(2, -3, 1, NumBase::Dec, 3, false), ["-003", "-002"]);
+    // 十六进制大小写两形态
+    assert_eq!(sequence_lines(2, 9, 1, NumBase::Hex, 2, false), ["09", "0a"]);
+    assert_eq!(sequence_lines(2, 9, 1, NumBase::Hex, 2, true), ["09", "0A"]);
+    // 二进制 / 八进制
+    assert_eq!(sequence_lines(3, 0, 2, NumBase::Bin, 4, false), ["0000", "0010", "0100"]);
+    assert_eq!(sequence_lines(2, 8, 1, NumBase::Oct, 2, false), ["10", "11"]);
+    // i64 饱和：极值 + 正步长停在 MAX，不回绕
+    assert_eq!(
+        sequence_lines(2, i64::MAX, 1, NumBase::Dec, 0, false),
+        [i64::MAX.to_string(), i64::MAX.to_string()]
+    );
+    // i64 饱和：极小值 + 负步长停在 MIN
+    assert_eq!(
+        sequence_lines(2, i64::MIN, -1, NumBase::Dec, 0, false),
+        [i64::MIN.to_string(), i64::MIN.to_string()]
+    );
+    // 补零宽度钳制：要求 100 位只给 32 位
+    assert_eq!(
+        sequence_lines(1, 7, 1, NumBase::Dec, 100, false),
+        [format!("{:0>32}", "7")]
+    );
+    // 零行 = 空序列
+    assert!(sequence_lines(0, 1, 1, NumBase::Dec, 0, false).is_empty());
+}
+
+#[test]
+fn zero_width_block_is_persistent_insertion_column() {
+    // 多行零宽块（r0<r1、c0==c1）不是空块：finish 保留、active 可查询
+    let mut c = core_with("abcdef\ngh\nijklm");
+    c.begin_block_select(CursorPos { line: 0, col: 2 });
+    c.update_block_select(CursorPos { line: 2, col: 2 });
+    assert!(c.finish_block_select(), "零宽插入列松开保留");
+    assert_eq!(c.active_block(), Some((0, 2, 2, 2)));
+
+    // 复制语义：各行片段为零串（不虚构内容）
+    assert_eq!(c.block_copy_text(), Some("\n\n".to_owned()));
+
+    // 插入 = 纯列前插入（零宽段无内容可删）；列越行尾的短行钳到行尾
+    // 插入（行 1 "gh" 长 2，列 2 恰在行尾 → "ghZ"）
+    assert!(c.insert_into_block("Z"));
+    assert_eq!(c.doc.to_text(), "abZcdef\nghZ\nijZklm");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 3 }, "光标落首行插入文本之后");
+    assert!(c.undo(), "零宽插入必须可撤销");
+    assert_eq!(c.doc.to_text(), "abcdef\ngh\nijklm");
+
+    // 序号寄生路径：sequence_lines 拼多行文本走 insert_into_block，
+    // 块行数 == 文本行数时 1:1 填充（1 列宽块 = 替换每行第 2 字符）
+    let seq = sequence_lines(3, 10, 5, NumBase::Dec, 2, false).join("\n");
+    c.begin_block_select(CursorPos { line: 0, col: 1 });
+    c.update_block_select(CursorPos { line: 2, col: 2 });
+    assert!(c.finish_block_select());
+    assert!(c.insert_into_block(&seq));
+    assert_eq!(c.doc.to_text(), "a10cdef\ng15\ni20klm");
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), "abcdef\ngh\nijklm");
+
+    // 零宽删除 = 全空预检 no-op，不产快照
+    let mut d = core_with("ab\ncd");
+    d.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 1 },
+        head: CursorPos { line: 1, col: 1 },
+    });
+    let snaps = d.undo_stack.len();
+    assert!(!d.delete_block_content());
+    assert_eq!(d.undo_stack.len(), snaps, "零宽删除不产快照");
+    assert_eq!(d.doc.to_text(), "ab\ncd");
+
+    // 单点（r0==r1 且 c0==c1）仍为空块：finish 自动清除（P87 口径保持）
+    let mut e = core_with("abcd\n");
+    e.begin_block_select(CursorPos { line: 1, col: 1 });
+    assert!(!e.finish_block_select(), "单点空块松开自动清除");
+    assert!(!e.has_block());
+}
 
 #[test]
 fn block_select_lifecycle_and_geometry() {

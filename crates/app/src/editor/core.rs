@@ -292,6 +292,25 @@ pub enum BlankKind {
     Whitespace,
 }
 
+/// 列编辑器序号进制（B9 Phase 1）。仅决定数字形态，不带符号/补零
+/// 参数——那些是 [`sequence_lines`] 的独立入参（对话框逐项可调）。
+#[allow(dead_code)] // Phase 2 对话框接线后消费；先随单测钉住口径
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumBase {
+    Dec,
+    Hex,
+    Bin,
+    Oct,
+}
+
+/// 列编辑器序号行数封顶（B9 设计 §3.1）：防御性保护撤销快照与绘制
+/// 预算，与查找命中 500 条封顶同哲学。Phase 2 对话框确认路径据此拒绝。
+#[allow(dead_code)] // Phase 2 对话框接线后消费；先随常量钉住口径
+pub(crate) const MAX_COLUMN_SEQ_ROWS: usize = 100_000;
+
+/// 序号补零宽度上限：超出钳制（64 位十进制最长 20 位，32 足够冗余）。
+pub(crate) const MAX_COLUMN_SEQ_WIDTH: usize = 32;
+
 /// 排序/去重的作用域块（第 59 轮）：有选区 = 触及块，无选区 = 全文档。
 /// `lines` 为剥掉行尾的各行正文；幻影末行（文档以换行收尾时 ropey 多出的
 /// 末尾空行）不是真实内容——参与排序会把末尾换行挪到文档头、参与去重会

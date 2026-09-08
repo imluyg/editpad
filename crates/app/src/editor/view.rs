@@ -12,8 +12,8 @@ use iced::advanced::{
 use iced::{alignment, border::Radius, mouse, window, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
 
 use super::core::{
-    luminance, lighten, EditOp, EditorHandle, ImeCommit, SCROLL_LINES_PER_NOTCH,
-    WRAP_SB_RESERVE_HYSTERESIS_LINES,
+    luminance, lighten, EditOp, EditorHandle, ImeCommit, CARET_WIDTH,
+    SCROLL_LINES_PER_NOTCH, WRAP_SB_RESERVE_HYSTERESIS_LINES,
 };
 use super::metrics::{
     char_cols, display_cols, leading_indent_cols, measure_char_width, measure_ink_box,
@@ -999,12 +999,19 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 let cols = text.chars().count();
                 let x0 = core.px_of(line, &text, c0.min(cols));
                 let x1 = core.px_of(line, &text, c1.min(cols).max(c0.min(cols)));
+                // B9 Phase 1：零宽插入列（c0==c1）画 2px 竖指示条而非
+                // 0.4 列宽的窄带——「在此列插入」的锚需要与有宽块可区分
+                let width = if c1 == c0 {
+                    CARET_WIDTH
+                } else {
+                    (x1 - x0).max(char_w * 0.4)
+                };
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
                             x: bounds.x + gutter_w + x0 - scroll_left,
                             y,
-                            width: (x1 - x0).max(char_w * 0.4),
+                            width,
                             height: lh,
                         },
                         ..renderer::Quad::default()
