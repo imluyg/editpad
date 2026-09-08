@@ -430,6 +430,13 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["F6"],
         desc: "列编辑器（向列块插入序号/文本）",
     },
+    // B10 Phase 2：多光标添加下一匹配。Ctrl+D 已被 P73 行复制占用，
+    // Ctrl+M 空闲（主流编辑器同语义键位）。
+    HotkeyAction {
+        id: "add_next_match",
+        default_combos: &["Ctrl+M"],
+        desc: "多光标：添加下一匹配（环形搜索）",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -667,6 +674,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         // P130：文件监视开关
         "toggle_monitor_file" => Some(Message::ToggleMonitorFile),
         "column_editor" => Some(Message::ColumnEditorToggled),
+        // B10 Phase 2：多光标添加下一匹配
+        "add_next_match" => edit(EditOp::AddNextMatch),
         _ => None,
     }
 }

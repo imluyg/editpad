@@ -12,7 +12,7 @@ use iced::advanced::{
 use iced::{alignment, border::Radius, mouse, window, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
 
 use super::core::{
-    luminance, lighten, EditOp, EditorHandle, ImeCommit, CARET_WIDTH,
+    luminance, lighten, CursorPos, EditOp, EditorHandle, ImeCommit, CARET_WIDTH,
     SCROLL_LINES_PER_NOTCH, WRAP_SB_RESERVE_HYSTERESIS_LINES,
 };
 use super::metrics::{
@@ -896,8 +896,24 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
 
         // 选区高亮：只画与视口相交的视觉行（双宽感知）。
         // 第 73 轮 ⑯：软换行开态逐视觉段画 [cs, ce) 子区间（跨段选区
-        // 分段着色，段间空隙 = 折行边界天然不画）；关态走既有逻辑行路径
-        if let Some((sel_start, sel_end)) = core.ordered_selection() {
+        // 分段着色，段间空隙 = 折行边界天然不画）；关态走既有逻辑行路径。
+        // B10 Phase 2：附加光标词选区（Ctrl+M 产生）与主选区同管线——
+        // 统一收集为有序 (start, end) 对后逐个绘制（设计 §3.4）
+        let mut sel_spans: Vec<(CursorPos, CursorPos)> = Vec::new();
+        if let Some((s, e)) = core.ordered_selection() {
+            sel_spans.push((s, e));
+        }
+        for ec in core.extra_cursors.iter() {
+            if let Some(a) = ec.anchor {
+                let span = if (a.line, a.col) <= (ec.cursor.line, ec.cursor.col) {
+                    (a, ec.cursor)
+                } else {
+                    (ec.cursor, a)
+                };
+                sel_spans.push(span);
+            }
+        }
+        let mut paint_selection = |sel_start: CursorPos, sel_end: CursorPos| {
             let last_line = core.doc.line_count().saturating_sub(1);
             for line in sel_start.line..=sel_end.line.min(last_line) {
                 let text = core.line_text(line);
@@ -983,6 +999,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     colors.selection,
                 );
             }
+        };
+        for (sel_start, sel_end) in sel_spans {
+            paint_selection(sel_start, sel_end);
         }
 
         // 第 67 轮 ⑮：列块高亮——逐行画 [c0, c1) 段 quad，颜色与单选区

@@ -165,3 +165,224 @@ fn caret_rect_at_matches_relative_for_main_cursor() {
         "caret_rect_relative = caret_rect_at(主光标)"
     );
 }
+
+// ---------- B10 Phase 2：同步编辑（InsertText/Backspace/Delete） ----------
+
+fn doc_text(c: &EditorCore) -> String {
+    c.doc.slice_text(0, c.doc.text_len())
+}
+
+#[test]
+fn multi_edit_inserts_at_all_cursors_single_snapshot() {
+    let mut c = core_with("abc\nabc\nabc");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 3 }));
+    assert!(c.toggle_extra_cursor(CursorPos { line: 2, col: 3 }));
+    let snapshots_before = c.undo_stack.len();
+
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("X")), Some(true));
+    assert_eq!(doc_text(&c), "abcX\nabcX\nabcX", "三点同步插入");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 4 }, "主光标落插入文本尾");
+    assert_eq!(
+        c.extra_cursors.iter().map(|e| e.cursor).collect::<Vec<_>>(),
+        vec![
+            CursorPos { line: 1, col: 4 },
+            CursorPos { line: 2, col: 4 },
+        ],
+        "附加光标各自落插入文本尾（位序不变量保持）"
+    );
+    assert_eq!(
+        c.undo_stack.len(),
+        snapshots_before + 1,
+        "单快照：一次用户操作只入一帧"
+    );
+
+    // 一次撤销撤掉整步，且恢复完整多光标态（Snapshot 扩展字段）
+    assert!(c.undo());
+    assert_eq!(doc_text(&c), "abc\nabc\nabc");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 3 });
+    assert_eq!(
+        c.extra_cursors.iter().map(|e| e.cursor).collect::<Vec<_>>(),
+        vec![
+            CursorPos { line: 1, col: 3 },
+            CursorPos { line: 2, col: 3 },
+        ],
+        "undo 恢复附加光标集"
+    );
+    assert!(c.redo());
+    assert_eq!(doc_text(&c), "abcX\nabcX\nabcX", "redo 对称");
+    assert_eq!(c.extra_cursors.len(), 2);
+}
+
+#[test]
+fn multi_edit_selection_replace_backspace_delete_inline() {
+    // 带选区插入 = 逐点替换选区（模拟 Ctrl+M 词选区后打字）
+    let mut c = core_with("foo bar foo");
+    c.anchor = Some(CursorPos { line: 0, col: 0 });
+    c.cursor = CursorPos { line: 0, col: 3 };
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 0, col: 11 },
+        anchor: Some(CursorPos { line: 0, col: 8 }),
+    }];
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("XX")), Some(true));
+    assert_eq!(doc_text(&c), "XX bar XX", "主/附光标选区同步替换");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+    assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 9 });
+    assert!(
+        c.extra_cursors.iter().all(|e| e.anchor.is_none()),
+        "编辑后各光标选区清空"
+    );
+
+    // 行内退格：两光标各删前一字符（从后往前应用互不干扰）
+    let mut c = core_with("abcdef\nghijkl");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 3 }));
+    assert_eq!(c.multi_edit(MultiEditKind::Backspace), Some(true));
+    assert_eq!(doc_text(&c), "abdef\nghjkl");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+    assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 1, col: 2 });
+
+    // 行内前向删除
+    let mut c = core_with("abcdef\nghijkl");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 0 }));
+    assert_eq!(c.multi_edit(MultiEditKind::Delete), Some(true));
+    assert_eq!(doc_text(&c), "bcdef\nhijkl");
+}
+
+#[test]
+fn multi_edit_noop_variants_produce_no_snapshot() {
+    // 主光标在文档原点退格 = no-op；其余光标照常参与
+    let mut c = core_with("ab\ncd");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 2 }));
+    let snapshots_before = c.undo_stack.len();
+    assert_eq!(c.multi_edit(MultiEditKind::Backspace), Some(true));
+    assert_eq!(doc_text(&c), "ab\nc");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 0 }, "原点光标不动");
+    assert_eq!(c.undo_stack.len(), snapshots_before + 1);
+
+    // 空文本插入 = Some(false)，不产快照
+    let mut c = core_with("ab\ncd");
+    c.cursor = CursorPos { line: 0, col: 1 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 1 }));
+    let snapshots_before = c.undo_stack.len();
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("")), Some(false));
+    assert_eq!(doc_text(&c), "ab\ncd");
+    assert_eq!(c.undo_stack.len(), snapshots_before, "空文本 no-op 无快照");
+}
+
+#[test]
+fn multi_edit_crossline_falls_back_to_single_cursor() {
+    // 附加光标行首退格 = 跨行删除，一期约束 → 整批折叠返回 None
+    let mut c = core_with("abcdef\nghijkl");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 0 }));
+    assert_eq!(c.multi_edit(MultiEditKind::Backspace), None, "跨行回退");
+    assert!(!c.has_multi(), "回退前折叠全部附加光标");
+
+    // 主光标行尾 Delete（吞换行）同样触发回退
+    let mut c = core_with("abcdef\nghijkl");
+    c.cursor = CursorPos { line: 0, col: 6 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 2 }));
+    assert_eq!(c.multi_edit(MultiEditKind::Delete), None);
+    assert!(!c.has_multi());
+
+    // 跨行选区插入同样回退（主光标选区跨行 + 附加光标在场）
+    let mut c = core_with("abcdef\nghijkl");
+    c.anchor = Some(CursorPos { line: 0, col: 2 });
+    c.cursor = CursorPos { line: 1, col: 2 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 0 }));
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("X")), None);
+    assert!(!c.has_multi());
+
+    // 无多光标 = None（调用方走普通路径的信号）
+    let mut c = core_with("abc");
+    assert_eq!(c.multi_edit(MultiEditKind::Backspace), None);
+    assert!(!c.has_multi());
+}
+
+#[test]
+fn multi_edit_multi_line_insert_shifts_bookmarks_below() {
+    // 粘贴（多行文本）走 InsertText 同步管线：跨行插入平移下方书签
+    let mut c = core_with("aa\nbb\ncc\ndd");
+    c.bookmarks.insert(3); // "dd" 行书签
+    c.cursor = CursorPos { line: 0, col: 2 };
+    assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 2 }));
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("\n")), Some(true));
+    assert_eq!(doc_text(&c), "aa\n\nbb\n\ncc\ndd", "两点各插一个换行");
+    assert!(
+        c.bookmarks.contains(&5),
+        "dd 行书签随两次插入累计下移 3→5"
+    );
+}
+
+// ---------- B10 Phase 2：添加下一匹配（Ctrl+M） ----------
+
+#[test]
+fn add_next_match_word_cycle_skips_occupied() {
+    let mut c = core_with("foo bar foo baz foo");
+    c.cursor = CursorPos { line: 0, col: 0 }; // 光标在词 "foo" 上
+
+    // 第 1 次：加 offset 8 的实例（词选区 anchor=8, cursor=11）
+    assert_eq!(c.add_next_match(), Ok(true));
+    assert_eq!(c.extra_cursors.len(), 1);
+    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 8 }));
+    assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 11 });
+
+    // 第 2 次：offset 8 已被占用 → 跳过，加 offset 16
+    assert_eq!(c.add_next_match(), Ok(true));
+    assert_eq!(c.extra_cursors.len(), 2);
+    assert_eq!(c.extra_cursors[1].anchor, Some(CursorPos { line: 0, col: 16 }));
+    assert_eq!(c.extra_cursors[1].cursor, CursorPos { line: 0, col: 19 });
+
+    // 第 3 次：无更多匹配 → Err 提示，集合不动
+    assert_eq!(
+        c.add_next_match(),
+        Err("没有更多匹配".to_owned()),
+        "环形一圈无匹配 = Err 提示"
+    );
+    assert_eq!(c.extra_cursors.len(), 2);
+}
+
+#[test]
+fn add_next_match_selection_text_and_word_end() {
+    // 有选区 = 以选区文本检索
+    let mut c = core_with("ab cd ab cd");
+    c.anchor = Some(CursorPos { line: 0, col: 0 });
+    c.cursor = CursorPos { line: 0, col: 2 }; // 选区 "ab"
+    assert_eq!(c.add_next_match(), Ok(true));
+    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 6 }));
+    assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 8 });
+
+    // 光标在词尾（无选区）= 向左扩展取词；下一实例在后面
+    let mut c = core_with("xx yy xx");
+    c.cursor = CursorPos { line: 0, col: 2 }; // 词 "xx" 尾
+    assert_eq!(c.add_next_match(), Ok(true));
+    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 6 }));
+    assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 8 });
+}
+
+#[test]
+fn add_next_match_guards() {
+    // 光标不在词上 → Err
+    let mut c = core_with("foo , bar");
+    c.cursor = CursorPos { line: 0, col: 5 }; // 空白处
+    assert!(c.add_next_match().is_err_and(|m| m.contains("词")));
+
+    // 折行开态拒绝（Ok(false) 静默）
+    let mut c = core_with("foo foo");
+    c.set_word_wrap(true);
+    assert_eq!(c.add_next_match(), Ok(false));
+    c.set_word_wrap(false);
+
+    // 列块态拒绝
+    c.begin_block_select(CursorPos { line: 0, col: 0 });
+    c.update_block_select(CursorPos { line: 0, col: 1 });
+    assert_eq!(c.add_next_match(), Ok(false));
+    c.clear_block();
+
+    // 组字态拒绝
+    c.ime_preedit("拼音".to_owned());
+    assert_eq!(c.add_next_match(), Ok(false));
+}

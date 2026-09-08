@@ -40,6 +40,8 @@ mod wrap;
 
 pub use core::*;
 pub use view::*;
+// B10 Phase 2：同步编辑操作种类（update.rs apply_edit 分流消费）
+pub(crate) use cursors::MultiEditKind;
 // P133：链接识别（E2）——update.rs 消费 LinkTarget，view.rs 消费 link_at
 pub(crate) use links::{link_at, LinkTarget};
 

@@ -240,6 +240,12 @@ pub enum EditOp {
     /// 应用选区文本工具（Base64/URL 编解码、MD5/SHA-256；语义见
     /// [`ToolKind`]，错误与幂等口径在 `EditorCore::apply_tool`）
     ApplyTool(ToolKind),
+    // ---------- B10 Phase 2：多光标同步编辑与添加下一匹配 ----------
+    /// 添加下一匹配（Ctrl+M，多光标）：把主光标当前词/选区文本的下一个
+    /// 实例（环形搜索，跳过既有光标占用者）连词带选区加入附加光标集。
+    /// 不改文档、不置脏；失败原因（不在词上/无匹配/封顶）由
+    /// `EditorCore::add_next_match` 以 Err 带出给状态栏。
+    AddNextMatch,
 }
 
 /// P128：选区文本工具种类。
@@ -421,6 +427,10 @@ pub(crate) struct Snapshot {
     /// `toggle_bookmark` 注释）；`remove_bookmarked_lines` 因此能一次
     /// 撤销同时找回文本和书签。
     pub(crate) bookmarks: BTreeSet<usize>,
+    /// B10 Phase 2（设计 §3.5）：附加光标集随快照入栈——一次撤销/重做
+    /// 恢复完整多光标态。旧快照语义 = 空集（字段新增前入栈者没有该
+    /// 状态可存），无迁移问题。
+    pub(crate) extra_cursors: Vec<ExtraCursor>,
 }
 
 // ---------- 核心状态 ----------
@@ -874,6 +884,8 @@ impl EditorCore {
         self.doc = doc;
         self.cursor = CursorPos::default();
         self.anchor = None;
+        // B10：整体换文档 = 旧坐标系作废，附加光标一并折叠
+        self.extra_cursors.clear();
         self.scroll_top = 0.0;
         self.scroll_left = 0.0;
         self.undo_stack.clear();

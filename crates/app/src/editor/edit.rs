@@ -7,6 +7,8 @@ impl EditorCore {
         self.doc = doc;
         self.cursor = CursorPos::default();
         self.anchor = None;
+        // B10：整体替换后行号坐标系作废，附加光标一并折叠
+        self.extra_cursors.clear();
         self.scroll_top = 0.0;
         self.scroll_left = 0.0;
         // 第 60 轮：全部替换后行号与旧内容的对应关系不可信，书签整体作废

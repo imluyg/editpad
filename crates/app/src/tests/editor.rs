@@ -891,6 +891,89 @@ fn multi_cursor_collapse_matrix() {
     }
 }
 
+// ---------- B10 Phase 2：同步编辑 + 添加下一匹配 ----------
+
+#[test]
+fn multi_cursor_sync_edit_via_apply_edit_pipeline() {
+    use crate::editor::{CursorPos, ExtraCursor};
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("foo bar foo baz\n".into())),
+    );
+    // 主光标与附加光标各带词选区（Ctrl+M 形态）
+    {
+        let mut h = app.cur_handle.borrow_mut();
+        h.cursor = CursorPos { line: 0, col: 3 };
+        h.anchor = Some(CursorPos { line: 0, col: 0 });
+        h.extra_cursors = vec![ExtraCursor {
+            cursor: CursorPos { line: 0, col: 11 },
+            anchor: Some(CursorPos { line: 0, col: 8 }),
+        }];
+    }
+    // InsertText 走同步管线：两点选区同步替换（apply_edit 分流多光标）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("XX".into())));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "XX bar XX baz\n",
+        "主/附光标选区同步替换"
+    );
+    assert!(app.tab().dirty, "同步编辑置脏（自动保存语义继承）");
+    // 单撤销撤掉整步，且恢复完整多光标态
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "foo bar foo baz\n");
+    let h = app.cur_handle.borrow();
+    assert_eq!(h.extra_cursors.len(), 1, "undo 恢复附加光标集");
+    assert_eq!(h.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 8 }));
+    assert_eq!(h.cursor, CursorPos { line: 0, col: 3 }, "恢复主光标");
+    assert_eq!(h.anchor, Some(CursorPos { line: 0, col: 0 }));
+}
+
+#[test]
+fn add_next_match_hotkey_dispatch_full_chain() {
+    use crate::editor::CursorPos;
+    // Ctrl+M 默认键位 → AddNextMatch（注册表默认分发）
+    let msg = handle_key_defaults(
+        keyboard::Key::Character("m".into()),
+        keyboard::Modifiers::CTRL,
+    );
+    assert!(
+        matches!(msg, Some(Message::Edit(EditOp::AddNextMatch))),
+        "Ctrl+M 默认分发 add_next_match"
+    );
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("foo bar foo".into())),
+    );
+    // 光标在文本尾 = 词 "foo"（8..11）尾；环形回绕命中开头实例
+    dispatch(&mut app, Message::Edit(EditOp::AddNextMatch));
+    let dirty_before = app.tab().dirty;
+    {
+        let h = app.cur_handle.borrow();
+        assert_eq!(h.extra_cursors.len(), 1, "命中开头实例 (0..3)");
+        assert_eq!(h.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 0 }));
+        assert_eq!(h.extra_cursors[0].cursor, CursorPos { line: 0, col: 3 });
+    }
+    // 再次 Ctrl+M：无更多匹配 → 状态栏提示，集合不动（文档尾部无实例）
+    dispatch(&mut app, Message::Edit(EditOp::AddNextMatch));
+    assert_eq!(app.cur_handle.borrow().extra_cursors.len(), 1);
+    assert!(app.status.contains("匹配"), "无匹配提示上状态栏");
+    assert_eq!(
+        app.tab().dirty,
+        dirty_before,
+        "添加匹配纯光标集操作不置脏"
+    );
+    // 只读页 Ctrl+M 放行（纯导航），同步编辑仍被拒
+    dispatch(&mut app, Message::ToggleReadOnly);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "foo bar foo",
+        "只读拒收同步编辑"
+    );
+}
+
 /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
 fn key_f5() -> Option<Message> {
     use iced::keyboard::{self, key::Named};
@@ -1509,6 +1592,8 @@ fn enter_and_tab_map_to_smart_indent_ops() {
         assert!(!crate::update::edit_op_mutates(&EditOp::CopyBookmarkedLines));
         assert!(!crate::update::edit_op_mutates(&EditOp::JumpToMatchingBracket));
         assert!(!crate::update::edit_op_mutates(&EditOp::CancelBlock));
+        // B10：添加下一匹配只动光标集，不改文档（只读页放行）
+        assert!(!crate::update::edit_op_mutates(&EditOp::AddNextMatch));
     }
 
     #[test]

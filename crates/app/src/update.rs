@@ -2687,10 +2687,8 @@ impl Editpad {
             self.cur_handle.borrow_mut().clear_block();
         }
         // B10 多光标存活白名单（设计 §3.3）：InsertText/Backspace/Delete
-        // （Phase 2 接同步编辑）+ 行内 Left/Right + CancelBlock；白名单外
-        // 一律先折叠为单光标再走既有路径——单点收口防漏折。Phase 1 期
-        // 三个编辑操作仍只落主光标（附加光标位置待 Phase 2 同步），注释
-        // 留痕。
+        // （Phase 2 同步编辑）+ 行内 Left/Right + CancelBlock + AddNextMatch；
+        // 白名单外一律先折叠为单光标再走既有路径——单点收口防漏折
         if self.cur_handle.borrow().has_multi()
             && !matches!(
                 op,
@@ -2698,6 +2696,7 @@ impl Editpad {
                     | E::Backspace
                     | E::Delete
                     | E::CancelBlock
+                    | E::AddNextMatch
                     | E::Motion(Motion::Left | Motion::Right, false)
             )
         {
@@ -2739,6 +2738,10 @@ impl Editpad {
                 // 第 67 轮 ⑮：列块态下输入 = 逐行替换块内容（v1 单行文本）
                 if editor.has_block() {
                     editor.insert_into_block(&text)
+                } else if let Some(changed) = editor.multi_edit(editor::MultiEditKind::Insert(&text)) {
+                    // B10 Phase 2：多光标同步插入（None = 触发折叠回退，
+                    // 落回普通单光标路径）
+                    changed
                 } else {
                     editor.insert_str(&text);
                     true
@@ -2749,6 +2752,8 @@ impl Editpad {
                 //（文档原点是静默 no-op，不得触发置脏/自动保存）
                 if editor.has_block() {
                     editor.delete_block_content()
+                } else if let Some(changed) = editor.multi_edit(editor::MultiEditKind::Backspace) {
+                    changed
                 } else {
                     editor.backspace()
                 }
@@ -2757,9 +2762,19 @@ impl Editpad {
                 // 文档末尾的 Delete 同样可能是空操作
                 if editor.has_block() {
                     editor.delete_block_content()
+                } else if let Some(changed) = editor.multi_edit(editor::MultiEditKind::Delete) {
+                    changed
                 } else {
                     editor.delete_forward()
                 }
+            }
+            E::AddNextMatch => {
+                // B10 Phase 2：添加下一匹配（Ctrl+M，纯光标集操作不置脏）；
+                // Err = 具体原因上状态栏（不在词上/无匹配/封顶）
+                if let Err(msg) = editor.add_next_match() {
+                    hint = Some(msg);
+                }
+                false
             }
             E::CancelBlock => {
                 // 第 67 轮 ⑮：Esc 取消列块（固定语义不入注册表）
@@ -3364,6 +3379,8 @@ pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
             | EditOp::CopyBookmarkedLines
             | EditOp::JumpToMatchingBracket
             | EditOp::CancelBlock
+            // B10：添加下一匹配只动光标集，不改文档（只读页可用）
+            | EditOp::AddNextMatch
             // P135：DropSelection 的 copy 变体不改内容，但 move 变体改——
             // fail-safe 口径一律按可变处理（只读态拖拽本就禁启动）
             | EditOp::DropSelection { .. }
