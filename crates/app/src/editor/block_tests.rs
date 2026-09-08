@@ -1,5 +1,4 @@
 use super::tests::*;
-use crate::editor::block::sequence_lines;
 use super::*;
 
 // ---------- 第 57 轮：行操作套件 ----------

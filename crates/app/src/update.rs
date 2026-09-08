@@ -475,6 +475,15 @@ impl Editpad {
             | Message::PaletteMove(_)
             | Message::PaletteExecute
             | Message::PalettePick(_)
+            | Message::ColumnEditorToggled
+            | Message::ColumnEditorModeToggled
+            | Message::ColumnEditorTextChanged(_)
+            | Message::ColumnEditorStartChanged(_)
+            | Message::ColumnEditorStepChanged(_)
+            | Message::ColumnEditorWidthChanged(_)
+            | Message::ColumnEditorBaseCycled
+            | Message::ColumnEditorHexUpperToggled
+            | Message::ColumnEditorConfirmed
             | Message::FindToggled
             | Message::FindQueryChanged(..)
             | Message::FindNext
@@ -642,6 +651,21 @@ impl Editpad {
                         (keyboard::Key::Named(Named::Escape), _) => {
                             self.palette_visible = false;
                             return Task::none();
+                        }
+                        _ => {}
+                    }
+                }
+                // B9：列编辑器对话框可见时 Enter=确认 / Esc=取消（先于
+                // 列块 Esc 清块分支——对话框开着时 Esc 语义属于对话框）。
+                // 输入框字符键不到本层（订阅只转发 Ignored），不串打字。
+                if self.column_editor_visible {
+                    match (&key, modifiers) {
+                        (keyboard::Key::Named(Named::Escape), _) => {
+                            self.column_editor_visible = false;
+                            return Task::none();
+                        }
+                        (keyboard::Key::Named(Named::Enter), _) => {
+                            return Task::done(Message::ColumnEditorConfirmed);
                         }
                         _ => {}
                     }
@@ -2483,6 +2507,66 @@ impl Editpad {
                 self.palette_idx = i;
                 self.palette_execute()
             }
+            // ---------- B9 列编辑器对话框 ----------
+            Message::ColumnEditorToggled => {
+                if self.column_editor_visible {
+                    self.column_editor_visible = false;
+                    return Task::none();
+                }
+                // 打开前置守卫：busy 与软换行拒绝；无列块拒绝（块是插入
+                // 的唯一目标，预告提示比打开空对话框更省一步）
+                if self.busy {
+                    return Task::none();
+                }
+                if self.cur_handle.borrow().wrap_enabled() {
+                    self.set_status_error("自动换行开启时不可用列编辑器（先关闭折行）");
+                    return Task::none();
+                }
+                if !self.cur_handle.borrow().has_block() {
+                    self.set_status_error("先建立列块选区（Alt+Shift 拖拽，竖直拖出零宽插入列亦可）");
+                    return Task::none();
+                }
+                // 浮层互斥：对话框与设置弹窗/命令面板不同框
+                self.settings_visible = false;
+                self.palette_visible = false;
+                self.column_editor_visible = true;
+                Task::none()
+            }
+            Message::ColumnEditorModeToggled => {
+                self.column_editor.number_mode = !self.column_editor.number_mode;
+                Task::none()
+            }
+            Message::ColumnEditorTextChanged(v) => {
+                self.column_editor.text = v;
+                Task::none()
+            }
+            Message::ColumnEditorStartChanged(v) => {
+                self.column_editor.start = v;
+                Task::none()
+            }
+            Message::ColumnEditorStepChanged(v) => {
+                self.column_editor.step = v;
+                Task::none()
+            }
+            Message::ColumnEditorWidthChanged(v) => {
+                self.column_editor.pad_width = v;
+                Task::none()
+            }
+            Message::ColumnEditorBaseCycled => {
+                use crate::editor::NumBase as B;
+                self.column_editor.base = match self.column_editor.base {
+                    B::Dec => B::Hex,
+                    B::Hex => B::Bin,
+                    B::Bin => B::Oct,
+                    B::Oct => B::Dec,
+                };
+                Task::none()
+            }
+            Message::ColumnEditorHexUpperToggled => {
+                self.column_editor.hex_upper = !self.column_editor.hex_upper;
+                Task::none()
+            }
+            Message::ColumnEditorConfirmed => self.column_editor_confirm(),
             Message::GotoSubmit => match self.goto_input.trim().parse::<usize>() {
                 Ok(n) if n >= 1 => {
                     self.cur_handle.borrow_mut().jump_to_line(n);
@@ -2500,6 +2584,73 @@ impl Editpad {
     }
 
     // ---------- 编辑分发 ----------
+
+    /// B9：列编辑器「确定」——校验草稿并生成插入文本，关闭对话框后经
+    /// `EditOp::InsertText` 进列块插入管线（`insert_into_block`：撤销
+    /// 单快照/书签/失效汇点/busy/只读总闸全继承，零新编辑路径）。
+    /// 校验失败 = 对话框保持打开 + 状态栏错误提示（不静默丢弃输入）。
+    fn column_editor_confirm(&mut self) -> Task<Message> {
+        if !self.column_editor_visible {
+            return Task::none();
+        }
+        let d = self.column_editor.clone();
+        let payload = if !d.number_mode {
+            if d.text.is_empty() {
+                Err("请输入要插入的文本".to_owned())
+            } else {
+                Ok(d.text)
+            }
+        } else {
+            self.column_editor_sequence(&d)
+        };
+        match payload {
+            Ok(text) => {
+                self.column_editor_visible = false;
+                self.status.clear();
+                // 递归 update（Pasted 同款先例）：busy/只读守卫在
+                // apply_edit 总闸二次生效，这里不重复裁决
+                self.update(Message::Edit(EditOp::InsertText(text)))
+            }
+            Err(msg) => {
+                self.set_status_error(msg);
+                Task::none()
+            }
+        }
+    }
+
+    /// 序号模式校验与生成：数值解析 + 块行数检查 + 封顶拒绝，文本由
+    /// `sequence_lines` 纯函数生成（多行拼接后与文本模式共用插入路径）。
+    fn column_editor_sequence(&self, d: &ColumnEditorDraft) -> Result<String, String> {
+        let start: i64 = d
+            .start
+            .trim()
+            .parse()
+            .map_err(|_| "起始值须为整数（可负）".to_owned())?;
+        let step: i64 = d
+            .step
+            .trim()
+            .parse()
+            .map_err(|_| "步长须为整数（可负）".to_owned())?;
+        let width: usize = d
+            .pad_width
+            .trim()
+            .parse()
+            .map_err(|_| "补零宽度须为非负整数（0 = 不补）".to_owned())?;
+        if width > editor::MAX_COLUMN_SEQ_WIDTH {
+            return Err(format!("补零宽度上限 {} 位", editor::MAX_COLUMN_SEQ_WIDTH));
+        }
+        let rows = match self.cur_handle.borrow().active_block() {
+            Some((r0, r1, _, _)) => r1 - r0 + 1,
+            None => return Err("先建立列块选区（Alt+Shift 拖拽）".to_owned()),
+        };
+        if rows > editor::MAX_COLUMN_SEQ_ROWS {
+            return Err(format!(
+                "列块行数 {rows} 超过列编辑器上限 {}",
+                editor::MAX_COLUMN_SEQ_ROWS
+            ));
+        }
+        Ok(editor::sequence_lines(rows, start, step, d.base, width, d.hex_upper).join("\n"))
+    }
 
     /// 执行一次按键编辑；返回是否真的改动了文本。
     fn apply_edit(&mut self, op: EditOp) -> bool {

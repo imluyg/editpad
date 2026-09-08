@@ -711,6 +711,109 @@ fn block_selection_edit_and_esc_flow() {
     assert!(!app.cur_handle.borrow().has_block());
 }
 
+// ---------- B9 Phase 2：列编辑器对话框 ----------
+
+/// F6 应分发到列编辑器（注册表→dispatch_action 全链路）。
+#[test]
+fn column_editor_f6_dispatches() {
+    use iced::keyboard::{self, key::Named};
+    let msg = handle_key_defaults(
+        keyboard::Key::Named(Named::F6),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(matches!(
+        msg,
+        Some(Message::ColumnEditorToggled)
+    ));
+}
+
+#[test]
+fn column_editor_dialog_open_guard_and_confirm() {
+    use crate::editor::{BlockSel, CursorPos, NumBase};
+    use iced::keyboard;
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("abcdef\nghijkl\n".into())),
+    );
+
+    // 无块打开 → 拒绝 + 错误提示
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(!app.column_editor_visible, "无列块不得打开");
+    assert!(!app.status.is_empty(), "拒绝必须给状态栏原因");
+
+    // 建块（1 列宽块 [1,2) 两行）→ 打开成功；默认文本模式
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 1 },
+        head: CursorPos { line: 1, col: 2 },
+    });
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(app.column_editor_visible);
+
+    // 序号模式：起始 10 步长 5 补零 2 → 1:1 填充替换 [1,2)
+    dispatch(&mut app, Message::ColumnEditorModeToggled);
+    assert!(app.column_editor.number_mode);
+    dispatch(&mut app, Message::ColumnEditorStartChanged("10".into()));
+    dispatch(&mut app, Message::ColumnEditorStepChanged("5".into()));
+    dispatch(&mut app, Message::ColumnEditorWidthChanged("2".into()));
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert!(!app.column_editor_visible, "成功确认后关闭");
+    assert!(app.status.is_empty(), "成功路径清状态栏");
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "a10cdef\ng15ijkl\n",
+        "序号经 insert_into_block 寄生路径逐行替换"
+    );
+    // 一次撤销撤掉整步（单快照）
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcdef\nghijkl\n");
+
+    // 无效数值：保持打开 + 错误提示（undo 清块，重建块后再开对话框）
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 1 },
+        head: CursorPos { line: 1, col: 2 },
+    });
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(app.column_editor.number_mode, "草稿跨开合保留（序号模式仍在）");
+    dispatch(&mut app, Message::ColumnEditorStartChanged("x".into()));
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert!(app.column_editor_visible, "校验失败保持打开");
+    assert!(app.status.contains("整数"), "提示具体原因");
+
+    // Esc 关闭（KeyPressed 拦截层），块保留不动
+    dispatch(
+        &mut app,
+        Message::KeyPressed(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::empty(),
+        ),
+    );
+    assert!(!app.column_editor_visible);
+    assert!(app.cur_handle.borrow().has_block(), "Esc 只关对话框不清块");
+
+    // 重开后再测：补零宽度越界拒绝（草稿跨开合保留；先复位有效数值
+    // 隔离宽度这个变量）
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    dispatch(&mut app, Message::ColumnEditorStartChanged("1".into()));
+    dispatch(&mut app, Message::ColumnEditorStepChanged("1".into()));
+    dispatch(&mut app, Message::ColumnEditorWidthChanged("99".into()));
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert!(app.column_editor_visible, "校验失败保持打开");
+    assert!(app.status.contains("上限"), "宽度钳制提示");
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(!app.column_editor_visible, "再 toggle = 关闭");
+
+    // 进制循环顺序：Dec→Hex→Bin→Oct→Dec
+    assert_eq!(app.column_editor.base, NumBase::Dec);
+    dispatch(&mut app, Message::ColumnEditorBaseCycled);
+    assert_eq!(app.column_editor.base, NumBase::Hex);
+    dispatch(&mut app, Message::ColumnEditorBaseCycled);
+    dispatch(&mut app, Message::ColumnEditorBaseCycled);
+    assert_eq!(app.column_editor.base, NumBase::Oct);
+    dispatch(&mut app, Message::ColumnEditorBaseCycled);
+    assert_eq!(app.column_editor.base, NumBase::Dec);
+}
+
 /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
 fn key_f5() -> Option<Message> {
     use iced::keyboard::{self, key::Named};

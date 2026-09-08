@@ -294,7 +294,6 @@ pub enum BlankKind {
 
 /// 列编辑器序号进制（B9 Phase 1）。仅决定数字形态，不带符号/补零
 /// 参数——那些是 [`sequence_lines`] 的独立入参（对话框逐项可调）。
-#[allow(dead_code)] // Phase 2 对话框接线后消费；先随单测钉住口径
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumBase {
     Dec,
@@ -304,9 +303,69 @@ pub enum NumBase {
 }
 
 /// 列编辑器序号行数封顶（B9 设计 §3.1）：防御性保护撤销快照与绘制
-/// 预算，与查找命中 500 条封顶同哲学。Phase 2 对话框确认路径据此拒绝。
-#[allow(dead_code)] // Phase 2 对话框接线后消费；先随常量钉住口径
+/// 预算，与查找命中 500 条封顶同哲学。对话框确认路径据此拒绝。
 pub(crate) const MAX_COLUMN_SEQ_ROWS: usize = 100_000;
+
+/// 序号格式化：非负 `mag` 按进制转数字串并补零到 `pad` 位（0 = 不补）。
+/// 手写循环除基（与 P128 手写哈希同款零依赖纪律）；`pad` 超上限钳 32。
+fn format_seq_digits(mag: u64, base: NumBase, pad: usize, upper: bool) -> String {
+    let digits: &str = match base {
+        NumBase::Dec => "0123456789",
+        NumBase::Hex => {
+            if upper {
+                "0123456789ABCDEF"
+            } else {
+                "0123456789abcdef"
+            }
+        }
+        NumBase::Bin => "01",
+        NumBase::Oct => "01234567",
+    };
+    let radix = digits.len() as u64;
+    let mut buf = Vec::new();
+    let mut v = mag;
+    loop {
+        buf.push(digits.as_bytes()[(v % radix) as usize]);
+        v /= radix;
+        if v == 0 {
+            break;
+        }
+    }
+    let pad = pad.min(MAX_COLUMN_SEQ_WIDTH);
+    while buf.len() < pad {
+        buf.push(b'0');
+    }
+    buf.reverse();
+    String::from_utf8(buf).expect("数字表恒 ASCII")
+}
+
+/// B9 列编辑器序号序列（设计 §3.1 纯函数）：产 `rows` 行文本，第 i 行
+/// = `start + i*step` 按进制格式化。步长可为负；累加走 `i64::saturating_add`
+/// （对齐 P124 数值排序的饱和口径，溢出钳制在极值不回绕不 panic）；
+/// 补零只作用于数字部分，负号在补零之外（`-005`）。行数封顶由调用方
+/// （对话框确认路径 `column_editor_sequence`）按 [`MAX_COLUMN_SEQ_ROWS`]
+/// 把关——本函数保持纯格式化。
+pub(crate) fn sequence_lines(
+    rows: usize,
+    start: i64,
+    step: i64,
+    base: NumBase,
+    width: usize,
+    upper: bool,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(rows);
+    let mut v = start;
+    for _ in 0..rows {
+        let s = if v < 0 {
+            format!("-{}", format_seq_digits(v.unsigned_abs(), base, width, upper))
+        } else {
+            format_seq_digits(v as u64, base, width, upper)
+        };
+        out.push(s);
+        v = v.saturating_add(step);
+    }
+    out
+}
 
 /// 序号补零宽度上限：超出钳制（64 位十进制最长 20 位，32 足够冗余）。
 pub(crate) const MAX_COLUMN_SEQ_WIDTH: usize = 32;

@@ -1700,6 +1700,10 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if self.palette_visible {
             layered = layered.push(self.palette_overlay());
         }
+        // B9：列编辑器对话框（居中模态；与设置/面板互斥由 update 保证）
+        if self.column_editor_visible {
+            layered = layered.push(self.column_editor_overlay());
+        }
         // P67：状态栏编码/行尾弹出菜单（互斥，update 层保证）
         if self.encoding_menu {
             layered = layered.push(self.encoding_menu_overlay());
@@ -1891,6 +1895,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     .push(item(
                         "切换行注释  Ctrl+Q".to_owned(),
                         interactive.then_some(Message::Edit(EditOp::ToggleLineComment)),
+                    ))
+                    .push(sep())
+                    .push(item(
+                        "列编辑器…  F6".to_owned(),
+                        interactive.then_some(Message::ColumnEditorToggled),
                     ));
             }
             // ---------- 查看 ----------
@@ -2139,6 +2148,154 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         )
         .on_press(Message::PaletteToggled(self.palette_mode))
             .into()
+    }
+
+    /// B9：列编辑器对话框——整窗背板（点击关闭）+ 居中卡片（设置弹窗
+    /// P40 同款结构、命令面板同款 opaque 防穿透）。文本/序号两模式；
+    /// Enter 确认 / Esc 取消在 KeyPressed 层拦截，输入框字符键不串层
+    /// （P129 同口径）。数值输入以字符串承载、确认时统一校验。
+    fn column_editor_overlay(&self) -> Element<'_, Message> {
+        let uipx = editor::ui_font_px();
+        let uifont = self.body_font();
+        let d = &self.column_editor;
+        let text_input_w = |placeholder: &'static str, value: &str, msg: fn(String) -> Message| {
+            text_input(placeholder, value)
+                .size(uipx)
+                .font(uifont)
+                .width(Fill)
+                .on_input(msg)
+                .padding([3, 8])
+        };
+        let mode_btn = |label: &str, active: bool| {
+            button(
+                text(format!("{} {label}", if active { "●" } else { "○" }))
+                    .size(uipx)
+                    .font(uifont),
+            )
+            .padding([3, 10])
+            .style(chrome_button_style)
+            .on_press(Message::ColumnEditorModeToggled)
+        };
+        fn labeled<'a>(
+            label: &str,
+            control: impl Into<iced::Element<'a, Message>>,
+            uipx: f32,
+            uifont: iced::Font,
+        ) -> iced::Element<'a, Message> {
+            row![
+                text(label.to_owned()).size(uipx).font(uifont),
+                control.into(),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(Fill)
+            .into()
+        }
+        let mut body = column![].spacing(8).width(Fill);
+        body = body.push(
+            row![
+                text("列编辑器").size(uipx).font(uifont).width(Fill),
+                button(text("×").size(uipx).font(uifont))
+                    .padding([1, 6])
+                    .style(chrome_button_style)
+                    .on_press(Message::ColumnEditorToggled),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        body = body.push(
+            row![mode_btn("文本", !d.number_mode), mode_btn("序号", d.number_mode)]
+                .spacing(6),
+        );
+        if d.number_mode {
+            body = body
+                .push(labeled(
+                    "起始",
+                    text_input_w("如 1（整数，可负）", &d.start, Message::ColumnEditorStartChanged),
+                    uipx,
+                    uifont,
+                ))
+                .push(labeled(
+                    "步长",
+                    text_input_w("如 1（整数，可负）", &d.step, Message::ColumnEditorStepChanged),
+                    uipx,
+                    uifont,
+                ))
+                .push(labeled(
+                    "进制",
+                    button(
+                        text(match d.base {
+                            editor::NumBase::Dec => "十进制".to_owned(),
+                            editor::NumBase::Hex => "十六进制".to_owned(),
+                            editor::NumBase::Bin => "二进制".to_owned(),
+                            editor::NumBase::Oct => "八进制".to_owned(),
+                        })
+                        .size(uipx)
+                        .font(uifont),
+                    )
+                    .padding([3, 10])
+                    .style(chrome_button_style)
+                    .on_press(Message::ColumnEditorBaseCycled),
+                    uipx,
+                    uifont,
+                ))
+                .push(labeled(
+                    "补零宽",
+                    text_input_w("0 = 不补，上限 32", &d.pad_width, Message::ColumnEditorWidthChanged),
+                    uipx,
+                    uifont,
+                ));
+            if d.base == editor::NumBase::Hex {
+                body = body.push(
+                    iced::widget::Checkbox::new(d.hex_upper)
+                        .label("十六进制字母大写（A-F）")
+                        .font(uifont)
+                        .text_size(uipx)
+                        .on_toggle(|_| Message::ColumnEditorHexUpperToggled),
+                );
+            }
+        } else {
+            body = body.push(labeled(
+                "文本",
+                text_input_w(
+                    "每行插入的内容（多行 = 循环填充）",
+                    &d.text,
+                    Message::ColumnEditorTextChanged,
+                ),
+                uipx,
+                uifont,
+            ));
+        }
+        // 目标块实时反馈：行数提示替代打开守卫的二次检查
+        let rows_info = match self.cur_handle.borrow().active_block() {
+            Some((r0, r1, _, _)) => format!("目标列块：{} 行", r1 - r0 + 1),
+            None => "⚠ 当前无列块选区，确认前请先框选".to_owned(),
+        };
+        body = body.push(text(rows_info).size(uipx).font(uifont));
+        body = body.push(
+            row![
+                button(text("确定").size(uipx).font(uifont))
+                    .padding([3, 14])
+                    .style(chrome_button_style)
+                    .on_press(Message::ColumnEditorConfirmed),
+                button(text("取消").size(uipx).font(uifont))
+                    .padding([3, 14])
+                    .style(chrome_button_style)
+                    .on_press(Message::ColumnEditorToggled),
+            ]
+            .spacing(8),
+        );
+        let card = opaque(container(body).padding(14).width(420).style(popup_card_style));
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(Alignment::Center)
+                .padding(16),
+        )
+        .on_press(Message::ColumnEditorToggled)
+        .into()
     }
 
     fn find_all_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {

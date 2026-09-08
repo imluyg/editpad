@@ -1,5 +1,40 @@
 use super::*;
 
+/// B9 列编辑器对话框草稿（Phase 2）。数值字段以字符串承载——输入框
+/// 原始态，确认时统一校验解析（无效输入不关闭对话框、状态栏提示）。
+/// 草稿跨开合保留（命令面板查询串同口径），不落盘不入快照。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ColumnEditorDraft {
+    /// true = 序号模式；false = 文本模式
+    pub(crate) number_mode: bool,
+    /// 文本模式：每行插入的内容（多行 = 循环填充 + 块扩展，v1 口径）
+    pub(crate) text: String,
+    /// 序号模式：起始值（i64）
+    pub(crate) start: String,
+    /// 序号模式：步长（i64，可负）
+    pub(crate) step: String,
+    /// 序号模式：进制（十六进制时 hex_upper 生效）
+    pub(crate) base: crate::editor::NumBase,
+    /// 序号模式：补零宽度（"0" = 不补；上限 32）
+    pub(crate) pad_width: String,
+    /// 序号模式：十六进制字母大写
+    pub(crate) hex_upper: bool,
+}
+
+impl Default for ColumnEditorDraft {
+    fn default() -> Self {
+        Self {
+            number_mode: false,
+            text: String::new(),
+            start: "1".to_owned(),
+            step: "1".to_owned(),
+            base: crate::editor::NumBase::Dec,
+            pad_width: "0".to_owned(),
+            hex_upper: false,
+        }
+    }
+}
+
 /// 应用状态（P21 骨架）：`tabs` 是标签页真值集合；
 /// busy/status/查找/跳转/确认条等交互态保持全局。
 #[derive(Debug, Clone)]
@@ -140,6 +175,11 @@ pub(crate) struct Editpad {
     pub(crate) palette_input: String,
     /// P129：当前选中行（过滤后列表下标）
     pub(crate) palette_idx: usize,
+    // ---------- B9 列编辑器对话框（Phase 2） ----------
+    /// 对话框可见性（居中模态，与设置弹窗/命令面板互斥——打开时关对方）
+    pub(crate) column_editor_visible: bool,
+    /// 对话框草稿（跨开合保留）
+    pub(crate) column_editor: ColumnEditorDraft,
     /// P130：待归页的监视重载（tab 下标, 是否 tail 跟随, 重载前视图）——
     /// check_external_changes 发起监视重载时捕获，Loaded 归页时消费
     ///（元组即重载前视图快照，一次性搬运不设类型别名）
@@ -284,6 +324,8 @@ impl Default for Editpad {
             palette_mode: PaletteMode::Commands,
             palette_input: String::new(),
             palette_idx: 0,
+            column_editor_visible: false,
+            column_editor: ColumnEditorDraft::default(),
             monitor_pending: None,
             pending_link_goto: None,
             always_on_top: false,

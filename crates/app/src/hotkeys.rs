@@ -423,6 +423,13 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["F8"],
         desc: "切换当前页文件监视（tail 跟随）",
     },
+    // B9：列编辑器（26 个 Ctrl+Shift 字母已全部占用（P129 记录），F 家族
+    // 余量取 F6；Alt 系因 AltGr 保护不可入表）
+    HotkeyAction {
+        id: "column_editor",
+        default_combos: &["F6"],
+        desc: "列编辑器（向列块插入序号/文本）",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -659,6 +666,7 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "quick_switch_tab" => Some(Message::PaletteToggled(crate::state::PaletteMode::Tabs)),
         // P130：文件监视开关
         "toggle_monitor_file" => Some(Message::ToggleMonitorFile),
+        "column_editor" => Some(Message::ColumnEditorToggled),
         _ => None,
     }
 }

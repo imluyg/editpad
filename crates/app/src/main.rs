@@ -260,6 +260,24 @@ enum Message {
     /// 设置：保存时备份模式循环切换（第 64 轮 ⑭，none→simple→
     /// timestamped→none，仿关窗行为的三态按钮）
     SettingsBackupModeToggled,
+    // ---------- B9 列编辑器对话框（路线图 B9 Phase 2） ----------
+    /// 开/关对话框（F6 / 编辑菜单 / 背板点击关闭共用；打开前置守卫 =
+    /// 非 busy 且当前页有列块且未开软换行，拒绝时状态栏提示）
+    ColumnEditorToggled,
+    /// 文本/序号两模式切换
+    ColumnEditorModeToggled,
+    /// 草稿编辑（文本/起始/步长/补零宽四个输入框共用 String 载荷）
+    ColumnEditorTextChanged(String),
+    ColumnEditorStartChanged(String),
+    ColumnEditorStepChanged(String),
+    ColumnEditorWidthChanged(String),
+    /// 进制循环切换：十进制→十六进制→二进制→八进制→十进制
+    ColumnEditorBaseCycled,
+    /// 十六进制字母大小写开关
+    ColumnEditorHexUpperToggled,
+    /// 确认：校验草稿 → 生成文本 → 关闭对话框 → 走 EditOp::InsertText
+    /// 进列块插入管线（撤销/书签/失效汇点/busy/只读全继承）
+    ColumnEditorConfirmed,
     // ---------- 第 69 轮：顶部菜单栏 ----------
     /// 菜单栏第 `idx` 个菜单开/关（0 文件 1 编辑 2 查看 3 视图 4 设置；
     /// 再次点击同项关闭，点背板/Esc 走 BarsDismissed）
