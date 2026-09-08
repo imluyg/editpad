@@ -42,6 +42,7 @@ Large-file acceptance: open `dev-assets/bench-50mb.log` (68MB / 600k lines) — 
 - **Log scenarios**: file watching (tail follow), files whose first line is `.LOG` auto-append a timestamp when opened, Log syntax coloring, `F5` insert date/time
 - **Navigation aids**: scrollbar mark strip (orange hit / amber bookmark ticks, click to jump), indent guides, right-edge ruler column, link detection (URL / `file:///` open externally, `path:line` open in-editor with line jump), drag-and-drop of the selection (hold Ctrl on release to copy, insertion-point indicator, single undo step)
 - **Multi-cursor**: `Alt+click` adds / removes extra cursors (a plain click or `Esc` collapses back to one); `Ctrl+M` adds the next match of the current word / selection as a full cursor with its own selection (cyclic search, occupied occurrences skipped); with multiple cursors, typing / backspace / delete apply at every point in sync — one undo step per action, and undo / redo restore the full multi-cursor state (capped at 1000 cursors)
+- **Find in files**: enter via the "在文件中查找" button in the find bar or `F12` (query, case and regex toggles shared with document search); the folder defaults to the current file's directory and can be changed via a folder picker; background scanning is cancellable with a live scanned-file counter, encoding sniffing and binary rejection are inherited, hidden and common build directories are skipped (capped at 20k files / 5k matches with explicit truncation); clicking a hit selects it in an open tab or opens the file and locates the match
 - **Column editor**: `F6` opens a dialog (also in the Edit menu) that inserts repeated text or incrementing numbers into a column block line-by-line — including the zero-width insertion column from an Alt+Shift vertical drag — with number base (dec/hex/bin/oct), negative steps, and zero-padding; each confirm is a single undo step with per-field validation
 - **Per-tab display**: per-tab word wrap three-state (follow global / on / off, View menu), per-tab font-size override (Ctrl+scroll affects only the current tab, reset via View menu), both saved with the session snapshot; with soft wrap on, `Home` / `End` move by visual row and `Alt+Home` / `Alt+End` go to the logical line edges
 
@@ -61,6 +62,7 @@ The following are the default combos, all remappable on the **Settings → Keybo
 | Ctrl+Shift+V | Open containing folder (locate the current file in Explorer) |
 | Ctrl+R | Toggle read-only lock (edits and undo are all rejected) |
 | F8 | Toggle file watching for the current tab (tail follow) |
+| F12 | Find in files: background scan of the current file's folder (changeable via a folder picker); clicking a hit opens/switches to it and locates the match |
 
 ### Editing
 

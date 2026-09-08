@@ -791,3 +791,129 @@ fn find_in_files_hotkey_f12_and_goto_open_tab() {
         "装载完成后选区落在命中上"
     );
 }
+
+// ---------- A8 Phase 3：边界批 ----------
+
+/// 空目录 / 全被排除 / 不存在的根：扫描空结果且不误报截断；
+/// GBK 文件经编码嗅探正常命中；正则模式与 CRLF 文件口径正确。
+#[test]
+fn fif_scan_dir_boundary_dirs_encodings_and_regex() {
+    use crate::find_scan::{fif_scan_dir, FifScanPayload};
+    let mk = |dir, regex| FifScanPayload {
+        seq: 1,
+        dir,
+        query: "needle".into(),
+        case_sensitive: true,
+        regex,
+        whole_word: false,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        progress: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        max_files: 100,
+        max_total_hits: 100,
+        max_hits_per_file: 100,
+    };
+
+    // 空目录：空结果、无截断
+    let empty = scratch_dir("fif-empty");
+    fs_create_dir_all(&empty);
+    let (results, truncated) = fif_scan_dir(&mk(empty.clone(), false));
+    assert!(results.is_empty() && !truncated, "空目录 = 空结果不误报截断");
+    let _ = std::fs::remove_dir_all(&empty);
+
+    // 全被排除（只有隐藏目录 + 噪音目录）：同样空结果
+    let excluded = scratch_dir("fif-excluded");
+    fs_create_dir_all(&excluded.join(".hidden"));
+    fs_create_dir_all(&excluded.join("node_modules"));
+    std::fs::write(excluded.join(".hidden/x.txt"), "needle").unwrap();
+    std::fs::write(excluded.join("node_modules/x.txt"), "needle").unwrap();
+    let (results, truncated) = fif_scan_dir(&mk(excluded.clone(), false));
+    assert!(results.is_empty() && !truncated);
+    let _ = std::fs::remove_dir_all(&excluded);
+
+    // 不存在的根：静默空结果
+    let (results, truncated) = fif_scan_dir(&mk(std::path::PathBuf::from("Z:/no/such"), false));
+    assert!(results.is_empty() && !truncated);
+
+    // GBK 编码文件：load_file 兜底解码 → 中文查询命中（编码嗅探继承）
+    let gbk = scratch_dir("fif-gbk");
+    // "中文 needle" 的 GBK 字节：中=D6D0 文=C4FA，其余 ASCII 原样
+    std::fs::write(gbk.join("gbk.txt"), b"\xD6\xD0\xCE\xC4 needle").unwrap();
+    let mut payload = mk(gbk.clone(), false);
+    payload.query = "needle".into();
+    let (results, _) = fif_scan_dir(&payload);
+    assert_eq!(results.len(), 1, "GBK 文件参与扫描");
+    payload.query = "中".into();
+    let (results, _) = fif_scan_dir(&payload);
+    assert_eq!(results.len(), 1, "GBK 兜底解码后中文查询命中");
+    let _ = std::fs::remove_dir_all(&gbk);
+
+    // 正则模式 + CRLF 文件：命中行号按 \r\n 行界计。
+    // "needle \w+" 命中行 1 的 "needle two"（行 2 的 needle 在行尾，
+    // 后随行界无 \w+ 可配——正好钉住跨行正则不误吞行界）
+    let crlf = scratch_dir("fif-crlf");
+    std::fs::write(crlf.join("c.txt"), "one\r\nneedle two\r\nthree needle").unwrap();
+    let mut payload = mk(crlf.clone(), true);
+    payload.query = r"needle \w+".into();
+    let (results, _) = fif_scan_dir(&payload);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].hits.len(), 1);
+    assert_eq!(results[0].hits[0].pos.line, 1, "CRLF 行界口径");
+    let _ = std::fs::remove_dir_all(&crlf);
+}
+
+/// 处理器边界：选择目录被取消（None）= busy 清零但目录不动；
+/// 查找栏关闭 = FIF 面板随栏隐藏 + 目录扫描取消；查询为空时开启
+/// FIF = 不排扫描（面板提示先输入查询）。
+#[test]
+fn fif_handlers_dir_pick_cancel_and_bar_close_teardown() {
+    let mut app = Editpad::default();
+
+    // FifDirPicked(None)：busy 清零、目录保持
+    app.busy = true;
+    app.fif_dir = Some(PathBuf::from("C:/keep"));
+    dispatch(&mut app, Message::FifDirPicked(None));
+    assert!(!app.busy, "对话框取消也要清 busy");
+    assert_eq!(app.fif_dir.as_deref(), Some(Path::new("C:/keep")));
+
+    // 查询为空时开启 FIF：不排队扫描（面板给提示）
+    app.find_query.clear();
+    dispatch(&mut app, Message::FindInFilesToggled);
+    assert!(app.fif_visible && app.fif_scan.is_none(), "空查询不排扫描");
+
+    // 关查找栏 = FIF 随栏隐藏 + 在途扫描取消
+    app.fif_scan = Some(3);
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.find_visible && !app.fif_visible, "面板随栏隐藏");
+    assert!(app.fif_scan.is_none(), "在途目录扫描取消");
+}
+
+/// 附加光标集与 FIF 互不干扰（只读搜索特性不触碰文档/光标/多光标态）。
+#[test]
+fn fif_scan_touches_neither_document_nor_cursors() {
+    use crate::editor::{CursorPos, ExtraCursor};
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("content"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    app.cur_handle.borrow_mut().extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 0, col: 3 },
+        anchor: None,
+    }];
+    app.fif_visible = true;
+    app.fif_dir = Some(PathBuf::from("C:/no/such"));
+    dispatch(&mut app, Message::FindQueryChanged("x".into()));
+    let h = app.cur_handle.borrow();
+    assert!(h.has_multi(), "FIF 查询触发不折叠多光标");
+    assert_eq!(h.doc.to_text(), "content", "FIF 不触碰文档");
+    assert_eq!(h.cursor, CursorPos { line: 0, col: 0 }, "FIF 不动主光标");
+}
