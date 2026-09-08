@@ -41,6 +41,7 @@ Large-file acceptance: open `dev-assets/bench-50mb.log` (68MB / 600k lines) — 
 - **Windows & tabs**: multiple tabs (double-click blank to create, × close button, middle-click close, pin, context menu, restore last closed, `Ctrl+P` fuzzy quick-switch), command palette, menu bar consolidating common commands, fixed status-bar sections, globally remappable hotkeys, window position & size memory, fullscreen / always-on-top, automatic data isolation between copies, single-instance mutex and file forwarding, window title-bar icon, open files from the command line / double-click in Explorer / "Open with" ("打开方式")
 - **Log scenarios**: file watching (tail follow), files whose first line is `.LOG` auto-append a timestamp when opened, Log syntax coloring, `F5` insert date/time
 - **Navigation aids**: scrollbar mark strip (orange hit / amber bookmark ticks, click to jump), indent guides, right-edge ruler column, link detection (URL / `file:///` open externally, `path:line` open in-editor with line jump), drag-and-drop of the selection (hold Ctrl on release to copy, insertion-point indicator, single undo step)
+- **Column editor**: `F6` opens a dialog (also in the Edit menu) that inserts repeated text or incrementing numbers into a column block line-by-line — including the zero-width insertion column from an Alt+Shift vertical drag — with number base (dec/hex/bin/oct), negative steps, and zero-padding; each confirm is a single undo step with per-field validation
 - **Per-tab display**: per-tab word wrap three-state (follow global / on / off, View menu), per-tab font-size override (Ctrl+scroll affects only the current tab, reset via View menu), both saved with the session snapshot; with soft wrap on, `Home` / `End` move by visual row and `Alt+Home` / `Alt+End` go to the logical line edges
 
 ## Keyboard Shortcuts
@@ -72,7 +73,8 @@ The following are the default combos, all remappable on the **Settings → Keybo
 | Insert | Toggle overwrite mode (typing replaces character-by-character; paste and IME commit always insert) |
 | Ctrl+D / Ctrl+L | Duplicate current line below / Delete current line |
 | Ctrl+Shift+↑ / Ctrl+Shift+↓ | Move current line up / down (a multi-line selection moves as a block) |
-| Alt+Shift+drag | Column (rectangular) selection: typing/backspace replaces or deletes line-by-line, Ctrl+C/X copy or cut the block, Esc cancels |
+| Alt+Shift+drag | Column (rectangular) selection: typing/backspace replaces or deletes line-by-line, Ctrl+C/X copy or cut the block, Esc cancels; a vertical drag creates a zero-width insertion column (2px indicator) = insert before that column |
+| F6 | Column editor dialog: insert repeated text or incrementing numbers into the block line-by-line (base / step / zero-padding adjustable) |
 | F5 | Insert current date/time at the cursor (`YYYY-MM-DD HH:MM`, local timezone) |
 | Ctrl+Q | Toggle line comment (`//` `#` `--` `::` prefix auto-selected by syntax) |
 

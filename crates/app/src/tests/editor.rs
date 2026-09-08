@@ -814,6 +814,35 @@ fn column_editor_dialog_open_guard_and_confirm() {
     assert_eq!(app.column_editor.base, NumBase::Dec);
 }
 
+// ---------- B9 Phase 3：列编辑器封顶实测 ----------
+
+#[test]
+fn column_editor_rows_cap_rejected() {
+    use crate::editor::{BlockSel, CursorPos};
+    // 100_001 行文档（10 万真实行 + 幻影）× 跨全部行块 → 确认被
+    // MAX_COLUMN_SEQ_ROWS 封顶拒绝，对话框保持打开
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("x\n".repeat(100_000))),
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.line_count(),
+        100_001,
+        "10 万真实行 + 幻影末行"
+    );
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 100_000, col: 0 },
+    });
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(app.column_editor_visible);
+    dispatch(&mut app, Message::ColumnEditorModeToggled);
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert!(app.column_editor_visible, "封顶拒绝保持打开");
+    assert!(app.status.contains("上限"), "提示行数封顶原因");
+}
+
 /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
 fn key_f5() -> Option<Message> {
     use iced::keyboard::{self, key::Named};

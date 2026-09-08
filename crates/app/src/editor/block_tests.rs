@@ -1198,6 +1198,49 @@ fn zero_width_block_is_persistent_insertion_column() {
     assert!(!e.has_block());
 }
 
+// ---------- B9 Phase 3：列块插入边界批 ----------
+
+#[test]
+fn column_block_insert_boundaries() {
+    // 空文档（单空行）：非零宽块在空行上插入 = 行首插入
+    let mut a = core_with("");
+    a.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 0, col: 1 },
+    });
+    assert!(a.insert_into_block("Z"));
+    assert_eq!(a.doc.to_text(), "Z");
+
+    // 幻影末行参与块（r1 = 幻影空行）：零内容行 = 纯插入；幻影行自身
+    // 无行尾（行尾单元属前行），插入后成为无行尾的真实末行——钉住现状
+    let mut b = core_with("a\n");
+    b.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 1, col: 1 },
+    });
+    assert!(b.insert_into_block("Z"));
+    assert_eq!(b.doc.to_text(), "Z\nZ");
+
+    // 空文本 = 全空预检 no-op：不产快照
+    let mut d = core_with("abc\ndef");
+    d.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 1, col: 1 },
+    });
+    let snaps = d.undo_stack.len();
+    assert!(!d.insert_into_block(""));
+    assert_eq!(d.undo_stack.len(), snaps, "空文本不产快照");
+
+    // CRLF 主导行尾：多行 payload 按主导行尾归一
+    let mut e = core_with("aa\r\nbb\r\ncc");
+    e.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 1, col: 1 },
+    });
+    assert!(e.insert_into_block("X\nY"));
+    assert_eq!(e.doc.to_text(), "Xa\r\nYb\r\ncc", "payload 行尾归一 CRLF");
+}
+
 #[test]
 fn block_select_lifecycle_and_geometry() {
     let mut c = core_with("abcdef\ngh\nijklm\n");

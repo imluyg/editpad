@@ -607,3 +607,121 @@ use super::tests::*;
         }
     }
 
+    /// 第 117 轮 B9 Phase 3：列块插入（`insert_into_block`）随机对拍——
+    /// 随机块（含零宽插入列、越行尾列）× 文本循环/序号两类 payload，
+    /// 与「逐行 splice + 循环取模 + 块扩展」闭式 oracle 逐字节对拍；
+    /// 收尾撤销到底回初始、重放终态一致。LF 纯净文档（主导行尾闭式）。
+    #[test]
+    fn random_column_block_inserts_match_oracle() {
+        const TOK: &[&str] = &["a", "Z", "中", "  ", ""]; // 含空行覆盖
+        const PLTOK: &[&str] = &["Z", "X-", "文", "99"]; // payload 池（非空，防全空 no-op）
+        for seed in [7u64, 0xB9_B9, 42] {
+            let mut rng = XorShift64(seed);
+            let rows = rng.below(5) + 2; // 2..=6 行
+            let mut init: Vec<String> = Vec::new();
+            for _ in 0..rows {
+                let mut s = String::new();
+                for _ in 0..rng.below(4) {
+                    s.push_str(TOK[rng.below(TOK.len())]);
+                }
+                init.push(s);
+            }
+            let trailing_nl = rng.below(2) == 0;
+            let mut text = init.join("\n");
+            if trailing_nl {
+                text.push('\n');
+            }
+            let initial = text.clone();
+            let mut c = core_with(&text);
+
+            for step in 0..120 {
+                let cur_text = c.doc.to_text();
+                let bodies = rope_line_bodies(&cur_text);
+                let ends_nl = cur_text.ends_with('\n');
+                let real: &[String] =
+                    if ends_nl && bodies.last().is_some_and(|s| s.is_empty()) {
+                        &bodies[..bodies.len() - 1]
+                    } else {
+                        &bodies[..]
+                    };
+                // 随机块：r0..=r1 限于真实行；列允许越过行尾（钳制覆盖）
+                let r0 = rng.below(real.len());
+                let r1 = r0 + rng.below(real.len() - r0);
+                let max_len = real[r0..=r1]
+                    .iter()
+                    .map(|s| s.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                let c0 = rng.below(max_len + 2);
+                let c1 = c0 + rng.below(max_len + 3);
+                c.block_sel = Some(BlockSel {
+                    anchor: CursorPos { line: r0, col: c0 },
+                    head: CursorPos { line: r1, col: c1 },
+                });
+                // payload：文本循环 / 十进制序号（oracle 独立重算，不走
+                // sequence_lines——它另有全参数单测，对拍目标是拼接逻辑）
+                let pl: Vec<String> = if rng.below(2) == 0 {
+                    let k = rng.below(3) + 1;
+                    (0..k)
+                        .map(|_| PLTOK[rng.below(PLTOK.len())].to_string())
+                        .collect()
+                } else {
+                    let k = rng.below(4) + 1;
+                    let start = rng.below(200) as i64 - 50;
+                    let step = rng.below(7) as i64 + 1;
+                    let step = if rng.below(4) == 0 { -step } else { step };
+                    (0..k).map(|i| (start + i as i64 * step).to_string()).collect()
+                };
+                let payload = pl.join("\n");
+
+                // 单点空块（r0==r1 且 c0==c1）：P87 语义 = 无操作，不产
+                // 快照（与零宽多行插入列相区分）
+                if r0 == r1 && c0 == c1 {
+                    assert!(!c.insert_into_block(&payload), "单点空块应 no-op");
+                    assert_eq!(c.doc.to_text(), cur_text, "单点空块不改文本");
+                    continue;
+                }
+
+                // oracle：逐行 splice（min 钳制）→ 循环取模 → 块扩展
+                let block_rows = r1 - r0 + 1;
+                let mut expected: Vec<String> = real.to_vec();
+                for (i, r) in (r0..=r1).enumerate() {
+                    let chars: Vec<char> = expected[r].chars().collect();
+                    let a = c0.min(chars.len());
+                    let b = c1.min(chars.len());
+                    let fill = &pl[i % pl.len()];
+                    let mut line: String = chars[..a].iter().collect();
+                    line.push_str(fill);
+                    line.extend(&chars[b.max(a)..]);
+                    expected[r] = line;
+                }
+                let mut extra: Vec<String> = Vec::new();
+                if pl.len() > block_rows {
+                    extra.extend_from_slice(&pl[block_rows..]);
+                }
+                let mut seq: Vec<String> = expected[..=r1].to_vec();
+                let has_extra = !extra.is_empty();
+                seq.extend(extra);
+                seq.extend_from_slice(&expected[r1 + 1..]);
+                let mut expected_text = seq.join("\n");
+                if ends_nl || has_extra {
+                    expected_text.push('\n');
+                }
+
+                assert!(c.insert_into_block(&payload), "seed={seed} step={step} 应发生改动");
+                assert_eq!(
+                    c.doc.to_text(),
+                    expected_text,
+                    "seed={seed} step={step} 列块插入发散（块 {r0}..={r1} 列 {c0}..={c1}）"
+                );
+                assert_structural_invariants(&c);
+            }
+
+            let final_text = c.doc.to_text();
+            while c.undo() {}
+            assert_eq!(c.doc.to_text(), initial, "seed={seed} 撤销到底未回初始态");
+            while c.redo() {}
+            assert_eq!(c.doc.to_text(), final_text, "seed={seed} 重放终态发散");
+        }
+    }
+
