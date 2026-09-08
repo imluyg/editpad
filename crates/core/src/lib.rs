@@ -7,6 +7,7 @@ pub mod toolkit;
 pub mod brackets;
 pub mod document;
 pub mod error;
+pub mod find_in_files;
 pub mod highlight;
 pub mod json;
 pub mod loader;
@@ -21,6 +22,8 @@ pub mod snapshot;
 pub use brackets::{bracket_kind, scan_forward, BRACKET_PAIRS, MAX_BRACKET_SCAN_CHARS};
 pub use document::{Document, LineEnding};
 pub use error::CoreError;
+pub use find_in_files::{filter_whole_word_text, find_in_file, walk_files, WalkOutput,
+    IGNORED_DIRS};
 pub use highlight::{resolve_language, syntax_for_extension, LazyHighlighter, StyledRun};
 pub use json::{format_json, validate_json, JsonError};
 pub use loader::{load_file, load_file_streaming, load_document_streaming, decode, LoadProgress,
