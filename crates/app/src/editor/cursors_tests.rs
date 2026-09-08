@@ -721,3 +721,37 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
         assert_eq!(c.extra_cursors, final_extra);
     }
 }
+
+// ---------- P145：add_next_match 字符/字节单位统一（CJK 回归批） ----------
+
+#[test]
+fn add_next_match_multibyte_reports_no_more_match_without_panic() {
+    // scan_from（字符偏移）曾直接当 String 字节下标——多字节字符之后
+    // 起扫，切点落进续字节或命中坐标越过 ropey 字符口径，双双 panic。
+    let mut c = core_with("日本語 x");
+    c.cursor = CursorPos { line: 0, col: 5 }; // 词 "x" 上
+    assert_eq!(c.add_next_match(), Err("没有更多匹配".to_owned()));
+    assert!(c.extra_cursors.is_empty());
+}
+
+#[test]
+fn add_next_match_multibyte_locates_by_char_offsets() {
+    // 跨 CJK 的实例定位必须按字符口径落在正确位置（旧实现按字节混算
+    // 会把光标钉进多字节字符中间）。
+    let mut c = core_with("中文 foo 日文 foo");
+    c.cursor = CursorPos { line: 0, col: 5 }; // 首 "foo" 词尾
+    assert_eq!(c.add_next_match(), Ok(true));
+    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 10 }));
+    assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 13 });
+}
+
+#[test]
+fn add_next_match_multibyte_wrap_scan_stays_in_bounds() {
+    // 回绕扫描：起点在文档尾（跨 CJK）时同样先换算字节再切，
+    // 命中换回字符口径；旧实现曾以越界字符偏移喂 char_to_line panic。
+    let mut c = core_with("foo 中文 foo");
+    c.cursor = CursorPos { line: 0, col: 10 }; // 第二个 "foo" 词尾
+    assert_eq!(c.add_next_match(), Ok(true));
+    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 0 }));
+    assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 3 });
+}

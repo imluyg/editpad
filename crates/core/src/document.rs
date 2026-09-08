@@ -255,6 +255,18 @@ impl Document {
         self.rope.char_to_line(char_idx)
     }
 
+    /// 全文字符偏移 → UTF-8 字节偏移（原生 str 搜索结果换算回字符
+    /// 口径用；`char_idx` 越界时夹到文末，与 `line_to_char` 同口径）。
+    pub fn char_to_byte(&self, char_idx: usize) -> usize {
+        self.rope.char_to_byte(char_idx.min(self.rope.len_chars()))
+    }
+
+    /// UTF-8 字节偏移 → 全文字符偏移（要求 `byte_idx` 落在字符边界，
+    /// 调用方保证；`match_indices`/词边界锚点天然满足）。
+    pub fn byte_to_char(&self, byte_idx: usize) -> usize {
+        self.rope.byte_to_char(byte_idx)
+    }
+
     /// 取 `[start, end)` 字符偏移区间的文本（选区读取用）。
     pub fn slice_text(&self, start_char: usize, end_char: usize) -> String {
         self.rope.slice(start_char..end_char).to_string()

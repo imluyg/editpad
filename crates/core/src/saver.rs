@@ -198,13 +198,23 @@ where
     Ok(())
 }
 
-/// 目标同目录下的兄弟临时文件名：`note.txt` → `note.txt.editpad-tmp`
+/// 目标同目录下的兄弟临时文件名：
+/// `note.txt` → `note.txt.<pid>.<seq>.editpad-tmp`
+///
+/// P146：曾恒为 `note.txt.editpad-tmp`——手动保存与自动保存（或连按
+/// Ctrl+S）并发时，两个写者对同一临时文件各自 create（截断）+分块写
+/// +rename，大文件写入窗口内交错会把目标文件写坏。pid + 进程内单调
+/// 序号让每个写者独占自己的临时文件：rename 原子性保证目标最终是
+/// 「某一次完整写入」，绝不交错损坏。
 fn temp_sibling(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut name = path
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
-    name.push(".editpad-tmp");
+    name.push(format!(".{}.{}.editpad-tmp", std::process::id(), seq));
     path.with_file_name(name)
 }
 
@@ -286,7 +296,17 @@ mod tests {
         save_document_atomic(&target, &second).unwrap();
 
         assert_eq!(fs::read_to_string(&target).unwrap(), second.to_text());
-        assert!(!temp_sibling(&target).exists(), "rename 后不得有临时残留");
+        // P146：临时名带 pid+序号不再可预测——按后缀模式断言目录里
+        // 没有任何临时残留
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".editpad-tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "rename 后不得有临时残留: {leftovers:?}"
+        );
         // 多块规模的内容（>64KB）也走同一收口
         assert!(second.to_text().len() < first.to_text().len(), "前置条件：首轮为多块规模");
 

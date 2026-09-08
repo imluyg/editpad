@@ -32,6 +32,10 @@ pub(crate) fn batch_close_targets(tabs: &[Tab], scope: BatchCloseScope) -> Vec<u
 /// 自动保存在途标记也**按页独立**——后台页同样参与自动保存。
 #[derive(Debug, Clone)]
 pub(crate) struct Tab {
+    /// P145：页的进程内唯一 id（单调递增，1 起，0 保留为「无页」哨兵）。
+    /// 后台加载任务登记时记下发起页 id，`Loaded` 归页按 id 找页——
+    /// 期间关页/换位导致的下标漂移不再串页/越界。进程内有效不入快照。
+    pub(crate) id: u64,
     pub(crate) editor: EditorHandle,
     pub(crate) path: Option<PathBuf>,
     pub(crate) dirty: bool,
@@ -40,6 +44,12 @@ pub(crate) struct Tab {
     pub(crate) version: u64,
     /// 本页自动保存任务在途标记
     pub(crate) autosave_inflight: bool,
+    /// P146：自动保存代次（与在途任务共享的原子计数器）。调度时任务
+    /// 带走当前值；编辑（[`Self::note_mutation`]）、撤销回基线、改路径、
+    /// 关页都会推进代次——睡满防抖窗的任务醒来发现代次不符即放弃写盘
+    /// （曾只认磁盘戳：撤销回基线/「放弃更改并关闭」后已作废的快照
+    /// 照样落盘，磁盘内容与 UI 置脏态双向失真）。
+    pub(crate) autosave_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// 本页最后一次内容改动的时刻（防抖窗口计时起点）
     pub(crate) last_edit_at: Option<std::time::Instant>,
     /// 未命名页的递增序号（P25）：显示为「未命名N」，
@@ -74,13 +84,17 @@ pub(crate) struct Tab {
 
 impl Tab {
     pub(crate) fn empty() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
         Self {
+            id: NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed),
             editor: EditorHandle::default(),
             path: None,
             dirty: false,
             encoding_label: String::new(),
             version: 0,
             autosave_inflight: false,
+            autosave_gen: std::default::Default::default(),
             last_edit_at: None,
             untitled_num: None,
             monitor: false,
@@ -125,5 +139,15 @@ impl Tab {
     pub(crate) fn note_mutation(&mut self) {
         self.version += 1;
         self.last_edit_at = Some(std::time::Instant::now());
+        // P146：任何真实改动都使在途自动保存快照过期（含撤销回基线：
+        // 调度时刻快照可能含已撤销内容，照写会让磁盘与 UI 双向失真）
+        self.invalidate_autosave();
+    }
+
+    /// P146：推进自动保存代次，使在途写盘任务醒来后放弃（改路径、
+    /// 关页、手动保存接管写盘等无内容版本变化的场景也走这里）。
+    pub(crate) fn invalidate_autosave(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.autosave_gen.fetch_add(1, Ordering::Relaxed);
     }
 }

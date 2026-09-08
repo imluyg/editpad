@@ -175,3 +175,58 @@ use super::*;
         std::fs::remove_dir_all(&dir).ok();
     }
 
+
+    // ---------- P145：Loaded 按「页 id」归页（下标漂移/越界回归批） ----------
+
+    #[test]
+    fn loaded_after_closing_loading_tab_discards_result_without_panic() {
+        // 加载中 Ctrl+W 关掉加载占位页（键盘路径无 busy 守卫，问题前提），
+        // 迟到的 Loaded 曾按登记下标直接索引 tabs——占位页被移除后下标
+        // 越界必 panic。现按页 id 解析不到 → 丢弃结果并收口 busy。
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/big.log")));
+        assert!(app.active_load.is_some(), "首次拖入应登记加载任务");
+        let seq = app.job_seq;
+
+        // 加载占位页即活动页且干净：Ctrl+W 直接移除（复现真实操作序列）
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.tabs.len(), 1, "占位页被移除后由空页补位");
+        assert!(app.active_load.is_some(), "关页不清加载任务（问题前提）");
+
+        let doc = editpad_core::Document::from_str("late");
+        dispatch(
+            &mut app,
+            Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+        );
+        assert!(app.active_load.is_none(), "Loaded 应收口任务");
+        assert!(!app.busy);
+        // 结果被丢弃：补位的空页不得装入内容/路径
+        assert!(app.tabs[0].path.is_none());
+        assert!(app.tabs[0].editor.borrow().doc.is_empty());
+    }
+
+    #[test]
+    fn loaded_routes_to_moved_tab_after_earlier_tab_closed() {
+        // 加载中关掉更早的页 → 目标页下标左移。归页必须按页 id 跟随移动
+        // 后的位置；旧实现按登记下标索引，轻则把内容装进错页，重则越界。
+        let mut app = app_with_tabs(2); // 页0 置脏 "d0"，页1 干净空页
+        dispatch(&mut app, Message::SwitchTab(1));
+        // 当前页干净空页 → 就地载入（下标 1）
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/moved.txt")));
+        assert!(app.active_load.is_some());
+        let seq = app.job_seq;
+
+        // 关掉更早的置脏页0（确认条「放弃更改并关闭」路径）
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+        assert_eq!(app.tabs.len(), 1, "页0 被移除，原页1 左移到下标 0");
+
+        let doc = editpad_core::Document::from_str("content");
+        dispatch(
+            &mut app,
+            Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+        );
+        // 装进移动后的页（现下标 0），不越界、不落错页
+        assert_eq!(app.tabs[0].path, Some(PathBuf::from("C:/moved.txt")));
+        assert_eq!(app.tabs[0].editor.borrow().doc.slice_text(0, 7), "content");
+        assert!(!app.busy);
+    }

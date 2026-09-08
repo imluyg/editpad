@@ -8,6 +8,9 @@ pub(crate) struct HeartbeatPayload {
     pub(crate) next_untitled: u64,
     /// 需要重写内容的 (页下标, 派发时刻内容版本)——回报据此回填账目
     pub(crate) plan: Vec<(usize, u64)>,
+    /// P146：派发时刻的清单过期代次——回报时比对，防「在途期间关页
+    /// 后成功回报把 stale 误清」（清单里还留着已关页，却永不重写）。
+    pub(crate) rev: u64,
 }
 
 /// 一次心跳提交的回报：派发时刻的计划 + 写盘结果（成功时含新清单，
@@ -15,5 +18,6 @@ pub(crate) struct HeartbeatPayload {
 #[derive(Debug, Clone)]
 pub(crate) struct HeartbeatOutcome {
     pub(crate) plan: Vec<(usize, u64)>,
+    pub(crate) rev: u64,
     pub(crate) result: Result<editpad_core::snapshot::SessionManifest, String>,
 }

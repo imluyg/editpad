@@ -61,8 +61,10 @@ pub(crate) struct Editpad {
     pub(crate) pending_backup_notice: Option<String>,
 
     // ---------- 即时保存（P18，版本号已下沉 Tab） ----------
-    /// 「保存后关闭标签」的目标页；Saved/TabSaved 完成后据此关页
-    pub(crate) pending_close_tab: Option<usize>,
+    /// 「保存后关闭标签」的目标页 id（P146：曾存下标，存盘期间关页/
+    /// 切页会让下标漂移——错页无确认关闭、静默丢弃内容）；
+    /// Saved/TabSaved 完成后据此关页
+    pub(crate) pending_close_tab: Option<u64>,
 
     // ---------- 设置 ----------
     pub(crate) settings: editpad_core::Settings,
@@ -259,6 +261,10 @@ pub(crate) struct Editpad {
     /// 清单，防止崩溃恢复把用户已落盘/已关闭的内容按旧快照复活
     /// （编辑置脏不置位：崩溃丢 ≤1 个间隔的输入正是心跳的设计语义）。
     pub(crate) session_manifest_stale: bool,
+    /// P146：过期标记的代次计数——每次置位 +1。心跳派发时随载荷带走，
+    /// 成功回报只在「派发后没有新置位」时才清标记（在途期间关页曾被
+    /// 成功回报误清，清单留着已关页永不重写，崩溃恢复复活已关页）。
+    pub(crate) manifest_rev: u64,
     /// 快照目录注入点（测试用）；None = 系统配置目录。
     pub(crate) snapshot_dir_override: Option<PathBuf>,
     /// P102：窗口几何最后一次落盘时刻（拖动/拉伸事件高频，节流用）。
@@ -387,6 +393,7 @@ impl Default for Editpad {
             // P31：周期快照心跳状态
             heartbeat_inflight: false,
             session_manifest_stale: false,
+            manifest_rev: 0,
             snapshot_dir_override: None,
             last_geometry_persist: None,
         }

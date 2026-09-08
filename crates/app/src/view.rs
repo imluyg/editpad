@@ -138,6 +138,7 @@ impl Editpad {
             active: self.active_tab,
             next_untitled: self.untitled_next,
             plan,
+            rev: self.manifest_rev,
         })
     }
 
@@ -150,7 +151,12 @@ impl Editpad {
         self.heartbeat_inflight = false;
         match outcome.result {
             Ok(manifest) => {
-                self.session_manifest_stale = false;
+                // P146：只在「派发后清单没有再过期」时清过期标记——曾无条件
+                // 清零：在途心跳期间关掉的页不在本次写出的清单里，标记被清
+                // 后永不重写，崩溃恢复会把已关页连同旧内容复活。
+                if outcome.rev == self.manifest_rev {
+                    self.session_manifest_stale = false;
+                }
                 for (idx, version) in outcome.plan {
                     let Some(tab) = self.tabs.get_mut(idx) else {
                         continue; // 期间被关闭/下标漂移：放弃这条账目
@@ -189,6 +195,7 @@ impl Editpad {
         .map_err(|e| e.to_string());
         let outcome = HeartbeatOutcome {
             plan: payload.plan,
+            rev: payload.rev,
             result,
         };
         self.heartbeat_apply(outcome.clone());
@@ -466,6 +473,14 @@ impl Editpad {
         }
 
         self.tabs = tabs;
+        // P147：全部页超内存护栏被规划放弃时 `kept` 为空——必须补一个
+        // 空页保持「tabs 恒非空」不变式，否则下方 tabs[active_tab] 直接
+        // 越界（启动即崩，需手删快照目录才能恢复；触发场景：退出快照无
+        // 单页上限，文档编辑超 256MB 后正常退出，或干净页被外部增大）
+        if self.tabs.is_empty() {
+            let tab = self.fresh_tab();
+            self.tabs.push(tab);
+        }
         // 激活页最后还原；编号计数取「清单值」与「实际用号+1」的较大者
         self.active_tab = manifest.active.min(self.tabs.len().saturating_sub(1));
         self.cur_handle = self.tabs[self.active_tab].editor.clone();
@@ -768,6 +783,10 @@ impl Editpad {
         self.hl_paving = Some(gen);
         Task::stream(build_hl_pave_stream(HlPavePayload {
             gen,
+            // P146：记下发起页 id——完成回报按它归页安装，不再装进
+            // 「回报时刻的活动页」（A 页铺建中切到 B 页曾把 A 的语法
+            // 状态装进 B，B 全文错色到下次编辑换代）
+            tab_id: self.tabs[self.active_tab].id,
             doc,
             highlighter,
             total_lines,
@@ -1535,8 +1554,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press_maybe(
-                            (!self.busy && self.tabs[idx].path.is_some())
-                                .then_some(Message::CloseTabSave(idx)),
+                            // P145：夹紧兜底——确认条下标随关页平移/清理
+                            //（close_tab_now），此处 get 防未来回归越界
+                            (!self.busy
+                                && self.tabs.get(idx).is_some_and(|t| t.path.is_some()))
+                            .then_some(Message::CloseTabSave(idx)),
                         ),
                     button(text("取消").size(uipx).font(uifont))
                         .padding([4, 12])

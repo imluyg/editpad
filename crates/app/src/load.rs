@@ -11,8 +11,11 @@ pub(crate) enum LoadEvent {
 pub(crate) struct LoadJob {
     pub(crate) id: u64,
     pub(crate) path: PathBuf,
-    /// 结果应写入的标签下标（期间切走标签不影响归页）
+    /// 结果应写入的标签下标（登记时刻的值；恢复队列的平移记账仍用它）
     pub(crate) tab: usize,
+    /// P145：目标页的稳定 id——`Loaded` 归页按 id 解析实际位置，
+    /// 期间关页/换位导致的下标漂移不再串页/越界。
+    pub(crate) tab_id: u64,
 }
 
 /// 把一次加载任务构造成事件流（OS 线程做阻塞 IO，std mpsc 桥接到异步端）。

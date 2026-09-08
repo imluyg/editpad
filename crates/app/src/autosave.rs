@@ -1,13 +1,15 @@
 use super::*;
 
-/// 一次自动保存的结局（P63）：写盘成功 / 撞上外部修改被拒写 / 写盘失败。
-/// 拒写不是失败——磁盘上发生了别人（其他编辑器/同步工具）的改动，
-/// 盲写会覆盖它；裁决权交给 P52 外部修改提示条。
+/// 一次自动保存的结局（P63）：写盘成功 / 撞上外部修改被拒写 / 写盘失败 /
+/// P146 代次过期作废（调度后页被编辑/回基线/改路径/关页——写盘动作
+/// 本身被跳过，什么都没发生）。拒写不是失败——磁盘上发生了别人（其他
+/// 编辑器/同步工具）的改动，盲写会覆盖它；裁决权交给 P52 外部修改提示条。
 #[derive(Debug, Clone)]
 pub(crate) enum AutosaveOutcome {
     Written,
     SkippedExternalChange,
     Failed(String),
+    Superseded,
 }
 
 /// 自动保存任务的落盘配置快照（P63/第 64 轮 ⑭：后台线程无 &Settings/
@@ -23,27 +25,37 @@ pub(crate) struct AutosaveTask {
     pub(crate) backup_mode: String,
 }
 
-/// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 写前校验 → 分块原子
-/// 落盘」，结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器仅阻塞等待
-/// 结果，且按页 inflight 去重保证同一页至多一个这样的线程）。
+/// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 代次校验 → 写前校验
+/// → 分块原子落盘」，结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器
+/// 仅阻塞等待结果，且按页 inflight 去重保证同一页至多一个这样的线程）。
 ///
 /// P63 写前校验：防抖睡眠期间磁盘可能被外部修改（焦点巡检只在窗口
 /// 重聚焦时跑，救不了后台线程）。期望戳不一致即拒写并回报
 /// [`AutosaveOutcome::SkippedExternalChange`]——原文件绝不盲写覆盖外部
 /// 内容。期望戳为 None（从未记录，如测试注入的不存在路径）时保持旧
 /// 语义直接写。
+///
+/// P146 代次校验：调度后页被编辑/撤销回基线/改路径/关页都会推进页的
+/// 代次计数器（`gen`），本任务带着调度时刻的 `my_gen`——醒来不符即
+/// 作废，不落盘（曾只校验磁盘戳：已作废快照照样写入，磁盘与 UI 双向
+/// 失真；「放弃更改并关闭」的页也会被复活写盘）。
 pub(crate) async fn drive_autosave_once(
-    tab: usize,
+    tab_id: u64,
     path: PathBuf,
     doc: editpad_core::Document,
     version: u64,
+    gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    my_gen: u64,
     task: AutosaveTask,
 ) -> Message {
+    use std::sync::atomic::Ordering;
     let (tx, rx) = std_mpsc::channel::<AutosaveOutcome>();
     let thread_path = path.clone();
     std::thread::spawn(move || {
         std::thread::sleep(task.delay);
-        let outcome = if autosave_must_skip(task.expected_stamp, file_stamp(&path)) {
+        let outcome = if gen.load(Ordering::Relaxed) != my_gen {
+            AutosaveOutcome::Superseded
+        } else if autosave_must_skip(task.expected_stamp, file_stamp(&path)) {
             AutosaveOutcome::SkippedExternalChange
         } else {
             write_to_disk(&path, &doc, task.encoding, &task.backup_mode)
@@ -54,7 +66,7 @@ pub(crate) async fn drive_autosave_once(
         .recv()
         .unwrap_or_else(|_| AutosaveOutcome::Failed("自动保存线程意外终止".to_owned()));
     // 路径本体已随闭包移入写盘线程；回报携带同内容的克隆
-    Message::TabAutosaved(tab, version, thread_path, outcome)
+    Message::TabAutosaved(tab_id, version, thread_path, outcome)
 }
 
 /// 防抖窗睡满后的实际落盘动作（线程体调用；同步函数便于测试直击磁盘

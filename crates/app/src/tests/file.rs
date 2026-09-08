@@ -188,6 +188,7 @@ use super::*;
             "首次编辑应排队本页防抖任务"
         );
         let scheduled_version = app.tab().version;
+        let tid = app.tabs[0].id;
 
         // 连续再编辑：inflight 去重不重复排队；版本继续推进
         dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
@@ -198,7 +199,7 @@ use super::*;
         dispatch(
             &mut app,
             Message::TabAutosaved(
-                0,
+                tid,
                 scheduled_version + 1,
                 PathBuf::from("C:/doc/note.txt"),
                 AutosaveOutcome::Written,
@@ -215,11 +216,12 @@ use super::*;
         app.settings.autosave_enabled = true;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         let stale = app.tab().version;
+        let tid = app.tabs[0].id;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
 
         dispatch(
             &mut app,
-            Message::TabAutosaved(0, stale, PathBuf::from("C:/doc/note.txt"), AutosaveOutcome::Written),
+            Message::TabAutosaved(tid, stale, PathBuf::from("C:/doc/note.txt"), AutosaveOutcome::Written),
         );
 
         assert!(
@@ -257,10 +259,11 @@ use super::*;
         assert!(app.tabs[0].autosave_inflight);
 
         let version = app.tab().version;
+        let tid = app.tabs[0].id;
         dispatch(
             &mut app,
             Message::TabAutosaved(
-                0,
+                tid,
                 version,
                 PathBuf::from("C:/doc/note.txt"),
                 AutosaveOutcome::Failed("disk full".into()),
@@ -337,13 +340,14 @@ use super::*;
         assert!(app.tabs[0].autosave_inflight);
         let old_stamp = app.tabs[0].file_stamp;
         let version = app.tab().version;
+        let tid = app.tabs[0].id;
 
         fs::write(&path, "external edit made this longer").unwrap();
 
         dispatch(
             &mut app,
             Message::TabAutosaved(
-                0,
+                tid,
                 version,
                 path.clone(),
                 AutosaveOutcome::SkippedExternalChange,
@@ -375,26 +379,28 @@ use super::*;
         app.settings.autosave_enabled = true;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         let v = app.tab().version;
+        let tid = app.tabs[0].id;
 
-        // 先来一条路径不符的回报（下标漂移竞态）——必须整条丢弃，
-        // 不得清脏/解除挂起；随后正确路径的同版本回报照常生效
+        // 先来一条路径不符的回报（另存为/改名竞态）——账目整条丢弃，
+        // 不得清脏；但 inflight 必须解除（P146：曾提前 return 漏清，
+        // 该页本会话永久失去自动保存）；随后正确路径的同版本回报照常生效
         dispatch(
             &mut app,
             Message::TabAutosaved(
-                0,
+                tid,
                 v,
                 PathBuf::from("C:/other/renamed.txt"),
                 AutosaveOutcome::Written,
             ),
         );
         assert!(
-            app.tab().dirty && app.tabs[0].autosave_inflight,
-            "路径不符的回报必须整条丢弃"
+            app.tab().dirty && !app.tabs[0].autosave_inflight,
+            "路径不符的回报丢弃账目但必须解除挂起"
         );
 
         dispatch(
             &mut app,
-            Message::TabAutosaved(0, v, path, AutosaveOutcome::Written),
+            Message::TabAutosaved(tid, v, path, AutosaveOutcome::Written),
         );
         assert!(!app.tab().dirty && !app.tabs[0].autosave_inflight);
     }
@@ -501,11 +507,12 @@ use super::*;
         // 模拟载入自 GBK 文件（标签为 GBK）
         app.tabs[0].encoding_label = "GBK".to_owned();
         let v = app.tab().version;
+        let tid = app.tabs[0].id;
 
         // 同编码保存：无转码提示
         dispatch(
             &mut app,
-            Message::Saved(v, Ok(editpad_core::EncodeNotice::default())),
+            Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
         );
         assert_eq!(app.tabs[0].encoding_label, "GBK", "标签反映实际落盘编码");
         assert!(app.status.is_empty(), "同编码不得提示转码，实际 {:?}", app.status);
@@ -515,6 +522,7 @@ use super::*;
         dispatch(
             &mut app,
             Message::Saved(
+                tid,
                 v,
                 Ok(editpad_core::EncodeNotice { unmappable: true }),
             ),
@@ -526,7 +534,7 @@ use super::*;
         app.tabs[0].encoding_label = "GBK".to_owned();
         dispatch(
             &mut app,
-            Message::Saved(v, Ok(editpad_core::EncodeNotice::default())),
+            Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
         );
         assert_eq!(app.tabs[0].encoding_label, "UTF-8");
         assert!(app.status.contains("GBK"), "应提示原编码：{:?}", app.status);
@@ -538,8 +546,9 @@ use super::*;
         // 暂存补显机制钉死：无转码补显、转码让位、失败弃置。
         let (mut app, _path) = loaded_real_file_app("backup-notice");
         let v = app.tab().version;
+        let tid = app.tabs[0].id;
         app.pending_backup_notice = Some("已备份旧版 → x.bak".to_owned());
-        dispatch(&mut app, Message::Saved(v, Ok(editpad_core::EncodeNotice::default())));
+        dispatch(&mut app, Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())));
         assert!(
             app.status.contains("已备份"),
             "落盘成功后补显备份提示，实际 {:?}",
@@ -552,7 +561,8 @@ use super::*;
         app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
         app.tabs[0].encoding_label = "UTF-8".to_owned();
         let v = app.tab().version;
-        dispatch(&mut app, Message::Saved(v, Ok(editpad_core::EncodeNotice::default())));
+        let tid = app.tabs[0].id;
+        dispatch(&mut app, Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())));
         assert!(!app.status.contains("已备份"), "转码知情权优先，实际 {:?}", app.status);
         assert!(app.pending_backup_notice.is_none());
     }
@@ -563,8 +573,9 @@ use super::*;
         // 状态让位。旧实现打一个字就把错误抹掉且无日志可查。
         let (mut app, _path) = loaded_real_file_app("error-sticky");
         let v = app.tab().version;
+        let tid = app.tabs[0].id;
         let err = Err("无法写入文件 x: disk full".to_owned());
-        dispatch(&mut app, Message::Saved(v, err));
+        dispatch(&mut app, Message::Saved(tid, v, err));
         assert!(app.status.contains("保存失败"));
         assert!(app.status_is_error, "错误必须带类型标记");
 
@@ -1179,4 +1190,117 @@ external
             path.parent().map(|p| p.to_path_buf())
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---------- P146：自动保存代次作废 / Saved 按页 id 归账 ----------
+
+    #[test]
+    fn autosave_superseded_by_generation_bump_skips_write() {
+        // 调度后页被编辑（代次推进）→ 睡醒的任务必须作废：曾只认磁盘戳，
+        // 已作废快照照写不误（撤销回基线/「放弃更改并关闭」后磁盘与 UI
+        // 双向失真）
+        let dir = scratch_dir("autosave-superseded");
+        let path = dir.join("note.txt");
+        let gen = Arc::new(std::sync::atomic::AtomicU64::new(7));
+        let task = AutosaveTask {
+            encoding: editpad_core::SaveEncoding::Utf8,
+            expected_stamp: None,
+            delay: std::time::Duration::from_millis(50),
+            backup_mode: "off".to_owned(),
+        };
+        let fut = drive_autosave_once(
+            1,
+            path.clone(),
+            editpad_core::Document::from_str("x"),
+            1,
+            gen.clone(),
+            7,
+            task,
+        );
+        gen.store(8, std::sync::atomic::Ordering::Relaxed);
+        match block_on(fut) {
+            Message::TabAutosaved(_, _, _, AutosaveOutcome::Superseded) => {}
+            other => panic!("应回报 Superseded，实际 {other:?}"),
+        }
+        assert!(!path.exists(), "作废任务不得写盘");
+
+        // 对照：代次未变 → 照常落盘
+        let task = AutosaveTask {
+            encoding: editpad_core::SaveEncoding::Utf8,
+            expected_stamp: None,
+            delay: std::time::Duration::from_millis(50),
+            backup_mode: "off".to_owned(),
+        };
+        let fut = drive_autosave_once(
+            1,
+            path.clone(),
+            editpad_core::Document::from_str("x"),
+            1,
+            gen.clone(),
+            8,
+            task,
+        );
+        match block_on(fut) {
+            Message::TabAutosaved(_, _, _, AutosaveOutcome::Written) => {}
+            other => panic!("代次一致应照常落盘，实际 {other:?}"),
+        }
+        assert!(path.exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn saved_report_accounts_to_origin_tab_after_switch() {
+        // 保存期间切页（版本号巧合）曾把账目记到「完成时刻的活动页」——
+        // 错清别页置脏标记 → 关页不再弹确认 → 未保存内容无声丢失。
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
+        let v0 = app.tabs[0].version;
+        let id0 = app.tabs[0].id;
+        // 页0 发起的保存回报，在活动页已切到页1 之后才到达
+        dispatch(&mut app, Message::SwitchTab(0));
+        dispatch(&mut app, Message::SwitchTab(1));
+        dispatch(
+            &mut app,
+            Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
+        );
+        // 账目必须落到发起页0：页0 清脏，页1 的置脏标记不得被错清
+        assert!(!app.tabs[0].dirty, "发起页应按版本守卫清脏");
+        assert!(app.tabs[1].dirty, "不得错清活动页的置脏标记");
+    }
+
+    #[test]
+    fn confirm_save_and_close_chains_through_all_dirty_pages() {
+        // P147 回归：ASK（非快照直退）模式「保存并关闭」曾只存活动页即
+        // 关窗，后台置脏页未存改动无声丢失。现逐页链式存完才关窗。
+        let mut app = Editpad::default();
+        app.settings.enable_snapshots = false; // session_restore_allowed=false → 走逐页链
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
+        app.tabs[0].path = Some(PathBuf::from("C:/w/a.txt"));
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
+        app.tabs[1].path = Some(PathBuf::from("C:/w/b.txt"));
+        let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
+
+        dispatch(&mut app, Message::ConfirmSaveAndClose);
+        assert!(app.pending_close && app.busy);
+
+        // 页0 的保存回报到达：仍有置脏页 → 切到页1 继续存
+        dispatch(
+            &mut app,
+            Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
+        );
+        assert_eq!(app.active_tab, 1, "应切到下一个置脏页继续存");
+        assert!(app.pending_close, "关窗意图必须保持到全部存完");
+        assert!(!app.tabs[0].dirty);
+
+        // 页1 的保存回报到达：无置脏页 → 消费关窗意图
+        let (v1, id1) = (app.tabs[1].version, app.tabs[1].id);
+        dispatch(
+            &mut app,
+            Message::Saved(id1, v1, Ok(editpad_core::EncodeNotice::default())),
+        );
+        assert!(!app.pending_close, "全部存完后消费关窗意图");
+        assert!(!app.tabs[1].dirty);
     }

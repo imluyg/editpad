@@ -865,3 +865,45 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!((app.cur_handle.borrow().font_size() - (global - 2.0)).abs() < 0.01);
     }
 
+
+    // ---------- P145：关闭确认条下标随页集合变动修正 ----------
+
+    #[test]
+    fn close_confirm_bar_index_shifts_when_earlier_tab_removed() {
+        // 确认条打开期间其前的页被关 → 确认下标必须随左移平移；旧实现
+        // 存陈旧下标，下一帧视图侧 tabs[idx] 越界 panic / 指向错页。
+        // 3 页：0 干净、1 置脏（确认条目标）、2 干净。
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("d1".into())));
+        dispatch(&mut app, Message::NewTab);
+        // 页1 已置脏，弹确认条
+        dispatch(&mut app, Message::SwitchTab(1));
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.close_tab_confirm, Some(1));
+        // 关掉其后的页2（干净直关）——确认条不受影响
+        dispatch(&mut app, Message::SwitchTab(2));
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.close_tab_confirm, Some(1), "其后的页被关不影响确认下标");
+        // 关掉其前的页0（干净直关）——确认下标左移平移
+        dispatch(&mut app, Message::SwitchTab(0));
+        dispatch(&mut app, Message::CloseTabRequest);
+        assert_eq!(app.close_tab_confirm, Some(0), "确认下标应随左移平移");
+        assert_eq!(app.tabs.len(), 1);
+        // 确认流走完：置脏页1（现下标0）放弃关闭，确认条清空
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+        assert_eq!(app.close_tab_confirm, None);
+    }
+
+    #[test]
+    fn batch_close_clears_confirm_bar_when_confirmed_tab_in_targets() {
+        // 批量移除把确认页自身也关掉 → 确认条必须清空（防陈旧下标）。
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("d0".into())));
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::SwitchTab(0));
+        dispatch(&mut app, Message::CloseTabRequest); // 页0 置脏 → 确认条
+        assert_eq!(app.close_tab_confirm, Some(0));
+        assert_eq!(app.close_tabs_now(&[0]), 1);
+        assert_eq!(app.close_tab_confirm, None, "确认页自身被批量移除应清空确认条");
+    }

@@ -622,8 +622,9 @@ mod tests {
         let before = read_manifest(&dir).unwrap();
         assert_eq!(before, baseline);
 
-        // 构造「第 2 页写盘必败」：占住其临时兄弟文件位（同 saver 测试手法）
-        let blocker = dir.join(format!("s{}-t1.snap.editpad-tmp", GEN + 1));
+        // 构造「第 2 页写盘必败」：占住其目标文件位（临时名带 pid+序号
+        // 不可预判，P146；目录占住 rename 目标同样触发中途失败）
+        let blocker = dir.join(format!("s{}-t1.snap", GEN + 1));
         fs::create_dir_all(&blocker).unwrap();
 
         let doomed = write_session_at(

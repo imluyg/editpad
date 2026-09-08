@@ -213,10 +213,11 @@ fn undo_back_to_saved_content_clears_dirty_and_redo_restores() {
     dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
     assert!(app.tab().dirty);
     let v = app.tab().version;
+    let tid = app.tabs[0].id;
     dispatch(
         &mut app,
         Message::TabAutosaved(
-            0,
+            tid,
             v,
             PathBuf::from("C:/doc/note.txt"),
             AutosaveOutcome::Written,
@@ -1280,6 +1281,7 @@ fn pave_payload(app: &Editpad, batch: usize) -> (HlPavePayload, u64) {
     (
         HlPavePayload {
             gen,
+            tab_id: app.tabs[0].id,
             doc,
             highlighter,
             total_lines: app.cur_handle.borrow().doc.line_count(),
@@ -1326,7 +1328,7 @@ fn hl_pave_stream_reports_progress_then_installs_final_state() {
     let dones: Vec<_> = messages
         .iter()
         .filter_map(|m| match m {
-            Message::HlPaved(g, _) => Some(*g),
+            Message::HlPaved(g, _, _) => Some(*g),
             _ => None,
         })
         .collect();
@@ -1368,7 +1370,8 @@ fn stale_hl_pave_result_is_dropped_after_generation_change() {
     let (stale_payload, _) = pave_payload(&app, 32);
     let mut enriched_hl = stale_payload.highlighter.clone();
     enriched_hl.advance_checkpoints(4, 600, &mut |i| format!("let e{i} = {i};"));
-    dispatch(&mut app, Message::HlPaved(gen0, enriched_hl));
+    let tid = app.tabs[0].id;
+    dispatch(&mut app, Message::HlPaved(gen0, tid, enriched_hl));
 
     assert_eq!(app.hl_paving, None, "过期任务的登记必须解除");
     assert_eq!(
@@ -1409,7 +1412,7 @@ fn cancelled_hl_pave_skips_work_but_still_replies_done() {
     assert_eq!(dones, 1, "取消也必须回一条完成消息保持「恰好一条」语义");
 
     // 兜底/取消路径送回的是起点克隆：安装它等于无变化，UI 不受损
-    if let Some(Message::HlPaved(_, hl)) = messages.into_iter().next() {
+    if let Some(Message::HlPaved(_, _, hl)) = messages.into_iter().next() {
         assert_eq!(hl.checkpoints_len(), base_len);
     }
 }
@@ -1440,7 +1443,7 @@ fn hl_pave_runner_panic_still_replies_done() {
 
     assert_eq!(messages.len(), 1, "panic 后只应有兜底完成消息");
     match &messages[0] {
-        Message::HlPaved(g, hl) => {
+        Message::HlPaved(g, _, hl) => {
             assert_eq!(*g, gen);
             assert_eq!(hl.checkpoints_len(), base_len, "兜底必须是未推进的起点");
         }

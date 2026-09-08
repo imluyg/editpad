@@ -184,15 +184,17 @@ enum Message {
     SaveRequested,
     SaveAsRequested,
     SaveTargetChosen(Option<PathBuf>),
-    /// 保存完成：(落盘内容的内容版本号, 结果)（P18 版本守卫；P67 起成功
-    /// 分支携带编码落盘的附带信息，如 GBK 不可映射字符告警）
-    Saved(u64, Result<editpad_core::EncodeNotice, String>),
-    /// 标签页保存完成（「保存并关闭」流程用）：(页, 快照版本, 结果)
-    TabSaved(usize, u64, Result<(), String>),
-    /// 自动保存完成（P63 载荷扩展）：(标签页, 快照版本, 调度时页路径,
-    /// 结局)。版本不符 = 期间又有编辑，不清脏；路径不符 = 页集合在防抖
-    /// 睡眠期间变动导致下标漂移，整条丢弃；结局三分见 [`AutosaveOutcome`]。
-    TabAutosaved(usize, u64, PathBuf, AutosaveOutcome),
+    /// 保存完成：(发起页 id, 落盘内容的内容版本号, 结果)（P18 版本守卫；
+    /// P67 起成功分支携带编码落盘的附带信息，如 GBK 不可映射字符告警）。
+    /// P146：按页 id 归账——保存异步期间切页/关页曾把账目记到「完成时刻
+    /// 的活动页」上，错清别页置脏标记。
+    Saved(u64, u64, Result<editpad_core::EncodeNotice, String>),
+    /// 标签页保存完成（「保存并关闭」流程用）：(页 id, 快照版本, 结果)
+    TabSaved(u64, u64, Result<(), String>),
+    /// 自动保存完成（P63 载荷扩展）：(页 id, 快照版本, 调度时页路径,
+    /// 结局)。版本不符 = 期间又有编辑，不清脏；页 id 解析不到 = 页已被
+    /// 关（账目整条丢弃）；结局四分见 [`AutosaveOutcome`]。
+    TabAutosaved(u64, u64, PathBuf, AutosaveOutcome),
     /// P67：状态栏「编码」标签点开的弹出菜单开关
     ToggleEncodingMenu,
     /// P67：状态栏「行尾」标签点开的弹出菜单开关
@@ -386,7 +388,7 @@ enum Message {
     HlPaveProgress(u64, u64),
     /// 后台高亮铺建完成：(代次, 推进后的高亮器)。期间编辑过（换代）
     /// 则整体丢弃，缺口由下一帧重新评估续排（P12）
-    HlPaved(u64, editpad_core::LazyHighlighter),
+    HlPaved(u64, u64, editpad_core::LazyHighlighter),
 
     GotoToggled,
     GotoInputChanged(String),
@@ -558,6 +560,7 @@ async fn drive_heartbeat(payload: HeartbeatPayload) -> Message {
         .unwrap_or_else(|e| Err(format!("心跳线程意外终止:{e}")));
     Message::HeartbeatDone(HeartbeatOutcome {
         plan: payload.plan,
+        rev: payload.rev,
         result,
     })
 }

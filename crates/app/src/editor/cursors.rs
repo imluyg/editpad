@@ -487,13 +487,17 @@ impl EditorCore {
         // 环形扫描：先 [scan_from, 文档尾)，再回绕 [0, scan_from)。
         // str::match_indices 为原生快速搜索，全文一遍 O(n)（设计 §4 #14
         // 的 4M 步封顶按「比照括号匹配」口径由线性原生搜索天然满足）。
+        // 单位口径：hay 是 String（字节索引），而 scan_from/占用表是
+        // 字符偏移——起点先经 char_to_byte 换算，命中 [字节, 字节+needle
+        // 字节数] 再经 byte_to_char 换回字符口径，才与占用表和 ropey
+        // 行列 API 对接。曾把字符偏移直接当字节下标切 String：CJK 文档
+        // 上 byte index not a char boundary panic 或定位错乱（P145 回归）。
+        let scan_from_b = self.doc.char_to_byte(scan_from);
         let mut hit: Option<(usize, usize)> = None;
-        for (base, range) in [
-            (scan_from, &hay[scan_from.min(hay.len())..]),
-            (0, &hay[..scan_from.min(hay.len())]),
-        ] {
+        for (base, range) in [(scan_from_b, &hay[scan_from_b..]), (0, &hay[..scan_from_b])] {
             for (off, _) in range.match_indices(&needle) {
-                let (ms, me) = (base + off, base + off + needle.len());
+                let ms = self.doc.byte_to_char(base + off);
+                let me = self.doc.byte_to_char(base + off + needle.len());
                 if !is_taken(ms, me) {
                     hit = Some((ms, me));
                     break;

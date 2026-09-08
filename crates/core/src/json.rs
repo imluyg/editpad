@@ -23,6 +23,11 @@ impl std::fmt::Display for JsonError {
 
 type JsonResult<T> = Result<T, JsonError>;
 
+/// 嵌套深度上限：`value → object/array → value` 是互递归，超深输入曾可
+/// 击穿线程栈——栈溢出是进程 abort（非 unwind），上层 catch_unwind 兜底
+/// 对它无效。512 层与主流编辑器口径一致，正常数据远达不到。
+const MAX_NEST_DEPTH: usize = 512;
+
 /// 校验整段 JSON 文本；合法返回 Ok(())。
 pub fn validate_json(text: &str) -> Result<(), JsonError> {
     let mut s = Scanner::new(text);
@@ -131,6 +136,10 @@ impl Scanner {
     /// * `depth`：当前嵌套深度（缩进级数）；
     /// * `formatted`：是否处于格式化模式（纯校验传 false，不产出）。
     fn value(&mut self, out: &mut String, depth: usize, formatted: bool) -> JsonResult<()> {
+        // 深度封顶（见 MAX_NEST_DEPTH）：递归进入下一层容器前拦截
+        if depth >= MAX_NEST_DEPTH {
+            return Err(self.error_here(format!("嵌套过深（超过 {MAX_NEST_DEPTH} 层）")));
+        }
         self.skip_ws();
         match self.peek() {
             None => Err(self.error_here("意外结束：缺少 JSON 值")),
@@ -465,6 +474,27 @@ mod tests {
 
     fn err_of(text: &str) -> JsonError {
         validate_json(text).expect_err("应校验失败")
+    }
+
+    #[test]
+    fn deep_nesting_reports_error_instead_of_stack_overflow() {
+        // 回归：value/object/array 互递归曾无深度上限，10 万层 `[` 直接
+        // 击穿线程栈（进程 abort，catch_unwind 兜不住）。现应报错而非崩溃。
+        let err = err_of(&"[".repeat(100_000));
+        assert!(err.message.contains("嵌套过深"), "实际：{err}");
+
+        // 上限之内（顶层值 depth 0，最深层容器 depth 511）照常合法
+        let legal = format!("{}{}", "[".repeat(511), "]".repeat(511));
+        assert!(validate_json(&legal).is_ok());
+        let formatted = format_json(&legal).unwrap();
+        assert!(validate_json(&formatted).is_ok(), "格式化输出须仍合法");
+
+        // 格式化路径同样受限（同一 value 入口）
+        let fmt_err = format_json(&"[".repeat(100_000)).unwrap_err();
+        assert!(fmt_err.message.contains("嵌套过深"));
+        // 对象与数组混合嵌套同受封顶
+        let mixed = "{\"a\":".repeat(100_000);
+        assert!(validate_json(&mixed).unwrap_err().message.contains("嵌套过深"));
     }
 
     #[test]

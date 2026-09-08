@@ -113,6 +113,14 @@ impl Editpad {
         }
     }
 
+    /// P146：置位「清单过期」并推进代次。心跳派发时把代次随载荷带走，
+    /// 成功回报只在代次未变时才清标记——在途心跳期间的结构变化（关页）
+    /// 不会被人写出的旧清单「洗白」。
+    fn touch_manifest_stale(&mut self) {
+        self.session_manifest_stale = true;
+        self.manifest_rev += 1;
+    }
+
     /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页
     /// （新页分配下一个未命名序号）。返回是否真的移除了页面。
     fn close_tab_now(&mut self, idx: usize) -> bool {
@@ -123,10 +131,20 @@ impl Editpad {
         self.remember_tab_views(&[idx]);
         // 第 64 轮：命名页进「上次关闭」栈（恢复入口见 ReopenLastClosedFile）
         self.remember_closed_tab(idx);
+        // P146：作废在途自动保存——「放弃更改并关闭」的页曾被人写盘复活
+        self.tabs[idx].invalidate_autosave();
         self.tabs.remove(idx);
         // P112：悬停的页被关掉 → 悬停态清空（下一个指针移动事件会
         // 按新下标重新置位；不清的话陈旧下标会悬停染色到错页）
         self.hovered_tab = None;
+        // P145：关闭确认条存的是裸下标——页集合变动后陈旧下标会让视图
+        // 侧 tabs[idx] 越界 panic 或指向错页。确认页自身被关 → 清；
+        // 其前的页被关 → 随左移平移（视图侧每帧消费该下标）。
+        self.close_tab_confirm = match self.close_tab_confirm {
+            Some(c) if c == idx => None,
+            Some(c) if c > idx => Some(c - 1),
+            other => other,
+        };
         if self.tabs.is_empty() {
             let tab = self.fresh_tab();
             self.tabs.push(tab);
@@ -134,7 +152,7 @@ impl Editpad {
             self.assign_untitled_num(last);
         }
         // P31：页集合结构已变——下一拍重写清单，防崩溃恢复复活已关的页
-        self.session_manifest_stale = true;
+        self.touch_manifest_stale();
         // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名
         self.refresh_cur_handle();
         true
@@ -158,6 +176,8 @@ impl Editpad {
         let mut removed = 0usize;
         for &idx in idxs.iter().rev() {
             if idx < self.tabs.len() {
+                // P146：同 close_tab_now——批量移除也作废在途自动保存
+                self.tabs[idx].invalidate_autosave();
                 self.tabs.remove(idx);
                 removed += 1;
             }
@@ -168,13 +188,22 @@ impl Editpad {
         // P112：悬停页可能在被移除之列——批量移除后悬停态统一清空
         // （下一个指针移动事件按新下标重新置位）
         self.hovered_tab = None;
+        // P145：批量移除同样修正关闭确认条的下标（确认页在移除集内 →
+        // 清；否则按其前方被移除的个数左移）——理由同 close_tab_now。
+        self.close_tab_confirm = self.close_tab_confirm.and_then(|c| {
+            if idxs.contains(&c) {
+                None
+            } else {
+                Some(c - idxs.iter().filter(|&&i| i < c).count())
+            }
+        });
         if self.tabs.is_empty() {
             let tab = self.fresh_tab();
             self.tabs.push(tab);
             let last = self.tabs.len() - 1;
             self.assign_untitled_num(last);
         }
-        self.session_manifest_stale = true;
+        self.touch_manifest_stale();
         self.refresh_cur_handle();
         removed
     }
@@ -754,15 +783,25 @@ impl Editpad {
                 }
                 Task::none()
             }
-            Message::HlPaved(gen, paved) => {
+            Message::HlPaved(gen, tab_id, paved) => {
                 if self.hl_paving == Some(gen) {
                     self.hl_paving = None;
+                    // P146：按发起页 id 归页安装——曾装进「回报时刻的活动
+                    // 页」：A 页大文件铺建中切到 B 页（同语言小文件、代次
+                    // 同为 0），A 的检查点状态被装进 B，B 全文按 A 的语法
+                    // 状态错色。页已被关则结果整体丢弃。
+                    let installed = self
+                        .tabs
+                        .iter()
+                        .position(|t| t.id == tab_id)
+                        .map(|idx| {
+                            self.tabs[idx]
+                                .editor
+                                .borrow_mut()
+                                .install_highlighter_if_current(gen, paved)
+                        });
                     // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
                     // needs_paving 重新评估并续排（从存活检查点出发，代价小）
-                    let installed = self
-                        .cur_handle
-                        .borrow_mut()
-                        .install_highlighter_if_current(gen, paved);
                     let _ = installed;
                     if self.status.starts_with("语法分析") {
                         self.status.clear();
@@ -966,14 +1005,18 @@ impl Editpad {
                 let path = self.tabs[idx].path.clone().expect("上方已确认非空");
                 let doc = self.tabs[idx].editor.borrow().doc.clone();
                 let version = self.tabs[idx].version;
-                self.pending_close_tab = Some(idx);
+                // P146：记发起页 id（存盘期间下标漂移曾致错页无确认关闭）
+                // 并作废在途自动保存（手动保存接管本页写盘）
+                let tab_id = self.tabs[idx].id;
+                self.tabs[idx].invalidate_autosave();
+                self.pending_close_tab = Some(tab_id);
                 Task::perform(
                     async move {
                         let saved = editpad_core::save_document_atomic(&path, &doc)
                             .map_err(|e| e.to_string());
                         (version, saved)
                     },
-                    move |(version, result)| Message::TabSaved(idx, version, result),
+                    move |(version, result)| Message::TabSaved(tab_id, version, result),
                 )
             }
             // ---------- 标签右键菜单（P28；P39 起为浮层） ----------
@@ -1447,20 +1490,21 @@ impl Editpad {
                 }
                 self.active_load = None;
                 self.progress = None;
-                // P21：结果路由回发起加载的标签页——期间切走也不串页
-                let target = job.tab;
+                // P21/P145：结果路由回发起加载的标签页——按登记时记下的
+                // 页 id 解析当前位置（期间关页/换位会让下标漂移，id 不变）；
+                // 页已被关则解析不到，结果走丢弃分支（曾按登记下标直接
+                // 索引 tabs：加载中 Ctrl+W 关页后必越界 panic/串页）。
+                let target = self.tabs.iter().position(|t| t.id == job.tab_id);
                 // P30：恢复任务的待还原视图随任务号取出；None = 普通打开
                 let pending_view = self.restore_views.remove(&job_id);
                 let is_restore = pending_view.is_some();
+                // P30 防串写护栏：恢复任务要求目标仍是空净无名占位页
+                let target = target.filter(|&i| !is_restore || self.restore_placeholder_ready(i));
                 let mut tasks: Vec<Task<Message>> = Vec::new();
                 // P126：.LOG 首行时间戳是否已追加（Ok 臂内置位，装载尾部重新置脏）
                 let mut log_appended = false;
-                match result {
-                    // P30 防串写护栏（第二半在 Ok(_) 分支）：普通打开照旧；
-                    // 恢复任务要求目标仍是空净无名占位页，否则走丢弃分支
-                    Ok((doc, sample, encoding))
-                        if !is_restore || self.restore_placeholder_ready(target) =>
-                    {
+                match (result, target) {
+                    (Ok((doc, sample, encoding)), Some(target)) => {
                         // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
                         // 内容嗅探（shebang/XML/JSON/YAML/约定文件名）
                         let language =
@@ -1557,7 +1601,7 @@ impl Editpad {
                         tab.untitled_num = None;
                         // P31：页内容整体换血（打开/恢复回填）——已提交清单
                         // 对本页的描述过期，下一拍重写
-                        self.session_manifest_stale = true;
+                        self.touch_manifest_stale();
                         if let Some(path) = self.path_of_tab(target) {
                             self.record_recent(&path);
                         }
@@ -1570,17 +1614,25 @@ impl Editpad {
                             tasks.push(self.schedule_find_scan());
                         }
                     }
-                    Ok(_) => {
-                        // P30：占位页已被用户动过（关页/新页导致下标漂移）——
-                        // 宁可丢弃结果也不能覆盖用户内容；计入失败汇总
+                    (Ok(_), _) => {
+                        // P30/P145：占位页已被用户动过（关页/新页导致下标
+                        // 漂移），或普通打开的目标页已被关——宁可丢弃结果
+                        // 也不能覆盖用户内容；恢复链计入失败汇总
                         self.busy = false;
-                        self.restore_failed += 1;
+                        if is_restore {
+                            self.restore_failed += 1;
+                        } else {
+                            self.set_status("目标标签页已关闭，本次加载结果已丢弃".to_owned());
+                        }
                     }
-                    Err(error) => {
+                    (Err(error), target) => {
                         if is_restore {
                             // P30：恢复页加载失败（文件被删等）——移除占位页
-                            // 继续恢复其余页，不阻断（§3 P30 第 6 条）
-                            self.drop_restore_placeholder(target);
+                            // 继续恢复其余页，不阻断（§3 P30 第 6 条）；
+                            // 占位页已被关（id 解析不到）则无可移除，照常计数
+                            if let Some(target) = target {
+                                self.drop_restore_placeholder(target);
+                            }
                             self.restore_failed += 1;
                             self.busy = false;
                         } else {
@@ -1646,6 +1698,9 @@ impl Editpad {
                 Task::none()
             }
             Message::SaveTargetChosen(Some(path)) => {
+                // P146：改路径前作废在途自动保存——曾以调度时刻的旧路径
+                // 落盘，新内容被写进旧文件
+                self.tab_mut().invalidate_autosave();
                 let tab = self.tab_mut();
                 tab.path = Some(path.clone());
                 // P133：相对路径链接的解析基准 = 本页文件所在目录
@@ -1663,31 +1718,39 @@ impl Editpad {
                 self.busy = false;
                 self.save()
             }
-            Message::Saved(version, Ok(notice)) => {
+            Message::Saved(tab_id, version, Ok(notice)) => {
+                // P146 路由：按发起页 id 归账——保存异步期间切页/关页，
+                // 曾按「完成时刻的活动页」记账（错清别页置脏标记 → 关页
+                // 不再弹确认 → 未保存内容无声丢失）。
+                let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                    // 页已被关：落盘已发生，账目无处可记——收口即可
+                    self.busy = false;
+                    self.pending_close = false;
+                    return Task::none();
+                };
                 // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
-                self.tab_mut().dirty = self.tab().version != version;
+                self.tabs[idx].dirty = self.tabs[idx].version != version;
                 self.busy = false;
-                if !self.tab().dirty {
+                if !self.tabs[idx].dirty {
                     // P38：落盘成功且期间无新编辑——当前内容即磁盘内容，
                     // 刷新撤销回基线的判定基准（版本不符时不得动基线：
                     // 那时磁盘上是旧快照）
-                    self.cur_handle.borrow_mut().mark_saved();
+                    self.tabs[idx].editor.borrow_mut().mark_saved();
                     // P31：内存态比已提交清单「更干净」——下一拍重写清单，
                     // 防崩溃恢复把已落盘内容按旧快照复活成置脏页
-                    self.session_manifest_stale = true;
+                    self.touch_manifest_stale();
                 }
-                if let Some(path) = self.tab().path.clone() {
+                if let Some(path) = self.tabs[idx].path.clone() {
                     self.record_recent(&path);
                 }
                 // P67：状态栏标签反映实际落盘编码（用户选择的偏好或默认
                 // UTF-8），转码提示按「原标签 vs 实际目标」判定
-                let target_label = self
-                    .tab()
+                let target_label = self.tabs[idx]
                     .save_encoding
                     .unwrap_or(editpad_core::SaveEncoding::Utf8)
                     .label();
-                let prev_label = self.tab().encoding_label.clone();
-                self.tab_mut().encoding_label = target_label.to_owned();
+                let prev_label = self.tabs[idx].encoding_label.clone();
+                self.tabs[idx].encoding_label = target_label.to_owned();
                 // P6 编码知情权：发生转码/BOM 丢失/不可映射字符时明确告知；
                 // 无转码时补显暂存的备份提示（备份消息写在异步落盘完成
                 // 之前，直接进状态栏会被本分支立即覆盖/抹掉）
@@ -1700,27 +1763,43 @@ impl Editpad {
                     self.status.clear();
                 }
                 // P50：落盘成功即刷新外部修改比对戳（磁盘内容 = 刚写的内容）
-                if let Some(path) = self.tab().path.clone() {
-                    self.tab_mut().file_stamp = file_stamp(&path);
+                if let Some(path) = self.tabs[idx].path.clone() {
+                    self.tabs[idx].file_stamp = file_stamp(&path);
                 }
                 if self.pending_close {
-                    // 落盘确认后才真正关窗。P29：保存的是活动页，
-                    // 其余置脏页走快照直退（不再二次弹窗），快照失败才降级
-                    self.pending_close = false;
-                    if session_restore_allowed(
+                    // P147：「保存并关闭」= 存完**全部**置脏页再关窗——曾只存
+                    // 活动页即关窗，ASK 模式下后台页未存改动无声丢失。仍有
+                    // 其他置脏页（且不走快照直退）时切过去继续存（pending_close
+                    // 保持），全部干净才关窗；未命名置脏页经另存为对话框裁决
+                    //（取消即放弃关窗，见 SaveTargetChosen(None)）。
+                    // 快照直退模式无需逐页存：exit_via_snapshot 全量入快照。
+                    let snapshot_exit = session_restore_allowed(
                         self.settings.enable_snapshots,
                         self.settings.remember_session,
-                    ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT
-                    {
-                        if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
-                            return self.exit_via_snapshot(&dir);
+                    ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT;
+                    if !snapshot_exit {
+                        if let Some(next) = self.tabs.iter().position(|t| t.dirty) {
+                            self.pending_close = true;
+                            self.set_active_tab(next);
+                            return self.save();
                         }
                     }
-                    return self.close_window();
+                    // P146：仅当保存的仍是当前活动页才延续关窗——保存期间
+                    // 切到别的（可能置脏的）页后照关会丢新页状态。
+                    self.pending_close = false;
+                    if idx == self.active_tab {
+                        if snapshot_exit {
+                            if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
+                                return self.exit_via_snapshot(&dir);
+                            }
+                        }
+                        return self.close_window();
+                    }
+                    self.set_status("保存期间切换了标签页，已取消关窗".to_owned());
                 }
                 Task::none()
             }
-            Message::Saved(_, Err(error)) => {
+            Message::Saved(_, _, Err(error)) => {
                 self.busy = false;
                 // 保存失败不关窗：留在应用里让用户处理
                 self.pending_close = false;
@@ -1730,17 +1809,24 @@ impl Editpad {
                 self.pending_backup_notice = None;
                 Task::none()
             }
-            // ---------- 即时保存（P18，按页路由；P63 结局三分+路径守卫） ----------
-            Message::TabAutosaved(idx, version, path, outcome) => {
-                // P63 路由守卫：回报按「下标 + 路径」双重核对。防抖睡眠
-                // 期间关掉前面的页会让下标漂移——路径不符说明这批账目属于
-                // 已不存在的旧页（或页已换血），整条丢弃。磁盘写入本身用
-                // 的是调度时刻克隆的路径，无损害；只是不能让错误的页记账。
-                if self.tabs.get(idx).and_then(|t| t.path.as_deref()) != Some(path.as_path()) {
+            // ---------- 即时保存（P18，按页路由；P63 结局三分 + P146 代次） ----------
+            Message::TabAutosaved(tab_id, version, path, outcome) => {
+                // P146 路由守卫：回报按「页 id」定位——防抖睡眠期间关页/
+                // 换位导致的下标漂移不再串页（曾按「下标 + 路径」双重核对）。
+                // inflight 必须无条件清除：曾路径失配提前 return 漏清，
+                // 该页此后 tab_autosave_ready 恒 false，本会话静默失去
+                // 自动保存。
+                let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                    return Task::none();
+                };
+                let path_matches = self.tabs[idx].path.as_deref() == Some(path.as_path());
+                self.tabs[idx].autosave_inflight = false;
+                if !path_matches {
+                    // 页已另存/改名：代次已失效（写盘必被跳过），旧路径
+                    // 账目整条丢弃
                     return Task::none();
                 }
                 let tab = &mut self.tabs[idx];
-                tab.autosave_inflight = false;
                 match outcome {
                     AutosaveOutcome::Written => {
                         // 版本一致 = 快照之后没有新编辑：可以安全清脏
@@ -1752,7 +1838,7 @@ impl Editpad {
                             tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
                             // P31：auto-save 成功清脏 = 内存比清单干净，
                             // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
-                            self.session_manifest_stale = true;
+                            self.touch_manifest_stale();
                         }
                     }
                     AutosaveOutcome::SkippedExternalChange => {
@@ -1778,6 +1864,13 @@ impl Editpad {
                         // 失败必须留痕（不能无声吞掉），但不打断编辑；
                         // 清掉 inflight 后，下一次编辑会重新排队
                         self.set_status_error(format!("自动保存失败:{error}"));
+                    }
+                    AutosaveOutcome::Superseded => {
+                        // P146：调度后页被编辑/撤销回基线/改路径作废——本轮
+                        // 不写盘。页仍就绪（置脏+命名）则立即重排一次防抖，
+                        // 保持「停手后落盘」的最终一致（否则最后一次编辑
+                        // 之后不再有新触发点，自动保存静默停摆）
+                        return self.maybe_schedule_autosave();
                     }
                 }
                 Task::none()
@@ -1914,11 +2007,15 @@ impl Editpad {
                 }
                 self.maybe_schedule_autosave()
             }
-            Message::TabSaved(idx, version, result) => {
+            Message::TabSaved(tab_id, version, result) => {
                 self.busy = false;
-                if idx >= self.tabs.len() {
+                // P146：按发起页 id 定位——存盘期间页集合变动导致的下标
+                // 漂移不再让「保存并关闭」落到别的页上（版本巧合时曾把
+                // 无关的置脏页静默移除、内容无声丢弃）
+                let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                    self.pending_close_tab = None;
                     return Task::none();
-                }
+                };
                 match result {
                     Ok(()) => {
                         // 版本守卫同款：期间又有编辑则保持置脏、不关闭
@@ -1929,7 +2026,9 @@ impl Editpad {
                             // 本页通常随即被移除，此处是 close_tab_now 失败
                             // 等幸存路径的基线兜底
                             self.tabs[idx].editor.borrow_mut().mark_saved();
-                            if self.pending_close_tab == Some(idx) && self.close_tab_now(idx) {
+                            if self.pending_close_tab == Some(tab_id)
+                                && self.close_tab_now(idx)
+                            {
                                 self.cancel_find_scan();
                             }
                             self.pending_close_tab = None;
@@ -2356,6 +2455,13 @@ impl Editpad {
                 let Some(pos) = self.match_idx.and_then(|i| self.matches.get(i).copied()) else {
                     return Task::none();
                 };
+                // P146 防护：pos 来自上一轮扫描的陈旧命中表——编辑删行后
+                // 重扫完成前行数可能已少于 pos.line。越界时 select_span/
+                // ropey line() 曾直接 panic（全库唯一未防护点）；宁可放弃
+                // 本次替换并排队重扫，也不在夹紧后的错误位置写入文本
+                if pos.line >= self.cur_handle.borrow().doc.line_count() {
+                    return self.schedule_find_scan();
+                }
                 self.cur_handle
                     .borrow_mut()
                     .select_span(pos.line, pos.col, pos.len_chars);
@@ -2368,8 +2474,11 @@ impl Editpad {
                     let expansion = {
                         let ed = self.cur_handle.borrow();
                         let line_text = ed.doc.line_str(pos.line);
-                        let byte_in_line: usize =
-                            line_text.chars().take(pos.col).map(char::len_utf8).sum();
+                        let byte_in_line: usize = line_text
+                            .chars()
+                            .take(pos.col)
+                            .map(char::len_utf8)
+                            .sum();
                         editpad_core::expand_regex_at(
                             &line_text,
                             byte_in_line,
@@ -2573,11 +2682,12 @@ impl Editpad {
                 }
             }
             Message::MonitorTick => {
-                if !self.busy
-                    && self.active_load.is_none()
-                    && self.tabs.iter().any(|t| t.monitor)
-                {
-                    self.check_external_changes();
+                if self.tabs.iter().any(|t| t.monitor) {
+                    // P146：busy/加载中的拍跳过巡检但**续链**——曾直接
+                    // Task::none() 断链，监视静默失效而状态栏仍显示已开启
+                    if !self.busy && self.active_load.is_none() {
+                        self.check_external_changes();
+                    }
                     return self.schedule_monitor_tick(); // 自我续期链
                 }
                 Task::none()
@@ -2999,7 +3109,7 @@ impl Editpad {
             if back_to_saved {
                 // P31：内存态变得比已提交清单更干净（清单还记着置脏页），
                 // 下一拍心跳重写清单，防崩溃恢复把已回清的内容按旧快照复活
-                self.session_manifest_stale = true;
+                self.touch_manifest_stale();
             }
             // 编辑噪声只清普通信息：错误提示（如「保存失败」）必须持久
             // 到用户做出下一个有效动作才让位，否则打一个字就消失
@@ -3056,7 +3166,9 @@ impl Editpad {
     pub(crate) fn register_load_job(&mut self, path: PathBuf, tab: usize) -> u64 {
         self.job_seq += 1;
         let id = self.job_seq;
-        self.active_load = Some(LoadJob { id, path, tab });
+        // P145：随任务记下目标页稳定 id（0 = 页不存在，归页必走丢弃分支）
+        let tab_id = self.tabs.get(tab).map(|t| t.id).unwrap_or(0);
+        self.active_load = Some(LoadJob { id, path, tab, tab_id });
         self.progress = Some((0, 0));
         self.enter_busy();
         id
@@ -3204,6 +3316,9 @@ impl Editpad {
         match fs::rename(&old, &target) {
             Ok(()) => {
                 if let Some(tab) = self.tabs.get_mut(idx) {
+                    // P146：改路径前作废在途自动保存——曾以调度时刻的旧
+                    // 路径落盘，新内容被写进旧文件
+                    tab.invalidate_autosave();
                     tab.path = Some(target.clone());
                     // P133：解析基准随改名迁移
                     tab.editor
@@ -3228,7 +3343,7 @@ impl Editpad {
                 }
                 self.persist_settings();
                 // 会话清单里记的是旧路径，下一拍重写
-                self.session_manifest_stale = true;
+                self.touch_manifest_stale();
                 self.renaming_tab = None;
                 self.rename_input.clear();
                 self.set_status(format!("已重命名为「{new_key}」"));
@@ -3334,18 +3449,24 @@ impl Editpad {
             .tab()
             .save_encoding
             .unwrap_or(editpad_core::SaveEncoding::Utf8);
+        // P146：手动保存接管本页写盘——先作废在途自动保存（双写者并发
+        // 曾可交错写同一目标；且自动保存回报晚于手动保存落地会搅乱账目）
+        self.tab_mut().invalidate_autosave();
         // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
         let doc = self.cur_handle.borrow().doc.clone();
         // P18 版本守卫：记录本次落盘对应的内容版本
         let version = self.tab().version;
+        // P146：随回报携带发起页 id——保存期间切页/关页不再把账目
+        // 记到「完成时刻的活动页」（错清别页置脏标记 → 关页无确认丢内容）
+        let tab_id = self.tab().id;
         Task::perform(
             async move {
                 let saved = editpad_core::save_document_encoded(&path, &doc, encoding)
                     .map_err(|e| e.to_string());
                 (version, saved)
             },
-            move |(version, result)| Message::Saved(version, result),
+            move |(version, result)| Message::Saved(tab_id, version, result),
         )
     }
 
@@ -3394,8 +3515,15 @@ impl Editpad {
                 backup_mode: self.settings.backup_mode.clone(),
             };
             self.tabs[idx].autosave_inflight = true;
+            // P146：带走发起页 id 与调度时刻的代次——回报按 id 归页；
+            // 醒来代次不符即作废（见 drive_autosave_once）
+            let tab_id = self.tabs[idx].id;
+            let gen = self.tabs[idx].autosave_gen.clone();
+            let my_gen = gen.load(std::sync::atomic::Ordering::Relaxed);
             tasks.push(Task::perform(
-                async move { drive_autosave_once(idx, path, doc, version, task).await },
+                async move {
+                    drive_autosave_once(tab_id, path, doc, version, gen, my_gen, task).await
+                },
                 |message| message,
             ));
         }

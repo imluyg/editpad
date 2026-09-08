@@ -9,6 +9,10 @@ pub(crate) const HL_PAVE_BATCH_STRIDES: usize = 32;
 /// 推进自己的高亮器副本，完成时整体送回，不做任何共享可变状态。
 pub(crate) struct HlPavePayload {
     pub(crate) gen: u64,
+    /// P146：发起页 id——完成回报按它归页安装。曾装进「回报时刻的
+    /// 活动页」：A 页大文件铺建中切到 B 页（同语言、代次同为 0），
+    /// A 的检查点状态会被装进 B，B 全文按 A 的语法状态错色。
+    pub(crate) tab_id: u64,
     pub(crate) doc: editpad_core::Document,
     pub(crate) highlighter: editpad_core::LazyHighlighter,
     pub(crate) total_lines: usize,
@@ -73,6 +77,7 @@ pub(crate) async fn drive_hl_pave<F>(
     }
     let (notify_tx, notify_rx) = std_mpsc::channel::<HlEvent>();
     let gen = payload.gen;
+    let tab_id = payload.tab_id;
     std::thread::spawn(move || {
         // AssertUnwindSafe：panic 后仅透传兜底克隆，不再触碰线程局部可变性
         let outcome =
@@ -92,7 +97,7 @@ pub(crate) async fn drive_hl_pave<F>(
     while let Ok(event) = notify_rx.recv() {
         let message = match event {
             HlEvent::Progress(done) => Message::HlPaveProgress(gen, done),
-            HlEvent::Done(hl) => Message::HlPaved(gen, hl),
+            HlEvent::Done(hl) => Message::HlPaved(gen, tab_id, hl),
         };
         if output.send(message).await.is_err() {
             break;

@@ -627,10 +627,11 @@ use super::*;
 
         // 真正落盘一次后基线重建，撤销回清能力恢复正常语义
         let v = app.tabs[1].version;
+        let tid = app.tabs[1].id;
         dispatch(
             &mut app,
             Message::TabAutosaved(
-                1,
+                tid,
                 v,
                 PathBuf::from("C:/w/report.txt"),
                 AutosaveOutcome::Written,
@@ -1003,6 +1004,7 @@ use super::*;
         app.settings.autosave_enabled = true;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
         let v = app.tab().version;
+        let tid = app.tabs[0].id;
 
         // 手动保存走完整链路：进入 busy → Saved 回报清脏并按新磁盘重记戳
         dispatch(&mut app, Message::SaveRequested);
@@ -1010,7 +1012,7 @@ use super::*;
         std::fs::write(&path, "our own newer content").unwrap();
         dispatch(
             &mut app,
-            Message::Saved(v, Ok(editpad_core::EncodeNotice::default())),
+            Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
         );
         assert!(!app.tab().dirty && !app.busy);
         let fresh_stamp = app.tabs[0].file_stamp;
@@ -1019,7 +1021,7 @@ use super::*;
         dispatch(
             &mut app,
             Message::TabAutosaved(
-                0,
+                tid,
                 v,
                 path.clone(),
                 AutosaveOutcome::SkippedExternalChange,
@@ -1038,7 +1040,7 @@ use super::*;
         let v2 = app.tab().version;
         dispatch(
             &mut app,
-            Message::TabAutosaved(0, v2, path, AutosaveOutcome::SkippedExternalChange),
+            Message::TabAutosaved(tid, v2, path, AutosaveOutcome::SkippedExternalChange),
         );
         assert_eq!(app.external_change, Some(vec![0]), "真外部改动必须入队裁决");
     }
@@ -1153,10 +1155,11 @@ use super::*;
 
         // 模拟 auto-save 成功清脏：内存比已提交清单「更干净」→ 过期标记
         let version = app.tabs[0].version;
+        let tid = app.tabs[0].id;
         dispatch(
             &mut app,
             Message::TabAutosaved(
-                0,
+                tid,
                 version,
                 PathBuf::from("C:/doc/note.txt"),
                 AutosaveOutcome::Written,
@@ -1265,6 +1268,7 @@ use super::*;
 
         let outcome = HeartbeatOutcome {
             plan: vec![(0, planned_version)],
+            rev: app.manifest_rev,
             result: Ok(editpad_core::snapshot::SessionManifest {
                 generation: 1,
                 tabs: vec![editpad_core::snapshot::SessionTab {
@@ -1542,3 +1546,90 @@ use super::*;
         app.busy = false;
     }
 
+
+    #[test]
+    fn heartbeat_ok_does_not_clear_stale_when_tabs_closed_in_flight() {
+        // P146 回归：心跳在途期间关页 → 成功回报曾无条件清 stale，磁盘
+        // 清单里留着已关页且永不重写——崩溃恢复把已关页连同旧内容复活。
+        let dir = scratch_dir("hb-inflight-close");
+        let mut app = heartbeat_app(&dir);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let payload = app.prepare_heartbeat_commit(&dir).expect("首轮应有提交");
+        app.heartbeat_inflight = true;
+        // 在途期间关掉置脏页（放弃更改路径）——结构变化推进过期代次
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+        assert!(app.session_manifest_stale, "关页应置位过期标记");
+        let result = editpad_core::snapshot::write_heartbeat_session(
+            &payload.dir,
+            &payload.pages,
+            payload.active,
+            payload.next_untitled,
+        )
+        .map_err(|e| e.to_string());
+        app.heartbeat_apply(HeartbeatOutcome {
+            plan: payload.plan,
+            rev: payload.rev,
+            result,
+        });
+        assert!(
+            app.session_manifest_stale,
+            "在途期间的结构变化必须保持过期标记（派发时的清单已过期）"
+        );
+
+        // 对照：无在途变化的正常提交照常清除标记
+        app.run_heartbeat_cycle(&dir).unwrap();
+        assert!(!app.session_manifest_stale);
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn restore_with_all_pages_over_mem_cap_keeps_app_alive() {
+        // P147 回归：全部页超内存护栏被规划放弃 → kept 为空。曾直接
+        // tabs[active_tab] 越界 panic（启动即崩，需手删快照目录才能恢复）；
+        // 必须补空页保持「tabs 恒非空」不变式。快照文件用 set_len 稀疏
+        // 超标（瞬间构造，不写真实字节——规划期只看 metadata 大小）。
+        let dir = snapshot_scratch_dir("p147-all-over-cap");
+        let tab = editpad_core::snapshot::SessionTab {
+            path: Some("C:/w/huge.log".to_owned()),
+            untitled_num: None,
+            dirty: true,
+            file: None,
+            cursor_line: 0,
+            cursor_col: 0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            wrap_override: None,
+            font_size_override: None,
+        };
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[editpad_core::snapshot::SessionPage {
+                tab,
+                doc: editpad_core::Document::from_str("content"),
+            }],
+            0,
+            2,
+        )
+        .expect("写会话应成功");
+
+        // 把该页快照「撑」到超护栏（稀疏文件，只改元数据长度）
+        let snap = dir.join(manifest.tabs[0].file.as_deref().expect("置脏页有快照"));
+        std::fs::File::options()
+            .write(true)
+            .open(&snap)
+            .unwrap()
+            .set_len(crate::session::MULTI_TAB_MEM_CAP_BYTES + 1)
+            .unwrap();
+
+        let mut app = Editpad::default();
+        let _ = app.restore_from_manifest(&dir, &manifest);
+        // 收尾汇总会重置计数器，但超护栏事实必须如实进状态栏
+        assert!(
+            app.status.contains("超出内存护栏"),
+            "截断汇总应提示，实际 {:?}",
+            app.status
+        );
+        assert_eq!(app.tabs.len(), 1, "全部放弃时补空页，tabs 恒非空");
+        assert!(app.tabs[0].editor.borrow().doc.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
