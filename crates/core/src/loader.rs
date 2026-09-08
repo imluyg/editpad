@@ -197,7 +197,8 @@ where
                     path: path.to_path_buf(),
                 });
             }
-            let utf8_valid = !scan.invalid;
+            // P147：含 EOF 截断判定的完整严格口径（对齐 decode()）
+            let utf8_valid = scan.utf8_valid();
 
             // ---- 第二遍：按结论装载（进度走后半程）----
             // 重新打开文件回到起点（第一遍没有保留字节——这正是省内存的关键）
@@ -267,13 +268,31 @@ fn fill_chunk(reader: &mut BufReader<fs::File>, chunk: &mut [u8]) -> std::io::Re
 }
 
 /// 第一遍扫描的状态：NUL 是最强二进制信号（短路）；
-/// 严格 UTF-8 校验用手写状态机（跨块续字节计数）。
-#[derive(Default)]
+/// 严格 UTF-8 校验用手写状态机（跨块续字节计数 + WHATWG 首续字节范围）。
 struct Utf8Scan {
     saw_nul: bool,
     invalid: bool,
-    /// 尚待接收的续字节数（0x80..=BF）
+    /// 尚待接收的续字节数
     expect: u8,
+    /// 下一个续字节的合法区间下/上界：首续字节按 lead 收窄
+    /// （E0→A0..、ED→..9F、F0→90..、F4→..8F），其余续字节恒 80..=BF。
+    /// 曾只查「是不是续字节」不查范围：超长编码 / CESU 代理对 /
+    /// >U+10FFFF 被判合法，与 [`decode`]（from_utf8 严格口径）发散。
+    next_min: u8,
+    next_max: u8,
+}
+
+impl Default for Utf8Scan {
+    fn default() -> Self {
+        Self {
+            saw_nul: false,
+            invalid: false,
+            expect: 0,
+            // 全区间（派生 Default 会给 0/0，首续字节永不合法——实测踩坑）
+            next_min: 0x80,
+            next_max: 0xBF,
+        }
+    }
 }
 
 impl Utf8Scan {
@@ -290,25 +309,53 @@ impl Utf8Scan {
                 return;
             }
             if self.expect > 0 {
-                if b & 0xC0 == 0x80 {
+                if b >= self.next_min && b <= self.next_max {
                     self.expect -= 1;
+                    // 只有 lead 后的首个续字节范围收窄，后续回到全区间
+                    self.next_min = 0x80;
+                    self.next_max = 0xBF;
                 } else {
                     self.expect = 0;
                     self.invalid = true;
                     return;
                 }
             } else if b >= 0x80 {
-                self.expect = match b {
-                    0xC2..=0xDF => 1,
-                    0xE0..=0xEF => 2,
-                    0xF0..=0xF4 => 3,
+                match b {
+                    0xC2..=0xDF => self.expect = 1,
+                    0xE0 => {
+                        self.expect = 2;
+                        self.next_min = 0xA0;
+                    }
+                    0xED => {
+                        self.expect = 2;
+                        self.next_max = 0x9F;
+                    }
+                    0xF0 => {
+                        self.expect = 3;
+                        self.next_min = 0x90;
+                    }
+                    0xF4 => {
+                        self.expect = 3;
+                        self.next_max = 0x8F;
+                    }
+                    0xE1..=0xEC | 0xEE..=0xEF => self.expect = 2,
+                    0xF1..=0xF3 => self.expect = 3,
+                    // 孤立续字节 / 过长 lead（C0/C1）/ 非法 lead（F5..FF）
                     _ => {
                         self.invalid = true;
                         return;
                     }
-                };
+                }
             }
         }
+    }
+
+    /// 流结束后的最终判定：悬挂的半截多字节序列 = 非 UTF-8（与
+    /// from_utf8 一致）。曾漏查 `expect > 0`——GBK 双字节字符大量落在
+    /// 「E0-EF + 合法续字节」形态上，以截断序列结尾的 GBK 文件曾被判成
+    /// UTF-8 解出 U+FFFD 而非走 GBK 兜底，保存后原字节被 FFFD 覆写。
+    fn utf8_valid(&self) -> bool {
+        !self.invalid && self.expect == 0
     }
 }
 
@@ -785,5 +832,51 @@ mod tests {
                     "sample={sample:?} split={split}");
             }
         }
+    }
+
+    #[test]
+    fn streaming_utf8_scan_matches_strict_decode_on_edge_sequences() {
+        // P147 回归：手写扫描器曾与 from_utf8 判定发散——EOF 截断序列
+        // 不判无效、不查首续字节范围（超长/代理/>U+10FFFF）。GBK 双字节
+        // 字符大量落在「E0-EF+续字节」形态上，以截断序列结尾的 GBK 文件
+        // 曾被流式路径错标 UTF-8 解出 FFFD，保存后原字节被覆写。
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            // EOF 截断的多字节序列（GBK 常见形态）
+            ("truncated.bin", b"ab\xE4\xB8".to_vec()),
+            ("truncated2.bin", b"\xE5\xA5".to_vec()),
+            // CESU 代理对（ED 的首续字节须 ..9F）
+            ("surrogate.bin", b"ok\xED\xA0\x80".to_vec()),
+            // 超长编码（E0 的首续字节须 A0..）
+            ("overlong.bin", b"ok\xE0\x9F\xBF".to_vec()),
+            // > U+10FFFF（F4 的首续字节须 ..8F）
+            ("overflow.bin", b"ok\xF4\x90\x80\x80".to_vec()),
+            // 对照：边界内的合法序列必须仍判 UTF-8（U+D7FF / U+10FFFF）
+            ("edge-valid.bin", b"ok\xED\x9F\xBF\xF4\x8F\xBF\xBF".to_vec()),
+            ("emoji.bin", "ok🚀".as_bytes().to_vec()),
+        ];
+
+        let dir = scratch_dir("p147-utf8-edge");
+        for (name, bytes) in cases {
+            fs::create_dir_all(&dir).unwrap();
+            let target = dir.join(name);
+            fs::write(&target, &bytes).unwrap();
+            let reference = decode(&bytes);
+            let streamed = load_document_streaming(&target, |_| {});
+            if reference.encoding == "UTF-8" {
+                let loaded = streamed.expect("参照判 UTF-8，流式不得拒绝");
+                assert_eq!(loaded.encoding, "UTF-8", "{name}: 标签必须一致");
+                assert_eq!(loaded.doc.to_text(), reference.text, "{name}: 正文必须一致");
+            } else {
+                match streamed {
+                    Ok(loaded) => assert_ne!(
+                        loaded.encoding, "UTF-8",
+                        "{name}: 流式不得把非 UTF-8 错标成 UTF-8（输入 {bytes:02x?}）"
+                    ),
+                    Err(CoreError::BinaryDetected { .. }) => {} // 双方一致拒绝
+                    Err(e) => panic!("{name}: 非预期错误 {e}"),
+                }
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
     }
 }

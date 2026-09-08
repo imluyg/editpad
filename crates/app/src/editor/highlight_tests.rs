@@ -34,7 +34,9 @@ use super::tests::*;
         assert_eq!(c.highlight_generation(), Some(gen));
         let mut worker = snapshot.clone();
         let built = worker.advance_checkpoints(32, 600, &mut |i| format!("let w{i} = {i};"));
-        assert_eq!(built, 3, "600 行的完整档位起点为 128/256/384，共 3 个");
+        // P147 检查点覆盖约定：k 覆盖 [(k-1)*STRIDE, k*STRIDE)——600 行的
+        // 完整档位为 [0,128)/[128,256)/[256,384)/[384,512)，共 4 个
+        assert_eq!(built, 4, "600 行的完整档位起点为 0/128/256/384，共 4 个");
         assert!(worker.checkpoints_len() > snapshot.checkpoints_len());
 
         // 代次一致 → 安装成功且状态生效

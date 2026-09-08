@@ -22,8 +22,8 @@ pub mod snapshot;
 pub use brackets::{bracket_kind, scan_forward, BRACKET_PAIRS, MAX_BRACKET_SCAN_CHARS};
 pub use document::{Document, LineEnding};
 pub use error::CoreError;
-pub use find_in_files::{filter_whole_word_text, find_in_file, walk_files, WalkOutput,
-    IGNORED_DIRS, MAX_SCAN_FILE_BYTES};
+pub use find_in_files::{filter_whole_word_text, find_in_file, find_in_file_with, walk_files,
+    FifMatcher, WalkOutput, IGNORED_DIRS, MAX_SCAN_FILE_BYTES};
 pub use highlight::{resolve_language, syntax_for_extension, LazyHighlighter, StyledRun};
 pub use json::{format_json, validate_json, JsonError};
 pub use loader::{load_file, load_file_streaming, load_document_streaming, decode, LoadProgress,
@@ -33,9 +33,9 @@ pub use paths::{data_root, data_root_for, data_root_for_base, instance_mutex_nam
 pub use saver::{save_atomic, save_document_atomic, save_document_encoded, EncodeNotice,
     SaveEncoding};
 pub use search::{
-    expand_regex_at, filter_whole_word, find_all, find_all_document, is_word_char, next_from,
-    prev_from, replace_all, replace_all_document, replace_all_word, ascii_case_eq, compile_regex,
-    find_all_regex, replace_all_regex, MatchPos,
+    expand_regex_at, filter_whole_word, find_all, find_all_document, for_each_line, is_word_char,
+    next_from, prev_from, replace_all, replace_all_document, replace_all_word, ascii_case_eq,
+    compile_regex, find_all_regex, find_all_regex_compiled, replace_all_regex, MatchPos,
 };
 pub use settings::{Settings, RecentView, normalize_combo, normalize_settings_page, EXIT_MODE_ASK,
     EXIT_MODE_SNAPSHOT, SETTINGS_PAGES, SETTINGS_PAGE_APPEARANCE, SETTINGS_PAGE_FONT,

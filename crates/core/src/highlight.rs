@@ -211,8 +211,10 @@ impl LazyHighlighter {
     /// （≤1 档，成本与日常随机访问相同），因此本值为 false 即代表
     /// 后台分批可以收工。
     pub fn needs_background_pave(&self, total_lines: usize) -> bool {
-        let start = self.checkpoints.len() * STRIDE;
-        start + STRIDE <= total_lines
+        // P147：下一档 = 检查点 k=len，覆盖 [(len-1)*STRIDE, len*STRIDE)，
+        // 含全真实行 ⟺ len*STRIDE ≤ total_lines（与 advance_checkpoints
+        // 的截停条件同式；检查点覆盖约定见 styled_line）
+        self.checkpoints.len() * STRIDE <= total_lines
     }
 
     /// 第 `line_idx` 行（含）之后的状态全部作废。
@@ -264,7 +266,11 @@ impl LazyHighlighter {
 
         // 补齐缺失的检查点（大跳转时一次性补齐沿途所有档位）
         while self.checkpoints.len() * STRIDE <= line_idx {
-            let start = self.checkpoints.len() * STRIDE;
+            // P147：新检查点 k 从上一档末尾 (k-1)*STRIDE 行推进——曾从
+            // k*STRIDE 起步，每个新检查点丢掉整整一档（STRIDE 行）的语法
+            // 上下文：跨档未闭合的注释/字符串状态全丢，大跳转错色；且
+            // [k*STRIDE, line_idx) 区间在下方走线时被二次解析
+            let start = (self.checkpoints.len() - 1) * STRIDE;
             let (mut parse, mut highlight) =
                 self.checkpoints.last().cloned().expect("初始检查点恒存在");
             let real_end = (start + STRIDE).min(total_lines);
@@ -479,7 +485,10 @@ impl LazyHighlighter {
         let highlighter = Highlighter::new(theme(self.dark));
         let mut built = 0usize;
         while built < max_strides {
-            let start = self.checkpoints.len() * STRIDE;
+            // P147：下一档 = 检查点 k=len，覆盖 [(len-1)*STRIDE, len*STRIDE)
+            // ——曾从 len*STRIDE 起步（与 styled_line 的补建起点同病），
+            // 后台铺建的检查点同样每档丢一档语法上下文
+            let start = (self.checkpoints.len() - 1) * STRIDE;
             if start + STRIDE > total_lines {
                 break; // 剩余不足一个完整档位：交给同步路径
             }
@@ -796,11 +805,12 @@ mod tests {
     #[test]
     fn advance_checkpoints_builds_full_strides_and_stops_at_document_edge() {
         let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
-        // 300 行：初始检查点已覆盖 [0,128)，完整档位只剩 [128,256) 一个；
-        // 起点 256 的档位越界（256+128=384 > 300）不得建
+        // 300 行（P147 检查点覆盖约定：k 覆盖 [(k-1)*STRIDE, k*STRIDE)）：
+        // 完整档位为 [0,128) 与 [128,256) 两个；起点 256 的档位越界
+        // （256+128=384 > 300）不得建
         let total = 300usize;
         let built = hl.advance_checkpoints(10, total, &mut |i| format!("let f{i} = {i};"));
-        assert_eq!(built, 1, "只应建完整档位，实际建了 {built}");
+        assert_eq!(built, 2, "只应建完整档位，实际建了 {built}");
         assert!(
             !hl.needs_background_pave(total),
             "残余不足一档时应判定后台无活可干"
@@ -821,6 +831,38 @@ mod tests {
             )
             .expect("残余不足预算时末行不应再要求降级");
         assert!(!runs.is_empty());
+    }
+
+    #[test]
+    fn cold_jump_matches_sequential_walk_across_strides() {
+        // P147 回归（跨档位 oracle）：检查点构建起点曾差一整档——冷启动
+        // 直接取跨档行时，第 0..128 行从未进入状态机，跨 128 行未闭合的
+        // 文档字符串状态全丢。冷跳转与逐行顺序走线必须产出同一配色。
+        let total = 400usize;
+        let lines: Vec<String> = (0..total)
+            .map(|i| match i {
+                2 => "s = '''".to_owned(),
+                350 => "'''".to_owned(),
+                _ => format!("padding line {i}"),
+            })
+            .collect();
+        let text_of = &mut |i: usize| lines[i].clone();
+
+        // 冷跳转：一次直达第 250 行（跨越第 2 行开启、第 350 行才闭合的字符串）
+        let mut cold = LazyHighlighter::new("py").expect("python 语法存在");
+        let cold_runs = cold.styled_line(250, &lines[250], total, text_of);
+
+        // 顺序走线：从第 0 行逐行推进到第 250 行
+        let mut warm = LazyHighlighter::new("py").expect("python 语法存在");
+        for (i, line) in lines.iter().enumerate().take(250) {
+            warm.styled_line(i, line, total, text_of);
+        }
+        let warm_runs = warm.styled_line(250, &lines[250], total, text_of);
+
+        assert_eq!(
+            cold_runs, warm_runs,
+            "冷跳转与顺序走线在第 250 行必须产出同一配色（跨档字符串状态不得丢失）"
+        );
     }
 
     #[test]

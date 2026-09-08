@@ -96,32 +96,84 @@ pub fn find_in_file(
     hits
 }
 
+/// P146：预编译查找器——FIF 扫描对至多 2 万文件逐个匹配，
+/// 正则曾每文件重新编译一次（O(文件数) 次编译放大）。编译一次、
+/// [`find_in_file_with`] 跨文件复用；字面模式零成本直通。
+pub enum FifMatcher {
+    Literal { query: String, case_sensitive: bool },
+    Regex(fancy_regex::Regex),
+}
+
+impl FifMatcher {
+    /// 组装查找器：正则模式编译失败返回 None（与 find_in_file 的
+    /// 「正则无效返回空表」口径一致，调用方据此整批提前收尾）。
+    pub fn build(query: &str, case_sensitive: bool, regex: bool) -> Option<Self> {
+        if regex {
+            Some(Self::Regex(crate::search::compile_regex(
+                query, case_sensitive,
+            )
+            .ok()?))
+        } else {
+            Some(Self::Literal {
+                query: query.to_owned(),
+                case_sensitive,
+            })
+        }
+    }
+}
+
+/// 单文件命中组装的复用版：语义与 [`find_in_file`] 完全一致
+/// （整词只作用于字面模式），只是正则来自预编译的 [`FifMatcher`]。
+pub fn find_in_file_with(
+    text: &str,
+    matcher: &FifMatcher,
+    whole_word: bool,
+    max_hits: usize,
+) -> Vec<MatchPos> {
+    let mut hits = match matcher {
+        FifMatcher::Regex(re) => {
+            crate::search::find_all_regex_compiled(text, re).unwrap_or_default()
+        }
+        FifMatcher::Literal { query, case_sensitive } => {
+            let hits = find_all(text, query, *case_sensitive);
+            if whole_word {
+                filter_whole_word_text(text, hits)
+            } else {
+                hits
+            }
+        }
+    };
+    hits.truncate(max_hits);
+    hits
+}
+
 /// [`crate::search::filter_whole_word`] 的 &str 版：只保留命中起点前
 /// 一字符与终点后一字符**均非词字符**的命中（行首/行尾视为边界）；
 /// 跨行命中（`len_chars` 含行界单元，行内边界语义不成立）一律保留。
 ///
-/// 行界口径与 [`find_all`] 对齐：`\r\n` / 孤立 `\r` / `\n` 皆一个行
-/// 界，行内容不含行尾换行单元（P78 同哲学）。`hits` 须按行序升序
-/// （`find_all` / `find_all_regex` 的输出序）；单遍切行消费，
-/// O(text 长度 + 命中数)。
+/// 行界口径与 [`crate::search::find_all`] 对齐（P147）：切行复用同一
+/// [`for_each_line`](crate::search::for_each_line)——行界全集为
+/// `\r\n` / 孤立 `\r` / `\n` / VT / FF / NEL / LS / PS。曾自写
+/// `find(['\r','\n'])` 切行：VT 等之后的命中行号大于过滤器自身推进的
+/// 行号，被防御分支按「行号越界」整体丢弃（`ab\u{000B}cd` 查 `cd`
+/// 整词返回 0 命中，应为 1）。`hits` 须按行序升序（`find_all` /
+/// `find_all_regex` 的输出序）。
 pub fn filter_whole_word_text(text: &str, hits: Vec<MatchPos>) -> Vec<MatchPos> {
     let mut out = Vec::with_capacity(hits.len());
     let mut pending = hits.into_iter().peekable();
-    let mut line_idx = 0usize;
-    let mut rest = text;
-    loop {
-        // 当前行内容 = 到首个行界字符前（\r 与 \n 均是行界起点）
-        let content_end = rest.find(['\r', '\n']).unwrap_or(rest.len());
-        let content: Vec<char> = rest[..content_end].chars().collect();
-        // 消费属于本行的全部命中（行号回退属防御性分支，正常输出序
-        // 不会出现——出现时丢弃该命中保持单调推进）
+    crate::search::for_each_line(text, |line_idx, content| {
+        // 只为本行确有命中时切 Vec（无命中行零分配，大文件不再逐行小分配）
+        if !matches!(pending.peek(), Some(h) if h.line == line_idx) {
+            return;
+        }
+        let content: Vec<char> = content.chars().collect();
         while let Some(hit) = pending.peek().copied() {
             if hit.line < line_idx {
                 pending.next();
-                continue;
+                continue; // 行号回退：防御性丢弃（正常输出序不出现）
             }
             if hit.line > line_idx {
-                break;
+                break; // 本行无命中，交由后续行处理
             }
             pending.next();
             let end = hit.col + hit.len_chars;
@@ -135,19 +187,7 @@ pub fn filter_whole_word_text(text: &str, hits: Vec<MatchPos>) -> Vec<MatchPos> 
                 out.push(hit);
             }
         }
-        if pending.peek().is_none() {
-            break;
-        }
-        if content_end >= rest.len() {
-            break; // 无更多行；剩余命中（行号越界）按防御口径丢弃
-        }
-        // 推进到下一行：\r\n 整体吞掉，孤立 \r 与 \n 各吞一个字符
-        if rest[content_end..].starts_with("\r\n") {
-            rest = &rest[content_end + 2..];
-        } else {
-            rest = &rest[content_end + 1..];
-        }
-        line_idx += 1;
-    }
+    });
+    // 行界之后仍有残留命中（行号越过末行）按防御口径丢弃
     out
 }

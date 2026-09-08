@@ -12,7 +12,7 @@
 - **大文件**——rope 存储 + 后台流式加载 + 视口虚拟化渲染，68MB 文件与 5KB 文件的每帧成本相同；
 - **中文友好**——系统输入法内联组字（带下划线、后文让位、光标随组字前进），CJK 双宽对齐叠加真实字形定位，光标/点击/选区零漂移；
 - **不丢工作**——置脏关窗零询问：快照 write-ahead 落盘后直退，下次启动原样还原；运行中心跳增量备份，崩溃至多丢一个间隔；
-- **全键位可改**——75 个动作全部在设置里可重映射，`Ctrl+E` 命令面板模糊直达任意命令；
+- **全键位可改**——78 个动作全部在设置里可重映射，`Ctrl+E` 命令面板模糊直达任意命令；
 - **绿色分发**——单 exe，配置与快照按 exe 所在路径自动隔离，多份拷贝互不干扰。
 
 ## 快速开始
@@ -318,7 +318,7 @@ editpad/
 ├── rust-toolchain.toml         # 工具链锁定；rustfmt.toml 为格式配置
 ├── crates/
 │   ├── core/                   # 纯逻辑层（零 GUI 依赖，可单独测试/复用）
-│   │   ├── src/                # document / search / highlight / loader / saver /
+│   │   ├── src/                # document / search / find_in_files / highlight / loader / saver /
 │   │   │                       # settings / snapshot / json / markdown / brackets /
 │   │   │                       # toolkit / paths / syntaxes / error
 │   │   ├── tests/              # 边界输入批 + 随机编辑对拍 fuzz
@@ -330,7 +330,7 @@ editpad/
 │       │   ├── view.rs         # 主视图组装（菜单栏/标签条/命令面板浮层）
 │       │   ├── settings_ui.rs  # 设置弹窗 UI + 中性样式
 │       │   ├── state.rs        # Editpad 状态结构体 + Default
-│       │   ├── hotkeys.rs      # 热键注册表（75 个动作，命令面板同源数据）
+│       │   ├── hotkeys.rs      # 热键注册表（78 个动作，命令面板同源数据）
 │       │   ├── load / find_scan / highlight_pave / md_preview / fonts / session /
 │       │   │   tab / autosave / heartbeat / chrome / single_instance / icon.rs
 │       │   ├── editor/         # 自绘虚拟化编辑器

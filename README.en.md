@@ -11,7 +11,7 @@ A windowed notepad built from scratch in Rust: multi-tab, session snapshot resto
 - **Large files** — rope storage + background streaming load + viewport-virtualized rendering, so a 68MB file costs the same per frame as a 5KB one;
 - **Chinese-friendly** — system IME inline composition (underline, following text yields, cursor advances with the composition), CJK double-width alignment layered on real glyph metrics, so the cursor, clicks, and selection never drift;
 - **Never lose work** — closing a dirty window asks nothing: snapshots are flushed write-ahead and it exits directly, and the last session is restored as-is on next launch; a runtime heartbeat does incremental backups, so a crash loses at most one interval;
-- **Every key rebindable** — all 75 actions can be remapped in Settings; the `Ctrl+E` command palette reaches any command by fuzzy search;
+- **Every key rebindable** — all 78 actions can be remapped in Settings; the `Ctrl+E` command palette reaches any command by fuzzy search;
 - **Portable distribution** — a single exe; config and snapshots are isolated by the exe's location, so multiple copies don't interfere with one another.
 
 ## Quick Start
@@ -220,7 +220,7 @@ editpad/
 ├── rust-toolchain.toml         # toolchain locked; rustfmt.toml is the format config
 ├── crates/
 │   ├── core/                   # pure logic layer (zero GUI deps, testable/reusable standalone)
-│   │   ├── src/                # document / search / highlight / loader / saver /
+│   │   ├── src/                # document / search / find_in_files / highlight / loader / saver /
 │   │   │                       # settings / snapshot / json / markdown / brackets /
 │   │   │                       # toolkit / paths / syntaxes / error
 │   │   ├── tests/              # edge-case input batch + random-edit differential fuzz
@@ -232,7 +232,7 @@ editpad/
 │       │   ├── view.rs         # main view assembly (menu bar / tab strip / command palette overlay)
 │       │   ├── settings_ui.rs  # settings popup UI + neutral styling
 │       │   ├── state.rs        # Editpad state struct + Default
-│       │   ├── hotkeys.rs      # hotkey registry (75 actions, same data source as the command palette)
+│       │   ├── hotkeys.rs      # hotkey registry (78 actions, same data source as the command palette)
 │       │   ├── load / find_scan / highlight_pave / md_preview / fonts / session /
 │       │   │   tab / autosave / heartbeat / chrome / single_instance / icon.rs
 │       │   ├── editor/         # custom virtualized editor

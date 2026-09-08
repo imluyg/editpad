@@ -38,7 +38,7 @@ rfd = "0.15"
 lto = "thin"
 # Phase 0 增补：体积/性能。codegen-units=1 让 thin LTO 更有效；strip 去符号。
 # ⚠️ 刻意不加 panic = "abort"：app 层多处 catch_unwind 兜底（加载/查找扫描/
-# 高亮铺路保证「必然回一条消息」，见 main.rs 注释），abort 会击穿该语义。
+# 高亮铺路保证「必然回一条消息」，见 load.rs / find_scan.rs / highlight_pave.rs 注释），abort 会击穿该语义。
 codegen-units = 1
 strip = "symbols"
 

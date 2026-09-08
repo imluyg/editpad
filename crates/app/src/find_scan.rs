@@ -148,6 +148,13 @@ pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
     if payload.cancelled.load(Ordering::Relaxed) {
         return (Vec::new(), false);
     }
+    // P146：正则编译一次跨文件复用（曾每文件重编译，O(文件数) 次放大）；
+    // 正则无效与 find_in_file 的「返回空表」口径一致——整批提前收尾
+    let Some(matcher) =
+        editpad_core::FifMatcher::build(&payload.query, payload.case_sensitive, payload.regex)
+    else {
+        return (Vec::new(), false);
+    };
     let mut results: Vec<FileHits> = Vec::new();
     let mut total_hits = 0usize;
     let walk = editpad_core::walk_files(&payload.dir, payload.max_files);
@@ -169,11 +176,9 @@ pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
         let Ok(loaded) = editpad_core::load_file(&path) else {
             continue;
         };
-        let hits = editpad_core::find_in_file(
+        let hits = editpad_core::find_in_file_with(
             &loaded.text,
-            &payload.query,
-            payload.case_sensitive,
-            payload.regex,
+            &matcher,
             payload.whole_word,
             payload.max_hits_per_file,
         );
@@ -199,8 +204,10 @@ pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
     (results, truncated)
 }
 
-/// 按行序升序的命中批量提取行摘录（单遍切行，与 find_all 的行界口径
-/// 一致：`\r\n` / 孤立 `\r` / `\n` 皆行界）。
+/// 按行序升序的命中批量提取行摘录（P147：切行复用 core 的
+/// `for_each_line` 行界全集——find_all 的行号按 `\r\n`/`\r`/`\n`/VT/
+/// FF/NEL/LS/PS 计数，曾自写 `\r\n` 切行，含 VT 等的文件摘录与命中
+/// 行号错位）。
 fn collect_excerpts(
     text: &str,
     hits: &[editpad_core::MatchPos],
@@ -208,24 +215,12 @@ fn collect_excerpts(
 ) -> Vec<String> {
     let mut out = vec![String::new(); hits.len()];
     let mut hit_i = 0usize;
-    let mut line_idx = 0usize;
-    let mut rest = text;
-    loop {
-        let content_end = rest.find(['\r', '\n']).unwrap_or(rest.len());
+    editpad_core::for_each_line(text, |line_idx, content| {
         while hit_i < hits.len() && hits[hit_i].line == line_idx {
-            out[hit_i] = crate::view::match_excerpt(&rest[..content_end], hits[hit_i].col, max_cols);
+            out[hit_i] = crate::view::match_excerpt(content, hits[hit_i].col, max_cols);
             hit_i += 1;
         }
-        if hit_i >= hits.len() || content_end >= rest.len() {
-            break;
-        }
-        rest = if rest[content_end..].starts_with("\r\n") {
-            &rest[content_end + 2..]
-        } else {
-            &rest[content_end + 1..]
-        };
-        line_idx += 1;
-    }
+    });
     out
 }
 

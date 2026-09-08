@@ -245,3 +245,35 @@ fn ignored_dirs_constant_pins_phase_one_scope() {
         &[".git", "node_modules", "target", "dist"]
     );
 }
+
+#[test]
+fn whole_word_text_full_line_break_set_matches_find_all() {
+    // P147 回归：切行曾只认 \r\n——VT/FF/NEL/LS/PS 之后的命中行号大于
+    // 过滤器自身推进的行号，被防御分支整体丢弃（`ab\u{000B}cd` 查 `cd`
+    // 整词返回 0 命中，应为 1）。现与 find_all 共用同一 for_each_line。
+    // 全集：\n、\r\n、孤立 \r、VT(\u{B})、FF(\u{C})、NEL(\u{85})、
+    // LS(\u{2028})、PS(\u{2029})。
+    let cases: Vec<(&str, &str)> = vec![
+        ("ab\u{000B}cd", "VT"),
+        ("ab\u{000C}cd", "FF"),
+        ("ab\u{0085}cd", "NEL"),
+        ("ab\u{2028}cd", "LS"),
+        ("ab\u{2029}cd", "PS"),
+        ("ab\rcd", "孤立 CR"),
+        ("ab\r\ncd", "CRLF"),
+        ("ab\ncd", "LF"),
+    ];
+    for (text, note) in cases {
+        let hits = find_all(text, "cd", true);
+        assert_eq!(hits.len(), 1, "{note}: find_all 应有 1 命中");
+        let kept = filter_whole_word_text(text, hits);
+        assert_eq!(kept.len(), 1, "{note}: 整词过滤不得丢弃行界后的命中");
+        assert_eq!(kept[0].line, 1, "{note}: 命中应在第 1 行");
+    }
+
+    // 对照：VT 前的命中照常按词边界过滤（不是「全部保留」的假阳性）
+    let text = "cd\u{000B}xcd";
+    let kept = filter_whole_word_text(text, find_all(text, "cd", true));
+    assert_eq!(kept.len(), 1, "VT 前独立 cd 保留，VT 后词中 cd 滤除");
+    assert_eq!(kept[0].line, 0);
+}

@@ -1313,7 +1313,8 @@ fn hl_pave_stream_reports_progress_then_installs_final_state() {
         collected
     });
 
-    // 600 行 → 3 个完整档位，batch=1 → 3 条进度 + 恰好 1 条完成
+    // 600 行 → 4 个完整档位（P147 约定：k 覆盖 [(k-1)*128, k*128)），
+    // batch=1 → 4 条进度 + 恰好 1 条完成
     let progresses: Vec<u64> = messages
         .iter()
         .filter_map(|m| match m {
@@ -1324,7 +1325,7 @@ fn hl_pave_stream_reports_progress_then_installs_final_state() {
             _ => None,
         })
         .collect();
-    assert_eq!(progresses, vec![1, 2, 3], "进度应为累计档位数");
+    assert_eq!(progresses, vec![1, 2, 3, 4], "进度应为累计档位数");
     let dones: Vec<_> = messages
         .iter()
         .filter_map(|m| match m {
@@ -1346,8 +1347,8 @@ fn hl_pave_stream_reports_progress_then_installs_final_state() {
     assert_eq!(app.hl_paving, None, "完成后必须解除在途登记");
     assert_eq!(
         app.cur_handle.borrow().highlight_checkpoints_len(),
-        Some(1 + 3),
-        "初始检查点 + 3 个后台档位"
+        Some(1 + 4),
+        "初始检查点 + 4 个后台档位（P147 检查点覆盖约定）"
     );
 }
 

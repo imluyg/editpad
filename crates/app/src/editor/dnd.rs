@@ -28,7 +28,19 @@ impl EditorCore {
     /// 按下——不清选区、不移动光标、不进入拖选）。列块/组字/只读态
     /// 一律不启动（v1 取舍：只读页拖拽整体禁用，含纯复制）。
     pub(crate) fn begin_dnd_press(&mut self, x: f32, y: f32) -> bool {
-        self.begin_dnd_at(self.hit_test(x, y))
+        // P147：记录按下坐标——曾恒存 (0,0)，4px 防误触阈值实际度量的是
+        // 「到控件左上角的距离」，选区内几乎任意位置轻点微动 1px 即被判
+        // 成拖拽（旧测试全用近原点坐标恰好绕过）
+        let hit = self.hit_test(x, y);
+        if self.begin_dnd_at(hit) {
+            if let Some(d) = self.dnd.as_mut() {
+                d.press_x = x;
+                d.press_y = y;
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// [`Self::begin_dnd_press`] 的命中点直入版（单测注入用）。
@@ -243,5 +255,26 @@ mod tests {
         c.cancel_dnd();
         assert!(c.dnd.is_none());
         assert!(c.selection_offsets().is_some());
+    }
+
+    #[test]
+    fn dnd_threshold_measures_from_press_point_not_widget_origin() {
+        // P147 回归：press 坐标曾恒存 (0,0)——4px 阈值变成「到控件左上角
+        // 的距离」，选区内轻点微动 1px 即被判成拖拽。选区钉在行尾，
+        // 按下点远离原点，阈值必须从按下点起算。
+        let mut c = core_with("abcd\nefgh\n");
+        select(&mut c, 0, 2, 0, 4);
+        // 按下点 (1000, 0)：hit_test 折算到行尾列 4，落在选区内 → 候选态
+        assert!(c.begin_dnd_press(1000.0, 0.0));
+        assert_eq!(
+            c.dnd.as_ref().unwrap().press_x, 1000.0,
+            "按下坐标必须如实记录"
+        );
+        // 距按下点 1px：阈值内仍是候选（旧实现按到原点距离 ≈1000px 已成拖拽）
+        assert!(!c.update_dnd(1001.0, 0.0));
+        assert!(!c.dnd.as_ref().unwrap().started);
+        // 距按下点 5px：超阈值进入拖拽
+        assert!(c.update_dnd(1005.0, 0.0));
+        assert!(c.dnd.as_ref().unwrap().started);
     }
 }

@@ -71,7 +71,7 @@ fn line_break_byte_len(c: char, next: Option<char>) -> usize {
 }
 
 /// 按 ropey 行界全集把 `text` 切成行并逐行回调（行内容不含行界）。
-fn for_each_line(text: &str, mut f: impl FnMut(usize, &str)) {
+pub fn for_each_line(text: &str, mut f: impl FnMut(usize, &str)) {
     let mut line_start = 0usize;
     let mut line_idx = 0usize;
     let mut chars = text.char_indices().peekable();
@@ -687,6 +687,16 @@ pub fn find_all_regex(
     case_sensitive: bool,
 ) -> Result<Vec<MatchPos>, String> {
     let re = compile_regex(pattern, case_sensitive)?;
+    find_all_regex_compiled(text, &re)
+}
+
+/// P146：已编译正则的扫描半程（[`find_all_regex`] 拆分）——
+/// FIF 对至多 2 万文件逐个匹配，正则曾每文件重新编译一次（O(文件数)
+/// 次编译放大），现在编译一次跨文件复用。
+pub fn find_all_regex_compiled(
+    text: &str,
+    re: &fancy_regex::Regex,
+) -> Result<Vec<MatchPos>, String> {
     let mut spans = Vec::new();
     for m in re.find_iter(text) {
         let m = m.map_err(|e| e.to_string())?;
