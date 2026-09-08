@@ -68,13 +68,39 @@ fn main() {
 }
 
 /// 在 Windows SDK 安装目录里找 rc.exe（版本取最新，架构 x64 优先）。
+/// 位置解析次序：注册表 `KitsRoot10`（2026-09-05 电脑重置后 SDK 装在
+/// `E:\software\Windows Kits\10`，不在默认盘——注册表是安装器写下的
+/// 权威记录，机器无关）→ 两个默认安装盘的硬编码候选（老口径兜底）。
 fn find_rc() -> Option<PathBuf> {
-    const ROOTS: [&str; 2] = [
-        r"C:\Program Files (x86)\Windows Kits\10\bin",
-        r"C:\Program Files\Windows Kits\10\bin",
-    ];
-    for root in ROOTS {
-        let entries = match fs::read_dir(root) {
+    let mut roots = Vec::new();
+    // reg query 输出形如 "    KitsRoot10    REG_SZ    <路径>"，取末段
+    if let Ok(out) = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows Kits\Installed Roots",
+            "/v",
+            "KitsRoot10",
+        ])
+        .output()
+    {
+        if out.status.success() {
+            if let Some(line) = std::str::from_utf8(&out.stdout)
+                .ok()
+                .and_then(|s| s.lines().find(|l| l.contains("REG_SZ")))
+            {
+                if let Some(path) = line.split("REG_SZ").nth(1) {
+                    // KitsRoot10 指向 SDK 根目录（…\Windows Kits\10\），
+                    // rc.exe 在其 bin\<版本>\<arch>\ 之下
+                    let root = PathBuf::from(path.trim()).join("bin");
+                    roots.push(root.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    roots.push(r"C:\Program Files (x86)\Windows Kits\10\bin".to_owned());
+    roots.push(r"C:\Program Files\Windows Kits\10\bin".to_owned());
+    for root in roots {
+        let entries = match fs::read_dir(&root) {
             Ok(e) => e,
             Err(_) => continue,
         };
