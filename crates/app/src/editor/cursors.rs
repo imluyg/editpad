@@ -292,11 +292,16 @@ impl EditorCore {
                 }
             }
         }
-        // 区间两两不重叠是「从后往前独立 splice」的前提（同位光标已在
-        // 增删时去重，但选区可能包住其他光标）——重叠则整批回退
+        // 区间两两不干扰是「从后往前独立 splice」的前提（同位光标已在
+        // 增删时去重，但选区可能包住其他光标）。两类干扰：
+        // ① 严格交叠（含零宽点落在区间内部）；② 同起点但一宽一零——
+        // 插入点与删除区间共享起点的退化情形语义不明，整批折叠回退。
+        // 同起点同宽（双零宽插入同点）放行：落点修正按应用次序处理。
         edits.sort_by_key(|(s, e, _)| (*s, *e));
         for w in edits.windows(2) {
-            if w[0].1 > w[1].0 {
+            let interior = w[0].1 > w[1].0;
+            let same_start_mixed = w[0].0 == w[1].0 && w[0].1 != w[1].0;
+            if interior || same_start_mixed {
                 self.collapse_multi();
                 return None;
             }
@@ -326,14 +331,17 @@ impl EditorCore {
             }
         }
         // 落点回填：先应用的（高偏移）编辑落点会被后应用的（低偏移）
-        // 编辑净长度变化平移——按「起点更小的编辑的 delta 之和」统一
-        // 修正到最终文档坐标系（delta = 插入净增 / 删除净减）。O(n²)、
-        // n ≤ 光标数封顶 1000，最坏 10⁶ 次整数加法可接受。
+        // 编辑净长度变化平移——修正到最终文档坐标系。起点严格更小者
+        // 取其 delta；**同起点**者：数组序在前的先应用、被后应用的插
+        // 入顶到上方，故本编辑的落点要加上「排在后面（尚未应用）的
+        // 同起点编辑」数量 × 单点净增。（delta = 插入净增 / 删除净减；
+        // O(n²)、n ≤ 光标数封顶 1000 可接受。）
+        let payload_len = payload.chars().count() as i64;
         let delta_of = |(s, e): (usize, usize)| -> i64 {
             if payload.is_empty() {
                 -((e - s) as i64)
             } else {
-                payload.chars().count() as i64 - (e - s) as i64
+                payload_len - (e - s) as i64
             }
         };
         let mut landed: Vec<(PointEdit, CursorPos)> = Vec::with_capacity(edits.len());
@@ -341,11 +349,15 @@ impl EditorCore {
         for (i, &(s, .., ref owner)) in edits.iter().enumerate() {
             changed = true;
             let final_s = (s as i64
+                + edits[i + 1..]
+                    .iter()
+                    .filter(|ej| ej.0 == s)
+                    .count() as i64
+                    * payload_len
                 + edits
                     .iter()
-                    .enumerate()
-                    .filter(|(j, _)| *j != i && edits[*j].0 < s)
-                    .map(|(_, ej)| delta_of((ej.0, ej.1)))
+                    .filter(|ej| ej.0 < s)
+                    .map(|ej| delta_of((ej.0, ej.1)))
                     .sum::<i64>())
             .max(0) as usize;
             let end_off = if payload.is_empty() {
