@@ -490,6 +490,11 @@ impl Editpad {
             | Message::FindPrev
             | Message::FindAllToggled
             | Message::FindAllGoto(..)
+            | Message::FindInFilesToggled
+            | Message::FifBrowseFolder
+            | Message::FifDirPicked(..)
+            | Message::FifScanDone(..)
+            | Message::FifGoto(..)
             | Message::CaseToggled(..)
             | Message::RegexToggled(..)
             | Message::WholeWordToggled(..)
@@ -1604,6 +1609,10 @@ impl Editpad {
                 if let Some(line) = self.pending_link_goto.take() {
                     self.cur_handle.borrow_mut().jump_to_line(line as usize);
                 }
+                // A8：FIF 命中点击的「打开后选中命中」——同上一次性消费
+                if let Some((line, col, len)) = self.pending_fif_goto.take() {
+                    self.cur_handle.borrow_mut().select_span(line, col, len);
+                }
                 if tasks.is_empty() {
                     Task::none()
                 } else {
@@ -2171,6 +2180,8 @@ impl Editpad {
                 self.find_visible = !self.find_visible;
                 if self.find_visible {
                     self.goto_visible = false;
+                    // A8：重开查找栏时不自动恢复 FIF 面板（入口显式切换）
+                    self.fif_visible = false;
                     // P123：有选区则带入其文本作为查询（上限 1 万字符——
                     // 防全选大文档把查询框与扫描撑爆；正则模式下原样带入，
                     // 元字符由用户自行调整，主流「选中即查」同口径）
@@ -2185,23 +2196,28 @@ impl Editpad {
                     self.sync_find_highlights();
                     return self.schedule_find_scan();
                 } else {
-                    // 关栏即取消在途扫描并清结果（旧实现只清结果）
+                    // 关栏即取消在途扫描并清结果（旧实现只清结果）；
+                    // A8：FIF 面板随栏隐藏，目录扫描一并取消
                     self.cancel_find_scan();
+                    self.fif_visible = false;
+                    self.cancel_fif_scan();
                 }
                 Task::none()
             }
             Message::FindQueryChanged(query) => {
                 self.find_query = query;
                 // P10：查询变化只排队后台扫描（防抖），UI 线程零全文拷贝；
-                // 查询为空时内部转为取消 + 清结果
-                self.schedule_find_scan()
+                // 查询为空时内部转为取消 + 清结果。
+                // A8：FIF 模式下同一个查询框驱动的是目录扫描
+                self.schedule_active_scan()
             }
             Message::FindNext => self.step_match(true),
             Message::FindPrev => self.step_match(false),
             // 第 62 轮：查找全部结果面板——纯 UI 开关，不动命中表；
-            // 查找栏关闭时面板随栏隐藏（停靠在查找区内，无独立生命周期）
+            // 查找栏关闭时面板随栏隐藏（停靠在查找区内，无独立生命周期）；
+            // A8：与 FIF 面板同槽互斥，FIF 开态不打开
             Message::FindAllToggled => {
-                if self.find_visible {
+                if self.find_visible && !self.fif_visible {
                     self.find_all_visible = !self.find_all_visible;
                 }
                 Task::none()
@@ -2216,7 +2232,8 @@ impl Editpad {
             }
             Message::CaseToggled(value) => {
                 self.case_sensitive = value;
-                self.schedule_find_scan()
+                // A8：FIF 模式下开关驱动的是目录扫描
+                self.schedule_active_scan()
             }
             Message::RegexToggled(value) => {
                 // P70：查询语义切换（字面转义 ↔ 正则语法），必须重扫
@@ -2226,11 +2243,98 @@ impl Editpad {
                         "正则模式：替换支持 $1/${1} 组引用，^$ 逐行锚定用 (?m)".to_owned(),
                     );
                 }
-                self.schedule_find_scan()
+                self.schedule_active_scan()
             }
             Message::WholeWordToggled(value) => {
                 self.whole_word = value;
-                self.schedule_find_scan()
+                self.schedule_active_scan()
+            }
+            // ---------- A8：在文件中查找 ----------
+            // 模式开关：开启 = 打开查找栏 + 目录锚当前页所在目录并立即
+            // 扫描；关闭 = 取消在途目录扫描（结果跨开合保留不清理）
+            Message::FindInFilesToggled => {
+                self.fif_visible = !self.fif_visible;
+                if self.fif_visible {
+                    self.find_visible = true; // 面板停靠在查找区内
+                    self.find_all_visible = false; // 同槽互斥
+                    self.fif_dir = self
+                        .tab()
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                    // 查询为空时 schedule_fif_scan 内部转为取消（面板给
+                    // 「输入查询」提示）；装载中静默拒（与编辑同口径）
+                    return self.schedule_fif_scan();
+                }
+                self.cancel_fif_scan();
+                Task::none()
+            }
+            // 「浏览…」换目录（open/save 对话框同款 busy 包裹防并发）
+            Message::FifBrowseFolder => {
+                if self.busy {
+                    return Task::none();
+                }
+                self.enter_busy();
+                self.status.clear();
+                Task::perform(
+                    async { rfd::AsyncFileDialog::new().pick_folder().await },
+                    |handle| Message::FifDirPicked(handle.map(|f| f.path().to_path_buf())),
+                )
+            }
+            Message::FifDirPicked(picked) => {
+                // 对话框阶段结束：busy 若不清零，会撞上后续守卫导致卡死
+                self.busy = false;
+                if let Some(dir) = picked {
+                    self.fif_dir = Some(dir);
+                    return self.schedule_fif_scan();
+                }
+                Task::none()
+            }
+            // 目录扫描完成：seq 过期的结果丢弃（FindScanDone 同构）
+            Message::FifScanDone(seq, results, truncated) => {
+                if self.fif_scan == Some(seq) {
+                    self.fif_scan = None;
+                    let files = results.len();
+                    let hits: usize = results.iter().map(|f| f.hits.len()).sum();
+                    self.fif_results = results;
+                    self.fif_truncated = truncated;
+                    if truncated {
+                        self.set_status(format!(
+                            "在文件中查找：已达封顶截断，结果不完整（{files} 个文件 / {hits} 处）"
+                        ));
+                    } else {
+                        self.set_status(format!("在文件中查找：{files} 个文件共 {hits} 处"));
+                    }
+                }
+                Task::none()
+            }
+            // 点击命中：已开页切换并选中该命中；未开页走打开管线，
+            // 装载结算（Loaded）后一次性消费 select_span（P133 同构）
+            Message::FifGoto(file_idx, hit_idx) => {
+                if self.busy || self.active_load.is_some() {
+                    return Task::none();
+                }
+                let Some(fh) = self.fif_results.get(file_idx) else {
+                    return Task::none();
+                };
+                let Some(h) = fh.hits.get(hit_idx) else {
+                    return Task::none();
+                };
+                let (path, line, col, len) =
+                    (fh.path.clone(), h.pos.line, h.pos.col, h.pos.len_chars);
+                if let Some(idx) = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.path.as_deref() == Some(path.as_path()))
+                {
+                    if idx != self.active_tab {
+                        self.set_active_tab(idx);
+                    }
+                    self.cur_handle.borrow_mut().select_span(line, col, len);
+                    return Task::none();
+                }
+                self.pending_fif_goto = Some((line, col, len));
+                self.request_open(path)
             }
             Message::ReplaceQueryChanged(query) => {
                 self.replace_query = query;

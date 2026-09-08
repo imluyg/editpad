@@ -98,3 +98,151 @@ pub(crate) fn unescape_query(q: &str) -> String {
     }
     out
 }
+
+// ---------- A8：在文件中查找（设计 docs/find-in-files-design.md §3.2） ----------
+
+/// 一条命中：位置 + 扫描时预计算的行摘录（面板展示零文件回读——
+/// 结果只存命中不驻留全文的设计约束）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileHit {
+    pub(crate) pos: editpad_core::MatchPos,
+    pub(crate) excerpt: String,
+}
+
+/// 一个文件的命中结果（面板按文件分组展示）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileHits {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) hits: Vec<FileHit>,
+}
+
+/// 三重封顶（设计 §3.2）：任一触达即截断明示并提前收尾。
+pub(crate) const FIF_MAX_FILES: usize = 20_000;
+pub(crate) const FIF_MAX_TOTAL_HITS: usize = 5_000;
+pub(crate) const FIF_MAX_HITS_PER_FILE: usize = 1_000;
+/// 面板摘录窗口列数（与查找全部面板 FIND_ALL_EXCERPT_COLS 同量级）。
+pub(crate) const FIF_EXCERPT_COLS: usize = 96;
+
+/// 一次「在文件中查找」后台扫描的输入快照。封顶参数显式入参
+/// （生产走上面常量，测试注入小值）；`cancelled`/`progress` 与应用
+/// 状态共享——前者供 UI 取消，后者供面板标题实时读已扫文件数。
+#[derive(Clone)]
+pub(crate) struct FifScanPayload {
+    pub(crate) seq: u64,
+    pub(crate) dir: std::path::PathBuf,
+    pub(crate) query: String,
+    pub(crate) case_sensitive: bool,
+    pub(crate) regex: bool,
+    pub(crate) whole_word: bool,
+    pub(crate) cancelled: Arc<AtomicBool>,
+    pub(crate) progress: Arc<AtomicUsize>,
+    pub(crate) max_files: usize,
+    pub(crate) max_total_hits: usize,
+    pub(crate) max_hits_per_file: usize,
+}
+
+/// 目录扫描本体（同步、可直接单测）：walk_files 遍历 → 逐文件大小
+/// 预检 → load_file（编码嗅探/二进制拒绝全继承）→ find_in_file。
+/// 任一文件失败（二进制/IO）跳过不中断；每文件 progress +1。
+pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
+    if payload.cancelled.load(Ordering::Relaxed) {
+        return (Vec::new(), false);
+    }
+    let mut results: Vec<FileHits> = Vec::new();
+    let mut total_hits = 0usize;
+    let walk = editpad_core::walk_files(&payload.dir, payload.max_files);
+    let mut truncated = walk.truncated;
+    for path in walk.files {
+        if payload.cancelled.load(Ordering::Relaxed) {
+            // 取消：已扫出的部分结果仍然有效，如实返回
+            return (results, truncated);
+        }
+        payload.progress.fetch_add(1, Ordering::Relaxed);
+        // 大文件豁免（64 MB，同备份口径）
+        if std::fs::metadata(&path)
+            .map(|m| m.len() > editpad_core::MAX_SCAN_FILE_BYTES)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        // 编码嗅探/二进制拒绝全继承：二进制或读取失败跳过该文件
+        let Ok(loaded) = editpad_core::load_file(&path) else {
+            continue;
+        };
+        let hits = editpad_core::find_in_file(
+            &loaded.text,
+            &payload.query,
+            payload.case_sensitive,
+            payload.regex,
+            payload.whole_word,
+            payload.max_hits_per_file,
+        );
+        if hits.is_empty() {
+            continue;
+        }
+        total_hits += hits.len();
+        // 摘录随扫描一次算好（单遍切行；find_in_file 输出按行序升序）
+        let excerpts = collect_excerpts(&loaded.text, &hits, FIF_EXCERPT_COLS);
+        results.push(FileHits {
+            path,
+            hits: hits
+                .into_iter()
+                .zip(excerpts)
+                .map(|(pos, excerpt)| FileHit { pos, excerpt })
+                .collect(),
+        });
+        if total_hits >= payload.max_total_hits {
+            truncated = true;
+            break;
+        }
+    }
+    (results, truncated)
+}
+
+/// 按行序升序的命中批量提取行摘录（单遍切行，与 find_all 的行界口径
+/// 一致：`\r\n` / 孤立 `\r` / `\n` 皆行界）。
+fn collect_excerpts(
+    text: &str,
+    hits: &[editpad_core::MatchPos],
+    max_cols: usize,
+) -> Vec<String> {
+    let mut out = vec![String::new(); hits.len()];
+    let mut hit_i = 0usize;
+    let mut line_idx = 0usize;
+    let mut rest = text;
+    loop {
+        let content_end = rest.find(['\r', '\n']).unwrap_or(rest.len());
+        while hit_i < hits.len() && hits[hit_i].line == line_idx {
+            out[hit_i] = crate::view::match_excerpt(&rest[..content_end], hits[hit_i].col, max_cols);
+            hit_i += 1;
+        }
+        if hit_i >= hits.len() || content_end >= rest.len() {
+            break;
+        }
+        rest = if rest[content_end..].starts_with("\r\n") {
+            &rest[content_end + 2..]
+        } else {
+            &rest[content_end + 1..]
+        };
+        line_idx += 1;
+    }
+    out
+}
+
+/// 「在文件中查找」任务的事件驱动（与 [`drive_find_scan`] 同骨架：
+/// OS 线程 + mpsc + catch_unwind 兜底）。无论成功、取消还是 panic 都
+/// 恰好回一条 `FifScanDone`，UI 永不永久等待；过期结果由 update 按
+/// seq 二次过滤。
+pub(crate) async fn drive_find_in_files(payload: FifScanPayload) -> Message {
+    let seq = payload.seq;
+    let (notify_tx, notify_rx) = std_mpsc::channel::<(Vec<FileHits>, bool)>();
+    std::thread::spawn(move || {
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fif_scan_dir(&payload)
+        }))
+        .unwrap_or((Vec::new(), false));
+        let _ = notify_tx.send(out);
+    });
+    let (results, truncated) = notify_rx.recv().unwrap_or((Vec::new(), false));
+    Message::FifScanDone(seq, results, truncated)
+}

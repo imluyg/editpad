@@ -15,7 +15,7 @@ mod editor;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
 
 use iced::futures::SinkExt;
@@ -218,6 +218,18 @@ enum Message {
     FindScanDone(u64, Vec<editpad_core::MatchPos>),
     /// P70：正则模式开关（开启/关闭都会触发重扫）
     RegexToggled(bool),
+    // ---------- A8：在文件中查找（设计 docs/find-in-files-design.md） ----------
+    /// FIF 模式开关：开启 = 打开查找栏 + 目录取当前页所在目录并立即
+    /// 扫描；关闭 = 取消在途扫描并收起面板（与查找全部面板同槽互斥）
+    FindInFilesToggled,
+    /// 「浏览…」触发目录选择对话框（open/save 同款 busy 包裹）
+    FifBrowseFolder,
+    /// 「浏览…」选定目录（None = 用户取消对话框，不动现有目录）
+    FifDirPicked(Option<PathBuf>),
+    /// 后台目录扫描完成：(任务序号, 结果, 是否封顶截断)。序号过期丢弃
+    FifScanDone(u64, Vec<crate::find_scan::FileHits>, bool),
+    /// 点击结果面板某文件的某条命中：已开页切换跳转，未开页装载后跳转
+    FifGoto(usize, usize),
     // ---------- 行操作扩充 + 查找全部（第 62 轮） ----------
     /// 「查找全部」结果面板开关（数据源 = 既有后台扫描的全量命中表）
     FindAllToggled,

@@ -437,6 +437,13 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+M"],
         desc: "多光标：添加下一匹配（环形搜索）",
     },
+    // A8：在文件中查找。Ctrl+Shift+F 被 format_json 占用（26 个
+    // Ctrl+Shift 字母占尽，P129 记录），F 家族空闲 F1/F4/F10/F12 取 F12。
+    HotkeyAction {
+        id: "find_in_files",
+        default_combos: &["F12"],
+        desc: "在文件中查找（当前页所在目录，可换目录）",
+    },
 ];
 
 /// 动作 id 的首个默认组合（未重映射时的展示主键位）。
@@ -676,6 +683,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "column_editor" => Some(Message::ColumnEditorToggled),
         // B10 Phase 2：多光标添加下一匹配
         "add_next_match" => edit(EditOp::AddNextMatch),
+        // A8：在文件中查找
+        "find_in_files" => Some(Message::FindInFilesToggled),
         _ => None,
     }
 }

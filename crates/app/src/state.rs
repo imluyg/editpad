@@ -142,6 +142,26 @@ pub(crate) struct Editpad {
     /// 扫描刷新时自动跟随；仅当查找栏可见时有意义（面板停靠在查找区内）
     pub(crate) find_all_visible: bool,
 
+    // ---------- A8：在文件中查找（设计 docs/find-in-files-design.md） ----------
+    /// FIF 模式开启（面板与查找全部面板同槽互斥；查找栏关闭即隐）
+    pub(crate) fif_visible: bool,
+    /// 扫描根目录；None = 未命名页（无 base_dir 锚点，入口禁用）
+    pub(crate) fif_dir: Option<PathBuf>,
+    pub(crate) fif_seq: u64,
+    /// 在途 FIF 扫描代次（None = 没有）；迟到旧结果按它丢弃
+    pub(crate) fif_scan: Option<u64>,
+    /// 当前代 FIF 扫描取消标志（新扫描/关闭时置位上一代）
+    pub(crate) fif_cancel: Arc<AtomicBool>,
+    /// 已扫描文件数（后台线程累加，面板标题每帧读数 O(1)）
+    pub(crate) fif_progress: Arc<AtomicUsize>,
+    /// 最近一次完成的结果（跨开合保留；不入会话快照——纯搜索态）
+    pub(crate) fif_results: Vec<crate::find_scan::FileHits>,
+    /// 结果是否因封顶截断（2 万文件 / 5000 总命中）
+    pub(crate) fif_truncated: bool,
+    /// FIF 命中点击的待跳转（行 0 起, 列, 跨度）——下一次 Loaded 装载
+    /// 结算后一次性消费（select_span 选区落在命中上）
+    pub(crate) pending_fif_goto: Option<(usize, usize, usize)>,
+
     // ---------- 高亮后台分批补建（P12） ----------
     /// 在途铺建任务的代次；None = 没有。同代幂等、异代重排
     pub(crate) hl_paving: Option<u64>,
@@ -311,6 +331,15 @@ impl Default for Editpad {
             find_seq: 0,
             find_cancel: Arc::default(),
             find_all_visible: false,
+            fif_visible: false,
+            fif_dir: None,
+            fif_seq: 0,
+            fif_scan: None,
+            fif_cancel: Arc::default(),
+            fif_progress: Arc::new(AtomicUsize::new(0)),
+            fif_results: Vec::new(),
+            fif_truncated: false,
+            pending_fif_goto: None,
             hl_paving: None,
             hl_pave_cancel: Arc::default(),
             goto_visible: false,

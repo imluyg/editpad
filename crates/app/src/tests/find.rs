@@ -629,3 +629,165 @@ use super::*;
         dispatch(&mut app, Message::FindToggled); // 开
         assert_eq!(app.find_query, "world", "无选区开栏保留原查询");
     }
+
+// ---------- A8：在文件中查找（Phase 2 接线） ----------
+
+/// 与 find_scan.rs 的 collect_excerpts 同口径的直测：tempdir 树上跑
+/// fif_scan_dir（真文件系统），钉住遍历排除、二进制跳过、摘录预计算
+/// 与封顶截断。
+#[test]
+fn fif_scan_dir_walks_tree_skips_binary_and_truncates() {
+    use crate::find_scan::{fif_scan_dir, FifScanPayload};
+    let dir = scratch_dir("fif-scan");
+    fs_create_dir_all(&dir);
+    std::fs::write(dir.join("a.txt"), "needle here\nno match\nneedle two").unwrap();
+    std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+    std::fs::write(dir.join(".hidden/h.txt"), "needle hidden").unwrap();
+    std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+    std::fs::write(dir.join("node_modules/n.txt"), "needle noise").unwrap();
+    // 二进制文件（NUL）：load_file 拒绝 → 跳过不中断
+    std::fs::write(dir.join("bin.dat"), b"ne\x00edle").unwrap();
+
+    let mk = |max_total: usize, max_per: usize| FifScanPayload {
+        seq: 1,
+        dir: dir.clone(),
+        query: "needle".into(),
+        case_sensitive: true,
+        regex: false,
+        whole_word: false,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        progress: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        max_files: 100,
+        max_total_hits: max_total,
+        max_hits_per_file: max_per,
+    };
+
+    let (results, truncated) = fif_scan_dir(&mk(100, 100));
+    assert!(!truncated);
+    assert_eq!(results.len(), 1, "只有 a.txt 命中（隐藏/噪音目录/二进制全跳过）");
+    assert!(results[0].path.ends_with("a.txt"));
+    assert_eq!(results[0].hits.len(), 2);
+    assert!(results[0].hits[0].excerpt.contains("needle"), "摘录预计算");
+
+    // 总命中封顶：截断明示
+    let (results, truncated) = fif_scan_dir(&mk(1, 100));
+    assert!(truncated, "总命中达封顶即截断");
+    assert!(!results.is_empty());
+
+    // 单文件封顶：截断到 max_hits_per_file
+    let (_, _) = fif_scan_dir(&mk(100, 1));
+    let (results, _) = fif_scan_dir(&mk(100, 1));
+    assert!(results.iter().all(|f| f.hits.len() <= 1));
+
+    // 取消标志：直接返回空
+    let cancelled = mk(100, 100);
+    cancelled
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(fif_scan_dir(&cancelled), (Vec::new(), false));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn find_in_files_toggle_scan_done_and_seq_guard() {
+    let mut app = Editpad::default();
+    // 未命名页：无目录锚点，开启后面板可见但目录为 None
+    dispatch(&mut app, Message::FindInFilesToggled);
+    assert!(app.fif_visible && app.find_visible, "开启即带开查找栏");
+    assert!(!app.find_all_visible, "同槽互斥");
+    assert!(app.fif_dir.is_none(), "未命名页无目录锚点");
+    // 再按 = 关闭
+    dispatch(&mut app, Message::FindInFilesToggled);
+    assert!(!app.fif_visible);
+
+    // 完成回填 + 过期序号丢弃
+    dispatch(&mut app, Message::FindInFilesToggled);
+    app.fif_scan = Some(7);
+    let fh = crate::find_scan::FileHits {
+        path: PathBuf::from("C:/doc/a.txt"),
+        hits: vec![crate::find_scan::FileHit {
+            pos: editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
+            excerpt: "abc".into(),
+        }],
+    };
+    dispatch(&mut app, Message::FifScanDone(8, vec![fh.clone()], true));
+    assert!(app.fif_results.is_empty(), "过期序号的结果丢弃");
+    dispatch(&mut app, Message::FifScanDone(7, vec![fh], true));
+    assert_eq!(app.fif_results.len(), 1, "当前代结果回填");
+    assert!(app.fif_truncated);
+    assert!(app.status.contains("封顶"), "截断明示上状态栏");
+}
+
+#[test]
+fn find_in_files_hotkey_f12_and_goto_open_tab() {
+    use crate::find_scan::{FileHit, FileHits};
+    // F12 默认分发
+    let msg = handle_key_defaults(
+        keyboard::Key::Named(keyboard::key::Named::F12),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(
+        matches!(msg, Some(Message::FindInFilesToggled)),
+        "F12 默认分发 find_in_files"
+    );
+
+    // 已开页命中：切换 + select_span 选中命中跨度
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("xx ab yy"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    app.fif_results = vec![FileHits {
+        path: PathBuf::from("C:/doc/a.txt"),
+        hits: vec![FileHit {
+            pos: editpad_core::MatchPos { line: 0, col: 3, len_chars: 2 },
+            excerpt: "ab".into(),
+        }],
+    }];
+    dispatch(&mut app, Message::FifGoto(0, 0));
+    {
+        let h = app.cur_handle.borrow();
+        assert_eq!(h.ordered_selection().map(|(s, e)| (s.line, s.col, e.line, e.col)), Some((0, 3, 0, 5)), "命中跨度被选中");
+    }
+
+    // 未开页：登记待跳转 + 走打开管线，Loaded 结算后选中命中
+    app.fif_results = vec![FileHits {
+        path: PathBuf::from("C:/doc/other.txt"),
+        hits: vec![FileHit {
+            pos: editpad_core::MatchPos { line: 2, col: 4, len_chars: 3 },
+            excerpt: "hit".into(),
+        }],
+    }];
+    dispatch(&mut app, Message::FifGoto(0, 0));
+    assert!(app.active_load.is_some(), "未开页触发打开管线");
+    assert_eq!(app.pending_fif_goto, Some((2, 4, 3)));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("aa\nbb\nxx hit yy"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(app.pending_fif_goto.is_none(), "Loaded 结算一次性消费");
+    let h = app.cur_handle.borrow();
+    assert_eq!(
+        h.ordered_selection().map(|(s, e)| (s.line, s.col, e.line, e.col)),
+        Some((2, 4, 2, 7)),
+        "装载完成后选区落在命中上"
+    );
+}

@@ -594,10 +594,76 @@ impl Editpad {
 
     // ---------- 查找 / 替换内部逻辑 ----------
 
+    /// A8：按当前模式路由查询触发（查询变化/大小写/正则/整词开关共用
+    /// ——FIF 开态驱动目录扫描，否则驱动活动文档扫描）
+    pub(crate) fn schedule_active_scan(&mut self) -> Task<Message> {
+        if self.fif_visible {
+            self.schedule_fif_scan()
+        } else {
+            self.schedule_find_scan()
+        }
+    }
+
+    /// A8：排队一次「在文件中查找」后台目录扫描。查询为空 = 取消在途
+    /// 扫描（面板给提示）；目录未定（未命名页）/装载中 = 静默拒。
+    /// 正则预校验与文档扫描同口径；代次 + 取消标志与 find_scan 同构。
+    pub(crate) fn schedule_fif_scan(&mut self) -> Task<Message> {
+        if !self.fif_visible || self.find_query.is_empty() {
+            self.cancel_fif_scan();
+            return Task::none();
+        }
+        let Some(dir) = self.fif_dir.clone() else {
+            return Task::none();
+        };
+        if self.active_load.is_some() {
+            return Task::none();
+        }
+        // 作废上一代任务（若它还在扫描中，下个文件循环检查即退出）
+        self.fif_cancel.store(true, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.fif_cancel = cancelled.clone();
+        self.fif_seq += 1;
+        let effective_query = if self.regex_enabled {
+            self.find_query.clone()
+        } else {
+            unescape_query(&self.find_query)
+        };
+        if self.regex_enabled {
+            if let Err(e) = editpad_core::compile_regex(&effective_query, self.case_sensitive) {
+                self.cancel_fif_scan();
+                self.set_status_error(format!("正则无效：{e}"));
+                return Task::none();
+            }
+        }
+        let payload = FifScanPayload {
+            seq: self.fif_seq,
+            dir,
+            query: effective_query,
+            case_sensitive: self.case_sensitive,
+            regex: self.regex_enabled,
+            whole_word: self.whole_word && !self.regex_enabled,
+            cancelled,
+            progress: Arc::new(AtomicUsize::new(0)),
+            max_files: FIF_MAX_FILES,
+            max_total_hits: FIF_MAX_TOTAL_HITS,
+            max_hits_per_file: FIF_MAX_HITS_PER_FILE,
+        };
+        self.fif_progress = payload.progress.clone();
+        self.fif_scan = Some(self.fif_seq);
+        Task::perform(drive_find_in_files(payload), |message| message)
+    }
+
+    /// A8：取消在途目录扫描（结果跨开合保留，不清理 fif_results）
+    pub(crate) fn cancel_fif_scan(&mut self) {
+        self.fif_cancel.store(true, Ordering::Relaxed);
+        self.fif_scan = None;
+    }
+
     /// 排队一次后台查找扫描（P10）。查询为空或查找栏已关闭时转为取消。
     /// UI 线程只做廉价操作：文档快照是 rope 结构共享克隆，全文扫描
     /// 在防抖 200ms 后的后台线程进行，结果按序号回填。
-    pub(crate) fn schedule_find_scan(&mut self) -> Task<Message> {        if !self.find_visible || self.find_query.is_empty() {
+    pub(crate) fn schedule_find_scan(&mut self) -> Task<Message> {
+        if !self.find_visible || self.find_query.is_empty() {
             self.cancel_find_scan();
             return Task::none();
         }
@@ -1253,6 +1319,8 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 }
             };
             let has_matches = !scanning && !self.matches.is_empty();
+            // A8：FIF 开态下文档导航按钮禁用（命中表是另一套数据源）
+            let doc_nav = !self.fif_visible;
 
             body = body.push(rule::horizontal(1)).push(
                 row![
@@ -1265,10 +1333,10 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     text(position_label).size(uipx).font(uifont),
                     button(text("↑ 上一个").size(uipx).font(uifont))
                         .style(chrome_button_style)
-                        .on_press_maybe(has_matches.then_some(Message::FindPrev)),
+                        .on_press_maybe(doc_nav.then_some(Message::FindPrev)),
                     button(text("↓ 下一个").size(uipx).font(uifont))
                         .style(chrome_button_style)
-                        .on_press_maybe(has_matches.then_some(Message::FindNext)),
+                        .on_press_maybe(doc_nav.then_some(Message::FindNext)),
                     checkbox(self.case_sensitive)
                         .label("区分大小写")
                         .text_size(uipx)
@@ -1295,10 +1363,23 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     })
                     .size(uipx)
                     .font(uifont),
-                    // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用）
+                    // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用；
+                    // A8：FIF 开态禁用——两套面板同槽互斥）
                     button(text("查找全部").size(uipx).font(uifont))
                         .style(chrome_button_style)
-                        .on_press_maybe(has_matches.then_some(Message::FindAllToggled)),
+                        .on_press_maybe(
+                            (has_matches && doc_nav).then_some(Message::FindAllToggled),
+                        ),
+                    // A8：在文件中查找模式开关（F12 同义入口）
+                    button(text(if self.fif_visible {
+                        "退出目录查找"
+                    } else {
+                        "在文件中查找"
+                    })
+                    .size(uipx)
+                    .font(uifont))
+                    .style(chrome_button_style)
+                    .on_press(Message::FindInFilesToggled),
                     button(text("×").size(uipx).font(uifont))
                         .style(chrome_button_style)
                         .on_press(Message::FindToggled),
@@ -1308,39 +1389,75 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 .padding([6, 10]),
             );
 
-            body = body.push(
-                row![
-                    text_input("替换为", &self.replace_query)
-                        .size(uipx)
-                        .font(uifont)
-                        .on_input(Message::ReplaceQueryChanged)
-                        .width(200),
-                    // P70：正则模式替换当前 = 对命中做 $1 展开替换
-                    button(text("替换当前").size(uipx).font(uifont))
-                        .style(chrome_button_style)
-                        .on_press_maybe(has_matches.then_some(if self.regex_enabled {
-                            Message::ReplaceCurrentRegex
+            // A8：FIF 开态 = 目录控制行（目录显示 + 浏览…）；关态 = 原替换行
+            if self.fif_visible {
+                let dir_text = match &self.fif_dir {
+                    Some(d) => d.display().to_string(),
+                    None => "（当前页未命名：先保存得到所在目录，或「浏览…」选择）".to_owned(),
+                };
+                body = body.push(
+                    row![
+                        text("目录:").size(uipx).font(uifont),
+                        text(dir_text).size(uipx).font(uifont),
+                        button(text("浏览…").size(uipx).font(uifont))
+                            .style(chrome_button_style)
+                            .on_press(Message::FifBrowseFolder),
+                        text(if self.fif_scan.is_some() {
+                            format!(
+                                "扫描中…（已扫 {} 个文件）",
+                                self.fif_progress.load(std::sync::atomic::Ordering::Relaxed)
+                            )
                         } else {
-                            Message::ReplaceCurrent
-                        })),
-                    // 扫描在途时禁用：此刻的全文快照可能是过期的
-                    button(text("全部替换").size(uipx).font(uifont))
-                        .style(chrome_button_style)
-                        .on_press_maybe(
-                            (!scanning).then_some(Message::ReplaceAll),
-                        ),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .padding([6, 10]),
-            );
+                            String::new()
+                        })
+                        .size(uipx)
+                        .font(uifont),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .padding([6, 10]),
+                );
+            } else {
+                body = body.push(
+                    row![
+                        text_input("替换为", &self.replace_query)
+                            .size(uipx)
+                            .font(uifont)
+                            .on_input(Message::ReplaceQueryChanged)
+                            .width(200),
+                        // P70：正则模式替换当前 = 对命中做 $1 展开替换
+                        button(text("替换当前").size(uipx).font(uifont))
+                            .style(chrome_button_style)
+                            .on_press_maybe(has_matches.then_some(if self.regex_enabled {
+                                Message::ReplaceCurrentRegex
+                            } else {
+                                Message::ReplaceCurrent
+                            })),
+                        // 扫描在途时禁用：此刻的全文快照可能是过期的
+                        button(text("全部替换").size(uipx).font(uifont))
+                            .style(chrome_button_style)
+                            .on_press_maybe(
+                                (!scanning).then_some(Message::ReplaceAll),
+                            ),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .padding([6, 10]),
+                );
+            }
 
             // 第 62 轮：查找全部结果面板（停靠在查找区内，栏关即隐；
-            // 数据源 = 后台扫描的全量命中表，重扫刷新时自动跟随）
-            if self.find_all_visible {
+            // 数据源 = 后台扫描的全量命中表，重扫刷新时自动跟随）。
+            // A8：与 FIF 面板同槽互斥——目录模式开态由 FIF 面板占位。
+            if self.find_all_visible && !self.fif_visible {
                 body = body
                     .push(rule::horizontal(1))
                     .push(self.find_all_panel(uipx, uifont));
+            }
+            if self.fif_visible {
+                body = body
+                    .push(rule::horizontal(1))
+                    .push(self.find_in_files_panel(uipx, uifont));
             }
         }
 
@@ -2353,6 +2470,96 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             );
         }
         // 高度按窗口钳制：小窗不溢出、大窗不占满（浮层卡片同策略）
+        let h = (self.viewport_size.1 * 0.35).clamp(120.0, 300.0);
+        container(
+            column![header, rule::horizontal(1), scrollable(rows)]
+                .spacing(0)
+                .width(Fill),
+        )
+        .width(Fill)
+        .height(h)
+        .into()
+    }
+
+    /// A8：「在文件中查找」结果面板——与查找全部面板同槽停靠（互斥
+    /// 由装配处的 fif_visible 裁决）。文件头分组行（相对路径 + 命中数）
+    /// 与可点命中行（行:列 + 扫描时预计算的摘录）。显示行数与查找全
+    /// 部面板同量级封顶，超出明示。
+    fn find_in_files_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
+        let scanning = self.fif_scan.is_some();
+        let total_files = self.fif_results.len();
+        let total_hits: usize = self.fif_results.iter().map(|f| f.hits.len()).sum();
+        let title = if scanning {
+            format!(
+                "目录扫描中…（已扫 {} 个文件）",
+                self.fif_progress.load(std::sync::atomic::Ordering::Relaxed)
+            )
+        } else if total_hits == 0 {
+            "目录中无匹配".to_owned()
+        } else {
+            format!("在文件中查找：{total_files} 个文件 {total_hits} 处")
+        };
+        let header = row![
+            text(if self.fif_truncated {
+                format!("{title}（已达封顶，结果不完整）")
+            } else {
+                title
+            })
+            .size(uipx)
+            .font(uifont)
+            .width(Fill),
+            button(text("×").size(uipx).font(uifont))
+                .style(chrome_button_style)
+                .on_press(Message::FindInFilesToggled),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .padding([4, 10]);
+
+        let mut rows = column![].spacing(0).width(Fill);
+        if !scanning && self.find_query.is_empty() {
+            rows = rows.push(text("先输入查询内容").size(uipx).font(uifont));
+        } else if !scanning {
+            let mut budget = FIND_ALL_MAX_ROWS;
+            'outer: for (fi, fh) in self.fif_results.iter().enumerate() {
+                let rel = fh
+                    .path
+                    .strip_prefix(self.fif_dir.as_deref().unwrap_or(std::path::Path::new("")))
+                    .unwrap_or(&fh.path)
+                    .display()
+                    .to_string();
+                rows = rows.push(
+                    text(format!("{rel}  （{} 处）", fh.hits.len()))
+                        .size(uipx)
+                        .font(uifont),
+                );
+                for (hi, h) in fh.hits.iter().enumerate() {
+                    if budget == 0 {
+                        break 'outer;
+                    }
+                    budget -= 1;
+                    rows = rows.push(
+                        button(
+                            text(format!("{}:{}  {}", h.pos.line + 1, h.pos.col + 1, h.excerpt))
+                                .size(uipx)
+                                .font(uifont)
+                                .width(Fill),
+                        )
+                        .width(Fill)
+                        .padding([3, 10])
+                        .style(chrome_menu_item_style)
+                        .on_press(Message::FifGoto(fi, hi)),
+                    );
+                }
+            }
+            if budget == 0 {
+                rows = rows.push(
+                    text(format!("已显示前 {} 条——请细化关键词", FIND_ALL_MAX_ROWS))
+                        .size(uipx)
+                        .font(uifont),
+                );
+            }
+        }
         let h = (self.viewport_size.1 * 0.35).clamp(120.0, 300.0);
         container(
             column![header, rule::horizontal(1), scrollable(rows)]
