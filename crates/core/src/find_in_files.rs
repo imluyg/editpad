@@ -21,6 +21,12 @@ pub const IGNORED_DIRS: &[&str] = &[".git", "node_modules", "target", "dist"];
 /// 64 MB 豁免同口径）。执行器在装载前以 metadata 预检。
 pub const MAX_SCAN_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// 目录遍历的深度封顶（P148）：`walk_dir` 是递归下降，万级深的目录树
+/// （恶意构造或路径异常）可击穿扫描线程栈——栈溢出是进程 abort，
+/// catch_unwind 兜不住。96 层远超正常工程嵌套（node_modules ≈15 层）；
+/// 超深处静默跳过（与无权限子目录同口径，不算截断）。
+pub const MAX_WALK_DEPTH: usize = 96;
+
 /// 遍历结果：文件按全路径**字典序**（跨目录确定性——read_dir 顺序平
 /// 台相关，展示与测试都要求稳定）；`truncated` = 实际遇到的文件数超
 /// 过封顶（超出者不收入，与「截断明示」的 UI 口径对应）。
@@ -37,13 +43,17 @@ pub struct WalkOutput {
 /// `max_files` = 文件数封顶（0 = 不收任何文件，遇到文件即判截断）。
 pub fn walk_files(root: &Path, max_files: usize) -> WalkOutput {
     let mut out = WalkOutput { files: Vec::new(), truncated: false };
-    walk_dir(root, max_files, &mut out);
+    walk_dir(root, max_files, 0, &mut out);
     out.files.sort();
     out.files.dedup();
     out
 }
 
-fn walk_dir(dir: &Path, max_files: usize, out: &mut WalkOutput) {
+fn walk_dir(dir: &Path, max_files: usize, depth: usize, out: &mut WalkOutput) {
+    // P148：深度封顶——超深处整棵子树跳过（递归下降无界曾可击穿栈）
+    if depth >= MAX_WALK_DEPTH {
+        return;
+    }
     // read_dir 失败（无权限/已消失）：跳过该子树，不中断
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -57,7 +67,7 @@ fn walk_dir(dir: &Path, max_files: usize, out: &mut WalkOutput) {
             if name.starts_with('.') || IGNORED_DIRS.contains(&name.as_ref()) {
                 continue;
             }
-            walk_dir(&entry.path(), max_files, out);
+            walk_dir(&entry.path(), max_files, depth + 1, out);
         } else if ft.is_file() {
             if out.files.len() >= max_files {
                 out.truncated = true; // 封顶后仍遇到真实文件 → 截断明示

@@ -142,9 +142,60 @@ pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option
                 return Some(format!("备份失败（继续保存）：{e}"));
             }
             let stamp = editor::local_datetime_stamp_compact();
-            let target = dir.join(format!("{name}.{stamp}.bak"));
+            // P148：时间戳粒度为秒——同秒内的第二次保存曾直接覆盖前一次
+            // 的「历史留存」，与模式承诺的逐次留存不符。目标已存在时追加
+            // 序号（-1、-2…），同秒多次保存各自成档。
+            let mut target = dir.join(format!("{name}.{stamp}.bak"));
+            let mut seq = 1u32;
+            while target.exists() {
+                target = dir.join(format!("{name}.{stamp}-{seq}.bak"));
+                seq += 1;
+            }
             report(std::fs::copy(path, &target).map(|_| target))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 项目内落盘目录（同 tests/mod.rs 口径：TEMP 在部分沙箱不可写）。
+    fn scratch_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join("editpad-app-tests")
+            .join(format!("{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn timestamped_backup_same_second_saves_keeps_each_copy() {
+        // P148 回归：时间戳粒度为秒——同秒内的两次保存曾互相覆盖，
+        // 「逐次留存」承诺失守。同秒第二次备份应落 -1 序号档。
+        let dir = scratch_dir("backup-same-second");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("note.txt");
+        std::fs::write(&target, "v1").unwrap();
+
+        assert!(perform_backup_before_overwrite(&target, "timestamped").is_some());
+        // 同秒内再备份一次（若跨秒则时间戳不同、各成一档，同样成立）
+        std::fs::write(&target, "v2").unwrap();
+        assert!(perform_backup_before_overwrite(&target, "timestamped").is_some());
+
+        let bak_dir = dir.join("note.txt.bak.d");
+        let backups: Vec<_> = std::fs::read_dir(&bak_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".bak"))
+            .collect();
+        assert_eq!(backups.len(), 2, "两次备份必须各自成档：{backups:?}");
+        // 两份内容分别是 v1 / v2（顺序无关）
+        let mut contents: Vec<String> = backups
+            .iter()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, vec!["v1".to_owned(), "v2".to_owned()]);
+        fs::remove_dir_all(&dir).ok();
     }
 }

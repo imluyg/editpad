@@ -91,7 +91,21 @@ use super::*;
         app.find_query = r"a(\d)".to_owned();
         app.replace_query = "x$1".to_owned();
 
+        // P148：替换本体移后台——dispatch 丢弃 Task，手动回报计算结果
         dispatch(&mut app, Message::ReplaceAll);
+        assert!(app.busy, "正则替换应进入 busy 包裹");
+        let (new_contents, count) = editpad_core::replace_all_regex(
+            "a1 b2\na3 c\nend a4",
+            r"a(\d)",
+            "x$1",
+            true,
+        )
+        .expect("参照替换应成功");
+        dispatch(
+            &mut app,
+            Message::ReplaceAllRegexDone(Ok((new_contents, count))),
+        );
+        assert!(!app.busy);
         assert_eq!(
             app.cur_handle.borrow().doc.to_text(),
             "x1 b2\nx3 c\nend x4",
@@ -100,15 +114,16 @@ use super::*;
         assert!(app.tab().dirty);
         assert!(app.status.contains("3"), "应报告替换 3 处：{:?}", app.status);
 
-        // 非法模式：文档原封不动
-        app.find_query = "[".to_owned();
-        dispatch(&mut app, Message::ReplaceAll);
+        // 后台计算失败（如回溯超限）：文档原封不动、busy 收口、错误留痕
+        let before = app.cur_handle.borrow().doc.clone();
+        dispatch(&mut app, Message::ReplaceAllRegexDone(Err("回溯超限".into())));
+        assert!(!app.busy);
+        assert_eq!(app.cur_handle.borrow().doc.to_text(), before.to_text());
         assert!(
-            app.status.contains("正则无效"),
-            "非法模式应报错：{:?}",
+            app.status.contains("正则替换失败"),
+            "实际 {:?}",
             app.status
         );
-        assert!(app.tab().dirty, "文档保持上次替换后的置脏状态");
     }
 
     #[test]

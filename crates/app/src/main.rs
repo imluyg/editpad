@@ -216,6 +216,10 @@ enum Message {
     /// P70：正则模式的「替换当前」（对当前命中做 $1 展开替换）
     ReplaceCurrentRegex,
     ReplaceAll,
+    /// P148：正则「全部替换」后台计算完成——替换本体曾同步跑在 UI 线程，
+    /// 回溯引擎对病态模式 + 大文档会冻结整个应用（回溯限制的是单次尝试
+    /// 步数，全文逐位置尝试的总量无界）
+    ReplaceAllRegexDone(Result<(String, usize), String>),
     /// 后台查找扫描完成：(任务序号, 命中表)。序号过期的结果直接丢弃（P10）
     FindScanDone(u64, Vec<editpad_core::MatchPos>),
     /// P70：正则模式开关（开启/关闭都会触发重扫）

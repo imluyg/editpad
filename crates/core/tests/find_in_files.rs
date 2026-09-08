@@ -277,3 +277,26 @@ fn whole_word_text_full_line_break_set_matches_find_all() {
     assert_eq!(kept.len(), 1, "VT 前独立 cd 保留，VT 后词中 cd 滤除");
     assert_eq!(kept[0].line, 0);
 }
+
+#[test]
+fn walk_files_depth_cap_skips_bottomless_trees() {
+    // P148 回归：递归下降曾无深度上限——万级深目录树可击穿扫描线程栈
+    //（进程 abort）。超深处整棵子树静默跳过；浅层文件照常收录。
+    let scratch = Scratch::new("depth-cap");
+    let mut deep = scratch.root.clone();
+    for i in 0..(editpad_core::MAX_WALK_DEPTH + 16) {
+        deep = deep.join(format!("d{i}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("bottom.txt"), "too deep").unwrap();
+    std::fs::write(scratch.root.join("shallow.txt"), "reachable").unwrap();
+
+    let out = walk_files(&scratch.root, 1000);
+    assert_eq!(
+        out.files.len(),
+        1,
+        "超深子树应整棵跳过，只收录浅层文件"
+    );
+    assert!(out.files[0].ends_with("shallow.txt"));
+    assert!(!out.truncated, "深度跳过不算截断（与文件数封顶口径区分）");
+}

@@ -531,6 +531,7 @@ impl Editpad {
             | Message::ReplaceCurrent
             | Message::ReplaceCurrentRegex
             | Message::ReplaceAll
+            | Message::ReplaceAllRegexDone(..)
             | Message::FindScanDone(..)
             | Message::GotoToggled
             | Message::GotoInputChanged(..)
@@ -2525,6 +2526,10 @@ impl Editpad {
                 }
                 // P70：正则分支——全文 to_text + fancy-regex 替换（$1 组引用）。
                 // 与 FormatJson 同款防冻结上限（to_text + 结果双份内存）。
+                // P148：替换本体移出 UI 线程——回溯引擎对病态模式 + 大文档
+                // 曾冻结整个应用（回溯限制的是单次尝试步数，全文逐位置尝试
+                // 总量无界）。busy 包裹挡并发编辑 ⇒ 回报内容与发起时刻必然
+                // 一致，无需版本复核；「必回一条消息」纪律由 Task 语义保证。
                 if self.regex_enabled {
                     const REGEX_REPLACE_MAX_CHARS: usize = 4_000_000;
                     let (text, chars) = {
@@ -2537,38 +2542,19 @@ impl Editpad {
                         ));
                         return Task::none();
                     }
-                    let mut tasks: Vec<Task<Message>> = Vec::new();
-                    match editpad_core::replace_all_regex(
-                        &text,
-                        &self.find_query,
-                        &self.replace_query,
-                        self.case_sensitive,
-                    ) {
-                        Ok((new_contents, count)) => {
-                            if count > 0 {
-                                // 替换结果按主导行尾归一后整体入主：正则替换
-                                // 文本里的裸换行不得在 CRLF 文档里制造混合
-                                // 行尾（字面路径的归一已在 core 内完成）
-                                let eol = self.cur_handle.borrow().doc.line_ending();
-                                let new_contents = eol.normalize(&new_contents);
-                                self.cur().borrow_mut().replace_whole_document(
-                                    editpad_core::Document::from_str(&new_contents),
-                                );
-                                self.tab_mut().dirty = true;
-                                self.tab_mut().note_mutation();
-                                tasks.push(self.schedule_find_scan());
-                                tasks.push(self.maybe_schedule_autosave());
-                            }
-                            self.set_status(format!("已替换 {count} 处"));
-                        }
-                        Err(e) => {
-                            self.set_status_error(format!("正则无效：{e}"));
-                        }
-                    }
-                    if tasks.is_empty() {
-                        return Task::none();
-                    }
-                    return Task::batch(tasks);
+                    let pattern = self.find_query.clone();
+                    let replacement = self.replace_query.clone();
+                    let case_sensitive = self.case_sensitive;
+                    self.enter_busy();
+                    self.set_status("正则替换中…（后台）".to_owned());
+                    return Task::perform(
+                        async move {
+                            editpad_core::replace_all_regex(
+                                &text, &pattern, &replacement, case_sensitive,
+                            )
+                        },
+                        Message::ReplaceAllRegexDone,
+                    );
                 }
                 // 整词模式（仅字面查询）：rope 流式路径不做词边界判定，
                 // 改走全文两遍法；文档上限与正则分支同口径防冻结
@@ -2632,6 +2618,39 @@ impl Editpad {
                 }
                 self.set_status(format!("已替换 {count} 处"));
                 Task::batch(tasks)
+            }
+            Message::ReplaceAllRegexDone(result) => {
+                // P148：后台正则替换落账。busy 包裹期间文档不可变——回报
+                // 内容与发起时刻一致，无需版本复核。替换结果按主导行尾归一
+                // 后整体入主：正则替换文本里的裸换行不得在 CRLF 文档里
+                // 制造混合行尾（字面路径的归一已在 core 内完成）。
+                self.busy = false;
+                match result {
+                    Ok((new_contents, count)) => {
+                        let mut tasks: Vec<Task<Message>> = Vec::new();
+                        if count > 0 {
+                            let eol = self.cur_handle.borrow().doc.line_ending();
+                            let new_contents = eol.normalize(&new_contents);
+                            self.cur().borrow_mut().replace_whole_document(
+                                editpad_core::Document::from_str(&new_contents),
+                            );
+                            self.tab_mut().dirty = true;
+                            self.tab_mut().note_mutation();
+                            tasks.push(self.schedule_find_scan());
+                            tasks.push(self.maybe_schedule_autosave());
+                        }
+                        self.set_status(format!("已替换 {count} 处"));
+                        if tasks.is_empty() {
+                            Task::none()
+                        } else {
+                            Task::batch(tasks)
+                        }
+                    }
+                    Err(e) => {
+                        self.set_status_error(format!("正则替换失败：{e}"));
+                        Task::none()
+                    }
+                }
             }
             Message::FindScanDone(seq, found) => {
                 // 过期结果丢弃：只认当前排队中的那次扫描（P10 的 job 序号过滤，
