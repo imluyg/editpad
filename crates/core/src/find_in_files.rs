@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 /// 解析不做——离线零依赖约束，见设计 §1）。
 pub const IGNORED_DIRS: &[&str] = &[".git", "node_modules", "target", "dist"];
 
+/// 单文件扫描的大小豁免（字节）：超过即跳过该文件（与保存备份
+/// 64 MB 豁免同口径）。执行器在装载前以 metadata 预检。
+pub const MAX_SCAN_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// 遍历结果：文件按全路径**字典序**（跨目录确定性——read_dir 顺序平
 /// 台相关，展示与测试都要求稳定）；`truncated` = 实际遇到的文件数超
 /// 过封顶（超出者不收入，与「截断明示」的 UI 口径对应）。
