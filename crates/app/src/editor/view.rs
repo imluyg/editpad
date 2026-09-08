@@ -1738,6 +1738,33 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             );
         }
 
+        // B10 多光标：附加光标竖线（与主光标同闪同色；caret_rect_at
+        // 重入几何，视口剔除同款口径）。组字偏移/折行重排只属主光标
+        // （IME 锚主光标，设计 §3.7），附加光标恒走基础几何。
+        if core.caret_visible() && core.has_multi() {
+            for pos in core.all_cursors() {
+                if pos == core.cursor {
+                    continue; // 主光标已在上方绘制（含组字偏移）
+                }
+                let r = core.caret_rect_at(pos);
+                let in_view = r.y + r.height > 0.0 && r.y < core.viewport_h;
+                if in_view {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: bounds.x + r.x,
+                                y: bounds.y + r.y,
+                                width: r.width,
+                                height: r.height,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        colors.caret,
+                    );
+                }
+            }
+        }
+
         // P135：拖拽落点指示器——插入点竖线（拖拽中恒显不闪烁，颜色
         // 同光标；折行开态按所在视觉段段相对定位）
         if let Some(d) = &core.dnd {
@@ -2058,6 +2085,23 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         }
                     }
                     drop(core);
+                    // B10 多光标：Alt+Click（无 Shift）= 加/移除附加光标
+                    // （Alt+Shift 仍走建块；先于 dnd 候选——Alt 语义优先，
+                    // 选区内按下也不启动拖拽）。只读页放行（纯导航态）。
+                    {
+                        let mut core = self.core.borrow_mut();
+                        if core.mods.alt() && !core.mods.shift() {
+                            let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                            let changed = core.toggle_extra_cursor(hit);
+                            drop(core);
+                            if changed {
+                                shell.publish(crate::Message::EditorNavChanged);
+                                shell.request_redraw();
+                            }
+                            shell.capture_event();
+                            return;
+                        }
+                    }
                     // P135（B8）：选区内左键按下 = 拖拽候选——不动光标
                     // 不清选区；超阈值成拖拽，原地释放由 ButtonReleased
                     // 按普通点击兜底
@@ -2080,8 +2124,10 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             shell.capture_event();
                             return;
                         }
-                        // 普通点击退出块态（与单选区互斥）
+                        // 普通点击退出块态（与单选区互斥）；B10：折叠多光标
+                        // （普通点击 = 重置为单光标，主流口径）
                         core.clear_block();
+                        core.collapse_multi();
                         core.dragging = true;
                         core.anchor = None;
                         core.cursor = hit;

@@ -843,6 +843,54 @@ fn column_editor_rows_cap_rejected() {
     assert!(app.status.contains("上限"), "提示行数封顶原因");
 }
 
+// ---------- B10 多光标一期：折叠矩阵 ----------
+
+#[test]
+fn multi_cursor_collapse_matrix() {
+    use crate::editor::{CursorPos, ExtraCursor};
+    let mk = |app: &mut Editpad| {
+        app.cur_handle.borrow_mut().extra_cursors = vec![ExtraCursor {
+            cursor: CursorPos { line: 0, col: 3 },
+            anchor: None,
+        }];
+    };
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("abcdef\ngh\n".into())));
+    let main_line = app.cur_handle.borrow().cursor.line;
+
+    // Esc = 折叠（KeyPressed 拦截层），主光标不动
+    mk(&mut app);
+    dispatch(
+        &mut app,
+        Message::KeyPressed(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::empty(),
+        ),
+    );
+    assert!(!app.cur_handle.borrow().has_multi(), "Esc 折叠多光标");
+    assert_eq!(
+        app.cur_handle.borrow().cursor.line,
+        main_line,
+        "主光标不动"
+    );
+
+    // 白名单内先行（文档未被破坏时验证）：行内 Left/Right 存活
+    mk(&mut app);
+    dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::Right, false)));
+    assert!(app.cur_handle.borrow().has_multi(), "行内 Right 存活");
+    mk(&mut app);
+    dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::Left, false)));
+    assert!(app.cur_handle.borrow().has_multi(), "行内 Left 存活");
+
+    // 白名单外编辑动作折叠：SelectAll / Undo / DeleteLines（三者会改
+    // 变文档/光标，故放在存活验证之后）
+    for op in [EditOp::SelectAll, EditOp::Undo, EditOp::DeleteLines] {
+        mk(&mut app);
+        dispatch(&mut app, Message::Edit(op.clone()));
+        assert!(!app.cur_handle.borrow().has_multi(), "{op:?} 折叠多光标");
+    }
+}
+
 /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
 fn key_f5() -> Option<Message> {
     use iced::keyboard::{self, key::Named};

@@ -5,6 +5,7 @@ impl EditorCore {
         self.break_typing(); // P37：选区变更打断组
         self.goal_px = None; // 第 73 轮 ⑯：选区变更 = 非竖向操作
         self.clear_block(); // 第 67 轮：块态与单选区互斥
+        self.collapse_multi(); // B10：全选重置为单光标（白名单外动作）
         let last = self.doc.line_count().saturating_sub(1);
         self.anchor = Some(CursorPos::default());
         self.cursor = CursorPos {
@@ -130,6 +131,8 @@ impl EditorCore {
         let Some((boff, other)) = self.bracket_match() else {
             return false;
         };
+        // B10：跳转重置为单光标（白名单外动作，与 select_span 同口径）
+        self.collapse_multi();
         let cursor_off = self.doc.line_to_char(self.cursor.line) + self.cursor.col;
         let target = if cursor_off <= boff { other + 1 } else { other };
         let target = target.min(self.doc.text_len());
@@ -144,6 +147,37 @@ impl EditorCore {
 
     /// 应用光标移动；`extend` 为 true 时保持锚点形成选区。
     pub fn apply_motion(&mut self, motion: Motion, extend: bool) {
+        // B10：多光标态仅行内 Left/Right（不扩展）保持存活——附加光标
+        // 逐个步进（触行界折叠该光标），主光标走既有完整语义；其余动
+        // 作（竖向/Home/End/词导航…）折叠后走单光标既有路径。
+        if self.has_multi() {
+            if !extend {
+                match motion {
+                    Motion::Left => {
+                        self.break_typing();
+                        self.clear_vertical_goal();
+                        if let Some(left) = self.step_main_horizontal(false) {
+                            self.cursor = left;
+                        }
+                        self.multi_step_horizontal(false);
+                        self.ensure_visible();
+                        return;
+                    }
+                    Motion::Right => {
+                        self.break_typing();
+                        self.clear_vertical_goal();
+                        if let Some(right) = self.step_main_horizontal(true) {
+                            self.cursor = right;
+                        }
+                        self.multi_step_horizontal(true);
+                        self.ensure_visible();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            self.collapse_multi();
+        }
         self.break_typing(); // P37：光标移动打断组
         self.clear_block(); // 第 67 轮：键盘移动退出块态（块内编辑走专属分支）
         if extend && self.anchor.is_none() {
@@ -154,6 +188,25 @@ impl EditorCore {
         }
         self.move_local(motion);
         self.ensure_visible();
+    }
+
+    /// B10：主光标行内一步（与附加光标同一「行界即折叠」口径——行首
+    /// Left / 行尾 Right 返回 None，由调用方决定折叠或保持）。独立于
+    /// move_local 的跨行语义：多光标态所有光标统一行内步进口径。
+    fn step_main_horizontal(&mut self, right: bool) -> Option<CursorPos> {
+        let len = self.line_display_len(self.cursor.line);
+        let col = self.cursor.col;
+        if right {
+            if col < len {
+                Some(CursorPos { line: self.cursor.line, col: col + 1 })
+            } else {
+                None
+            }
+        } else if col > 0 {
+            Some(CursorPos { line: self.cursor.line, col: col - 1 })
+        } else {
+            None
+        }
     }
 
     pub(crate) fn move_local(&mut self, motion: Motion) {
@@ -645,6 +698,8 @@ impl EditorCore {
         }
         if enabled {
             self.clear_block();
+            // B10：折行开态多光标互斥（设计 §4 #7）——附加光标随块一并折叠
+            self.collapse_multi();
             self.scroll_left = 0.0;
             let (lines, cols) = (self.doc.line_count(), self.wrap_max_cols());
             let px = self.wrap_max_px();
@@ -733,7 +788,8 @@ impl EditorCore {
     /// 会让像素断行在截断前缀上漏判溢出（boot 后 CJK 长行整行不折、滚动
     /// 不自愈）；P116：缩放帧旧字号 xs 长度对齐但字宽过期，同样不得
     /// 用于断行（否者 break 按旧字宽计算 → 缩小留白/放大超右缘）。
-    fn trusted_xs(&self, line: usize, body: &str) -> Option<&[f32]> {
+    /// B10：cursors.rs 的 caret_rect_at 重入也消费——pub(crate)。
+    pub(crate) fn trusted_xs(&self, line: usize, body: &str) -> Option<&[f32]> {
         let n = body.chars().count();
         let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
         self.row_layouts
@@ -1192,39 +1248,10 @@ impl EditorCore {
     /// P13：x 含水平滚动偏移的抵扣——返回值是视口系坐标。
     /// 第 73 轮 ⑯：软换行开态 y 走视觉行映射（光标所在段），x 走**段
     /// 相对**定位（续行从文本区左缘起排，主流折行口径）。
+    /// B10：多光标绘制经 [`Self::caret_rect_at`] 提参重入，本函数保持
+    /// 主光标语义不变。
     pub fn caret_rect_relative(&self) -> Rectangle {
-        let text = self.line_text(self.cursor.line);
-        let col = self.cursor.col.min(text.chars().count());
-        // P45：滞后感知（同 ensure_visible_horizontal）——布局新鲜走真实
-        // 字形位置，滞后回退列模型实时计算；IME 候选框定位同样受益
-        let x_px = self.px_of(self.cursor.line, &text, col);
-        let (v, seg_start) = if self.wrap.borrow().enabled {
-            let mut w = self.wrap.borrow_mut();
-            w.ensure_synced(
-                self.doc.line_count(),
-                self.wrap_max_cols(),
-                self.wrap_max_px(),
-            );
-            let lens = text.chars().count();
-            let real_xs = self.trusted_xs(self.cursor.line, &text);
-            let breaks = w.segments_of(self.cursor.line, &text, real_xs);
-            let seg = segment_index(&breaks, col, lens);
-            let v = w.index.prefix_rows(self.cursor.line) + seg as u32;
-            (v, breaks[seg])
-        } else {
-            (self.cursor.line as u32, 0)
-        };
-        Rectangle {
-            x: self.gutter_width() + (x_px - self.px_of(self.cursor.line, &text, seg_start))
-                - self.scroll_left,
-            // P88：字形墨迹在行盒内下浮 ink_offset——光标矩形下移到
-            // 墨迹顶对齐，高度同步收窄到墨迹盒（行盒顶对齐会让光标
-            // 顶部悬在首行上方空带、底部压进下行间隙，见
-            // measure_ink_offset 注释；IME 候选框定位同样受益）
-            y: (v as f32 - self.scroll_top) * self.line_height() + self.ink_offset,
-            width: CARET_WIDTH,
-            height: (self.line_height() - 2.0 * self.ink_offset).max(CARET_WIDTH * 2.0),
-        }
+        self.caret_rect_at(self.cursor)
     }
 
     pub fn set_viewport_height(&mut self, h: f32) {

@@ -37,6 +37,9 @@ impl EditorCore {
             || self.block_sel.is_some()
             || self.preedit.is_some()
             || self.read_only
+            // B10：多光标态不启动拖拽（设计 §4 #6）——普通点击折叠在
+            // 控件层先于本函数裁决，能到这里即 multi 已清，此为双保险
+            || self.has_multi()
         {
             return false;
         }

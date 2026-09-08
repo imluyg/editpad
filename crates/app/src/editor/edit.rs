@@ -252,6 +252,7 @@ impl EditorCore {
     pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
         self.break_typing(); // P37：选区变更打断组（查找跳转/替换当前都经此）
         self.clear_block(); // 第 67 轮：块态与单选区互斥
+        self.collapse_multi(); // B10：选区跳转重置为单光标（白名单外动作）
         let start = CursorPos { line, col };
         let mut cur = start;
         let mut remain = len_chars;

@@ -908,6 +908,9 @@ impl EditorCore {
         if self.wrap.borrow().enabled {
             return;
         }
+        // B10：多光标态与列块互斥（设计 §4 #5）——先折叠再建块。
+        // Alt+Click 加光标分支先于本函数裁决，此处为双保险。
+        self.collapse_multi();
         self.block_dragging = true;
         self.block_sel = Some(BlockSel {
             anchor: at,

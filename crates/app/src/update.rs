@@ -670,6 +670,14 @@ impl Editpad {
                         _ => {}
                     }
                 }
+                // B10 多光标：Esc = 折叠为单光标（设计 §3.3），先于列块
+                // Esc 清块分支消费按键
+                if let keyboard::Key::Named(Named::Escape) = &key {
+                    if self.cur_handle.borrow().has_multi() {
+                        self.cur_handle.borrow_mut().collapse_multi();
+                        return Task::none();
+                    }
+                }
                 // 第 67 轮 ⑮：列块选区时 Esc 先清块并消费按键
                 // （不与热键捕获/状态栏菜单的 Esc 语义叠加）。同步清除 +
                 // CancelBlock 消息幂等兜底（架构惯例走编辑入口）
@@ -2677,6 +2685,23 @@ impl Editpad {
             E::InsertText(_) | E::Backspace | E::Delete | E::CancelBlock | E::TabKey(false)
         ) {
             self.cur_handle.borrow_mut().clear_block();
+        }
+        // B10 多光标存活白名单（设计 §3.3）：InsertText/Backspace/Delete
+        // （Phase 2 接同步编辑）+ 行内 Left/Right + CancelBlock；白名单外
+        // 一律先折叠为单光标再走既有路径——单点收口防漏折。Phase 1 期
+        // 三个编辑操作仍只落主光标（附加光标位置待 Phase 2 同步），注释
+        // 留痕。
+        if self.cur_handle.borrow().has_multi()
+            && !matches!(
+                op,
+                E::InsertText(_)
+                    | E::Backspace
+                    | E::Delete
+                    | E::CancelBlock
+                    | E::Motion(Motion::Left | Motion::Right, false)
+            )
+        {
+            self.cur_handle.borrow_mut().collapse_multi();
         }
         // P38：撤销/重做后内容是否恰好回到落盘基线（打字/删除路径不查询，
         // 维持保守置脏，避免大文档每键全量比对）

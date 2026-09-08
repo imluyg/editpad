@@ -25,6 +25,8 @@ mod motion;
 mod edit;
 mod block;
 mod highlight;
+// B10 多光标一期：附加光标集（增删/折叠/步进/caret_rect_at 重入）
+mod cursors;
 
 mod metrics;
 mod scrollbars;

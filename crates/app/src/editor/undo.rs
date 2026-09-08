@@ -49,6 +49,9 @@ impl EditorCore {
         self.break_typing(); // P37：撤销本身打断组，防后续输入混入历史组
         self.goal_px = None; // 第 73 轮 ⑯：撤销 = 非竖向操作，清 goal
         self.clear_block(); // 第 67 轮：列块不参与快照回滚，一并清除
+        // B10：附加光标不参与快照回滚（Snapshot 扩展字段属 Phase 2），
+        // 先折叠——恢复完整多光标态待字段落地
+        self.collapse_multi();
         let Some(snap) = self.undo_stack.pop() else {
             return false;
         };
@@ -74,6 +77,7 @@ impl EditorCore {
         self.break_typing(); // P37 同上
         self.goal_px = None; // 第 73 轮 ⑯：重做 = 非竖向操作，清 goal
         self.clear_block(); // 第 67 轮：同 undo
+        self.collapse_multi(); // B10：同 undo（Phase 2 随快照扩展取消）
         let Some(snap) = self.redo_stack.pop() else {
             return false;
         };

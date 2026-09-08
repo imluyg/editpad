@@ -101,6 +101,21 @@ impl BlockSel {
     }
 }
 
+/// B10 多光标一期：附加光标（设计 docs/multi-cursor-design.md §3.1）。
+/// 主光标 = 既有 `cursor`/`anchor` 字段**原样保留**——全部单光标路径
+/// （ensure_visible/caret_rect/IME/列块/查找跳转）零改动；多光标全集 =
+/// `[主光标] + extra_cursors`（无主次标记，闪烁全员同步）。`anchor`
+/// Some = 该光标携带选区（Ctrl+M 词匹配产生；Alt+Click 纯插入点为
+/// None）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExtraCursor {
+    pub(crate) cursor: CursorPos,
+    pub(crate) anchor: Option<CursorPos>,
+}
+
+/// 附加光标数量封顶（设计 §4 #14）：保护绘制与批量 splice 预算。
+pub(crate) const MAX_EXTRA_CURSORS: usize = 1000;
+
 /// 光标移动语义（与逻辑行对齐——本编辑器不软换行）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
@@ -559,6 +574,8 @@ pub struct EditorCore {
     /// 互斥——建立/存在期间任何普通导航或编辑先清除块态。
     /// pub(crate) 仅限测试直接构造状态；生产路径走 begin/update/finish。
     pub(crate) block_sel: Option<BlockSel>,
+    /// B10：附加光标集（空 = 单光标恒等退化；生产路径走 toggle/collapse）
+    pub(crate) extra_cursors: Vec<ExtraCursor>,
     /// 列块拖拽进行中（view 层鼠标状态机的 core 侧镜像）：
     /// true = Alt+Shift 按下未松开，CursorMoved 持续更新 head。
     pub(crate) block_dragging: bool,
@@ -668,6 +685,8 @@ impl Default for EditorCore {
             dnd: None,
             block_sel: None,
             block_dragging: false,
+            // B10：多光标附加集默认空 = 恒等退化（既有全量测试守护）
+            extra_cursors: Vec::new(),
             wrap: RefCell::new(WrapCache::new()),
             goal_px: None,
             wrap_sb_reserve: false,
@@ -1198,3 +1217,6 @@ mod motion_tests;
 #[cfg(test)]
 #[path = "undo_tests.rs"]
 mod undo_tests;
+#[cfg(test)]
+#[path = "cursors_tests.rs"]
+mod cursors_tests;
