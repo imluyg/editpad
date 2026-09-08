@@ -1304,3 +1304,16 @@ external
         assert!(!app.pending_close, "全部存完后消费关窗意图");
         assert!(!app.tabs[1].dirty);
     }
+
+    #[test]
+    fn tick_stream_emits_periodic_message() {
+        // P149：节拍订阅桥接语义——桥接线程睡满间隔后经 async channel
+        // 投递，首拍按间隔到达（此前 Task 睡眠链占用执行器 worker 整段
+        // 睡眠时长，四条链常驻占死 2~3 个 worker）。
+        let mut stream = Box::pin(crate::update::tick_stream(&crate::update::TickKind::PendingOpen));
+        let first = block_on(stream.as_mut().next());
+        assert!(
+            matches!(first, Some(Message::PendingOpenTick)),
+            "首拍应产出节拍消息"
+        );
+    }

@@ -1,6 +1,71 @@
 use super::settings_ui::SettingsPage;
 use super::*;
 
+// ---------- P149：周期节拍订阅（OS 线程独占睡眠 + async channel 桥接） ----------
+
+/// 节拍种类：既描述间隔与产出消息，也充当订阅身份（`run_with` 的 data，
+/// 内容变化即重键 → 旧流撤销、新流按新参数启动）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TickKind {
+    /// 光标闪烁 / 滚动条淡出快拍（间隔随淡出态切换）
+    Caret { interval_ms: u64 },
+    /// 周期快照心跳（间隔 = 设置值，5~120s）
+    Heartbeat { interval_secs: u32 },
+    /// 文件监视巡检（固定 2s）
+    Monitor,
+    /// 单实例转发握手轮询（固定 400ms）
+    PendingOpen,
+}
+
+type TickStream = std::pin::Pin<Box<dyn iced::futures::Stream<Item = Message> + Send>>;
+
+/// 节拍流（`run_with` 的 builder 需要 fn 指针 → 返回具名 boxed 流）。
+///
+/// 桥接线程独占 `thread::sleep`（自有 OS 线程，随便睡），经 async channel
+/// `try_send` 投递；执行器 worker 只 `pending().await` 正确 async 停车，
+/// 不再被整段睡眠占用。曾用 `Task::perform(async { thread::sleep })` 自我
+/// 续期：caret/心跳/监视/转发轮询四条链常驻占死线程池 worker（futures
+/// ThreadPool 规模 ≈ 核数），与加载/查找扫描共用时极端情形饿死表现为
+/// 假死。注：`iced::time::every` 在本工程 feature 组合（thread-pool，无
+/// smol/tokio）下是空实现，离线环境也无法引入 smol 依赖——故手写同语义
+/// 桥接。缓冲写满丢拍不断链；订阅撤销后 try_send 失败，桥接线程自然退出。
+pub(crate) fn tick_stream(kind: &TickKind) -> TickStream {
+    let (interval, message) = match *kind {
+        TickKind::Caret { interval_ms } => (
+            std::time::Duration::from_millis(interval_ms),
+            (|| Message::CaretTick) as fn() -> Message,
+        ),
+        TickKind::Heartbeat { interval_secs } => (
+            std::time::Duration::from_secs(u64::from(interval_secs)),
+            (|| Message::SnapshotHeartbeatTick) as fn() -> Message,
+        ),
+        TickKind::Monitor => (
+            std::time::Duration::from_secs(2),
+            (|| Message::MonitorTick) as fn() -> Message,
+        ),
+        TickKind::PendingOpen => (
+            std::time::Duration::from_millis(400),
+            (|| Message::PendingOpenTick) as fn() -> Message,
+        ),
+    };
+    Box::pin(stream::channel(
+        4,
+        move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+            std::thread::spawn(move || loop {
+                std::thread::sleep(interval);
+                match output.try_send(message()) {
+                    Ok(()) => {}
+                    // 丢拍不断链（UI 停顿瞬间缓冲写满）
+                    Err(e) if e.is_full() => {}
+                    // 订阅已撤销：线程自然收敛
+                    Err(_) => break,
+                }
+            });
+            std::future::pending::<()>().await
+        },
+    ))
+}
+
 impl Editpad {
     // ---------- 多标签访问器（P21） ----------
 
@@ -294,24 +359,8 @@ impl Editpad {
                 state.status = format!("配置的字体「{name}」未安装，本次启动回退默认等宽");
             }
         }
-        // P18 打磨：启动光标闪烁心跳链（自我续期，占用一个睡眠节拍）
-        let caret_chain = Task::perform(
-            async {
-                std::thread::sleep(std::time::Duration::from_millis(editor::CARET_BLINK_MS));
-            },
-            |_| Message::CaretTick,
-        );
-        // P31 周期快照心跳链：同一自我续期模式——运行中每隔
-        // snapshot_interval_secs 巡检置脏页增量写快照（崩溃至多丢一个
-        // 间隔的输入）；随窗口关闭/进程退出自然销毁。
-        let heartbeat_chain = Task::perform(
-            async move {
-                std::thread::sleep(std::time::Duration::from_secs(u64::from(
-                    state.settings.snapshot_interval_secs,
-                )));
-            },
-            |_| Message::SnapshotHeartbeatTick,
-        );
+        // P149：caret 闪烁 / 快照心跳的节拍链已改为订阅时钟驱动（见
+        // subscription 的 tick_stream），boot 不再起 Task 睡眠链。
         // P30：启动会话恢复——读清单重建标签；命名干净页经加载管线回填。
         // 开关判定在 boot_restore 内部（关闭 = 空白启动 + 存量清场）。
         // P103：命令行文件（资源管理器双击 / 「打开方式」/ 多选打开）——
@@ -323,22 +372,19 @@ impl Editpad {
         // 依赖 boot 任务的消息投递（iced 0.14 实测：boot 任务「立即
         // 输出」在窗口创建初期丢失，CaretTick 类延时输出正常；详见
         // 归档第 79 轮）。
-        let (mut state, boot_task) = if cli_files.is_empty() {
+        let (state, boot_task) = if cli_files.is_empty() {
             let task = state.boot_restore();
             (state, task)
         } else {
             state.boot_cli_kickoff(cli_files);
             (state, Task::none())
         };
-        // 单实例转发轮询链：已运行实例经实例目录的握手文件接收第二实例
-        // 递来的待开文件（双击文件而实例已在跑 = 新标签页打开而非弹窗）
-        let pending_open_poll = state.schedule_pending_open_poll();
+        // 单实例转发轮询：已运行实例经实例目录的批次文件接收第二实例
+        // 递来的待开文件（双击文件而实例已在跑 = 新标签页打开而非弹窗）。
+        // P149：轮询节拍已改订阅时钟驱动（见 subscription），boot 不再起链。
         // 注：窗口标题栏图标（第 76 轮用户点单）在 main() 的
         // `.window(Settings { icon })` 声明期下发（见 window_title_icon）
-        (
-            state,
-            Task::batch([caret_chain, heartbeat_chain, boot_task, pending_open_poll]),
-        )
+        (state, boot_task)
     }
 
     /// P103：boot 期把命令行文件清单转成打开链路的初始状态——
@@ -357,23 +403,9 @@ impl Editpad {
         self.pending_cli = rest.into();
     }
 
-    /// 单实例转发握手文件的轮询链（自我续期，CaretTick/心跳同款模式）。
-    /// 每 400ms 一拍：常规代价 = 一次 stat，无转发时空转。
-    pub(crate) fn schedule_pending_open_poll(&mut self) -> Task<Message> {
-        Task::perform(
-            async { std::thread::sleep(std::time::Duration::from_millis(400)) },
-            |_| Message::PendingOpenTick,
-        )
-    }
-
-    /// P130：文件监视巡检链（自我续期，CaretTick/心跳同款）：每 2s 一拍
-    /// ——有监视页时 stat 比对 (mtime, size)，干净活动页被改则静默重载。
-    fn schedule_monitor_tick(&mut self) -> Task<Message> {
-        Task::perform(
-            async { std::thread::sleep(std::time::Duration::from_millis(2000)) },
-            |_| Message::MonitorTick,
-        )
-    }
+    /// P130：文件监视巡检链（P149 改订阅时钟驱动，见 `tick_stream`）：
+    /// 每 2s 一拍——有监视页时 stat 比对 (mtime, size)，干净活动页被改
+    /// 则静默重载。
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match &message {
             // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
@@ -812,22 +844,13 @@ impl Editpad {
             }
             Message::CaretTick => {
                 // 打磨项：翻转闪烁相位（update 本身会触发重绘）。
-                // 心跳链在 new() 启动后自我续期，占用一个常驻睡眠节拍。
                 // P53：一条链两用——竖直滚动条淡出动画期间切换 33ms 快拍
                 // 驱动渐变（相位翻转由 tick_blink 按真实间隔门控，不受影响），
                 // 其余时间维持 ~530ms 常规节拍。
+                // P149：节拍已改订阅时钟驱动（见 subscription 的 tick_stream），
+                // 间隔随淡出态重键订阅，本臂只做相位翻转。
                 self.cur_handle.borrow_mut().tick_blink();
-                let next_ms = if self.cur_handle.borrow().scrollbar_fading() {
-                    editor::SCROLLBAR_FADE_TICK_MS
-                } else {
-                    editor::CARET_BLINK_MS
-                };
-                Task::perform(
-                    async move {
-                        std::thread::sleep(std::time::Duration::from_millis(next_ms));
-                    },
-                    |_| Message::CaretTick,
-                )
+                Task::none()
             }
             Message::PreviewToggled => {
                 // 仅 Markdown 语法页可开预览（按钮本身已禁用，此处双保险）
@@ -1459,21 +1482,18 @@ impl Editpad {
                 self.request_open(path)
             }
             Message::PendingOpenTick => {
-                // 单实例转发轮询（自我续期，CaretTick/心跳同款）：读实例
-                // 目录握手文件里第二实例递来的待开路径，走既有 CLI 队列
-                // 在新标签页逐个打开。busy（加载/对话框在途）时不动握手
-                // 文件、下一拍重试——防转发路径进队列后无人续排
+                // 单实例转发轮询：读实例目录批次文件里第二实例递来的待开
+                // 路径，走既有 CLI 队列在新标签页逐个打开。busy（加载/
+                // 对话框在途）时跳过本拍，下一拍自然重试。
+                // P149：节拍已改订阅时钟驱动，本臂只做轮询。
                 if !self.busy {
                     let paths = single_instance::take_pending_open();
                     if !paths.is_empty() {
                         self.pending_cli.extend(paths);
-                        return Task::batch([
-                            self.schedule_pending_open_poll(),
-                            self.update(Message::OpenNextCliFile),
-                        ]);
+                        return self.update(Message::OpenNextCliFile);
                     }
                 }
-                self.schedule_pending_open_poll()
+                Task::none()
             }
             Message::LoadProgress(job_id, bytes_read, total_bytes) => {
                 if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {
@@ -2174,14 +2194,8 @@ impl Editpad {
                 self.discard_session_recover(editpad_core::snapshot::snapshot_dir())
             }
             Message::SnapshotHeartbeatTick => {
-                // P31 自我续期：无论本轮是否干活，下一拍恒排队（与光标
-                // 闪烁同一模式；进程退出即销毁，无残留计时器）。间隔取
-                // 加载时已归一的设置值，运行期视为不变。
-                let interval =
-                    std::time::Duration::from_secs(u64::from(self.settings.snapshot_interval_secs));
-                let rearm = Task::perform(async move { std::thread::sleep(interval) }, |_| {
-                    Message::SnapshotHeartbeatTick
-                });
+                // P149：节拍已改订阅时钟驱动（subscription 按快照底座开关/
+                // 模式门控），本臂只做巡检，不再自我续期。
                 // 快照底座任一开关关闭 / ask 模式 = 心跳整体停摆：
                 // 清单不写，退出流与启动恢复同样不依赖它（P29/P30 语义）
                 if !session_restore_allowed(
@@ -2189,11 +2203,11 @@ impl Editpad {
                     self.settings.remember_session,
                 ) || self.settings.exit_mode != editpad_core::EXIT_MODE_SNAPSHOT
                 {
-                    return rearm;
+                    return Task::none();
                 }
                 // 至多一个提交在途：本轮巡检跳过（页级账目不受影响）
                 if self.heartbeat_inflight {
-                    return rearm;
+                    return Task::none();
                 }
                 // 目录解析走注入点（生产为 None → 系统配置目录）
                 let dir = self
@@ -2201,20 +2215,17 @@ impl Editpad {
                     .clone()
                     .or_else(editpad_core::snapshot::snapshot_dir);
                 let Some(dir) = dir else {
-                    return rearm;
+                    return Task::none();
                 };
                 match self.prepare_heartbeat_commit(&dir) {
                     // 无变化且清单不过期：什么都不写（防无谓 IO）
-                    None => rearm,
+                    None => Task::none(),
                     Some(payload) => {
                         self.heartbeat_inflight = true;
-                        Task::batch([
-                            rearm,
-                            Task::perform(
-                                async move { drive_heartbeat(payload).await },
-                                |message| message,
-                            ),
-                        ])
+                        Task::perform(
+                            async move { drive_heartbeat(payload).await },
+                            |message| message,
+                        )
                     }
                 }
             }
@@ -2694,20 +2705,18 @@ impl Editpad {
                 } else {
                     "已关闭文件监视".to_owned()
                 });
-                if on {
-                    self.schedule_monitor_tick()
-                } else {
-                    Task::none()
-                }
+                // P149：监视节拍已改订阅时钟驱动（subscription 按「存在
+                // 监视页」门控），开关翻转不再手动起链
+                Task::none()
             }
             Message::MonitorTick => {
-                if self.tabs.iter().any(|t| t.monitor) {
-                    // P146：busy/加载中的拍跳过巡检但**续链**——曾直接
-                    // Task::none() 断链，监视静默失效而状态栏仍显示已开启
-                    if !self.busy && self.active_load.is_none() {
-                        self.check_external_changes();
-                    }
-                    return self.schedule_monitor_tick(); // 自我续期链
+                // P149：节拍已改订阅时钟驱动（订阅随「无监视页」自动撤销），
+                // 本臂只做巡检。busy/加载中的拍跳过，下一拍自然重试。
+                if self.tabs.iter().any(|t| t.monitor)
+                    && !self.busy
+                    && self.active_load.is_none()
+                {
+                    self.check_external_changes();
                 }
                 Task::none()
             }
@@ -3379,6 +3388,38 @@ impl Editpad {
             Some(job) => Subscription::run_with(job.clone(), build_load_stream),
             None => Subscription::none(),
         };
+        // P149：周期节拍全部改订阅时钟驱动（OS 线程独占睡眠 + async
+        // channel 桥接，见 tick_stream）——替代原「Task::perform 睡眠 +
+        // 自我续期」的四条链（caret/心跳/监视/转发轮询），执行器 worker
+        // 不再被常驻睡眠占用。订阅按 run_with 身份去重：开关/间隔变化
+        // 即重键，旧流撤销、桥接线程自然收敛。
+        let caret_interval = if self.cur_handle.borrow().scrollbar_fading() {
+            editor::SCROLLBAR_FADE_TICK_MS
+        } else {
+            editor::CARET_BLINK_MS
+        };
+        let caret = Subscription::run_with(
+            TickKind::Caret { interval_ms: caret_interval },
+            tick_stream,
+        );
+        let heartbeat =
+            if session_restore_allowed(
+                self.settings.enable_snapshots,
+                self.settings.remember_session,
+            ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT {
+                Subscription::run_with(
+                    TickKind::Heartbeat { interval_secs: self.settings.snapshot_interval_secs },
+                    tick_stream,
+                )
+            } else {
+                Subscription::none()
+            };
+        let monitor = if self.tabs.iter().any(|t| t.monitor) {
+            Subscription::run_with(TickKind::Monitor, tick_stream)
+        } else {
+            Subscription::none()
+        };
+        let pending_open = Subscription::run_with(TickKind::PendingOpen, tick_stream);
         // P10 的查找扫描走 Task::perform（见 schedule_find_scan），不经订阅
         // 0.14 没有 keyboard::on_key_press 了，用 listen_with 手动过滤按键；
         // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）。
@@ -3410,7 +3451,7 @@ impl Editpad {
         let close_requests = window::close_requests().map(Message::CloseRequested);
         // P18 即时保存不走订阅：编辑后由 maybe_schedule_autosave 直接派发
         // 「睡眠防抖→落盘」的专用线程（inflight 去重，至多一个挂起）
-        Subscription::batch([load, events, close_requests])
+        Subscription::batch([load, events, close_requests, caret, heartbeat, monitor, pending_open])
     }
 
     // ---------- 保存 ----------
