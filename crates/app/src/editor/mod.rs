@@ -49,6 +49,11 @@ pub(crate) use links::{link_at, LinkTarget};
 
 /// 行号与正文的最小间距。
 pub(crate) const GUTTER_MIN: f32 = 12.0;
+/// 行号文本盒的额外宽度余量（P150）：上游 `fill_text` 以 `bounds.width`
+/// 为排版界，盒宽**恰好等于**文本宽度时末位字形仍会被判出界并整段丢弃
+/// （用户复现：霞鹜臻楷 GB + 24px 下 `10/11/12` 只画出首位）。留 1px 后
+/// 右对齐位置不变（左缘仍按「位数 × 行号字宽」算），只是盒子略宽。
+pub(crate) const GUTTER_NUM_SLACK: f32 = 1.0;
 /// 行号栏左侧书签条带宽（第 60 轮）：书签圆点的专属槽位，与行号数字
 /// 互不挤占（行号仍右对齐于条带右侧，gutter 总宽 = 条带 + 间距 + 数字宽）。
 pub(crate) const BOOKMARK_STRIP: f32 = 10.0;

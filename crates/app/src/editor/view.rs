@@ -394,6 +394,12 @@ impl EditorView {
         if let Some(w) = measure_char_width(self.font, key.1) {
             self.core.borrow_mut().set_measured_char_width(w);
         }
+        // P150：行号栏字宽按**行号字号**单独实测——行号文本盒宽度不再
+        // 依赖「正文字宽 × 13/16」的线性折算（比例字体下折算会偏窄，
+        // 上游随即丢掉末位字形）。
+        if let Some(w) = measure_char_width(self.font, key.1 * GUTTER_FONT_SCALE) {
+            self.core.borrow_mut().set_gutter_char_width(w);
+        }
         // P88/P89：同键顺带实测字形墨迹盒（上边距 + 墨迹高）——光标/
         // 选区纵向对齐基准（P89 起选区带按墨迹盒居中，需成对注入）。
         // 失败保持默认（顶 0 / 整行高 = 旧行为，恒安全）。
@@ -1360,12 +1366,14 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     // 行号栏右缘 − GUTTER_MIN）
                     if seg == 0 {
                         let num = (line + 1).to_string();
-                        let num_w = num.chars().count() as f32 * char_w * GUTTER_FONT_SCALE;
+                        // P150：同关态口径（实测字宽 + 1px 余量）
+                        let digits = num.chars().count();
+                        let num_w = digits as f32 * core.gutter_char_width();
                         let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
                         renderer.fill_text(
                             core_text::Text {
                                 content: num,
-                                bounds: Size::new(num_w, lh),
+                                bounds: Size::new(core.gutter_number_box_w(digits), lh),
                                 size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                                 line_height: core_text::LineHeight::Absolute(Pixels(lh)),
                                 font: body_font,
@@ -1545,13 +1553,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             // 内容矩形方向正确）。数字是 ASCII 等宽（P42 实测 char_w，行号
             // 字号按 GUTTER_FONT_SCALE 线性折算），左缘可精确计算：
             // num_x + num_w = 行号栏右缘 − GUTTER_MIN，视觉仍是右对齐。
+            // P150：盒宽改用「行号字号实测字宽 × 位数 + GUTTER_NUM_SLACK」
+            // ——线性折算与盒宽等于文本宽度都会让上游丢掉末位字形
+            //（用户复现：自定义比例字体 + 24px 下 10/11/12 只画出首位）。
             let num = (line + 1).to_string();
-            let num_w = num.chars().count() as f32 * char_w * GUTTER_FONT_SCALE;
+            let digits = num.chars().count();
+            let num_w = digits as f32 * core.gutter_char_width();
             let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
             renderer.fill_text(
                 core_text::Text {
                     content: num,
-                    bounds: Size::new(num_w, lh),
+                    bounds: Size::new(core.gutter_number_box_w(digits), lh),
                     size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                     line_height: core_text::LineHeight::Absolute(Pixels(lh)),
                     font: body_font,

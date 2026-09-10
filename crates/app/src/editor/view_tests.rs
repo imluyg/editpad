@@ -3117,3 +3117,148 @@ fn headless_link_hover_underline_ink_under_token() {
     let off = render(None);
     assert_eq!(blue_ink(&off), 0, "无悬停时该区域不应有下划线蓝墨");
 }
+
+// ---------- P150：行号末位字形被裁根治 ----------
+
+/// 契约：行号文本盒宽度必须**严格大于**文本真实宽度。
+///
+/// 上游 `fill_text` 以 `bounds.width` 为排版界，盒宽 ≤ 文本宽度时末位
+/// 字形会被整段丢弃（用户复现：霞鹜臻楷 GB + 24px，`10/11/12` 只画出
+/// 首位）。本测试按控件层同源实测注入字宽后核对每个字号/位数的余量。
+#[test]
+fn p150_gutter_number_box_leaves_room_for_last_glyph() {
+    use super::super::metrics::{measure_char_width, measure_text_width};
+    use crate::editor::GUTTER_NUM_SLACK;
+    let font = BODY_FONT;
+    for size in [10.0f32, 13.0, 16.0, 20.0, 24.0, 32.0, 48.0] {
+        let gsize = size * GUTTER_FONT_SCALE;
+        let Some(gw) = measure_char_width(font, gsize) else {
+            continue;
+        };
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            c.set_font_size(size);
+            assert!(c.set_gutter_char_width(gw), "字号 {size}：行号字宽注入应通过校验");
+        }
+        let c = core.borrow();
+        for digits in 1..=4usize {
+            let real = measure_text_width(font, gsize, &"0".repeat(digits))
+                .expect("文本宽度应可测");
+            let box_w = c.gutter_number_box_w(digits);
+            assert!(
+                box_w > real,
+                "字号 {size} 位数 {digits}：盒宽 {box_w:.3} 必须严格大于文本宽度 \
+                 {real:.3}（相等即丢末位字形）"
+            );
+            // 余量恰为 GUTTER_NUM_SLACK：右对齐左缘仍按「位数 × 字宽」算
+            assert!(
+                (box_w - (digits as f32 * gw + GUTTER_NUM_SLACK)).abs() < 1e-3,
+                "盒宽公式漂移：{box_w:.3}"
+            );
+        }
+    }
+}
+
+/// 像素级回归：估算略偏窄（比例字体的常见情形，0.25px/字）时，两位数
+/// 行号的**末位字形**仍须上墨——修前盒宽 = 位数 × 估算值 < 真实宽度，
+/// 上游丢掉末位（用户截图：第 10~12 行只剩「1」）。开/关自动换行两条
+/// 绘制路径同验。
+#[test]
+fn p150_two_digit_line_number_keeps_last_glyph() {
+    for wrap in [false, true] {
+        let core = EditorHandle::default();
+        let (gw_real, gsize) = {
+            let c = core.borrow();
+            let gsize = c.font_size() * GUTTER_FONT_SCALE;
+            (
+                super::super::metrics::measure_char_width(BODY_FONT, gsize)
+                    .expect("行号字宽应可测"),
+                gsize,
+            )
+        };
+        {
+            let mut c = core.borrow_mut();
+            let doc_text: String = "1\n".repeat(12);
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(600.0);
+            c.set_viewport_height(600.0);
+            c.set_word_wrap(wrap);
+            // 钉住度量键：layout 不再重测覆盖注入值（模拟控件层注入结果）
+            c.metric_key = Some((BODY_FONT, c.font_size()));
+            assert!(c.set_gutter_char_width(gw_real - 0.25), "偏窄估算仍须合法");
+            let body_w = super::super::metrics::measure_char_width(BODY_FONT, c.font_size())
+                .expect("正文字宽应可测");
+            assert!(c.set_measured_char_width(body_w));
+        }
+
+        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(600.0, 600.0), Size::new(600.0, 600.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let (w, h) = (600u32, 600u32);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        let damage = vec![viewport_rect];
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
+
+        let (gutter, lh) = {
+            let c = core.borrow();
+            (c.gutter_width(), c.line_height())
+        };
+        // 行号栏墨迹的水平跨度：单位数 < 1×字宽；两位数须 ≥ 1.2×字宽
+        let ink_span = |line: usize| -> (u32, u32, u32) {
+            let y0 = (line as f32 * lh) as u32;
+            let y1 = ((line as f32 + 1.0) * lh) as u32;
+            let (mut min_x, mut max_x) = (u32::MAX, 0u32);
+            for x in 0..gutter as u32 {
+                let has = (y0..y1).any(|y| {
+                    pixels
+                        .pixel(x, y)
+                        .map(|p| p.red() < 200)
+                        .unwrap_or(false)
+                });
+                if has {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                }
+            }
+            if min_x == u32::MAX {
+                (0, 0, 0)
+            } else {
+                (min_x, max_x, max_x - min_x)
+            }
+        };
+        let (_, _, span1) = ink_span(0); // 第 1 行「1」
+        let (_, _, span2) = ink_span(9); // 第 10 行「10」
+        eprintln!(
+            "[P150] wrap={wrap} gsize={gsize:.2} 单位数跨度={span1} 两位数跨度={span2}"
+        );
+        assert!(span1 > 0, "wrap={wrap}：第 1 行行号必须有墨迹");
+        assert!(
+            span2 as f32 > span1 as f32 * 1.2,
+            "wrap={wrap}：第 10 行行号跨度 {span2} 应明显大于单位数 {span1}\
+             （末位字形被裁的典型症状）"
+        );
+    }
+}

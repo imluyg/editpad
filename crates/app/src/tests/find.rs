@@ -932,3 +932,123 @@ fn fif_scan_touches_neither_document_nor_cursors() {
     assert_eq!(h.doc.to_text(), "content", "FIF 不触碰文档");
     assert_eq!(h.cursor, CursorPos { line: 0, col: 0 }, "FIF 不动主光标");
 }
+
+// ---------- P150：查找轻浮层（居中 + 不挤占正文） ----------
+
+/// 收集应用视图的全部布局节点 bounds（深度封顶，够覆盖 Stack/正文树）。
+fn collect_layout_nodes(
+    layout: iced::advanced::Layout<'_>,
+    depth: usize,
+    out: &mut Vec<iced::Rectangle>,
+) {
+    out.push(layout.bounds());
+    if depth >= 7 {
+        return;
+    }
+    for i in 0..layout.children().count() {
+        collect_layout_nodes(layout.child(i), depth + 1, out);
+    }
+}
+
+/// 渲染一次应用视图并返回全部节点 bounds。
+fn app_layout_nodes(app: &Editpad) -> Vec<iced::Rectangle> {
+    use iced::advanced::{
+        layout::{self, Layout},
+        widget::Tree,
+    };
+    use iced::{Font, Pixels, Size};
+
+    let mut element = app.view();
+    let mut tree = Tree::new(element.as_widget());
+    let renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
+    let limits = layout::Limits::new(
+        Size::new(app.viewport_size.0, app.viewport_size.1),
+        Size::new(app.viewport_size.0, app.viewport_size.1),
+    );
+    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    let root = Layout::new(&node);
+    let mut nodes = Vec::new();
+    collect_layout_nodes(root, 0, &mut nodes);
+    nodes
+}
+
+/// 正文编辑器节点 = 全宽节点里 y > 40（菜单/标签条之下）且最高的那个。
+fn editor_node(nodes: &[iced::Rectangle]) -> iced::Rectangle {
+    *nodes
+        .iter()
+        .filter(|b| b.width > 1000.0 && b.y > 40.0 && b.height > 150.0)
+        .max_by(|a, b| a.height.partial_cmp(&b.height).unwrap())
+        .expect("应能找到正文编辑器节点")
+}
+
+fn app_with_lines(lines: usize) -> Editpad {
+    let mut app = Editpad::default();
+    app.viewport_size = (1024.0, 768.0); // 与真实窗口同尺寸（卡片宽度钳制要用）
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/p150.txt")));
+    let seq = app.job_seq;
+    let text: String = "1\n".repeat(lines);
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str(&text),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    app
+}
+
+/// P150：查找 UI 从「底部整宽停靠行」改为「窗口中间定宽轻浮层」——
+/// 正文高度不随查找栏开关变化（修前查找行会把正文挤矮），且卡片水平居中。
+#[test]
+fn p150_find_overlay_centered_and_does_not_shrink_editor() {
+    let mut app = app_with_lines(12);
+    let off = editor_node(&app_layout_nodes(&app));
+
+    dispatch(&mut app, Message::FindToggled);
+    assert!(app.find_visible, "Ctrl+F 应打开查找");
+    let nodes_on = app_layout_nodes(&app);
+    let on = editor_node(&nodes_on);
+    assert_eq!(
+        (off.y, off.height),
+        (on.y, on.height),
+        "查找浮层不得挤占正文（修前为底部停靠行，正文被压矮）"
+    );
+
+    // 卡片：宽度贴近 FIND_CARD_W、水平居中于窗口
+    let card = nodes_on
+        .iter()
+        .filter(|b| (480.0..=600.0).contains(&b.width) && b.height > 80.0)
+        .max_by(|a, b| a.height.partial_cmp(&b.height).unwrap())
+        .copied()
+        .expect("应能找到查找浮层卡片");
+    let center_x = card.x + card.width * 0.5;
+    let center_y = card.y + card.height * 0.5;
+    eprintln!("[P150] 卡片 = {card:?} 中心 = ({center_x:.1},{center_y:.1})");
+    assert!(
+        (center_x - 512.0).abs() < 2.0,
+        "查找浮层应水平居中，实际中心 x = {center_x:.1}"
+    );
+    assert!(
+        (center_y - 384.0).abs() < 60.0,
+        "查找浮层应出现在窗口中间，实际中心 y = {center_y:.1}"
+    );
+
+    // 结果面板开态同样不占正文（面板在卡片内滚动）
+    app.find_all_visible = true;
+    let panel = editor_node(&app_layout_nodes(&app));
+    assert_eq!(
+        (off.y, off.height),
+        (panel.y, panel.height),
+        "结果面板开态也必须留在浮层内，不得挤占正文"
+    );
+
+    // 关栏后浮层消失（节点回到基线）
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.find_visible);
+    let after = editor_node(&app_layout_nodes(&app));
+    assert_eq!((off.y, off.height), (after.y, after.height));
+}

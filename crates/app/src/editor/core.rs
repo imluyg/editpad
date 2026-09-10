@@ -19,7 +19,7 @@ pub(crate) use super::metrics::{
 };
 pub(crate) use super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
 pub(crate) use super::wrap::{segment_index, WrapCache};
-pub(crate) use super::FONT_SIZE_DEFAULT;
+pub(crate) use super::{FONT_SIZE_DEFAULT, GUTTER_FONT_SCALE, GUTTER_NUM_SLACK};
 
 pub(crate) const CARET_WIDTH: f32 = 2.0;
 /// 撤销组上限（P37 打字成组后，一组 ≈ 一次连续输入；快照是 rope 结构
@@ -499,6 +499,13 @@ pub struct EditorCore {
     /// P42 实测列宽（真实字形 advance，像素/列）：控件层用排版段落实测
     /// 后注入。None = 未实测或测值无效，[`Self::char_width`] 回退固定假设。
     pub(crate) measured_char_w: Option<f32>,
+    /// P150 行号栏实测单字宽（**行号字号**下的真实字形 advance，像素）。
+    /// 行号文本盒宽度 = 位数 × 本值 + [`GUTTER_NUM_SLACK`]。刻意**不复用**
+    /// [`Self::measured_char_w`] × [`GUTTER_FONT_SCALE`] 线性折算：折算值
+    /// 在比例/自定义字体下与真实 advance 有偏差，偏差为「估算偏窄」时上游
+    /// 把行号末位字形整段裁掉（用户复现：霞鹜臻楷 GB + 24px，10/11/12 只
+    /// 画出首位）。None = 未实测，回退线性折算（既有行为）。
+    pub(crate) gutter_char_w: Option<f32>,
     /// P88 字形墨迹在行盒内的上边距（px）：光标/选区等行盒装饰矩形的
     /// 纵向对齐基准——字形在行盒（行高 = 字号 × 1.375）内按字体度量
     /// 下浮 1~6px（实测 CJK 等宽钉字 ≈ 4px），行盒顶对齐会让装饰墨迹
@@ -668,6 +675,8 @@ impl Default for EditorCore {
             saved_baseline: Some(Document::new()),
             // P42：默认未实测，走 0.5625 固定假设（既有契约不变）
             measured_char_w: None,
+            // P150：行号栏字宽同样未实测起步（回退线性折算）
+            gutter_char_w: None,
             ink_offset: 0.0,
             // P89：默认 0 = 未实测（decoration_inset 自动退化为整行盒）
             ink_height: 0.0,
@@ -727,6 +736,26 @@ impl EditorCore {
     /// 累计 +1px 漂移，光标压字/离字（P42）皆源于此，实测后归零。
     pub fn char_width(&self) -> f32 {
         self.measured_char_w.unwrap_or(self.font_size * 0.5625)
+    }
+
+    /// 行号栏单字宽（像素，行号字号下）。
+    ///
+    /// P150：优先用 [`Self::gutter_char_w`]（控件层按**行号字号**实测的
+    /// 真实 advance）；未实测回退 [`Self::char_width`] × [`GUTTER_FONT_SCALE`]
+    /// 线性折算（既有行为，等宽字体下二者相等）。
+    pub fn gutter_char_width(&self) -> f32 {
+        self.gutter_char_w
+            .unwrap_or_else(|| self.char_width() * GUTTER_FONT_SCALE)
+    }
+
+    /// 行号文本盒宽度（像素）：`位数 × 行号字宽 + GUTTER_NUM_SLACK`。
+    ///
+    /// 该值同时决定右对齐左缘（`gutter 右缘 − GUTTER_MIN − 位数 × 字宽`）
+    /// 与传给 `fill_text` 的排版盒宽。**余量不可省**：盒宽等于文本宽度时
+    /// （比例/自定义字体下估算与真实值相等是常态）上游仍会丢掉末位字形
+    /// ——P150 用户复现根因；右对齐位置不受余量影响。
+    pub fn gutter_number_box_w(&self, digits: usize) -> f32 {
+        digits as f32 * self.gutter_char_width() + GUTTER_NUM_SLACK
     }
 
     // ---------- 行级真实布局（第 40 轮根治） ----------
@@ -817,6 +846,20 @@ impl EditorCore {
         }
     }
 
+    /// P150：注入行号栏实测单字宽（控件层按 `字号 × GUTTER_FONT_SCALE`
+    /// 实测后调用）。校验口径与 [`Self::set_measured_char_width`] 相同：
+    /// 失败返回 false 并保持现状（调用方无需回退，公式自带折算兜底）。
+    pub fn set_gutter_char_width(&mut self, width: f32) -> bool {
+        let gutter_size = self.font_size * GUTTER_FONT_SCALE;
+        match validate_measured_char_width(width, gutter_size) {
+            Some(w) => {
+                self.gutter_char_w = Some(w);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// P88/P89：注入字形墨迹盒——上边距 + 墨迹高（px，见字段注释）。
     /// 两值须**同时**通过校验才落库（任一非法返回 false 且保持现状），
     /// 避免只更新一半产生非对称几何。上边距上界 = 字号 × 0.75；高度
@@ -872,6 +915,12 @@ impl EditorCore {
                 } else {
                     self.measured_char_w = None;
                 }
+            }
+            // P150：行号栏字宽同口径折算（键随字号变化，控件层下一帧重测）
+            if let Some(w) = self.gutter_char_w {
+                let scaled = w * self.font_size / old;
+                self.gutter_char_w =
+                    validate_measured_char_width(scaled, self.font_size * GUTTER_FONT_SCALE);
             }
         }
         self.ensure_visible();

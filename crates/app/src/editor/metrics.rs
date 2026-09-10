@@ -163,12 +163,24 @@ pub(crate) fn validate_measured_char_width(w: f32, font_size: f32) -> Option<f32
 /// （Shaping::Advanced + Wrapping::None，见 draw 的 fill_text 调用），
 /// 保证量出来的就是画出来的。任何异常返回 None（保持固定假设）。
 pub(crate) fn measure_char_width(font: Font, size: f32) -> Option<f32> {
-    if !(size.is_finite() && size > 0.0) {
+    let total = measure_text_width(font, size, &"0".repeat(MEASURE_SAMPLE_CHARS))?;
+    if !(total.is_finite() && total > 0.0) {
+        return None;
+    }
+    Some(total / MEASURE_SAMPLE_CHARS as f32)
+}
+
+/// P150：任意短串的排版宽度（像素）——同源段落（同 font/字号/Shaping::
+/// Advanced/Wrapping::None），供行号文本盒宽度契约核对使用（行号盒宽
+/// 必须严格大于文本真实宽度，否则上游丢掉末位字形）。
+/// 空串返回 None；任何异常同样返回 None。
+pub(crate) fn measure_text_width(font: Font, size: f32, text: &str) -> Option<f32> {
+    if text.is_empty() || !(size.is_finite() && size > 0.0) {
         return None;
     }
     let paragraph = <iced::Renderer as core_text::Renderer>::Paragraph::with_text(
         core_text::Text {
-            content: "0".repeat(MEASURE_SAMPLE_CHARS).as_str(),
+            content: text,
             bounds: Size::new(f32::INFINITY, f32::INFINITY),
             size: Pixels(size),
             line_height: core_text::LineHeight::Absolute(Pixels(size * 1.375)),
@@ -180,10 +192,7 @@ pub(crate) fn measure_char_width(font: Font, size: f32) -> Option<f32> {
         },
     );
     let total = paragraph.min_bounds().width;
-    if !(total.is_finite() && total > 0.0) {
-        return None;
-    }
-    Some(total / MEASURE_SAMPLE_CHARS as f32)
+    (total.is_finite() && total > 0.0).then_some(total)
 }
 
 /// 第 40 轮根治：对单行文本按与正文绘制**完全同源**的段落（同 font/字号/

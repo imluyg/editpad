@@ -2305,7 +2305,13 @@ impl Editpad {
                         }
                     }
                     self.sync_find_highlights();
-                    return self.schedule_find_scan();
+                    // P150：打开查找栏即把输入焦点交给查询框（修前焦点留在
+                    // 正文——打开查找栏后打字直接改动文档）；扫描任务与聚焦
+                    // 批处理返回。
+                    return Task::batch([
+                        self.schedule_find_scan(),
+                        crate::view::focus_find_input(),
+                    ]);
                 } else {
                     // 关栏即取消在途扫描并清结果（旧实现只清结果）；
                     // A8：FIF 面板随栏隐藏，目录扫描一并取消
