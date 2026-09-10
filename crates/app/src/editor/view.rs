@@ -1956,7 +1956,10 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 输入法常开：winit 在 Windows 上默认禁用 IME。
         // 每次事件都续约请求（运行时在下一帧 RedrawRequested 时消费），
         // 候选框始终跟随光标；预编辑串由本控件内联绘制，故不传给系统浮窗。
-        {
+        // P151：**仅当正文持有输入焦点时**才请求——查找/替换、标签重命名、
+        // 命令面板等文本框接管输入时若仍请求，候选框会在两处跳，且同一
+        // 组字事件被两处消费（用户复现：预编辑串在查找框与正文各画一份）。
+        if self.core.borrow().focused {
             let core = self.core.borrow();
             let caret = core.caret_rect_relative();
             let ime: input_method::InputMethod = input_method::InputMethod::Enabled {

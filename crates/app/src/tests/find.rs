@@ -1052,3 +1052,62 @@ fn p150_find_overlay_centered_and_does_not_shrink_editor() {
     let after = editor_node(&app_layout_nodes(&app));
     assert_eq!((off.y, off.height), (after.y, after.height));
 }
+
+/// P151：程序化聚焦应用内文本框（查找框/命令面板/重命名）时，**正文编辑器
+/// 必须交出输入焦点**——编辑器核心的 `focused` 只在鼠标按下时更新，程序化
+/// 聚焦不经过鼠标，于是同一个 IME 组字事件被两处消费：预编辑串在文本框与
+/// 正文各画一份（用户复现「怎么有两个」），**上屏文本还会被编辑器吃进文档**
+/// （在查找框里打中文 = 改正文）。
+#[test]
+fn p151_programmatic_text_field_focus_releases_editor_ime() {
+    use crate::editor::ImeCommit;
+    use crate::state::PaletteMode;
+
+    let mut app = app_with_lines(3);
+
+    // 查找栏：打开 → 正文交出焦点（不吃预编辑、不吃上屏）
+    dispatch(&mut app, Message::FindToggled);
+    assert!(app.find_visible);
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "查找框接管焦点后正文不得再持有 IME 焦点"
+    );
+    assert!(
+        !app.cur_handle.borrow_mut().ime_preedit("ni".to_owned()),
+        "正文不得消费预编辑串（否则查找框与正文各画一份）"
+    );
+    assert_eq!(
+        app.cur_handle.borrow_mut().ime_commit("你好"),
+        ImeCommit::Ignored,
+        "正文不得消费上屏事件"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "1\n1\n1\n",
+        "上屏文本绝不能落进文档"
+    );
+
+    // 关闭（× 同路径）→ 焦点还给正文，IME 恢复可用
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.find_visible);
+    assert!(app.cur_handle.borrow().focused, "关栏后正文应重新持有焦点");
+    assert!(app.cur_handle.borrow_mut().ime_preedit("ni".to_owned()));
+
+    // Esc 收起路径同口径
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.cur_handle.borrow().focused);
+    dispatch(&mut app, Message::BarsDismissed);
+    assert!(!app.find_visible);
+    assert!(app.cur_handle.borrow().focused, "Esc 收起后焦点应回正文");
+
+    // 命令面板同口径（P129 也是程序化聚焦）
+    dispatch(&mut app, Message::PaletteToggled(PaletteMode::Commands));
+    assert!(app.palette_visible);
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "命令面板接管焦点后正文应让出"
+    );
+    dispatch(&mut app, Message::PaletteToggled(PaletteMode::Commands));
+    assert!(!app.palette_visible);
+    assert!(app.cur_handle.borrow().focused);
+}

@@ -403,6 +403,25 @@ impl Editpad {
         self.pending_cli = rest.into();
     }
 
+    /// P151：把输入焦点交给应用内文本框（查找/替换、标签重命名、命令面板）。
+    ///
+    /// **正文编辑器必须同步交出焦点**：编辑器核心的 `focused` 只在鼠标按下
+    /// 时更新（`pointer_focus`），程序化聚焦不经过鼠标 → 编辑器仍以为焦点
+    /// 在自己身上，同一个 IME 组字事件被两处消费：预编辑串在文本框与正文
+    /// 各画一份（用户复现「怎么有两个」），**上屏文本还会被编辑器吃进文档**
+    /// （在查找框里打中文 = 改正文）。交出焦点 = `pointer_focus(false)`
+    /// （清残留组字 + 打断打字组）。
+    pub(crate) fn focus_text_field(&mut self, id: iced::widget::Id) -> Task<Message> {
+        self.cur_handle.borrow_mut().pointer_focus(false);
+        iced::widget::operation::focus(id)
+    }
+
+    /// P151：文本框类 UI 关闭后把输入焦点还给正文（IME 组字恢复可用）。
+    /// 鼠标点在正文里的情形由控件自身的 `pointer_focus(true)` 覆盖，二者等价。
+    pub(crate) fn focus_editor(&mut self) {
+        self.cur_handle.borrow_mut().pointer_focus(true);
+    }
+
     /// P130：文件监视巡检链（P149 改订阅时钟驱动，见 `tick_stream`）：
     /// 每 2s 一拍——有监视页时 stat 比对 (mtime, size)，干净活动页被改
     /// 则静默重载。
@@ -717,6 +736,8 @@ impl Editpad {
                         }
                         (keyboard::Key::Named(Named::Escape), _) => {
                             self.palette_visible = false;
+                            // P151：焦点还给正文
+                            self.focus_editor();
                             return Task::none();
                         }
                         _ => {}
@@ -1092,8 +1113,10 @@ impl Editpad {
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
                         // P64：聚焦 + 全选——键盘流直达，预填旧名整体可
-                        // 被直接覆盖；操作在下一帧视图含该输入框后生效
-                        return iced::widget::operation::focus(rename_input_id())
+                        // 被直接覆盖；操作在下一帧视图含该输入框后生效。
+                        // P151：同时正文交出 IME 焦点（否则组字两处渲染）
+                        return self
+                            .focus_text_field(rename_input_id())
                             .chain(iced::widget::operation::select_all(rename_input_id()));
                     }
                     return self.save_as_dialog();
@@ -1108,6 +1131,7 @@ impl Editpad {
             Message::TabRenameCancelled => {
                 self.renaming_tab = None;
                 self.rename_input.clear();
+                self.focus_editor(); // P151：焦点还给正文
                 Task::none()
             }
             Message::CloseTabAt(idx) => {
@@ -2132,6 +2156,10 @@ impl Editpad {
                 self.find_visible = false;
                 self.goto_visible = false;
                 self.recents_visible = false;
+                // P151：Esc 同时收起命令面板与重命名态（下方既有分支同款），
+                // 收尾把输入焦点还给正文——否则中文输入法在正文里失效
+                self.palette_visible = false;
+                self.focus_editor();
                 // P27：Esc 一并关闭设置弹窗
                 self.settings_visible = false;
                 // Esc 同时视作放弃关闭/打开确认
@@ -2305,12 +2333,10 @@ impl Editpad {
                         }
                     }
                     self.sync_find_highlights();
-                    // P150：打开查找栏即把输入焦点交给查询框（修前焦点留在
-                    // 正文——打开查找栏后打字直接改动文档）；扫描任务与聚焦
-                    // 批处理返回。
+                    // P150/P151：打开查找栏即聚焦查询框，同时正文交出 IME 焦点
                     return Task::batch([
                         self.schedule_find_scan(),
-                        crate::view::focus_find_input(),
+                        self.focus_text_field(crate::view::find_input_widget_id()),
                     ]);
                 } else {
                     // 关栏即取消在途扫描并清结果（旧实现只清结果）；
@@ -2318,6 +2344,8 @@ impl Editpad {
                     self.cancel_find_scan();
                     self.fif_visible = false;
                     self.cancel_fif_scan();
+                    // P151：焦点还给正文（否则中文输入法在正文里失效）
+                    self.focus_editor();
                 }
                 Task::none()
             }
@@ -2729,7 +2757,8 @@ impl Editpad {
             // ---------- P129：命令面板 / 快速标签切换 ----------
             Message::PaletteToggled(mode) => {
                 if self.palette_visible && self.palette_mode == mode {
-                    self.palette_visible = false; // 同模式再按 = 关闭
+                    // 同模式再按 = 关闭
+                    self.palette_visible = false;
                 } else {
                     self.palette_visible = true;
                     self.palette_mode = mode;
@@ -2737,8 +2766,10 @@ impl Editpad {
                     self.palette_idx = 0;
                 }
                 if self.palette_visible {
-                    iced::widget::operation::focus(crate::palette_input_id())
+                    // P151：焦点交给面板输入框，同时正文交出 IME 焦点
+                    self.focus_text_field(crate::palette_input_id())
                 } else {
+                    self.focus_editor();
                     Task::none()
                 }
             }

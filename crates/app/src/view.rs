@@ -2067,6 +2067,8 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             _ => None,
         };
         self.palette_visible = false;
+        // P151：面板关闭即把输入焦点还给正文（否则中文输入法在正文里失效）
+        self.focus_editor();
         match msg {
             Some(m) => self.update(m),
             None => Task::none(),
@@ -2751,14 +2753,6 @@ pub(crate) const FIND_INPUT_ID: &str = "editpad-find-input";
 /// [`iced::advanced::widget::Id`] 只能由 `&'static str` 构造）。
 pub(crate) fn find_input_widget_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new(FIND_INPUT_ID)
-}
-
-/// 查询框聚焦任务（P150）：`operate` 驱动 focusable 操作，把焦点交给
-/// 带 [`FIND_INPUT_ID`] 的输入框（打开查找栏时调用一次）。
-pub(crate) fn focus_find_input() -> Task<Message> {
-    iced::advanced::widget::operate(
-        iced::advanced::widget::operation::focusable::focus(find_input_widget_id()),
-    )
 }
 
 /// 结果面板行摘录：剥行尾 → 以命中列为窗心取最多 `max_cols` 个字符，
