@@ -565,6 +565,10 @@ impl Editpad {
             | Message::ColumnEditorHexUpperToggled
             | Message::ColumnEditorConfirmed
             | Message::FindToggled
+            | Message::FindCursorMoved(..)
+            | Message::FindDragStart
+            | Message::FindDragEnd
+            | Message::FindDragReset
             | Message::FindQueryChanged(..)
             | Message::FindNext
             | Message::FindPrev
@@ -2183,6 +2187,14 @@ impl Editpad {
                 self.eol_menu = false;
                 // P10：取消在途扫描 + 清结果（含序号失效）
                 self.cancel_find_scan();
+                // 关栏（Esc 路径）同样清掉查找进度提示，避免左下角残留；
+                // 只清自己写的那条（换过别的状态时标记已失效）
+                if self.find_status {
+                    self.status.clear();
+                    self.status_is_error = false;
+                    self.find_status = false;
+                }
+                self.find_drag = None;
                 Task::none()
             }
             _ => Task::none(),
@@ -2344,9 +2356,43 @@ impl Editpad {
                     self.cancel_find_scan();
                     self.fif_visible = false;
                     self.cancel_fif_scan();
+                    // 用户复报：关栏后左下角仍留着「第 N/M 处匹配」——该文案
+                    // 由查找流程写入状态栏，关栏即一并清掉（只清自己写的）
+                    if self.find_status {
+                        self.status.clear();
+                        self.status_is_error = false;
+                        self.find_status = false;
+                    }
+                    self.find_drag = None;
                     // P151：焦点还给正文（否则中文输入法在正文里失效）
                     self.focus_editor();
                 }
+                Task::none()
+            }
+            // ---------- 查找浮层拖动（用户点单：浮层挡住正文时必须能拖开） ----------
+            Message::FindCursorMoved(point) => {
+                self.find_cursor = point;
+                if let Some(last) = self.find_drag {
+                    // 逐帧增量平移：位置由应用层持有，无需知道卡片布局尺寸
+                    let delta = point - last;
+                    let cur = self.find_pos.unwrap_or_else(|| self.default_find_pos());
+                    self.find_pos = Some(self.clamp_find_pos(cur + delta));
+                    self.find_drag = Some(point);
+                }
+                Task::none()
+            }
+            Message::FindDragStart => {
+                // on_press 不带坐标：锚点取最近一次 on_move 的位置
+                self.find_drag = Some(self.find_cursor);
+                Task::none()
+            }
+            Message::FindDragEnd => {
+                self.find_drag = None;
+                Task::none()
+            }
+            Message::FindDragReset => {
+                self.find_pos = None;
+                self.find_drag = None;
                 Task::none()
             }
             Message::FindQueryChanged(query) => {

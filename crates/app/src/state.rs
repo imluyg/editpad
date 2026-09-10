@@ -143,6 +143,18 @@ pub(crate) struct Editpad {
     /// 「查找全部」结果面板可见（第 62 轮）：数据源 = matches 全量命中表，
     /// 扫描刷新时自动跟随；仅当查找栏可见时有意义（面板停靠在查找区内）
     pub(crate) find_all_visible: bool,
+    /// 查找浮层左上角位置（窗口坐标）。None = 用默认位置（窗口中间偏上）；
+    /// 用户点单：浮层遮住正文目标行时必须能拖开，故位置由应用层持有。
+    pub(crate) find_pos: Option<Point>,
+    /// 拖动中的上一帧光标位置（按住拖动条时按逐帧增量平移浮层）；
+    /// None = 未在拖动。按下时用 [`Self::find_cursor`] 作锚点（on_press
+    /// 不带坐标，锚点取最近一次 on_move 的位置）。
+    pub(crate) find_drag: Option<Point>,
+    /// 最近一次已知光标位置（窗口坐标；`on_move` 层每帧更新）
+    pub(crate) find_cursor: Point,
+    /// 状态栏当前显示的是查找进度（「第 N/M 处匹配」）——关闭查找栏时
+    /// 据此清理，避免关栏后左下角残留（用户复报）
+    pub(crate) find_status: bool,
 
     // ---------- A8：在文件中查找（设计 docs/find-in-files-design.md） ----------
     /// FIF 模式开启（面板与查找全部面板同槽互斥；查找栏关闭即隐）
@@ -337,6 +349,10 @@ impl Default for Editpad {
             find_seq: 0,
             find_cancel: Arc::default(),
             find_all_visible: false,
+            find_pos: None,
+            find_drag: None,
+            find_cursor: Point::ORIGIN,
+            find_status: false,
             fif_visible: false,
             fif_dir: None,
             fif_seq: 0,
@@ -405,12 +421,24 @@ impl Editpad {
     pub(crate) fn set_status(&mut self, text: impl Into<String>) {
         self.status = text.into();
         self.status_is_error = false;
+        // 已被别的状态顶替：查找进度标记失效（否则关查找栏会误清这条）
+        self.find_status = false;
     }
 
     /// 写入错误状态（红色 ⚠ 渲染；编辑噪声不清除，直到下一条状态让位）。
     pub(crate) fn set_status_error(&mut self, text: impl Into<String>) {
         self.status = text.into();
         self.status_is_error = true;
+        self.find_status = false;
+    }
+
+    /// 写入**查找进度**状态（「第 N/M 处匹配」）。与 [`Self::set_status`] 的
+    /// 唯一差别是打上 [`Self::find_status`] 标记：关闭查找栏时据此清掉这条
+    /// 自己写的提示（用户复报：关栏后左下角仍残留「第 1/23 处匹配」）。
+    pub(crate) fn set_find_status(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_is_error = false;
+        self.find_status = true;
     }
 }
 

@@ -1111,3 +1111,73 @@ fn p151_programmatic_text_field_focus_releases_editor_ime() {
     assert!(!app.palette_visible);
     assert!(app.cur_handle.borrow().focused);
 }
+
+/// 用户复报二连：①查找浮层必须能**拖开**（固定居中会遮住正文目标行，
+/// 只看得到浮层底下看不到内容）；②关栏后状态栏左下的「第 N/M 处匹配」
+/// 必须一起消失（修前关栏、点空白都不消失）。
+#[test]
+fn find_overlay_drags_and_clears_its_status_on_close() {
+    let mut app = app_with_lines(3);
+    app.viewport_size = (1024.0, 768.0);
+    dispatch(&mut app, Message::FindToggled);
+    assert!(app.find_visible);
+    assert!(app.find_pos.is_none(), "未拖动时应走默认位置");
+    let default = app.default_find_pos();
+
+    // 按下拖动条（锚点 = 最近一次 on_move 位置）→ 逐帧增量平移
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(600.0, 300.0)));
+    dispatch(&mut app, Message::FindDragStart);
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(700.0, 350.0)));
+    let moved = app.find_pos.expect("拖动后应持有显式位置");
+    assert!((moved.x - (default.x + 100.0)).abs() < 0.01, "x 未按增量平移：{moved:?}");
+    assert!((moved.y - (default.y + 50.0)).abs() < 0.01, "y 未按增量平移：{moved:?}");
+    dispatch(&mut app, Message::FindDragEnd);
+
+    // 拖出视野 → 钳制在窗口内；双击拖动条 → 复位默认
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(5000.0, 5000.0)));
+    dispatch(&mut app, Message::FindDragStart);
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(9000.0, 9000.0)));
+    assert_eq!(
+        app.find_pos,
+        Some(app.clamp_find_pos(Point::new(9000.0, 9000.0))),
+        "拖动必须钳制在窗口内"
+    );
+    dispatch(&mut app, Message::FindDragEnd);
+    dispatch(&mut app, Message::FindDragReset);
+    assert!(app.find_pos.is_none(), "双击拖动条应复位到默认位置");
+
+    // 结构核对：卡片左上角 ≡ find_pos（拖到左上角区域）
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(600.0, 300.0)));
+    dispatch(&mut app, Message::FindDragStart);
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(200.0, 120.0)));
+    dispatch(&mut app, Message::FindDragEnd);
+    let pos = app.find_pos.expect("应持有位置");
+    let nodes = app_layout_nodes(&app);
+    let card = nodes
+        .iter()
+        .filter(|b| (480.0..=600.0).contains(&b.width) && b.height > 80.0)
+        .max_by(|a, b| a.height.partial_cmp(&b.height).unwrap())
+        .copied()
+        .expect("应能找到查找浮层卡片");
+    assert!(
+        (card.x - pos.x).abs() < 1.0 && (card.y - pos.y).abs() < 1.0,
+        "卡片位置应等于 find_pos：卡片 {card:?}，pos {pos:?}"
+    );
+
+    // 状态清理：× / Ctrl+F 关栏
+    app.set_find_status("第 1/23 处匹配");
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.find_visible);
+    assert!(app.status.is_empty(), "关栏后查找进度应清除，实际 {:?}", app.status);
+    // Esc 关栏同样清除
+    dispatch(&mut app, Message::FindToggled);
+    app.set_find_status("第 1/23 处匹配");
+    dispatch(&mut app, Message::BarsDismissed);
+    assert!(app.status.is_empty(), "Esc 关栏后查找进度应清除，实际 {:?}", app.status);
+    // 换过别的状态则不得误清
+    dispatch(&mut app, Message::FindToggled);
+    app.set_find_status("第 1/23 处匹配");
+    app.set_status("已保存");
+    dispatch(&mut app, Message::FindToggled);
+    assert_eq!(app.status, "已保存", "非查找状态不得被关栏误清");
+}

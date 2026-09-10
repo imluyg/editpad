@@ -806,7 +806,7 @@ impl Editpad {
         self.cur_handle
             .borrow_mut()
             .select_span(pos.line, pos.col, pos.len_chars);
-        self.set_status(format!("第 {}/{} 处匹配", index + 1, self.matches.len()));
+        self.set_find_status(format!("第 {}/{} 处匹配", index + 1, self.matches.len()));
     }
 
     /// 第 63 轮：复制某页的完整路径或文件名到剪贴板。
@@ -875,7 +875,7 @@ impl Editpad {
             self.cur_handle
                 .borrow_mut()
                 .select_span(pos.line, pos.col, pos.len_chars);
-            self.set_status(format!("第 {}/{} 处匹配", i + 1, self.matches.len()));
+            self.set_find_status(format!("第 {}/{} 处匹配", i + 1, self.matches.len()));
         }
         Task::none()
     }
@@ -2472,6 +2472,24 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // A8：FIF 开态下文档导航按钮禁用（命中表是另一套数据源）
         let doc_nav = !self.fif_visible;
 
+        // 拖动条（用户点单）：按住卡片顶部这条即可拖走浮层，双击复位到
+        // 默认位置。`on_move`/`on_release` 挂在整层（见函数尾部）——按下
+        // 只有这里捕获，其它位置点击照旧穿透到正文。
+        let grip = mouse_area(
+            container(
+                text("≡  拖动（双击复位）")
+                    .size(uipx * 0.8)
+                    .font(uifont)
+                    .width(Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .width(Fill)
+            .padding([0, 0]),
+        )
+        .interaction(iced::mouse::Interaction::Grab)
+        .on_press(Message::FindDragStart)
+        .on_double_click(Message::FindDragReset);
+
         // ①查询行：P150 起输入框带 Id（打开查找栏即聚焦，修前焦点留正文）
         let query_row = row![
             text_input("查找内容", &self.find_query)
@@ -2597,7 +2615,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center);
 
-        let mut card_body = column![query_row, options_row, third_row, panel_row]
+        let mut card_body = column![grip, query_row, options_row, third_row, panel_row]
             .spacing(8)
             .width(Fill);
         // ⑤结果面板：查找全部 / 目录命中（同槽互斥，面板自身限高滚动）
@@ -2621,13 +2639,44 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 .padding(10)
                 .style(popup_card_style),
         );
-        container(card)
-            .width(Fill)
-            .height(Fill)
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(Alignment::Center)
-            .padding(16)
-            .into()
+        // 位置由应用层持有（用户点单：浮层遮住目标行要能拖开）：
+        // 默认 = 窗口中间偏上（名义高度参与居中），拖动后 = 钳制过的左上角。
+        // 整层挂 `on_move`/`on_release` 追踪拖动：该层**不设 on_press**，
+        // 点击照旧穿透到正文；`ButtonReleased` 上游不捕获（只发消息），
+        // 所以正文拖拽/滚动条拖动不受影响。
+        let pos = self.find_pos.unwrap_or_else(|| self.default_find_pos());
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding { top: pos.y, right: 0.0, bottom: 0.0, left: pos.x }),
+        )
+        .on_move(Message::FindCursorMoved)
+        .on_release(Message::FindDragEnd)
+        .into()
+    }
+
+    /// 查找浮层默认位置（窗口中间偏上；卡片高度按名义值 [`FIND_CARD_NOMINAL_H`]
+    /// 参与居中——真实高度随结果面板开合变化，取名义值即可，且便于拖动钳制）。
+    pub(crate) fn default_find_pos(&self) -> Point {
+        let (w, h) = self.viewport_size;
+        let card_w = FIND_CARD_W.min((w - 32.0).max(320.0));
+        Point::new(
+            ((w - card_w) * 0.5).max(8.0),
+            ((h - FIND_CARD_NOMINAL_H) * 0.5).max(8.0),
+        )
+    }
+
+    /// 拖动钳制：左上角留在窗口内（右下按名义尺寸留边，拖不出视野）。
+    pub(crate) fn clamp_find_pos(&self, p: Point) -> Point {
+        let (w, h) = self.viewport_size;
+        let card_w = FIND_CARD_W.min((w - 32.0).max(320.0));
+        Point::new(
+            p.x.clamp(8.0, (w - card_w - 8.0).max(8.0)),
+            p.y.clamp(8.0, (h - FIND_CARD_NOMINAL_H - 8.0).max(8.0)),
+        )
     }
 
     /// P67：状态栏弹出菜单的通用浮层骨架——背板点击关闭 + 右下角贴
@@ -2745,6 +2794,9 @@ const FIND_ALL_EXCERPT_COLS: usize = 96;
 /// 查找浮层定宽（px）：用户点单「出现在窗口中间、不要太宽」（小窗自动
 /// 钳制到窗口宽 − 32）。修前查找 UI 是整宽停靠在编辑器下方的行。
 const FIND_CARD_W: f32 = 560.0;
+/// 查找浮层名义高度（px）：仅用于「默认位置取窗口中间」与拖动钳制——
+/// 真实高度随结果面板开合变化，用名义值即可，无需回读布局。
+const FIND_CARD_NOMINAL_H: f32 = 170.0;
 /// 查找输入框的稳定 Id：打开查找栏（Ctrl+F / 菜单 / 工具栏）后据此
 /// 自动聚焦——修前打开查找栏不转移焦点，打字直接落进正文文档。
 pub(crate) const FIND_INPUT_ID: &str = "editpad-find-input";

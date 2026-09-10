@@ -205,6 +205,14 @@ enum Message {
     ConvertEol(editpad_core::LineEnding),
 
     FindToggled,
+    /// 查找浮层拖动：光标移动（窗口坐标；`on_move` 层每帧上报）
+    FindCursorMoved(Point),
+    /// 查找浮层拖动开始（按住卡片顶部拖动条）
+    FindDragStart,
+    /// 查找浮层拖动结束（左键松开；`on_release` 不捕获事件，不影响正文拖拽）
+    FindDragEnd,
+    /// 双击拖动条：浮层位置复位到默认（窗口中间偏上）
+    FindDragReset,
     FindQueryChanged(String),
     FindNext,
     FindPrev,
