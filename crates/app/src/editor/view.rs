@@ -382,7 +382,10 @@ impl EditorView {
     /// 调用点 = 控件 `layout`（每帧最先执行，早于任何 update 事件与
     /// draw），保证键盘/鼠标事件到达时 char_width 已是实测值。
     fn ensure_measured_char_width(&self) {
-        let key = (self.font, self.core.borrow().font_size());
+        let gutter_font = self.core.borrow().gutter_font();
+        // P154：键含行号字体——只换 UI/行号字体（正文字体不变）时也必须重测
+        // 行号字宽与墨迹盒，否则用旧族量出的宽度画新族字形（P150 的老坑）。
+        let key = (self.font, self.core.borrow().font_size(), gutter_font);
         {
             let core = self.core.borrow();
             if core.metric_key == Some(key) {
@@ -394,15 +397,17 @@ impl EditorView {
         if let Some(w) = measure_char_width(self.font, key.1) {
             self.core.borrow_mut().set_measured_char_width(w);
         }
-        // P150：行号栏字宽按**行号字号**单独实测——行号文本盒宽度不再
-        // 依赖「正文字宽 × 13/16」的线性折算（比例字体下折算会偏窄，
-        // 上游随即丢掉末位字形）。
-        if let Some(w) = measure_char_width(self.font, key.1 * GUTTER_FONT_SCALE) {
+        // P150：行号栏字宽按**行号字号 + 行号字体**单独实测——行号文本盒宽度
+        // 不再依赖「正文字宽 × 13/16」的线性折算（比例字体下折算会偏窄，
+        // 上游随即丢掉末位字形）。P154：字体取本帧行号族（未下发 = 正文字体）。
+        let gutter_face = gutter_font.unwrap_or(self.font);
+        if let Some(w) = measure_char_width(gutter_face, key.1 * GUTTER_FONT_SCALE) {
             self.core.borrow_mut().set_gutter_char_width(w);
         }
         // P88/P89：同键顺带实测字形墨迹盒（上边距 + 墨迹高）——光标/
         // 选区纵向对齐基准（P89 起选区带按墨迹盒居中，需成对注入）。
-        // 失败保持默认（顶 0 / 整行高 = 旧行为，恒安全）。
+        // 失败保持默认（顶 0 / 整行高 = 旧行为，恒安全）。行号栏纵向对齐
+        // 用**行号族**量（P154：换行号字体后数字在行盒里的落位随之校正）。
         if let Some((off, ink_h)) = measure_ink_box(self.font, key.1) {
             self.core.borrow_mut().set_ink_box(off, ink_h);
         }
@@ -573,6 +578,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         let core = self.core.borrow();
         // P34：本帧字形族来自构造入参（默认 = BODY_FONT）
         let body_font = self.font;
+        // P154：行号栏字形族——应用层下发的等宽族；未下发则跟随正文字体
+        // （拆分前口径，逐像素等价）。只用于行号数字，正文/高亮/组字不变。
+        let gutter_font = core.gutter_font().unwrap_or(body_font);
         let palette = theme.palette();
         let colors = EditorColors::resolve(theme);
         let lh = core.line_height();
@@ -1376,7 +1384,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                                 bounds: Size::new(core.gutter_number_box_w(digits), lh),
                                 size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                                 line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                font: body_font,
+                                // P154：行号用行号族（未下发 = 正文字体）
+                                font: gutter_font,
                                 align_x: core_text::Alignment::Default,
                                 align_y: alignment::Vertical::Top,
                                 shaping: core_text::Shaping::Basic,
@@ -1566,7 +1575,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     bounds: Size::new(core.gutter_number_box_w(digits), lh),
                     size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                     line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                    font: body_font,
+                    // P154：行号用行号族（未下发 = 正文字体）
+                    font: gutter_font,
                     align_x: core_text::Alignment::Default,
                     align_y: alignment::Vertical::Top,
                     shaping: core_text::Shaping::Basic,

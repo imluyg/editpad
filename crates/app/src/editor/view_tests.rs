@@ -2,6 +2,75 @@
 //! view 子模块）。全部只走公开 API 构造状态。
 use super::*;
 
+/// P154：行号栏字体独立下发后——换行号族**必须重测**行号字宽（否则用旧族
+/// 量出的宽度画新族字形，就是 P150 的老坑「末位字形被丢」），且正文列宽
+/// 不受影响（正文字体未变，不该重算）。
+#[test]
+fn p154_gutter_font_change_remeasures_gutter_width_only() {
+    let core = EditorHandle::default();
+    core.borrow_mut().set_font_size(24.0);
+    // 行号族：显式具名族（本机 Win 自带，等价 GUI 里解析出的 Consolas 类）
+    let gutter_font = Font {
+        family: iced::font::Family::Name("Courier New"),
+        ..Font::DEFAULT
+    };
+    core.borrow_mut().set_gutter_font(Some(gutter_font));
+
+    let view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    view.ensure_measured_char_width();
+    {
+        let c = core.borrow();
+        assert_eq!(
+            c.gutter_font(),
+            Some(gutter_font),
+            "下发的行号族应被控件层读到"
+        );
+        assert_eq!(
+            c.metric_key,
+            Some((BODY_FONT, 24.0, Some(gutter_font))),
+            "度量键必须含行号字体（只换行号字体也要重测）"
+        );
+        let gw = c
+            .gutter_char_w
+            .expect("行号字宽应按行号族实测注入");
+        // 行号字号 = 正文字号 × GUTTER_FONT_SCALE（19.5px）
+        let expect = super::super::metrics::measure_char_width(
+            gutter_font,
+            c.font_size() * GUTTER_FONT_SCALE,
+        )
+        .expect("行号族字宽应可测");
+        assert!(
+            (gw - expect).abs() < 0.01,
+            "行号字宽必须按**行号族**实测：注入 {gw} ≠ 实测 {expect}"
+        );
+    }
+
+    // 再下发同名族：键不变 → 不重测（幂等，避免每帧空转）
+    let before = core.borrow().metric_key;
+    core.borrow_mut().set_gutter_font(Some(gutter_font));
+    assert_eq!(core.borrow().metric_key, before, "同族重复下发不得作废度量键");
+
+    // 清空行号族（回落正文字体）：换键 + 字宽按正文字体重测
+    core.borrow_mut().set_gutter_font(None);
+    assert!(
+        core.borrow().metric_key.is_none(),
+        "行号族变化应作废度量键，下一帧重测"
+    );
+    view.ensure_measured_char_width();
+    let c = core.borrow();
+    assert_eq!(c.metric_key, Some((BODY_FONT, 24.0, None)), "回落正文字体");
+    let body_only = super::super::metrics::measure_char_width(
+        BODY_FONT,
+        24.0 * GUTTER_FONT_SCALE,
+    )
+    .expect("正文字体字宽应可测");
+    let gw = c.gutter_char_w.expect("应已重测");
+    assert!(
+        (gw - body_only).abs() < 0.01,
+        "回落正文字体后行号字宽应按正文字体重测：{gw} ≠ {body_only}"
+    );
+}
+
 /// P88 残影根治回归：光标/选区等「行盒装饰」与字形墨迹纵向对齐——
 /// 字体度量让字形在行盒（行高 = 字号 × 1.375）内下浮（实测 CJK 等宽
 /// 字体 ≈ 4px），旧实现按行盒顶画装饰，顶部的悬墨落在首行上方空带
@@ -1361,7 +1430,7 @@ fn ensure_measured_char_width_measures_and_dedups() {
     };
     view.ensure_measured_char_width();
     let core = view.core.borrow();
-    assert_eq!(core.metric_key, Some((BODY_FONT, 16.0)));
+    assert_eq!(core.metric_key, Some((BODY_FONT, 16.0, None)));
     let w = core
         .measured_char_w
         .expect("系统字体可用时实测不应失败");
@@ -1374,7 +1443,7 @@ fn ensure_measured_char_width_measures_and_dedups() {
     // 同键二次调用去重（值稳定不抖动）
     view.ensure_measured_char_width();
     let core = view.core.borrow();
-    assert_eq!(core.metric_key, Some((BODY_FONT, 16.0)));
+    assert_eq!(core.metric_key, Some((BODY_FONT, 16.0, None)));
     assert_eq!(core.measured_char_w, Some(w));
 
     // 换字号 → 换键重测：倍率保持（advance ∝ 字号）
@@ -1382,7 +1451,7 @@ fn ensure_measured_char_width_measures_and_dedups() {
     view.core.borrow_mut().set_font_size(20.0);
     view.ensure_measured_char_width();
     let core = view.core.borrow();
-    assert_eq!(core.metric_key, Some((BODY_FONT, 20.0)));
+    assert_eq!(core.metric_key, Some((BODY_FONT, 20.0, None)));
     let w20 = core.measured_char_w.expect("换字号重测不应失败");
     assert!((w20 / 20.0 - w / 16.0).abs() < 0.05, "倍率应守恒 {w20}");
 }
@@ -3185,7 +3254,7 @@ fn p150_two_digit_line_number_keeps_last_glyph() {
             c.set_viewport_height(600.0);
             c.set_word_wrap(wrap);
             // 钉住度量键：layout 不再重测覆盖注入值（模拟控件层注入结果）
-            c.metric_key = Some((BODY_FONT, c.font_size()));
+            c.metric_key = Some((BODY_FONT, c.font_size(), None));
             assert!(c.set_gutter_char_width(gw_real - 0.25), "偏窄估算仍须合法");
             let body_w = super::super::metrics::measure_char_width(BODY_FONT, c.font_size())
                 .expect("正文字宽应可测");

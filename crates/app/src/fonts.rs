@@ -36,8 +36,85 @@ pub(crate) fn apply_default_cjk_mono_pin() {
 
 // ---------- 字体选择（P34） ----------
 
-/// 设置弹窗字体列表单帧最多渲染的行数；超出提示继续过滤。
-/// Windows 全量族名可达数百条——无上限的 widget 树会让弹窗每帧变重，
+/// P154：UI 字体候选表（按界面语言）。**完整族名**列出，逐个查系统清单，
+/// 首个命中即用——受系统差异影响（不同 Windows 版本/语言的族名本地化
+/// 变体），故英文名与中文名都给上（fontdb 两种写法都在）。
+///
+/// * 中文简体：微软雅黑系（Win 自带；`Microsoft YaHei UI` 是 Win10+ 的
+///   界面优化变体，优先）；
+/// * English：Segoe UI 系（Win 原生界面字体；用户点单的 Courier New
+///   **不作 UI 主字体**——打字机衬线体做按钮/菜单标签观感旧、小字号发虚，
+///   且中文界面下大半字符仍要靠系统回退，收益与损失不成比例；Courier
+///   New 保留在行号位候选链里）。
+pub(crate) const UI_FONT_CANDIDATES_ZH: [&str; 4] = [
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "微软雅黑",
+    "SimSun",
+];
+pub(crate) const UI_FONT_CANDIDATES_EN: [&str; 3] = [
+    "Segoe UI Variable",
+    "Segoe UI",
+    "Tahoma",
+];
+
+/// P154：行号位字体候选链（**等宽**，只画 ASCII 数字故不要求 CJK 覆盖）。
+///
+/// 为什么行号单独一套：行号是数字位，等宽族的数字同宽、基线稳，13px 小
+/// 字号下比正文字体（可能是楷体/比例字体）清晰得多；同时与正文解耦后
+/// 「改正文字体」不再影响行号栏几何。候选按「清晰度 + 普及度」排序：
+/// `Consolas`（Win 自带、小字号最清晰）→ `Cascadia Mono`（Win11/终端）
+/// → `Courier New`（老系统兜底）→ `NSimSun`（含 CJK 的等宽兜底）。
+/// **全不命中 → None**，调用方回落 UI 字体（不引入新失败模式）。
+pub(crate) const GUTTER_FONT_CANDIDATES: [&str; 5] = [
+    "Consolas",
+    "Cascadia Mono",
+    "Courier New",
+    "NSimSun",
+    "MS Gothic",
+];
+
+/// P154：按语言从系统清单里挑 UI 字体族（纯函数便于单测）。
+/// 全不命中 → None（调用方回落 `Font::DEFAULT` 默认无衬线，不引入失败）。
+pub(crate) fn pick_ui_font_family(
+    language: &str,
+    available: &[String],
+) -> Option<&'static str> {
+    let candidates: &[&str] = if editpad_core::settings::normalize_language(language)
+        == editpad_core::settings::LANG_EN
+    {
+        &UI_FONT_CANDIDATES_EN
+    } else {
+        &UI_FONT_CANDIDATES_ZH
+    };
+    candidates.iter().copied().find(|cand| {
+        let want = editor::normalize_family(cand);
+        available
+            .iter()
+            .any(|family| editor::normalize_family(family) == want)
+    })
+}
+
+/// P154：从系统清单里挑行号位等宽族（纯函数便于单测）。
+/// 全不命中 → None（调用方回落 UI 字体；行号仍受 P150 实测字宽保护）。
+pub(crate) fn pick_gutter_font_family(available: &[String]) -> Option<&'static str> {
+    GUTTER_FONT_CANDIDATES.iter().copied().find(|cand| {
+        let want = editor::normalize_family(cand);
+        available
+            .iter()
+            .any(|family| editor::normalize_family(family) == want)
+    })
+}
+
+/// P154：把解析出的族名转成 iced 字形族（默认字重/风格）。
+pub(crate) fn family_font(name: &'static str) -> Font {
+    Font {
+        family: iced::font::Family::Name(name),
+        ..Font::DEFAULT
+    }
+}
+
+/// 设置弹窗字体列表单帧最多渲染的行数；超出提示继续过滤。/// Windows 全量族名可达数百条——无上限的 widget 树会让弹窗每帧变重，
 /// v1 用「过滤词 + 上限」控制规模（滚动列表本身有高度限制）。
 pub(crate) const FONT_PICKER_MAX_ROWS: usize = 200;
 

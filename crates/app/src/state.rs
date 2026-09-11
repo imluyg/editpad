@@ -113,8 +113,17 @@ pub(crate) struct Editpad {
     /// 实际生效的字体族名（经 [`effective_font_family`] 对系统清单解析后的
     /// 规范名，已 `'static` 化——见 [`leak_font_family`]）。None = 默认等宽。
     /// 配置值与生效值的分离让「卸载了所选字体」只回退本次渲染，不抹掉
-    /// 用户配置（重装后自动恢复）。
+    /// 用户配置（重装后自动恢复）。**P154 起只作用于正文与预览**。
     pub(crate) active_font_family: Option<&'static str>,
+    /// P154：UI 字形族名（按 [`Settings::language`] 从候选表解析、已
+    /// `'static` 化）。None = 候选全未命中 → 回落 `Font::DEFAULT`。
+    /// 与正文族完全解耦：只影响除正文/预览之外的界面文字；行号栏另有
+    /// [`Self::gutter_font_family`]。
+    pub(crate) ui_font_family: Option<&'static str>,
+    /// P154：行号栏字形族名（等宽候选链解析，见
+    /// [`crate::fonts::pick_gutter_font_family`]）。None = 全未命中 →
+    /// 回落 UI 字体（行号宽度仍由实测字宽保护，见 P150）。
+    pub(crate) gutter_font_family: Option<&'static str>,
     /// 设置弹窗字体列表的过滤词（纯 UI 态，不落盘）。
     pub(crate) font_filter: String,
 
@@ -339,6 +348,8 @@ impl Default for Editpad {
             hotkey_capture: None,
             available_fonts: Vec::new(),
             active_font_family: None,
+            ui_font_family: None,
+            gutter_font_family: None,
             font_filter: String::new(),
             job_seq: 0,
             active_load: None,

@@ -35,6 +35,24 @@ pub struct RecentView {
 pub const THEME_LIGHT: &str = "light";
 pub const THEME_DARK: &str = "dark";
 
+/// P154：界面语言的唯二合法取值；其他值在加载时归一为 [`LANG_ZH_CN`]。
+///
+/// 本轮只承担「UI 字体按语言选族」一个职责（界面文案的 i18n 另行立项）；
+/// 取值用 BCP-47 风格的短码，将来扩展（zh-TW / ja / …）时旧配置仍然合法。
+pub const LANG_ZH_CN: &str = "zh-CN";
+pub const LANG_EN: &str = "en";
+
+/// 界面语言归一（纯函数便于单测与设置层复用）：大小写/下划线/空白宽松
+/// 匹配 `zh-CN` 与 `en`；未知值一律回落 [`LANG_ZH_CN`]（默认界面）。
+pub fn normalize_language(value: &str) -> &'static str {
+    let v = value.trim().to_ascii_lowercase().replace('_', "-");
+    match v.as_str() {
+        "en" | "en-us" | "en-gb" => LANG_EN,
+        "zh" | "zh-cn" | "zh-hans" | "zh-sg" => LANG_ZH_CN,
+        _ => LANG_ZH_CN,
+    }
+}
+
 /// 字号允许范围（闭区间）与默认值；越界值在加载时被 clamp。
 /// P116：上限 28 → 48（用户点单：调节范围太小；下限 10 保持）。
 pub const MIN_FONT_SIZE: f32 = 10.0;
@@ -56,6 +74,11 @@ pub struct Settings {
     // 必须指向规范默认值，保证旧 config.toml 缺字段时直接得到合法偏好。
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// P154：界面语言（`"zh-CN"` / `"en"`，见 [`normalize_language`]）。
+    /// 本轮职责 = 选 UI 字体族（中文简体 → 雅黑系；English → Segoe UI 系）；
+    /// 非法值在加载时归一为 `"zh-CN"`。界面文案本身仍是中文（i18n 另行立项）。
+    #[serde(default = "default_language")]
+    pub language: String,
     /// 编辑器字号，加载时 clamp 到 `[MIN_FONT_SIZE, MAX_FONT_SIZE]`。
     #[serde(default = "default_font_size")]
     pub font_size: f32,
@@ -165,6 +188,7 @@ impl Default for Settings {
             recent_files: Vec::new(),
             recent_views: HashMap::new(),
             theme: THEME_LIGHT.to_string(),
+            language: LANG_ZH_CN.to_string(),
             font_size: DEFAULT_FONT_SIZE,
             remember_recent_files: true,
             // P63 策略反转：对标主流编辑器，默认不自动写盘（显式 Ctrl+S 才落盘）
@@ -402,6 +426,11 @@ fn default_theme() -> String {
     THEME_LIGHT.to_string()
 }
 
+/// `#[serde(default)]` 用：P154 缺字段时的界面语言默认值（中文简体）。
+fn default_language() -> String {
+    LANG_ZH_CN.to_string()
+}
+
 /// `#[serde(default)]` 用：缺字段时的字号默认值。
 fn default_font_size() -> f32 {
     DEFAULT_FONT_SIZE
@@ -450,6 +479,8 @@ impl Settings {
         if self.theme != THEME_LIGHT && self.theme != THEME_DARK {
             self.theme = THEME_LIGHT.to_string();
         }
+        // P154：界面语言归一（未知值回落中文简体默认）
+        self.language = normalize_language(&self.language).to_string();
         // clamp 对 NaN 会原样返回 NaN，先排除非有限值。
         self.font_size = if self.font_size.is_finite() {
             self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
@@ -529,6 +560,11 @@ impl Settings {
     /// 切换主题，写回的总是规范字符串 `"light"` / `"dark"`。
     pub fn set_theme(&mut self, dark: bool) {
         self.theme = if dark { THEME_DARK } else { THEME_LIGHT }.to_string();
+    }
+
+    /// P154：切换界面语言，写回的总是规范短码（非法值回落中文简体）。
+    pub fn set_language(&mut self, language: &str) {
+        self.language = normalize_language(language).to_string();
     }
 
     /// 原子保存（P7）：走同 crate 的 write_atomic（临时文件 + rename + sync）。
@@ -1380,6 +1416,61 @@ mod tests {
         fs::write(&path, "theme = \"dark\"\nfont_size = 18\n").unwrap();
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded.font_family, None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P154：界面语言 ----------
+
+    #[test]
+    fn p154_language_normalization_contract() {
+        // 合法写法（大小写/下划线/区域变体宽松匹配）
+        for raw in ["en", "EN", "en-US", "en_us", "En-Gb"] {
+            assert_eq!(normalize_language(raw), LANG_EN, "{raw:?} 应归一为 en");
+        }
+        for raw in ["zh", "zh-CN", "zh_cn", "ZH-Hans", "zh-SG"] {
+            assert_eq!(normalize_language(raw), LANG_ZH_CN, "{raw:?} 应归一为 zh-CN");
+        }
+        // 未知/空/垃圾值 → 默认中文简体（界面默认语言，不因手改配置而错乱）
+        for raw in ["", "  ", "fr", "日本語", "xx-YY", "en-US-x-private"] {
+            assert_eq!(
+                normalize_language(raw),
+                LANG_ZH_CN,
+                "{raw:?} 未知值应回落默认中文简体"
+            );
+        }
+    }
+
+    #[test]
+    fn p154_language_defaults_roundtrips_and_normalizes_on_load() {
+        let s = Settings::default();
+        assert_eq!(s.language, LANG_ZH_CN, "默认界面语言 = 中文简体");
+
+        let dir = scratch_dir("p154-language");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // 旧配置缺字段 → 默认中文（serde default，零迁移）
+        fs::write(&path, "theme = \"dark\"\n").unwrap();
+        assert_eq!(Settings::load_from(&path).language, LANG_ZH_CN);
+
+        // 落盘往返
+        let mut s = Settings::default();
+        s.set_language(LANG_EN);
+        assert_eq!(s.language, LANG_EN);
+        s.save_to(&path).unwrap();
+        assert_eq!(Settings::load_from(&path).language, LANG_EN);
+
+        // 手改非法值 → 加载归一
+        fs::write(&path, "language = \"klingon\"\n").unwrap();
+        assert_eq!(Settings::load_from(&path).language, LANG_ZH_CN);
+
+        // setter 同样归一
+        let mut s = Settings::default();
+        s.set_language("en_US");
+        assert_eq!(s.language, LANG_EN, "setter 应写回规范短码");
+        s.set_language("bogus");
+        assert_eq!(s.language, LANG_ZH_CN);
+
         fs::remove_dir_all(&dir).ok();
     }
 

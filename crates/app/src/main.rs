@@ -448,6 +448,9 @@ enum Message {
 
     /// 深浅主题切换（写回设置）
     ThemeToggled,
+    /// P154：界面语言循环切换（中文简体 ⇄ English）。当前职责 = 重新解析
+    /// UI 字体族（文案 i18n 另行立项）；落盘并立即生效。
+    LanguageToggled,
     /// 字号增减（±2.0，clamp 后写回设置并即时生效）
     FontSizeDelta(f32),
 

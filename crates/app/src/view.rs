@@ -20,10 +20,25 @@ impl Editpad {
         editor::normalize_font_size(self.settings.font_size)
     }
 
-    /// 正文与 UI 的统一字形族（P34 换装点）：生效族名 Some → 以
-    /// `Family::Name` 引用（系统字体已在 fontdb 里，无需装载字节），
-    /// None / 未配置 → 默认等宽（P33 的 CJK 钉字仍生效）。
+    /// P154：UI 字形族（菜单栏/工具栏/标签栏/状态栏/查找框/设置弹窗/命令
+    /// 面板等**除正文与预览之外**的一切文字）。
+    ///
+    /// 族由界面语言决定（启动期解析、切语言即重解析，见
+    /// [`crate::fonts::pick_ui_font_family`]）；未命中任何候选 → None，
+    /// 此时回落 [`Font::DEFAULT`]（iced 默认无衬线），不引入失败模式。
+    /// 与正文字体完全解耦：改正文不再影响 UI，改语言不再影响正文。
+    pub(crate) fn ui_font(&self) -> Font {
+        match self.ui_font_family {
+            Some(name) => fonts::family_font(name),
+            None => Font::DEFAULT,
+        }
+    }
+
+    /// 正文字形族（P34 换装点，**只作用于正文与 Markdown 预览**）。
+    /// 生效族名 Some → 以 `Family::Name` 引用（系统字体已在 fontdb 里，
+    /// 无需装载字节）；None / 未配置 → 默认等宽（P33 的 CJK 钉字仍生效）。
     /// iced 排版缓存按 Font 值做键——运行期换族即换键，无陈旧缓存问题。
+    /// P154 拆分：本体不再供 UI 使用（UI 走 [`Self::ui_font`]）。
     pub(crate) fn body_font(&self) -> Font {
         match self.active_font_family {
             Some(name) => Font {
@@ -955,7 +970,7 @@ impl Editpad {
         let interactive = !self.busy;
         // P33/P36：UI 与正文同族，字号固定不随正文缩放；P34：族随设置
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
 
         let mut panel = column![
             row![
@@ -1077,7 +1092,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // P33/P36：UI 全部控件与正文同族，字号固定不随正文缩放——
         // Ctrl+滚轮（P48）与设置面板只调节文件内容；P34：族随设置切换
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
 
         // 第 69 轮：顶部菜单栏（文件/编辑/查看/视图/设置）——整条包
         // mouse_area 跟踪指针作浮层锚点（仿标签条 P39 模式）；展开的
@@ -1793,7 +1808,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
     /// 守卫口径与原工具栏按钮一致（busy / dirty / is_markdown）。
     fn menubar_panel(&self, idx: usize) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let interactive = !self.busy;
         let item = |label: String, msg: Option<Message>| {
             button(container(text(label).size(uipx).font(uifont)).width(Fill))
@@ -2080,7 +2095,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
     /// 卡片自身 opaque 防穿透（右键菜单同款双层）。
     fn palette_overlay(&self) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let entries = self.palette_filtered();
         let total = entries.len();
         let sel = self.palette_idx.min(total.saturating_sub(1));
@@ -2148,7 +2163,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
     /// （P129 同口径）。数值输入以字符串承载、确认时统一校验。
     fn column_editor_overlay(&self) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let d = &self.column_editor;
         let text_input_w = |placeholder: &'static str, value: &str, msg: fn(String) -> Message| {
             text_input(placeholder, value)
@@ -2765,7 +2780,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         const W: f32 = 200.0;
         const ITEM_H: f32 = 32.0;
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let named = self.tab().path.is_some();
         let item = |label: &str, enc: editpad_core::SaveEncoding| {
             button(
@@ -2799,7 +2814,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         const W: f32 = 220.0;
         const ITEM_H: f32 = 32.0;
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let current = self.cur_handle.borrow().doc.line_ending();
         let item = |label: &str, target: editpad_core::LineEnding| {
             let disabled = current == target;

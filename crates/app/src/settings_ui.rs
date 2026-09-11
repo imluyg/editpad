@@ -67,6 +67,9 @@ impl SettingsPage {
 /// 防止文案改动后两处漂移。
 pub(crate) const FONT_ROW_KEY: &str = "正文字体";
 
+/// P154：「界面语言」行的行键：控件匹配与元数据声明共用同一常量。
+pub(crate) const LANGUAGE_ROW_KEY: &str = "界面语言";
+
 /// 「编辑后自动写盘」行的行键（P63 改名，原「即时保存」）：控件匹配
 /// 与元数据声明共用同一常量，防止文案改动后两处漂移。
 pub(crate) const AUTOSAVE_ROW_KEY: &str = "编辑后自动写盘";
@@ -95,6 +98,13 @@ pub(crate) struct StaticRow {
 
 /// 设置行静态元数据（P47）：标题 / 描述文案与所属页。
 pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
+    StaticRow {
+        page: SettingsPage::Appearance,
+        key: LANGUAGE_ROW_KEY,
+        title: LANGUAGE_ROW_KEY,
+        desc: "界面字体按语言选族（中文简体 → 微软雅黑系；English → Segoe UI 系）。\
+               界面文案暂不随语言切换（i18n 另行立项）。",
+    },
     StaticRow {
         page: SettingsPage::Appearance,
         key: "主题",
@@ -129,7 +139,9 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         page: SettingsPage::Font,
         key: FONT_ROW_KEY,
         title: FONT_ROW_KEY,
-        desc: "界面与正文共用的字体族；建议选含中文字形的等宽字体，非等宽字体的列对齐会漂移。",
+        desc: "正文字体族（只作用于正文与 Markdown 预览；菜单/状态栏/行号等界面\
+               文字由「界面语言」选族）；建议选含中文字形的等宽字体，非等宽字体的\
+               列对齐会漂移。",
     },
     // 第 68 轮用户点单：字号从外观移入字体分类（族与大小同页调）
     StaticRow {
@@ -595,7 +607,7 @@ impl Editpad {
     fn settings_panel(&self, content_h: f32) -> Element<'_, Message> {
         // P33/P36：UI 与正文同族，字号固定不随正文缩放；P34：族随设置
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let sc = settings_colors(&self.theme());
 
         // 标题行：「设置」+ 右上角 ×（关闭按钮放在标题栏右侧）
@@ -639,7 +651,7 @@ impl Editpad {
     /// 跨分类的命中结果）。
     fn settings_sidebar(&self) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let sc = settings_colors(&self.theme());
         let searching = !self.settings_search.trim().is_empty();
 
@@ -682,7 +694,7 @@ impl Editpad {
     /// 无命中给出提示。整列由外层 scrollable 钳高滚动。
     fn settings_content(&self, content_h: f32) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let sc = settings_colors(&self.theme());
         let query = self.settings_search.trim();
         let current_page = self.settings_page;
@@ -799,7 +811,7 @@ impl Editpad {
     /// 分隔线（行式布局）。「正文字体」行下方附带字体挑选块。
     fn settings_row_widget(&self, r: SettingsRow) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let sc = settings_colors(&self.theme());
 
         let left = column![
@@ -829,7 +841,7 @@ impl Editpad {
     pub(crate) fn settings_row_control(&self, key: &str) -> Option<Element<'_, Message>> {
         let s = &self.settings;
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
 
         // P62 热键行（key = 动作 id）：修改按钮 / 捕获中提示
         if HOTKEY_ACTIONS.iter().any(|a| a.id == key) {
@@ -863,6 +875,20 @@ impl Editpad {
 
         let control: Element<'_, Message> = match key {
             // ---- 外观 ----
+            // P154：界面语言（当前职责 = 选 UI 字体；文案 i18n 另行立项）
+            LANGUAGE_ROW_KEY => button(
+                text(if s.language == editpad_core::settings::LANG_EN {
+                    "English"
+                } else {
+                    "中文简体"
+                })
+                .size(uipx)
+                .font(uifont),
+            )
+            .padding([3, 12])
+            .style(chrome_button_style)
+            .on_press(Message::LanguageToggled)
+            .into(),
             "主题" => button(
                 text(if s.is_dark() { "深色" } else { "浅色" })
                     .size(uipx)
@@ -994,7 +1020,7 @@ impl Editpad {
         inc: Option<Message>,
     ) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let mk = |label: &str, msg: Option<Message>| {
             button(text(label.to_owned()).size(uipx).font(uifont))
                 .padding([2, 9])
@@ -1020,7 +1046,7 @@ impl Editpad {
     fn settings_font_picker(&self) -> Element<'_, Message> {
         let s = &self.settings;
         let uipx = editor::ui_font_px();
-        let uifont = self.body_font();
+        let uifont = self.ui_font();
         let sc = settings_colors(&self.theme());
 
         let current = text(match (&s.font_family, &self.active_font_family) {

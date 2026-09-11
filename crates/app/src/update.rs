@@ -99,6 +99,11 @@ impl Editpad {
         tab.editor
             .borrow_mut()
             .set_edge_column(self.settings.edge_column);
+        // P154：行号栏字体族与字号同口径下发（fresh_tab 幂等；漏下发会让
+        // 新页行号回落到正文字体，与既有页观感不一致）
+        tab.editor
+            .borrow_mut()
+            .set_gutter_font(self.gutter_font_family.map(fonts::family_font));
         tab
     }
 
@@ -321,7 +326,14 @@ impl Editpad {
         let available_fonts = enumerate_available_families();
         let (active_font_family, configured_font_missing) =
             resolve_startup_font(settings.font_family.as_deref(), &available_fonts);
-        // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
+        // P154：UI 字体（按界面语言解析）与行号位等宽字体——两者都与正文族
+        // 解耦；候选全未命中则 None（UI 回落 iced 默认、行号回落 UI 字体），
+        // 不引入失败模式。
+        let ui_font_family =
+            pick_ui_font_family(&settings.language, &available_fonts)
+                .map(|name| leak_font_family(name.to_owned()));
+        let gutter_font_family = pick_gutter_font_family(&available_fonts)
+            .map(|name| leak_font_family(name.to_owned()));        // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
         // （对齐 P20「记住最近文件」先例）
         if !settings.enable_snapshots {
             if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
@@ -336,11 +348,15 @@ impl Editpad {
             dark_mode,
             available_fonts,
             active_font_family: active_font_family.map(leak_font_family),
+            ui_font_family,
+            gutter_font_family,
             ..Self::default()
         };
         {
             let mut ed = state.cur_handle.borrow_mut();
             ed.set_font_size(font_size);
+            // P154：行号栏字体按解析出的等宽族（None = 回落 UI 字体）
+            ed.set_gutter_font(gutter_font_family.map(fonts::family_font));
             // 外观设置与 fresh_tab 同口径兜底：boot 初始页走 Self::default()
             // 的 Tab::empty()、不经过 fresh_tab——漏下发则「重启后自动换行/
             // 空白标记失效但设置里仍显示勾选」（用户实测：启动加载的文件
@@ -485,6 +501,7 @@ impl Editpad {
             | Message::HotkeyCaptureCancel
             | Message::HotkeysResetAll
             | Message::ThemeToggled
+            | Message::LanguageToggled
             | Message::FontSizeDelta(..)
             | Message::TabFontSizeDelta(..)
             | Message::TabFontSizeReset
@@ -1297,6 +1314,25 @@ impl Editpad {
                 for tab in &self.tabs {
                     tab.editor.borrow_mut().apply_highlight_theme(dark);
                 }
+                Task::none()
+            }
+            // P154：界面语言切换（中文简体 ⇄ English）——重新解析 UI 字体族
+            // 并立即生效（UI 文字下一帧换族）；行号族与语言无关，但若从未
+            // 下发过则一并补发。正文族**不受影响**（与 UI 彻底解耦）。
+            Message::LanguageToggled => {
+                let next = if self.settings.language == editpad_core::settings::LANG_EN {
+                    editpad_core::settings::LANG_ZH_CN
+                } else {
+                    editpad_core::settings::LANG_EN
+                };
+                self.settings.set_language(next);
+                self.persist_settings();
+                self.ui_font_family = pick_ui_font_family(next, &self.available_fonts)
+                    .map(|name| leak_font_family(name.to_owned()));
+                self.set_status(match self.ui_font_family {
+                    Some(family) => format!("界面语言已切换（界面字体：{family}）"),
+                    None => "界面语言已切换（未命中候选字体，回落系统默认）".to_owned(),
+                });
                 Task::none()
             }
             // P134（C7）：全局默认字号（设置步进器入口）——「跟随全局」

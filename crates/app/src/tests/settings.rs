@@ -718,6 +718,140 @@ use super::*;
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ---------- P154：UI 字体（按语言）+ 行号字体 + 正文解耦 ----------
+
+    /// 候选表按语言命中 + 宽松匹配（大小写/空白）+ 全不命中回落 None。
+    #[test]
+    fn p154_ui_and_gutter_font_picking_contract() {
+        let zh = vec![
+            "Microsoft YaHei".to_owned(),
+            "Consolas".to_owned(),
+            "Noto Sans".to_owned(),
+        ];
+        assert_eq!(
+            pick_ui_font_family("zh-CN", &zh),
+            Some("Microsoft YaHei"),
+            "中文简体应命中雅黑系"
+        );
+        assert_eq!(
+            pick_ui_font_family("zh-CN", &zh),
+            pick_ui_font_family("bogus", &zh),
+            "未知语言回落中文简体（同一候选表）"
+        );
+        // 英文候选全不在清单里 → None（调用方回落 Font::DEFAULT，不失败）
+        assert_eq!(pick_ui_font_family("en", &zh), None);
+        let en = vec!["Segoe UI".to_owned(), "Tahoma".to_owned()];
+        assert_eq!(
+            pick_ui_font_family("en", &en),
+            Some("Segoe UI"),
+            "English 应命中 Segoe UI 系"
+        );
+        // 宽松匹配：大小写/空白变体也算命中
+        let loose = vec!["microsoft  yahei  ui".to_owned()];
+        assert_eq!(
+            pick_ui_font_family("zh-CN", &loose),
+            Some("Microsoft YaHei UI"),
+            "候选匹配应忽略大小写与空白（复用 normalize_family）"
+        );
+
+        // 行号位：等宽候选链按顺序命中，全不命中 → None
+        assert_eq!(
+            pick_gutter_font_family(&["Consolas".to_owned()]),
+            Some("Consolas")
+        );
+        assert_eq!(
+            pick_gutter_font_family(&["Cascadia Mono".to_owned()]),
+            Some("Cascadia Mono"),
+            "首选缺失时顺位下移"
+        );
+        assert_eq!(
+            pick_gutter_font_family(&["Consolas".to_owned(), "Courier New".to_owned()]),
+            Some("Consolas"),
+            "候选顺序优先 Consolas"
+        );
+        assert_eq!(pick_gutter_font_family(&["Arial".to_owned()]), None);
+        assert_eq!(pick_gutter_font_family(&[]), None);
+    }
+
+    /// 用户点单的核心契约：**改正文只影响正文**（UI 与行号不动），
+    /// **切语言只影响 UI**（正文与行号不动）。
+    #[test]
+    fn p154_body_ui_and_gutter_fonts_are_decoupled() {
+        let dir = scratch_dir("p154-decouple");
+        let config = dir.join("config.toml");
+        let mut app = Editpad::default();
+        app.settings_path_override = Some(config.clone());
+        app.available_fonts = vec![
+            "Arial".to_owned(),
+            "Microsoft YaHei".to_owned(),
+            "Segoe UI".to_owned(),
+            "Consolas".to_owned(),
+        ];
+        // 启动期解析语义：中文界面 → 雅黑；行号 → Consolas
+        app.ui_font_family = pick_ui_font_family("zh-CN", &app.available_fonts);
+        app.gutter_font_family = pick_gutter_font_family(&app.available_fonts);
+        assert_eq!(app.ui_font_family, Some("Microsoft YaHei"));
+        assert_eq!(app.gutter_font_family, Some("Consolas"));
+
+        // 改正文：正文换族，UI 与行号**不受影响**
+        dispatch(&mut app, Message::SettingsFontSelected("Arial".to_owned()));
+        assert_eq!(
+            app.body_font().family,
+            iced::font::Family::Name("Arial"),
+            "正文应切到所选族"
+        );
+        assert_eq!(
+            app.ui_font().family,
+            iced::font::Family::Name("Microsoft YaHei"),
+            "改正文不得影响 UI 字体（P154 解耦契约）"
+        );
+        assert_eq!(app.gutter_font_family, Some("Consolas"), "行号字体不受影响");
+
+        // 切语言：UI 换族，正文与行号**不受影响**，且即时落盘
+        dispatch(&mut app, Message::LanguageToggled);
+        assert_eq!(app.settings.language, editpad_core::settings::LANG_EN);
+        assert_eq!(
+            app.ui_font().family,
+            iced::font::Family::Name("Segoe UI"),
+            "English 应切到 Segoe UI 系"
+        );
+        assert_eq!(
+            app.body_font().family,
+            iced::font::Family::Name("Arial"),
+            "切语言不得影响正文字体（P154 解耦契约）"
+        );
+        assert_eq!(
+            editpad_core::Settings::load_from(&config).language,
+            editpad_core::settings::LANG_EN,
+            "切语言必须即时写回 config.toml"
+        );
+
+        // 再切一次回到中文（循环两态）
+        dispatch(&mut app, Message::LanguageToggled);
+        assert_eq!(app.settings.language, editpad_core::settings::LANG_ZH_CN);
+        assert_eq!(
+            app.ui_font().family,
+            iced::font::Family::Name("Microsoft YaHei")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 候选全不命中时的降级：UI 回落 iced 默认、行号回落正文字体，
+    /// 都不 panic、不引入失败模式。
+    #[test]
+    fn p154_font_picking_degrades_gracefully_when_no_candidate() {
+        let mut app = Editpad::default();
+        app.available_fonts = vec!["Some Random Font".to_owned()];
+        app.ui_font_family = pick_ui_font_family("en", &app.available_fonts);
+        app.gutter_font_family = pick_gutter_font_family(&app.available_fonts);
+        assert!(app.ui_font_family.is_none());
+        assert!(app.gutter_font_family.is_none());
+        assert_eq!(app.ui_font(), Font::DEFAULT, "UI 回落 iced 默认字形族");
+        // 视图可构造（不 panic）
+        let _ = app.view();
+    }
+
     #[test]
     fn font_selection_via_loose_match_canonicalizes_name() {
         // 手改 config 的变体名经统一解析收敛到规范名（与启动期同一条路径）

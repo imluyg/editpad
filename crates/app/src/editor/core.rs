@@ -506,6 +506,14 @@ pub struct EditorCore {
     /// 把行号末位字形整段裁掉（用户复现：霞鹜臻楷 GB + 24px，10/11/12 只
     /// 画出首位）。None = 未实测，回退线性折算（既有行为）。
     pub(crate) gutter_char_w: Option<f32>,
+    /// P154：行号栏字形族。`None` = 用本帧正文字体（拆分前口径，逐像素
+    /// 等价）；`Some(font)` = 行号栏独立族（应用层按界面语言/系统清单解析，
+    /// 见 [`crate::fonts::pick_gutter_font_family`]）。
+    ///
+    /// 只影响行号栏**字形与字宽实测**，不改行高（`line_height` 仍由正文字号
+    /// 决定）——换行号字体不会让行距抖动。下发时 [`Self::set_gutter_font`]
+    /// 会作废度量键，控件层下一帧按新族重测 `gutter_char_w` 与墨迹盒。
+    pub(crate) gutter_font: Option<Font>,
     /// P88 字形墨迹在行盒内的上边距（px）：光标/选区等行盒装饰矩形的
     /// 纵向对齐基准——字形在行盒（行高 = 字号 × 1.375）内按字体度量
     /// 下浮 1~6px（实测 CJK 等宽钉字 ≈ 4px），行盒顶对齐会让装饰墨迹
@@ -518,10 +526,11 @@ pub struct EditorCore {
     /// 居中）。默认 0 = 未实测 → [`Self::decoration_inset`] 公式自动得 0
     /// （整行盒装饰 = 旧行为），恒安全。
     pub(crate) ink_height: f32,
-    /// P42 度量键：最近一次实测尝试的 (字体, 字号)。与上字段配对去重——
-    /// 键相同即「已按当前字体/字号测过（无论成败）」，避免每帧重测；
-    /// 字体切换（P34）/字号变更（set_font_size 折算后仍会重测校准）时换键。
-    pub(crate) metric_key: Option<(Font, f32)>,
+    /// P42 度量键：最近一次实测尝试的 (正文字体, 字号, 行号字体)。
+    /// 与上字段配对去重——键相同即「已按当前字体/字号测过（无论成败）」，
+    /// 避免每帧重测；字体切换（P34）/字号变更 / **行号字体下发（P154）**
+    /// 时换键重测校准。行号字体为 None = 跟随正文字体（旧键语义）。
+    pub(crate) metric_key: Option<(Font, f32, Option<Font>)>,
     /// 行级真实布局缓存（第 40 轮根治）：line → 每个字符起点的真实像素 x
     /// （长度 = 行字符数 + 1，末项 = 行尾 x）。由控件层每帧按可见行 shaping
     /// 注入（与正文绘制同源段落）；未注入的行回退列模型。命中时光标/选区/
@@ -677,6 +686,9 @@ impl Default for EditorCore {
             measured_char_w: None,
             // P150：行号栏字宽同样未实测起步（回退线性折算）
             gutter_char_w: None,
+            // P154：行号栏字形族默认 = None（运行时回落本帧正文字体，
+            // 与拆分前逐像素等价）；应用层按语言/系统清单下发等宽族
+            gutter_font: None,
             ink_offset: 0.0,
             // P89：默认 0 = 未实测（decoration_inset 自动退化为整行盒）
             ink_height: 0.0,
@@ -746,6 +758,23 @@ impl EditorCore {
     pub fn gutter_char_width(&self) -> f32 {
         self.gutter_char_w
             .unwrap_or_else(|| self.char_width() * GUTTER_FONT_SCALE)
+    }
+
+    /// P154：下发行号栏字形族（`None` = 回落本帧正文字体，即拆分前口径）。
+    ///
+    /// 度量键一并作废：控件层 `ensure_measured_char_width` 下一帧按新族重测
+    /// 行号字宽与墨迹盒（键含字体，改族必然重测）。**行高不受影响**（仍由
+    /// 正文字号决定），故换行号字体不会让行距/滚动口径发生变化。
+    pub(crate) fn set_gutter_font(&mut self, font: Option<Font>) {
+        if self.gutter_font != font {
+            self.gutter_font = font;
+            self.metric_key = None;
+        }
+    }
+
+    /// P154：本帧行号栏实际使用的字形族（`None` = 未下发，用正文字体）。
+    pub(crate) fn gutter_font(&self) -> Option<Font> {
+        self.gutter_font
     }
 
     /// 行号文本盒宽度（像素）：`位数 × 行号字宽 + GUTTER_NUM_SLACK`。
