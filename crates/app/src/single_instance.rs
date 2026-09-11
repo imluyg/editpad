@@ -41,17 +41,18 @@ pub(crate) fn acquire_single_instance() -> bool {
     true
 }
 
-/// 第二实例退出前的原生提示（不依赖 iced 窗口——此刻应用尚未启动）。
+/// 原生消息框（不依赖 iced 窗口——调用点都在应用尚未启动或已退出的时刻）。
+///
+/// 当前两处消费：单实例「已在运行」提示（[`notify_already_running`]）与
+/// 发布构建的 `--help` / `--version` 输出——后者不能走 stdout：P24 起
+/// 发布版是 windows 子系统应用，**没有控制台**（见 main.rs 顶部）。
 #[cfg(windows)]
-pub(crate) fn notify_already_running() {
+pub(crate) fn show_message(title: &str, body: &str) {
     use std::os::windows::ffi::OsStrExt;
 
     const MB_OK: u32 = 0;
     const MB_ICONINFORMATION: u32 = 0x40;
     const MB_TOPMOST: u32 = 0x4_0000;
-    let title = "Editpad";
-    let body = "Editpad 已在运行（同一份拷贝只允许一个实例）。\n\
-                如需打开文件，请切换到已打开的 Editpad 窗口。";
     let wide = |s: &str| -> Vec<u16> {
         std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     };
@@ -67,9 +68,18 @@ pub(crate) fn notify_already_running() {
     }
 }
 
-/// 非 Windows 平台永远不会走到第二实例分支。
+/// 非 Windows 平台无原生消息框：调用方改走 stdout。
 #[cfg(not(windows))]
-pub(crate) fn notify_already_running() {}
+pub(crate) fn show_message(_title: &str, _body: &str) {}
+
+/// 第二实例退出前的原生提示（不依赖 iced 窗口——此刻应用尚未启动）。
+pub(crate) fn notify_already_running() {
+    show_message(
+        "Editpad",
+        "Editpad 已在运行（同一份拷贝只允许一个实例）。\n\
+         如需打开文件，请切换到已打开的 Editpad 窗口。",
+    );
+}
 
 /// 第二实例的文件转发：把待开路径写进实例目录的**本实例专属**批次
 /// 文件（pid 命名）后正常退出（不弹提示——用户意图是打开文件，不是

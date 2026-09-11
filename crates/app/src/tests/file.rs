@@ -877,6 +877,53 @@ use super::*;
         );
     }
 
+    /// `--help` / `--version` 识别：修前这两个选项被当未知选项静默忽略，
+    /// `editpad --help` 的结果是打开一个空白窗口。
+    #[test]
+    fn cli_help_and_version_options_are_recognized() {
+        use std::ffi::OsString;
+        let args = |xs: &[&str]| -> Vec<OsString> {
+            std::iter::once("editpad.exe")
+                .chain(xs.iter().copied())
+                .map(OsString::from)
+                .collect()
+        };
+        assert_eq!(parse_cli_option(args(&["--help"])), Some(CliOption::Help));
+        assert_eq!(parse_cli_option(args(&["-h"])), Some(CliOption::Help));
+        assert_eq!(parse_cli_option(args(&["--version"])), Some(CliOption::Version));
+        assert_eq!(parse_cli_option(args(&["-V"])), Some(CliOption::Version));
+        // 文件与选项混排：选项优先（此刻用户要看帮助，不是打开文件）
+        assert_eq!(
+            parse_cli_option(args(&["C:/a.txt", "--help"])),
+            Some(CliOption::Help)
+        );
+        // 无选项 = 照旧打开文件 / 恢复会话
+        assert_eq!(parse_cli_option(args(&[])), None);
+        assert_eq!(parse_cli_option(args(&["C:/a.txt"])), None);
+        assert_eq!(parse_cli_option(args(&["-fullscreen"])), None);
+    }
+
+    /// `--` 之后一律按文件路径处理：`editpad -- --help` 要打开一个叫
+    /// `--help` 的文件，而不是打印帮助。
+    #[test]
+    fn cli_option_scan_stops_after_double_dash() {
+        use std::ffi::OsString;
+        let args: Vec<OsString> = ["editpad.exe", "--", "--help", "-V"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        assert_eq!(
+            parse_cli_option(args.clone()),
+            None,
+            "`--` 之后的 --help / -V 是文件名，不得被当选项"
+        );
+        assert_eq!(
+            parse_cli_file_args(args),
+            vec![PathBuf::from("--help"), PathBuf::from("-V")],
+            "同一份参数的另一半口径：两个都当文件"
+        );
+    }
+
     #[test]
     fn boot_cli_kickoff_registers_first_file_and_queues_rest() {
         let mut app = Editpad::default();

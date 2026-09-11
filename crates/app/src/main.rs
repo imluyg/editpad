@@ -31,11 +31,23 @@ pub(crate) use iced::{border::Radius, stream, window, Alignment, Background, Bor
 use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSpaceKind, ToolKind, TrimMode};
 
 fn main() -> iced::Result {
+    // `--help` / `--version` 必须在单实例判定与 iced 初始化之前处理：
+    // 两者都有副作用（迁移遗留数据 / 建窗），而用户此刻并不想开窗口。
+    // 修前这两个选项被当「未知选项」静默忽略，`editpad --help` 的结果是
+    // 打开一个空白窗口——正是用户第一反应会试的入口。
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(opt) = parse_cli_option(argv.iter().cloned()) {
+        emit_cli_text(match opt {
+            CliOption::Help => HELP_TEXT,
+            CliOption::Version => VERSION_LINE,
+        });
+        return Ok(());
+    }
     // P103：命令行参数 = 待打开文件。资源管理器「双击文件」/右键
     // 「打开方式」/多选右键「打开」都会把文件路径作为 argv 传给本程序
     // （拖动进窗口走 FileDropped 事件，是另一条路）。必须在单实例
     // 判定之前解析——第二实例要靠它决定「转发」还是「弹提示」
-    let cli_files = parse_cli_file_args(std::env::args_os());
+    let cli_files = parse_cli_file_args(argv);
     // 单实例互斥：同一份拷贝（同 exe 位置 → 同实例键）只允许一个进程。
     // 有待开文件的第二实例把路径**转发**给已运行实例（握手文件 + 轮询，
     // 在新标签页打开）后静默退出；裸启动的第二实例才弹提示。
@@ -72,6 +84,73 @@ fn main() -> iced::Result {
         // 不显式关掉的话点 X 会直接退进程，永远轮不到未保存确认）
         .exit_on_close_request(false)
         .run()
+}
+
+/// `--version` 输出（单行）。
+const VERSION_LINE: &str = concat!("editpad ", env!("CARGO_PKG_VERSION"));
+
+/// `--help` 输出。版本号经 `concat!` 编进常量，零运行时开销。
+const HELP_TEXT: &str = concat!(
+    "editpad ",
+    env!("CARGO_PKG_VERSION"),
+    " —— 轻量文本编辑器\n",
+    "\n",
+    "用法:\n",
+    "  editpad                 启动（恢复上次会话）\n",
+    "  editpad <文件>...       打开一个或多个文件（逐个开成标签页）\n",
+    "\n",
+    "选项:\n",
+    "  -h, --help              显示本帮助后退出\n",
+    "  -V, --version           显示版本号后退出\n",
+    "      --                  其后全部按文件路径处理（含以 - 开头的文件名）\n",
+    "\n",
+    "说明:\n",
+    "  资源管理器双击文件、右键「打开方式」、多选打开，都会把路径作为命令行\n",
+    "  参数传入。同一份拷贝同时只运行一个实例，第二实例带文件参数时会把路径\n",
+    "  转发给已运行的窗口后自行退出。\n",
+);
+
+/// 启动期就要处理的命令行选项（与待开文件互斥）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliOption {
+    Help,
+    Version,
+}
+
+/// 识别 `--help` / `--version`（纯函数便于单测）。
+///
+/// 与 [`parse_cli_file_args`] 同口径：跳过程序自身路径，`--` 之后停止
+/// 扫描（让 `-- --help` 这样的合法文件名不被误判成选项）。
+fn parse_cli_option<I>(args: I) -> Option<CliOption>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    for arg in args.into_iter().skip(1) {
+        match arg.to_string_lossy().as_ref() {
+            "--" => break,
+            "--help" | "-h" => return Some(CliOption::Help),
+            "--version" | "-V" => return Some(CliOption::Version),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 输出命令行文本（`--help` / `--version` 的结果）。
+///
+/// 调试构建（有控制台）与非 Windows 平台走 stdout；**发布构建的 Windows
+/// 版没有控制台**（P24 windows 子系统），改弹原生消息框——与单实例提示
+/// 同一手法，否则用户敲完 `--help` 什么也看不到。
+fn emit_cli_text(text: &str) {
+    #[cfg(test)]
+    let _ = text;
+    #[cfg(not(test))]
+    {
+        #[cfg(any(debug_assertions, not(windows)))]
+        println!("{text}");
+        #[cfg(all(not(debug_assertions), windows))]
+        single_instance::show_message("Editpad", text);
+    }
 }
 
 /// 收集命令行传入的待打开文件路径（P103：双击文件 / 「打开方式」/
