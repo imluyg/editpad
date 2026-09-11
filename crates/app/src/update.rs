@@ -452,10 +452,27 @@ impl Editpad {
         self.cur_handle.borrow_mut().pointer_focus(true);
     }
 
-    /// P130：文件监视巡检链（P149 改订阅时钟驱动，见 `tick_stream`）：
-    /// 每 2s 一拍——有监视页时 stat 比对 (mtime, size)，干净活动页被改
-    /// 则静默重载。
+    /// 消息总入口：按域分派到 `update_editor` / `update_tabs` / `update_file` /
+    /// `update_find` / `update_settings` / `update_menus` / `update_session`。
+    ///
+    /// ## 递归重入约束（改动前必读）
+    /// 本函数会被**同步递归调用**——剪切/粘贴、列编辑器确认、CLI 文件续排
+    /// 等路径都靠它继承置脏与自动保存调度（当前 8 处调用点）。编辑器状态存
+    /// 在 `Rc<RefCell<EditorCore>>` 里，所以**递归调用点必须落在借用作用域
+    /// 之外**：若在 `borrow()` / `borrow_mut()` 仍存活时重入，之后任何
+    /// `borrow_mut()` 都会 panic（`already mutably borrowed`），而栈回溯离
+    /// 现场很远、极难定位。现有调用点均为安全形态——形如
+    /// `let t = self.cur_handle.borrow().x();` 的临时借用在语句末即释放，
+    /// 递归发生在借用期之外；**新增递归调用时请照此办理**。
+    ///
+    /// 调试构建会在入口自检一次（见下方断言），把这类问题暴露在最近的位置。
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        // 入口自检：持有 editor 借用时重入 = 后续必然 panic。探测守卫在
+        // 表达式结束即丢弃，不改变借用状态；发布构建零开销。
+        debug_assert!(
+            self.cur_handle.try_borrow_mut().is_ok(),
+            "update 不得在持有 editor 借用时被调用——递归重入必须落在借用作用域之外"
+        );
         match &message {
             // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
             Message::Edit(..)

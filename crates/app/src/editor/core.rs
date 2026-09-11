@@ -1114,6 +1114,19 @@ impl EditorHandle {
     pub fn borrow_mut(&self) -> std::cell::RefMut<'_, EditorCore> {
         self.0.borrow_mut()
     }
+
+    /// 试探性可变借用：已被借用时返回 `Err` 而不 panic。
+    ///
+    /// 唯一用途是调试构建下的入口自检（见 `Editpad::update`）——那里若正
+    /// 持有借用，后续任何 `borrow_mut()` 都会 panic 且回溯离现场很远。
+    /// 唯一调用点在 `Editpad::update` 的 `debug_assert!` 里。`debug_assert!`
+    /// 展开为 `if cfg!(debug_assertions) { .. }`（编译期常量条件，**代码不
+    /// 被剔除**），故发布构建同样存在调用者、不会触发 dead_code。
+    pub fn try_borrow_mut(
+        &self,
+    ) -> Result<std::cell::RefMut<'_, EditorCore>, std::cell::BorrowMutError> {
+        self.0.try_borrow_mut()
+    }
 }
 
 // ---------- Tab↔空格纯转换助手（第 62 轮） ----------
