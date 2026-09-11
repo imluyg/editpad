@@ -1,5 +1,31 @@
 use super::*;
 
+    /// 设置弹窗的几何契约（P47 卡片尺寸纯函数的落地结果）：
+    /// **宽 720、高 vh−32、且水平垂直都居中**。
+    ///
+    /// 走生产视图树——卡片尺寸算错或叠层位置跑偏，这里就红；
+    /// 此前本文件的弹窗用例只写 `let _ = app.view()`（仅验「不 panic」）。
+    fn assert_settings_card_centered(app: &Editpad) {
+        let ui = ViewTree::layout_default(app);
+        let card = ui
+            .find(|b| (700.0..=740.0).contains(&b.width) && b.height > 300.0)
+            .unwrap_or_else(|| panic!("应能找到设置弹窗卡片；\n树形：\n{}", ui.dump()));
+        let vp = ui.viewport();
+        let c = card.center();
+        assert!(
+            (c.x - vp.width / 2.0).abs() < 1.0,
+            "弹窗应水平居中：中心 x = {:.1}，视口宽 {:.1}",
+            c.x,
+            vp.width
+        );
+        assert!(
+            (c.y - vp.height / 2.0).abs() < 1.0,
+            "弹窗应垂直居中：中心 y = {:.1}，视口高 {:.1}",
+            c.y,
+            vp.height
+        );
+    }
+
     // ---------- P33 字体一致性 ----------
 
     #[test]
@@ -217,13 +243,13 @@ use super::*;
         for page in SettingsPage::ALL {
             dispatch(&mut app, Message::SettingsPageSelected(page));
             assert_eq!(app.settings_page, page);
-            let _ = app.view();
+            assert_settings_card_centered(&app);
         }
 
         // 搜索态：输入词入账、视图可构造（跨分类过滤分支）
         dispatch(&mut app, Message::SettingsSearchChanged("快照".to_owned()));
         assert_eq!(app.settings_search, "快照");
-        let _ = app.view();
+        assert_settings_card_centered(&app);
 
         // 点导航 = 离开搜索态（同款语义：搜索词被清空）
         dispatch(&mut app, Message::SettingsPageSelected(SettingsPage::Save));
@@ -934,8 +960,9 @@ use super::*;
         );
         assert!(app.status.is_empty(), "重复选中不应产生状态栏噪声");
 
-        // 英文界面下整体视图可构造（不 panic）
-        let _ = app.view();
+        // 英文界面下弹窗几何不变（换文案不应破坏布局）
+        dispatch(&mut app, Message::SettingsToggled);
+        assert_settings_card_centered(&app);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -985,8 +1012,9 @@ use super::*;
         assert!(app.ui_font_family.is_none());
         assert!(app.gutter_font_family.is_none());
         assert_eq!(app.ui_font(), Font::DEFAULT, "UI 回落 iced 默认字形族");
-        // 视图可构造（不 panic）
-        let _ = app.view();
+        // 字体候选全落空时，正文仍须正常布局（回落不得让编辑器塌掉）
+        let body = ViewTree::layout_default(&app).editor_body();
+        assert!(body.height > 150.0, "字体回落后正文仍应占据正常高度");
     }
 
     #[test]
@@ -1054,4 +1082,3 @@ use super::*;
             )))
         ));
     }
-

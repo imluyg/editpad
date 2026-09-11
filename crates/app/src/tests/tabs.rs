@@ -1,5 +1,25 @@
 use super::*;
 
+    /// 断言视图树里存在满足谓词的节点（找不到时打印整棵树便于定位）。
+    ///
+    /// 此前多处只写 `let _ = app.view()`——那只证明「构造不 panic」，
+    /// 证明不了「东西真的画出来了」。浮层渲染不出来才是真故障。
+    fn assert_overlay(app: &Editpad, what: &str, pred: impl Fn(iced::Rectangle) -> bool) {
+        let ui = ViewTree::layout_default(app);
+        assert!(
+            ui.find(pred).is_some(),
+            "{what} 应渲染在视图树里；\n树形：\n{}",
+            ui.dump()
+        );
+    }
+
+    /// 标签条命中面的 bounds（横贯窗口、位于菜单栏之下的窄带）。
+    fn strip_bounds(app: &Editpad) -> iced::Rectangle {
+        ViewTree::layout_default(app)
+            .find(|b| b.width > 1000.0 && (28.0..=48.0).contains(&b.height) && b.y > 20.0)
+            .expect("应能找到标签条")
+    }
+
     // ---------- 不变量：tabs 恒非空 ----------
 
     /// 删页路径（关页 / 批量关 / 恢复占位页回收）之后 `tabs` 必须仍非空，
@@ -282,9 +302,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::ViewportResized(1024.0, 768.0));
         dispatch(&mut app, Message::CursorMoved(iced::Point::new(40.0, 40.0)));
         dispatch(&mut app, Message::TabContextMenu(0));
-        let _ = app.view();
+        let is_menu_card =
+            |b: iced::Rectangle| (195.0..=215.0).contains(&b.width) && b.height > 200.0;
+        assert_overlay(&app, "右键菜单卡片（定宽 200）", is_menu_card);
         dispatch(&mut app, Message::SettingsToggled);
-        let _ = app.view();
+        // 浮层共存：菜单与设置弹窗必须同时渲染，互不吞掉
+        assert_overlay(&app, "设置弹窗（宽 720）", |b| {
+            (700.0..=740.0).contains(&b.width) && b.height > 300.0
+        });
+        assert_overlay(&app, "右键菜单卡片（定宽 200）", is_menu_card);
     }
 
     #[test]
@@ -653,7 +679,10 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert_eq!(app.renaming_tab, Some(0));
         assert_eq!(app.rename_input, "origin.txt", "预填当前文件名");
         assert!(!app.busy, "就地重命名不进对话框阶段");
-        let _ = app.view(); // 输入框视图可构造
+        // 输入框真的渲染在标签条内（P64 自动聚焦 + 全选的载体）
+        assert_overlay(&app, "标签条内的重命名输入框", |b| {
+            (140.0..=160.0).contains(&b.width) && (28.0..=34.0).contains(&b.height)
+        });
 
         // 提交：磁盘改名 + 页路径/戳/最近文件迁移
         dispatch(&mut app, Message::TabRenameInputChanged("改名.txt".into()));
@@ -789,10 +818,15 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         let mut app = app_with_tabs(2);
         dispatch(&mut app, Message::TabHovered(Some(0)));
         dispatch(&mut app, Message::TogglePinTab(1));
-        let _ = app.view();
+        let strip_hover = strip_bounds(&app);
         // 悬停离开后重建一遍（悬停态 None 分支）
         dispatch(&mut app, Message::TabHovered(None));
-        let _ = app.view();
+        let strip_leave = strip_bounds(&app);
+        assert_eq!(
+            strip_hover.height, strip_leave.height,
+            "悬停/离开不得改变标签条高度（否则标签条会随鼠标抖动）"
+        );
+        assert!(strip_hover.width > 1000.0, "标签条命中面仍应横贯窗口");
     }
 
     // ---------- P134：每页换行/字号独立（路线图 C7） ----------

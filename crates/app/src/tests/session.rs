@@ -1,5 +1,34 @@
 use super::*;
 
+    /// 外部修改提示条的布局契约。
+    ///
+    /// 两种失败都严重：条**渲染不出来** = 用户永远看不到外部改动（静默失败）；
+    /// 条**覆盖在正文上** = 挡住正在编辑的内容。故同时钉住：
+    /// ① 条确实存在于**正文之下**（正文底与视口底之间）；
+    /// ② 存在可点控件（重载 / 忽略两个按钮）——条不是一段死文字。
+    ///
+    /// 走生产视图树；此前本文件的三处只写 `let _ = app.view()`（仅验「不 panic」）。
+    fn assert_external_change_bar(app: &Editpad) {
+        let ui = ViewTree::layout_default(app);
+        let body = ui.editor_body();
+        let below_body = |b: &iced::Rectangle| b.y >= body.y + body.height - 0.5;
+        let bar = ui
+            .find(|b| (20.0..=60.0).contains(&b.height) && below_body(&b))
+            .unwrap_or_else(|| panic!("外部修改提示条应渲染在正文之下；\n树形：\n{}", ui.dump()));
+        assert!(
+            bar.y + bar.height <= ui.viewport().height,
+            "提示条不得溢出视口底部：{bar:?}"
+        );
+        assert!(
+            ui.find(|b| (40.0..=110.0).contains(&b.width)
+                && (18.0..=36.0).contains(&b.height)
+                && b.y >= body.y + body.height - 0.5)
+                .is_some(),
+            "提示条内应有可点按钮（重载 / 忽略）；\n树形：\n{}",
+            ui.dump()
+        );
+    }
+
     // ---------- P32 最近文件光标/滚动记忆 ----------
 
     #[test]
@@ -1397,7 +1426,7 @@ use super::*;
         // 聚焦：置脏页绝不静默重载，弹提示条
         dispatch(&mut app, Message::WindowFocused);
         assert_eq!(app.external_change, Some(vec![0]));
-        let _ = app.view(); // 提示条视图可构造
+        assert_external_change_bar(&app);
 
         // 忽略 → 以磁盘现状重记戳，再次聚焦不再提示
         dispatch(&mut app, Message::IgnoreExternalChange(0));
@@ -1502,7 +1531,7 @@ use super::*;
         // 重载完成后再次聚焦：页1已重记戳不再命中，队列只剩页0
         dispatch(&mut app, Message::WindowFocused);
         assert_eq!(app.external_change, Some(vec![0]));
-        let _ = app.view();
+        assert_external_change_bar(&app);
 
         // 忽略页0 → 队列清空；再改两页且都置脏 → 聚合 [0,1]
         dispatch(&mut app, Message::IgnoreExternalChange(0));
@@ -1521,7 +1550,7 @@ use super::*;
         // 忽略首页 → 队列切到下一页（条不消失）
         dispatch(&mut app, Message::IgnoreExternalChange(0));
         assert_eq!(app.external_change, Some(vec![1]));
-        let _ = app.view();
+        assert_external_change_bar(&app);
 
         // 全部忽略 → 清队且两页都重记戳（再次聚焦不再提示）
         dispatch(&mut app, Message::IgnoreAllExternalChanges);

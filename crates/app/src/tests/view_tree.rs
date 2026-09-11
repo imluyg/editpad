@@ -124,6 +124,14 @@ impl<'a> ViewTree<'a> {
         Layout::new(&self.root)
     }
 
+    /// 本次布局实际使用的视口。
+    ///
+    /// 断言「居中」这类契约时要用它、而不是直接读 `app.viewport_size`——
+    /// 后者可能是 `(0, 0)`，而夹具已回退到默认视口。
+    pub(crate) fn viewport(&self) -> Size {
+        self.viewport.size()
+    }
+
     /// 按树路径取 bounds（路径 = 逐层的 child 下标）。
     ///
     /// 保留 P100 的原始手法；**新用例优先用 [`Self::find`]**——硬编码路径
