@@ -935,23 +935,6 @@ fn fif_scan_touches_neither_document_nor_cursors() {
 
 // ---------- P150：查找轻浮层（居中 + 不挤占正文） ----------
 
-/// 渲染一次应用视图并返回全部节点 bounds。
-///
-/// 经 [`ViewTree`] 夹具布局——它统一了「布局生产视图树」这件事（此前本文件
-/// 与 tabs / chrome 各写一遍样板），并按 `app.viewport_size` 取视口。
-fn app_layout_nodes(app: &Editpad) -> Vec<iced::Rectangle> {
-    ViewTree::layout_default(app).find_all(|_| true)
-}
-
-/// 正文编辑器节点 = 全宽节点里 y > 40（菜单/标签条之下）且最高的那个。
-fn editor_node(nodes: &[iced::Rectangle]) -> iced::Rectangle {
-    *nodes
-        .iter()
-        .filter(|b| b.width > 1000.0 && b.y > 40.0 && b.height > 150.0)
-        .max_by(|a, b| a.height.partial_cmp(&b.height).unwrap())
-        .expect("应能找到正文编辑器节点")
-}
-
 fn app_with_lines(lines: usize) -> Editpad {
     let mut app = Editpad::default();
     app.viewport_size = (1024.0, 768.0); // 与真实窗口同尺寸（卡片宽度钳制要用）
@@ -977,12 +960,11 @@ fn app_with_lines(lines: usize) -> Editpad {
 #[test]
 fn p150_find_overlay_centered_and_does_not_shrink_editor() {
     let mut app = app_with_lines(12);
-    let off = editor_node(&app_layout_nodes(&app));
+    let off = ViewTree::layout_default(&app).editor_body();
 
     dispatch(&mut app, Message::FindToggled);
     assert!(app.find_visible, "Ctrl+F 应打开查找");
-    let nodes_on = app_layout_nodes(&app);
-    let on = editor_node(&nodes_on);
+    let on = ViewTree::layout_default(&app).editor_body();
     assert_eq!(
         (off.y, off.height),
         (on.y, on.height),
@@ -990,12 +972,7 @@ fn p150_find_overlay_centered_and_does_not_shrink_editor() {
     );
 
     // 卡片：宽度贴近 FIND_CARD_W、水平居中于窗口
-    let card = nodes_on
-        .iter()
-        .filter(|b| (480.0..=600.0).contains(&b.width) && b.height > 80.0)
-        .max_by(|a, b| a.height.partial_cmp(&b.height).unwrap())
-        .copied()
-        .expect("应能找到查找浮层卡片");
+    let card = ViewTree::layout_default(&app).find_layer_card();
     let center_x = card.x + card.width * 0.5;
     let center_y = card.y + card.height * 0.5;
     eprintln!("[P150] 卡片 = {card:?} 中心 = ({center_x:.1},{center_y:.1})");
@@ -1010,7 +987,7 @@ fn p150_find_overlay_centered_and_does_not_shrink_editor() {
 
     // 结果面板开态同样不占正文（面板在卡片内滚动）
     app.find_all_visible = true;
-    let panel = editor_node(&app_layout_nodes(&app));
+    let panel = ViewTree::layout_default(&app).editor_body();
     assert_eq!(
         (off.y, off.height),
         (panel.y, panel.height),
@@ -1020,7 +997,7 @@ fn p150_find_overlay_centered_and_does_not_shrink_editor() {
     // 关栏后浮层消失（节点回到基线）
     dispatch(&mut app, Message::FindToggled);
     assert!(!app.find_visible);
-    let after = editor_node(&app_layout_nodes(&app));
+    let after = ViewTree::layout_default(&app).editor_body();
     assert_eq!((off.y, off.height), (after.y, after.height));
 }
 
@@ -1123,13 +1100,7 @@ fn find_overlay_drags_and_clears_its_status_on_close() {
     dispatch(&mut app, Message::FindCursorMoved(Point::new(200.0, 120.0)));
     dispatch(&mut app, Message::FindDragEnd);
     let pos = app.find_pos.expect("应持有位置");
-    let nodes = app_layout_nodes(&app);
-    let card = nodes
-        .iter()
-        .filter(|b| (480.0..=600.0).contains(&b.width) && b.height > 80.0)
-        .max_by(|a, b| a.height.partial_cmp(&b.height).unwrap())
-        .copied()
-        .expect("应能找到查找浮层卡片");
+    let card = ViewTree::layout_default(&app).find_layer_card();
     assert!(
         (card.x - pos.x).abs() < 1.0 && (card.y - pos.y).abs() < 1.0,
         "卡片位置应等于 find_pos：卡片 {card:?}，pos {pos:?}"
@@ -1179,11 +1150,10 @@ fn p153_editor_click_dims_find_overlay_and_card_click_restores() {
     // 淡出态下浮层布局不变：卡片仍是那一个定宽高卡片
     //（宽度口径与 `view::FIND_CARD_W` 一致 = 560；常量是 view 模块私有，
     //  测试里按 480..=600 区间认卡片，与 p150 的位置核对同口径）
-    let nodes = app_layout_nodes(&app);
     assert!(
-        nodes
-            .iter()
-            .any(|b| (480.0..=600.0).contains(&b.width) && b.height > 100.0),
+        ViewTree::layout_default(&app)
+            .find(|b| (480.0..=600.0).contains(&b.width) && b.height > 100.0)
+            .is_some(),
         "淡出态下卡片框体应保持不变（仅背板透明度变化）"
     );
 

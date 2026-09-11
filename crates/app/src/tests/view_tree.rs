@@ -36,6 +36,27 @@ pub(crate) const DEFAULT_VIEWPORT: Size = Size::new(1280.0, 800.0);
 ///
 /// 生命周期 `'a` 绑定被借用的 `Editpad`——夹具不拥有应用状态，
 /// 需要改状态时照常在夹具外用 `dispatch(&mut app, msg)`。
+///
+/// ## ⚠️ 借用用法：优先「临时值」，别绑定成变量
+/// `ViewTree` 内部持有 `Element` / `Tree`（**都实现 `Drop`**），所以借用会
+/// 一直活到作用域末尾，NLL 不会提前释放它。于是这样写会编译失败：
+/// ```ignore
+/// let ui = ViewTree::layout_default(&app);
+/// assert!(ui.editor_body().height > 100.0);
+/// dispatch(&mut app, Message::FindToggled); // E0502：app 仍被不可变借用
+/// ```
+/// 正确写法是让夹具作为**临时值**，借用随语句结束即刻释放：
+/// ```ignore
+/// let body = ViewTree::layout_default(&app).editor_body();   // ✅
+/// let card = ViewTree::layout_default(&app).find_layer_card(); // ✅
+/// ```
+/// 确实要多查几项时，用一个块把借用收紧：
+/// ```ignore
+/// let (a, b) = {
+///     let ui = ViewTree::layout_default(&app);
+///     (ui.editor_body(), ui.find_layer_card())
+/// };
+/// ```
 pub(crate) struct ViewTree<'a> {
     element: Element<'a, Message>,
     tree: Tree,
@@ -81,6 +102,15 @@ impl<'a> ViewTree<'a> {
         Self::layout(app, size)
     }
 
+    /// 查找浮层卡片 = 定宽（`view::FIND_CARD_W` ≈ 560）且足够高的那一块。
+    ///
+    /// 卡片宽度常量是 view 模块私有的，故按区间认卡片——P150 / P152 / P153
+    /// 三处一直各写一遍同一区间，收拢到这儿。
+    pub(crate) fn find_layer_card(&self) -> Rectangle {
+        self.find(|b| (480.0..=600.0).contains(&b.width) && b.height > 80.0)
+            .unwrap_or_else(|| panic!("应能找到查找浮层卡片；\n树形：\n{}", self.dump()))
+    }
+
     /// 正文编辑器节点 = 全宽、位于菜单/标签条之下、最高的那一块。
     ///
     /// 把这个几何谓词内置：调用点不必各自拼（P150 起一直散在调用处）。
@@ -119,22 +149,6 @@ impl<'a> ViewTree<'a> {
             layout.children().find_map(|child| walk(child, pred))
         }
         walk(self.root(), &pred)
-    }
-
-    /// 收集**所有**满足谓词的节点 bounds（如「全部高度 < 40 的横带」）。
-    pub(crate) fn find_all(&self, pred: impl Fn(Rectangle) -> bool) -> Vec<Rectangle> {
-        fn walk(layout: Layout<'_>, pred: &impl Fn(Rectangle) -> bool, out: &mut Vec<Rectangle>) {
-            let bounds = layout.bounds();
-            if pred(bounds) {
-                out.push(bounds);
-            }
-            for child in layout.children() {
-                walk(child, pred, out);
-            }
-        }
-        let mut out = Vec::new();
-        walk(self.root(), &pred, &mut out);
-        out
     }
 
     /// 整棵树的 bounds 缩进打印——测试作者找节点路径/尺寸时先跑这个。
