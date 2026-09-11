@@ -3,6 +3,7 @@
 # Usage (run from repo root, inside the harness PowerShell session):
 #   & .\package.ps1             # full flow (includes release build)
 #   & .\package.ps1 -SkipBuild  # repackage existing exe only
+#   & .\package.ps1 -SkipCheck  # skip the release-tag check (local trials)
 #
 # Output: dist/Editpad-<version>-win64.zip (exe + README + license).
 # dist/ is gitignored (artifacts are reproducible).
@@ -10,11 +11,33 @@
 # without a BOM using the legacy ANSI codepage, so non-ASCII comments
 # would turn into mojibake and can break parsing.
 
-param([switch]$SkipBuild)
+param([switch]$SkipBuild, [switch]$SkipCheck)
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $cargo = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe'
+
+# 0. Release traceability: a package must come from a tagged, clean revision so
+#    the zip can be traced back to its source. Skipped with -SkipCheck, and also
+#    skipped (with a warning) when git is unavailable - packaging itself does
+#    not depend on git.
+if (-not $SkipCheck) {
+    $git = (Get-Command git -ErrorAction SilentlyContinue).Source
+    if (-not $git) {
+        foreach ($p in @("$env:ProgramFiles\Git\cmd\git.exe", 'E:\software\Git\cmd\git.exe')) {
+            if (Test-Path $p) { $git = $p; break }
+        }
+    }
+    if ($git -and (Test-Path $git)) {
+        $dirty = & $git -C $root status --porcelain
+        if ($dirty) { throw 'working tree is dirty - commit before packaging (or pass -SkipCheck)' }
+        $tag = & $git -C $root describe --tags --exact-match HEAD 2>$null
+        if (-not $tag) { throw 'HEAD is not tagged - tag the release commit before packaging (or pass -SkipCheck)' }
+        Write-Host ("== release: {0} @ {1} ==" -f $tag, (& $git -C $root rev-parse --short HEAD))
+    } else {
+        Write-Warning 'git not found - skipping release-tag check'
+    }
+}
 
 # Version comes from workspace.package (first `version = ` line in Cargo.toml).
 $versionLine = Select-String -Path (Join-Path $root 'Cargo.toml') -Pattern '^version = "(.+)"'
