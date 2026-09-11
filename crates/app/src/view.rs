@@ -590,10 +590,9 @@ impl Editpad {
             return;
         }
         self.tabs.remove(idx);
-        if self.tabs.is_empty() {
-            let tab = self.fresh_tab();
-            self.tabs.push(tab);
-        }
+        // 占位页也走同一收口（不变量见 Editpad::ensure_nonempty_tabs）：
+        // 恢复期间删掉唯一占位页而队列尚有后续时，不能让 tabs 变空。
+        let _ = self.ensure_nonempty_tabs();
         for entry in &mut self.restore_queue {
             if entry.tab > idx {
                 entry.tab -= 1;

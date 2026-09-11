@@ -1,5 +1,35 @@
 use super::*;
 
+    // ---------- 不变量：tabs 恒非空 ----------
+
+    /// 删页路径（关页 / 批量关 / 恢复占位页回收）之后 `tabs` 必须仍非空，
+    /// 且 `active_tab` 保持合法。
+    ///
+    /// 契约：`set_active_tab` 用 `len() - 1` 钳制、`SwitchTabNext/Prev`
+    /// 用 `% len()` 回绕——空集会分别下溢与除零。三处删页点已收口到
+    /// [`Editpad::ensure_nonempty_tabs`]，本测试钉住该不变量。
+    #[test]
+    fn tabs_stay_nonempty_after_closing_last() {
+        let mut app = Editpad::default();
+        assert_eq!(app.tabs.len(), 1, "前置：默认单页");
+
+        // ① 关闭唯一页 → 补出一个干净页，不变量不破
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert!(!app.tabs.is_empty(), "关掉最后一页后必须仍有页");
+        assert!(app.active_tab < app.tabs.len(), "active_tab 必须合法");
+        assert!(app.cur_handle.borrow().doc.is_empty(), "补出的应是干净页");
+
+        // ② 回绕切换在单页下不得 panic（`% len()` 除零面）
+        dispatch(&mut app, Message::SwitchTabNext);
+        dispatch(&mut app, Message::SwitchTabPrev);
+        assert_eq!(app.active_tab, 0, "单页来回切换仍停在 0");
+
+        // ③ 恢复占位页回收路径同款：删掉唯一占位页不得留下空集合
+        app.drop_restore_placeholder(0);
+        assert!(!app.tabs.is_empty(), "回收占位页后必须仍有页");
+        assert!(app.active_tab < app.tabs.len());
+    }
+
     // ---------- P21 多标签骨架 ----------
 
     #[test]

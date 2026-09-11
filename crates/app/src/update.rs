@@ -145,6 +145,26 @@ impl Editpad {
         }
     }
 
+    /// 保证标签页集合非空：删页后若已空，补一个干净未命名页。
+    /// 返回补出来的新页下标（原本非空时为 `None`）。
+    ///
+    /// ## 不变量：`tabs` 恒非空
+    /// `set_active_tab` / `refresh_cur_handle` 用 `len() - 1` 钳制，
+    /// `SwitchTabNext` / `SwitchTabPrev` 用 `% len()` 回绕——空集会
+    /// 分别导致**下溢**与**除零**。此前由三处删页点各自手写
+    /// `if self.tabs.is_empty() { … }` 守卫维护，属重复实现：新增第四处
+    /// 删页一旦漏写即 panic，且编译器无从提示。现统一收口到本函数，
+    /// 三处删页点必须都走它（回归测试 `tabs_stay_nonempty_after_closing_last`
+    /// 钉住该契约）。
+    pub(crate) fn ensure_nonempty_tabs(&mut self) -> Option<usize> {
+        if !self.tabs.is_empty() {
+            return None;
+        }
+        let tab = self.fresh_tab();
+        self.tabs.push(tab);
+        Some(self.tabs.len() - 1)
+    }
+
     /// 切换活动页并同步长期别名（所有 active_tab 变更必须经此或
     /// [`Self::refresh_cur_handle`])。
     pub(crate) fn set_active_tab(&mut self, idx: usize) {
@@ -215,10 +235,7 @@ impl Editpad {
             Some(c) if c > idx => Some(c - 1),
             other => other,
         };
-        if self.tabs.is_empty() {
-            let tab = self.fresh_tab();
-            self.tabs.push(tab);
-            let last = self.tabs.len() - 1;
+        if let Some(last) = self.ensure_nonempty_tabs() {
             self.assign_untitled_num(last);
         }
         // P31：页集合结构已变——下一拍重写清单，防崩溃恢复复活已关的页
@@ -267,10 +284,7 @@ impl Editpad {
                 Some(c - idxs.iter().filter(|&&i| i < c).count())
             }
         });
-        if self.tabs.is_empty() {
-            let tab = self.fresh_tab();
-            self.tabs.push(tab);
-            let last = self.tabs.len() - 1;
+        if let Some(last) = self.ensure_nonempty_tabs() {
             self.assign_untitled_num(last);
         }
         self.touch_manifest_stale();
