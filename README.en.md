@@ -26,7 +26,13 @@ cargo fmt                    # format (rustfmt.toml)
 ./package.ps1                # release packaging: build → stage → zip → SHA256
 ```
 
-Large-file acceptance: open `dev-assets/bench-50mb.log` (68MB / 600k lines) — the UI stays draggable during loading and the progress bar advances in real time; once it opens, scrolling and editing don't lag. Open `.rs` / `.py` / `.md` files to see syntax highlighting.
+Large-file acceptance: **the sample is not in the repo** (`dev-assets/` is gitignored), so generate it once first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # ~65MB / 600k lines
+```
+
+Then open `dev-assets/bench-50mb.log` — the UI stays draggable during loading and the progress bar advances in real time; once it opens, scrolling and editing don't lag. Open `.rs` / `.py` / `.md` files to see syntax highlighting.
 
 ## Features
 
@@ -245,6 +251,7 @@ editpad/
 │       │   └── tests/          # app-layer tests split by domain (tabs/file/find/session/…)
 │       └── assets/             # assets such as app.ico (embedded into the exe by build.rs)
 ├── vendor/iced_tiny_skia/      # in-place-maintained render-layer patch
+├── tools/                      # in-repo helper scripts (gen-bench-log.ps1 builds the sample)
 ├── dev-assets/                 # large-file acceptance sample (bench-50mb.log, gitignored)
 └── package.ps1                 # release packaging (build → stage → zip → SHA256)
 ```

@@ -27,8 +27,14 @@ cargo fmt                    # 格式化（rustfmt.toml）
 ./package.ps1                # 发布打包：build → stage → zip → SHA256
 ```
 
-大文件验收：打开 `dev-assets/bench-50mb.log`（68MB / 60 万行）——加载期间界面可拖动、
-进度条实时推进；打开后滚动与编辑不卡顿。打开 `.rs` / `.py` / `.md` 等文件可看到语法着色。
+大文件验收：**样本不在仓库里**（`dev-assets/` 已 gitignore），先用脚本生成一次：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 约 65MB / 60 万行
+```
+
+再打开 `dev-assets/bench-50mb.log`——加载期间界面可拖动、进度条实时推进；打开后滚动与编辑不卡顿。
+打开 `.rs` / `.py` / `.md` 等文件可看到语法着色。
 
 ## 功能一览
 
@@ -349,6 +355,7 @@ editpad/
 │       │   └── tests/          # app 层测试按域拆分（tabs/file/find/session/…）
 │       └── assets/             # app.ico 等资源（build.rs 编入 exe）
 ├── vendor/iced_tiny_skia/      # 就地维护的渲染层补丁
+├── tools/                      # 仓库内工具脚本（gen-bench-log.ps1 生成验收样本）
 ├── dev-assets/                 # 大文件验收样本（bench-50mb.log，gitignore）
 └── package.ps1                 # 发布打包（build → stage → zip → SHA256）
 ```
