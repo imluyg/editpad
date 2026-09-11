@@ -415,3 +415,33 @@ fn p153_press_observer_captures_press_so_editor_cannot_steal_ime_focus() {
     }
     assert!(outside.is_empty());
 }
+
+/// P153：**点正文**必须让应用收到 `EditorBodyPressed`——查找框据此整框转半透明。
+///
+/// 本用例是对上面两条 `p153_press_observer_*` 的**端到端补位**：那两条手工
+/// 拼装 `PressObserver` 与模拟内容，验的是观察层自身的语义；而「真实
+/// `view()` 里正文控件是否真的把按下转成了这条消息」此前无人验证——P153
+/// 恰被复报 5 轮，病根正在这种「测试跑的不是用户那棵树」。
+///
+/// 经 [`ViewTree`] 走**生产视图树 + 真实事件**。
+#[test]
+fn p153_clicking_editor_body_emits_press_message_through_view_tree() {
+    let mut app = Editpad::default();
+    app.viewport_size = (1024.0, 768.0);
+    let mut ui = ViewTree::layout_default(&app);
+
+    let body = ui.editor_body();
+    let hit = ui.click(body.center());
+    assert!(
+        hit.iter().any(|m| matches!(m, Message::EditorBodyPressed)),
+        "点正文必须发出 EditorBodyPressed（查找框据此淡出）；实际 {hit:?}"
+    );
+
+    // 反证：点菜单栏不得产生这条消息——否则淡出会被误触发
+    let menu = ui.bounds_at(&[0, 0, 0]);
+    let miss = ui.click(iced::Point::new(menu.x + 10.0, menu.y + menu.height * 0.5));
+    assert!(
+        !miss.iter().any(|m| matches!(m, Message::EditorBodyPressed)),
+        "菜单栏区域的点击不得触发正文淡出；实际 {miss:?}"
+    );
+}

@@ -145,6 +145,11 @@
         (mods, key)
     }
 
+// 生产视图树夹具（让用例跑用户真正看到的那棵树；见该文件头部说明）。
+// 经 `pub(crate) use` 引出，各域测试文件通过 `use super::*` 直接可用。
+mod view_tree;
+pub(crate) use view_tree::ViewTree;
+
 mod tabs;
 mod file;
 mod find;

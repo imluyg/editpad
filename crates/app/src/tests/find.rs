@@ -935,41 +935,12 @@ fn fif_scan_touches_neither_document_nor_cursors() {
 
 // ---------- P150：查找轻浮层（居中 + 不挤占正文） ----------
 
-/// 收集应用视图的全部布局节点 bounds（深度封顶，够覆盖 Stack/正文树）。
-fn collect_layout_nodes(
-    layout: iced::advanced::Layout<'_>,
-    depth: usize,
-    out: &mut Vec<iced::Rectangle>,
-) {
-    out.push(layout.bounds());
-    if depth >= 7 {
-        return;
-    }
-    for i in 0..layout.children().count() {
-        collect_layout_nodes(layout.child(i), depth + 1, out);
-    }
-}
-
 /// 渲染一次应用视图并返回全部节点 bounds。
+///
+/// 经 [`ViewTree`] 夹具布局——它统一了「布局生产视图树」这件事（此前本文件
+/// 与 tabs / chrome 各写一遍样板），并按 `app.viewport_size` 取视口。
 fn app_layout_nodes(app: &Editpad) -> Vec<iced::Rectangle> {
-    use iced::advanced::{
-        layout::{self, Layout},
-        widget::Tree,
-    };
-    use iced::{Font, Pixels, Size};
-
-    let mut element = app.view();
-    let mut tree = Tree::new(element.as_widget());
-    let renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
-    let limits = layout::Limits::new(
-        Size::new(app.viewport_size.0, app.viewport_size.1),
-        Size::new(app.viewport_size.0, app.viewport_size.1),
-    );
-    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
-    let root = Layout::new(&node);
-    let mut nodes = Vec::new();
-    collect_layout_nodes(root, 0, &mut nodes);
-    nodes
+    ViewTree::layout_default(app).find_all(|_| true)
 }
 
 /// 正文编辑器节点 = 全宽节点里 y > 40（菜单/标签条之下）且最高的那个。
