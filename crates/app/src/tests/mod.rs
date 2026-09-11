@@ -148,6 +148,7 @@
 mod tabs;
 mod file;
 mod find;
+mod chrome;
 mod session;
 mod settings;
 mod editor;

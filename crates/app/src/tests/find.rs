@@ -1181,3 +1181,98 @@ fn find_overlay_drags_and_clears_its_status_on_close() {
     dispatch(&mut app, Message::FindToggled);
     assert_eq!(app.status, "已保存", "非查找状态不得被关栏误清");
 }
+
+// ---------- P153：点正文 → 查找框淡出 ----------
+
+/// 点正文内容让查找框转半透明（用户点单「开启查找框之后点具体内容，
+/// 查找框进入半透明」）：仅在栏开着时有意义；点回卡片 / 改查询 / 关栏
+/// 都要复位，且淡出态不影响浮层布局（卡片框体不变）。
+#[test]
+fn p153_editor_click_dims_find_overlay_and_card_click_restores() {
+    let mut app = app_with_lines(12);
+    assert!(!app.find_dimmed, "初始应不透明");
+
+    // 未开栏：点正文不进入淡出态（无框可淡）
+    dispatch(&mut app, Message::EditorBodyPressed);
+    assert!(!app.find_dimmed, "未开栏时点正文不应置淡出位");
+
+    dispatch(&mut app, Message::FindToggled);
+    assert!(app.find_visible && !app.find_dimmed, "开栏即不透明");
+
+    // 点正文 → 淡出；重复点击幂等
+    dispatch(&mut app, Message::EditorBodyPressed);
+    assert!(app.find_dimmed, "栏开着时点正文应淡出");
+    dispatch(&mut app, Message::EditorBodyPressed);
+    assert!(app.find_dimmed, "连续点正文保持淡出（幂等）");
+
+    // 淡出态下浮层布局不变：卡片仍是那一个定宽高卡片
+    //（宽度口径与 `view::FIND_CARD_W` 一致 = 560；常量是 view 模块私有，
+    //  测试里按 480..=600 区间认卡片，与 p150 的位置核对同口径）
+    let nodes = app_layout_nodes(&app);
+    assert!(
+        nodes
+            .iter()
+            .any(|b| (480.0..=600.0).contains(&b.width) && b.height > 100.0),
+        "淡出态下卡片框体应保持不变（仅背板透明度变化）"
+    );
+
+    // 点回卡片 → 复位
+    dispatch(&mut app, Message::FindBoxPressed);
+    assert!(!app.find_dimmed, "点回查找卡片应恢复不透明");
+
+    // 在查询框里打字（焦点已回查找框）同样复位
+    dispatch(&mut app, Message::EditorBodyPressed);
+    assert!(app.find_dimmed);
+    dispatch(&mut app, Message::FindQueryChanged("1".into()));
+    assert!(!app.find_dimmed, "改查询即视为回到查找框操作");
+
+    // 关栏清标记（重开恒为不透明）
+    dispatch(&mut app, Message::EditorBodyPressed);
+    assert!(app.find_dimmed);
+    dispatch(&mut app, Message::FindToggled); // 关
+    assert!(!app.find_dimmed, "关栏应清掉淡出标记");
+    dispatch(&mut app, Message::FindToggled); // 开
+    assert!(!app.find_dimmed, "重开查找框应为不透明");
+}
+
+/// P153 第四轮复报：**开查找框 → 打进数据 → 点正文中间 → 回查找框打字**
+/// 之后，组字串在正文与查找框各画一份（上屏还可能落进文档）。
+///
+/// 序列化到状态上就是「正文控件的 `focused`（= 是否请求 IME 并内联画组字串）
+/// 在回到查找框后仍为 true」：
+/// * 点正文 → 正文控件 `pointer_focus(true)`；
+/// * 点查找框 → 按下被 `PressObserver` 消费（必须消费，否则事件下传正文
+///   再次夺焦），正文**收不到**「区外按下 = 交出焦点」的信号 → 保持 true。
+///
+/// 故 `FindBoxPressed` 必须显式把正文焦点让出去。本用例钉住这条——去掉
+/// `pointer_focus(false)` 即变红。
+#[test]
+fn p153_returning_to_find_box_surrenders_editor_ime_focus() {
+    let mut app = app_with_lines(12);
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.cur_handle.borrow().focused, "开栏即让出正文焦点（P151）");
+
+    // 点正文：正文控件接管焦点（IME 归属正文）
+    app.cur_handle.borrow_mut().pointer_focus(true);
+    assert!(app.cur_handle.borrow().focused);
+
+    // 点查找框（输入框/按钮/空白任意一处都发这条）：必须让出正文焦点
+    dispatch(&mut app, Message::FindBoxPressed);
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "回到查找框后正文不得再持焦——否则组字串在正文与查找框各画一份，\
+         上屏文本还可能被正文吃进文档"
+    );
+
+    // 反复来回仍成立（幂等）
+    app.cur_handle.borrow_mut().pointer_focus(true);
+    dispatch(&mut app, Message::FindBoxPressed);
+    assert!(!app.cur_handle.borrow().focused);
+
+    // 反向路径不受影响：点正文仍由控件自己接管焦点
+    dispatch(&mut app, Message::EditorBodyPressed);
+    assert!(
+        app.find_dimmed,
+        "点正文照旧淡出（View 层的淡出与焦点让出互不影响）"
+    );
+}

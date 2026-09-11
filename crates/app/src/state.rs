@@ -155,6 +155,11 @@ pub(crate) struct Editpad {
     /// 状态栏当前显示的是查找进度（「第 N/M 处匹配」）——关闭查找栏时
     /// 据此清理，避免关栏后左下角残留（用户复报）
     pub(crate) find_status: bool,
+    /// P153：查找框淡出态——用户点了正文内容（编辑/选词）后置位，浮层
+    /// 背板转半透明（[`crate::chrome::FIND_CARD_DIM_ALPHA`]）让开被遮挡的
+    /// 正文；点回查找卡片（任意处）即复位。纯 UI 态，不落盘不入快照；
+    /// 关栏时一并清零（重开恒为不透明）。
+    pub(crate) find_dimmed: bool,
 
     // ---------- A8：在文件中查找（设计 docs/find-in-files-design.md） ----------
     /// FIF 模式开启（面板与查找全部面板同槽互斥；查找栏关闭即隐）
@@ -353,6 +358,7 @@ impl Default for Editpad {
             find_drag: None,
             find_cursor: Point::ORIGIN,
             find_status: false,
+            find_dimmed: false,
             fif_visible: false,
             fif_dir: None,
             fif_seq: 0,

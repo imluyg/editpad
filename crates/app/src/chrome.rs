@@ -1,4 +1,7 @@
 use super::*;
+// P153：查找框控件的「未淡出态」直接复用既有按钮/复选框样式（保证淡出
+// 开关两侧逐字等价）；二者定义在 settings_ui.rs，不经 main.rs 的 glob 转发。
+use crate::settings_ui::{chrome_button_style, settings_checkbox_style};
 
 /// 右键菜单卡片的估宽（px）：最宽项「关闭其他标签页(N)」≈ 8 汉字 ×16px
 /// + 内边距。仅用于贴边钳制，与实际 Shrink 宽度的少量偏差可接受。
@@ -72,4 +75,126 @@ pub(crate) fn popup_card_style(theme: &Theme) -> container::Style {
         shadow: Shadow::default(),
         ..container::Style::default()
     }
+}
+
+/// P153：查找框淡出态背板透明度（用户点单「保留文字可读」，第三轮调至 0.4
+/// ——「所有元素一起更淡」，故卡片/输入框/按钮/复选框/标签共用此单一系数）。
+///
+/// 半透明是**逐 quad 的 alpha 合成**（tiny-skia 后端直接按 alpha 混合）。
+/// 卡片内**每个自带底色的控件都能单独盖住下层**：输入框用主题
+/// `background.base` 实底色、按钮/复选框用 [`settings_colors`] 的
+/// `control_bg`（浅色是纯白）——只压卡片背板，这些控件仍是不透明的白块
+/// 浮在半透明卡片上（用户复报「输入框/替换框/按钮没有半透明」）。
+/// 故淡出是**整框统一口径**：背板 + 输入框 + 按钮 + 复选框 + 纯文本标签的
+/// 底色/文字/描边全部按同一系数压 alpha（见 [`find_input_style`] /
+/// [`find_button_style`] / [`find_checkbox_style`] / [`find_label_color`]），
+/// 被它盖住的正文才能真正透出来。
+pub(crate) const FIND_CARD_DIM_ALPHA: f32 = 0.4;
+
+/// P153：淡出系数（1.0 = 不淡出）。所有查找框内的控件样式都经它统一压
+/// alpha，避免「卡片淡了、控件没淡」的口径分裂。
+pub(crate) fn find_dim_factor(dimmed: bool) -> f32 {
+    if dimmed {
+        FIND_CARD_DIM_ALPHA
+    } else {
+        1.0
+    }
+}
+
+/// P153：按 `factor` 压一个颜色的 alpha（factor ≥ 1 时原样返回）。
+fn dampen(color: Color, factor: f32) -> Color {
+    if factor >= 1.0 {
+        color
+    } else {
+        Color {
+            a: color.a * factor,
+            ..color
+        }
+    }
+}
+
+/// P153：按 `factor` 压背景色的 alpha（`Background` 是枚举，非纯色原样返回）。
+fn dampen_bg(bg: Background, factor: f32) -> Background {
+    match bg {
+        Background::Color(c) => Background::Color(dampen(c, factor)),
+        other => other,
+    }
+}
+
+/// P153：查找卡片里的**纯文本**标签（拖动条文案、命中计数、目录行、
+/// 扫描进度）淡出用色：取主题正文字色按系数压 alpha。
+///
+/// 为什么单独给：`text` 控件无底色，用的是 iced 默认文字样式（主题
+/// `palette.text`，alpha = 1）——上一版只压了背板与控件，这些标签仍是
+/// 全不透明（用户复报「无匹配提示还是原来的，没跟着变淡」）。
+/// `None` = 不淡出：调用方**不设色**（保持 iced 默认口径，逐字等价）。
+pub(crate) fn find_label_color(theme: &Theme, factor: f32) -> Option<Color> {
+    (factor < 1.0).then(|| dampen(theme.palette().text, factor))
+}
+
+/// P153：查找卡片淡出态样式——[`popup_card_style`] 的同一形状/描边，
+/// 仅把背板背景色压到 [`FIND_CARD_DIM_ALPHA`]。
+pub(crate) fn popup_card_dim_style(theme: &Theme) -> container::Style {
+    let mut style = popup_card_style(theme);
+    if let Some(Background::Color(color)) = style.background {
+        style.background = Some(Background::Color(Color {
+            a: FIND_CARD_DIM_ALPHA,
+            ..color
+        }));
+    }
+    style
+}
+
+/// P153：查找/替换输入框样式——未淡出（`factor >= 1`）= iced 默认样式
+/// （与改前逐字等价：主题 `background.base` 底 + `strong` 描边、聚焦转
+/// primary 描边）；淡出 = 同一套颜色整体压 alpha。
+pub(crate) fn find_input_style(
+    theme: &Theme,
+    status: text_input::Status,
+    factor: f32,
+) -> text_input::Style {
+    let mut style = text_input::default(theme, status);
+    if factor < 1.0 {
+        style.background = dampen_bg(style.background, factor);
+        style.border.color = dampen(style.border.color, factor);
+        style.icon = dampen(style.icon, factor);
+        style.placeholder = dampen(style.placeholder, factor);
+        style.value = dampen(style.value, factor);
+        style.selection = dampen(style.selection, factor);
+    }
+    style
+}
+
+/// P153：查找卡片按钮样式——未淡出 = 既有 [`chrome_button_style`]（逐字
+/// 等价）；淡出 = 底色/描边/文字/悬停同口径压 alpha（禁用态次要色一并压）。
+pub(crate) fn find_button_style(
+    theme: &Theme,
+    status: button::Status,
+    factor: f32,
+) -> button::Style {
+    let mut style = chrome_button_style(theme, status);
+    if factor < 1.0 {
+        style.background = style.background.map(|bg| dampen_bg(bg, factor));
+        style.text_color = dampen(style.text_color, factor);
+        style.border.color = dampen(style.border.color, factor);
+    }
+    style
+}
+
+/// P153：查找卡片复选框样式——未淡出 = 既有 [`settings_checkbox_style`]；
+/// 淡出 = 选中底（点缀色）/未选中底/描边/白勾/文字全部压 alpha（勾是
+/// 纯白 `Color::WHITE`，不压就是淡出框里唯一的纯白亮点）。
+pub(crate) fn find_checkbox_style(
+    theme: &Theme,
+    status: checkbox::Status,
+    factor: f32,
+) -> checkbox::Style {
+    let mut style = settings_checkbox_style(theme, status);
+    if factor < 1.0 {
+        style.background = dampen_bg(style.background, factor);
+        style.icon_color = dampen(style.icon_color, factor);
+        style.border.color = dampen(style.border.color, factor);
+        style.text_color = style.text_color.map(|c| dampen(c, factor));
+    }
+    style
 }

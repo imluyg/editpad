@@ -444,6 +444,7 @@ impl Editpad {
             | Message::CaretTick
             | Message::PreviewToggled
             | Message::CursorMoved(..)
+            | Message::EditorBodyPressed
             | Message::ViewportResized(..) => self.update_editor(message),
             // ---------- 标签页/右键菜单/批关 ----------
             Message::OpenContainingFolder
@@ -569,6 +570,7 @@ impl Editpad {
             | Message::FindDragStart
             | Message::FindDragEnd
             | Message::FindDragReset
+            | Message::FindBoxPressed
             | Message::FindQueryChanged(..)
             | Message::FindNext
             | Message::FindPrev
@@ -629,6 +631,21 @@ impl Editpad {
             }
             Message::EditorNavChanged => Task::none(),
             // 视图重建即可刷新状态栏
+
+            // P153：正文被左键按下 → 查找框转半透明（用户点单：点正文编辑时
+            // 别让浮层糊住内容）。关栏/未开栏时零动作；已淡出则幂等返回
+            // （连续点正文不重复重建）。
+            //
+            // 焦点无需在此处理：正文控件的 pointer_focus(true) 已在同一事件
+            // 里接管焦点（置位 + 请求 IME），且打断组字由它负责。**反向路径
+            // 才需要补**：点查找框的按下被 PressObserver 消费，正文收不到
+            // 「区外按下」，故 `FindBoxPressed` 里显式 `pointer_focus(false)`。
+            Message::EditorBodyPressed => {
+                if self.find_visible && !self.find_dimmed {
+                    self.find_dimmed = true;
+                }
+                Task::none()
+            }
 
             // P125：覆写/插入切换（busy 加载中拒收——编辑同口径）
             Message::ToggleOverwrite => {
@@ -2329,6 +2346,9 @@ impl Editpad {
             // ---------- 查找 / 替换 ----------
             Message::FindToggled => {
                 self.find_visible = !self.find_visible;
+                // P153：开/关都清淡出态——重开查找框恒为不透明（下一条
+                // 正文点击才会再淡出），关栏时也不留悬挂的半透明标记
+                self.find_dimmed = false;
                 if self.find_visible {
                     self.goto_visible = false;
                     // A8：重开查找栏时不自动恢复 FIF 面板（入口显式切换）
@@ -2395,8 +2415,33 @@ impl Editpad {
                 self.find_drag = None;
                 Task::none()
             }
+            // P153：点回查找卡片（含拖动条/空白处、**以及输入框/按钮本身**）
+            // → 淡出态复位，并把正文的键盘/IME 焦点收回来交给查找框。
+            //
+            // 为什么必须在这里收焦点（用户复报第四轮的操作序列：开查找框 →
+            // 打进数据 → 点正文 → 回查找框打字，组字串在正文与查找框各画一份）：
+            // 点正文时正文控件的 `pointer_focus(true)` 会置位（正文请求 IME
+            // 并内联画组字串）；此后点查找框的按下被 PressObserver 消费
+            // （必须消费，否则事件下传正文会再次夺焦，见 press_observer.rs），
+            // 正文控件**再也收不到**「点区外 = 交出焦点」的信号 → `focused`
+            // 一直是 true → 回到查找框打拼音时，同一组字事件被两处消费。
+            // 这里用 P151 的同一把钥匙 `focus_text_field`：让出正文焦点
+            // （清残留组字 + 打断打字组）+ 程序化聚焦查询框。
+            Message::FindBoxPressed => {
+                // 只「让出正文焦点」——**不**改焦点归属：框内被点的控件
+                // 自己已经在事件派发阶段拿好焦点（输入框聚焦/按钮就绪），
+                // 这里只补上正文控件因事件被消费而收不到的那次「区外按下
+                // = 交出焦点」。`pointer_focus(false)` 会清掉残留组字并
+                // 打断打字组，正文随即停止请求 IME（候选框不再跳正文）。
+                self.cur_handle.borrow_mut().pointer_focus(false);
+                self.find_dimmed = false;
+                Task::none()
+            }
             Message::FindQueryChanged(query) => {
                 self.find_query = query;
+                // P153：能在查询框里打字 = 焦点已回到查找框，淡出态一并复位
+                //（点查询框但未输入字符时的复位见 `FindBoxPressed` 注释）。
+                self.find_dimmed = false;
                 // P10：查询变化只排队后台扫描（防抖），UI 线程零全文拷贝；
                 // 查询为空时内部转为取消 + 清结果。
                 // A8：FIF 模式下同一个查询框驱动的是目录扫描

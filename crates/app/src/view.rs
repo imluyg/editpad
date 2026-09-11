@@ -2471,18 +2471,27 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let has_matches = !scanning && !self.matches.is_empty();
         // A8：FIF 开态下文档导航按钮禁用（命中表是另一套数据源）
         let doc_nav = !self.fif_visible;
+        // P153：淡出系数（1.0 = 不淡出）。卡片背板、输入框、按钮、复选框
+        // 共用同一系数——控件自带底色（输入框主题底 / 按钮白底 / 勾选点缀色），
+        // 只压背板会留下「实心白块浮在淡卡片上」的口径分裂。
+        let dim = find_dim_factor(self.find_dimmed);
+        // P153：纯文本标签（无底色）的淡出用色——None = 不淡出（不设色，
+        // 保持 iced 默认文字样式）。
+        let label_color = find_label_color(&self.theme(), dim);
 
         // 拖动条（用户点单）：按住卡片顶部这条即可拖走浮层，双击复位到
         // 默认位置。`on_move`/`on_release` 挂在整层（见函数尾部）——按下
         // 只有这里捕获，其它位置点击照旧穿透到正文。
+        let grip_text = text("≡  拖动（双击复位）")
+            .size(uipx * 0.8)
+            .font(uifont)
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Center);
         let grip = mouse_area(
-            container(
-                text("≡  拖动（双击复位）")
-                    .size(uipx * 0.8)
-                    .font(uifont)
-                    .width(Fill)
-                    .align_x(iced::alignment::Horizontal::Center),
-            )
+            container(match label_color {
+                Some(c) => grip_text.color(c).into(),
+                None => Element::from(grip_text),
+            })
             .width(Fill)
             .padding([0, 0]),
         )
@@ -2498,32 +2507,42 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 .font(uifont)
                 .on_input(Message::FindQueryChanged)
                 .on_submit(Message::FindNext)
+                .style(move |theme, status| find_input_style(theme, status, dim))
                 .width(Fill),
             button(text("↑ 上一个").size(uipx).font(uifont))
-                .style(chrome_button_style)
+                .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press_maybe(doc_nav.then_some(Message::FindPrev)),
             button(text("↓ 下一个").size(uipx).font(uifont))
-                .style(chrome_button_style)
+                .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press_maybe(doc_nav.then_some(Message::FindNext)),
             button(text("×").size(uipx).font(uifont))
-                .style(chrome_button_style)
+                .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press(Message::FindToggled),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
 
         // ②开关与计数行
+        // P153：命中计数是纯文本、无底色可压 alpha——淡出时显式设色
+        //（含「无匹配」「查找中…」，用户复报它们不跟着变淡）
+        let position_widget = text(position_label).size(uipx).font(uifont);
+        let position_text: Element<'_, Message> = match label_color {
+            Some(c) => position_widget.color(c).into(),
+            None => position_widget.into(),
+        };
         let options_row = row![
             checkbox(self.case_sensitive)
                 .label("区分大小写")
                 .text_size(uipx)
                 .font(uifont)
+                .style(move |theme, status| find_checkbox_style(theme, status, dim))
                 .on_toggle(Message::CaseToggled),
             // P70：正则模式开关（.* 是各编辑器通用的正则图标语义）
             checkbox(self.regex_enabled)
                 .label(".* 正则")
                 .text_size(uipx)
                 .font(uifont)
+                .style(move |theme, status| find_checkbox_style(theme, status, dim))
                 .on_toggle(Message::RegexToggled),
             // 整词匹配：命中前后均非词字符（正则模式下不参与——扫描与
             // 替换路径均按 regex 分支先行返回）
@@ -2531,9 +2550,10 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 .label("整词")
                 .text_size(uipx)
                 .font(uifont)
+                .style(move |theme, status| find_checkbox_style(theme, status, dim))
                 .on_toggle(Message::WholeWordToggled),
             // P123：命中计数（扫描在途给动态反馈；0 处也如实显示）
-            text(position_label).size(uipx).font(uifont),
+            position_text,
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -2544,25 +2564,38 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 Some(d) => d.display().to_string(),
                 None => "（当前页未命名：先保存得到所在目录，或「浏览…」选择）".to_owned(),
             };
+            let dir_label = text("目录:".to_owned()).size(uipx).font(uifont);
+            let dir_label: Element<'_, Message> = match label_color {
+                Some(c) => dir_label.color(c).into(),
+                None => dir_label.into(),
+            };
+            let dir_path = text(dir_text).size(uipx).font(uifont);
+            let dir_path: Element<'_, Message> = match label_color {
+                Some(c) => dir_path.color(c).into(),
+                None => dir_path.into(),
+            };
+            let scan_label = text(if self.fif_scan.is_some() {
+                format!(
+                    "扫描中…（已扫 {} 个文件）",
+                    self.fif_progress.load(std::sync::atomic::Ordering::Relaxed)
+                )
+            } else {
+                String::new()
+            })
+            .size(uipx)
+            .font(uifont);
+            let scan_label: Element<'_, Message> = match label_color {
+                Some(c) => scan_label.color(c).into(),
+                None => scan_label.into(),
+            };
             row![
-                text("目录:").size(uipx).font(uifont),
+                dir_label,
                 // 长路径裁剪显示：不撑破定宽卡片（取舍：卡片内不可横向滚动）
-                container(text(dir_text).size(uipx).font(uifont))
-                    .width(Fill)
-                    .clip(true),
+                container(dir_path).width(Fill).clip(true),
                 button(text("浏览…").size(uipx).font(uifont))
-                    .style(chrome_button_style)
+                    .style(move |theme, status| find_button_style(theme, status, dim))
                     .on_press(Message::FifBrowseFolder),
-                text(if self.fif_scan.is_some() {
-                    format!(
-                        "扫描中…（已扫 {} 个文件）",
-                        self.fif_progress.load(std::sync::atomic::Ordering::Relaxed)
-                    )
-                } else {
-                    String::new()
-                })
-                .size(uipx)
-                .font(uifont),
+                scan_label,
             ]
             .spacing(8)
             .align_y(Alignment::Center)
@@ -2573,10 +2606,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     .size(uipx)
                     .font(uifont)
                     .on_input(Message::ReplaceQueryChanged)
+                    .style(move |theme, status| find_input_style(theme, status, dim))
                     .width(Fill),
                 // P70：正则模式替换当前 = 对命中做 $1 展开替换
                 button(text("替换当前").size(uipx).font(uifont))
-                    .style(chrome_button_style)
+                    .style(move |theme, status| find_button_style(theme, status, dim))
                     .on_press_maybe(has_matches.then_some(if self.regex_enabled {
                         Message::ReplaceCurrentRegex
                     } else {
@@ -2584,7 +2618,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     })),
                 // 扫描在途时禁用：此刻的全文快照可能是过期的
                 button(text("全部替换").size(uipx).font(uifont))
-                    .style(chrome_button_style)
+                    .style(move |theme, status| find_button_style(theme, status, dim))
                     .on_press_maybe((!scanning).then_some(Message::ReplaceAll)),
             ]
             .spacing(8)
@@ -2597,7 +2631,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用；
             // A8：FIF 开态禁用——两套面板同槽互斥）
             button(text("查找全部").size(uipx).font(uifont))
-                .style(chrome_button_style)
+                .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press_maybe(
                     (has_matches && doc_nav).then_some(Message::FindAllToggled),
                 ),
@@ -2609,7 +2643,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             })
             .size(uipx)
             .font(uifont))
-            .style(chrome_button_style)
+            .style(move |theme, status| find_button_style(theme, status, dim))
             .on_press(Message::FindInFilesToggled),
         ]
         .spacing(8)
@@ -2632,13 +2666,30 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
 
         // 定宽 + 小窗钳制；高度按窗口钳制（结果面板内部滚动承接溢出）
         let card_w = FIND_CARD_W.min((self.viewport_size.0 - 32.0).max(320.0));
+        // P153：点过正文（find_dimmed）后整框转半透明——背板换淡出色，
+        // 卡片内文字/控件沿用原样式按同一 alpha 淡出。
+        let card_style = if self.find_dimmed {
+            popup_card_dim_style
+        } else {
+            popup_card_style
+        };
         let card = opaque(
             container(card_body)
                 .width(card_w)
                 .max_height((self.viewport_size.1 - 48.0).max(160.0))
                 .padding(10)
-                .style(popup_card_style),
+                .style(card_style),
         );
+        // P153：卡片（含拖动条、空白处，**以及输入框/按钮本身**）接住左键
+        // 按下 → 半透明态复位。必须用 [`crate::press_observer::PressObserver`]
+        // 而非 `mouse_area`：输入框/按钮会捕获按下事件，`mouse_area` 在内容
+        // 已捕获时不再自查（上游 `MouseArea::update` 的 `is_event_captured`
+        // 早退），导致「点半透明框里的输入框不恢复」（用户复报）。
+        // 观察层同时**消费**该按下——否则会继续下传给正文自绘控件，正文
+        // 重新持焦并请求 IME，拼音组字串在查找框与正文各画一份（P151 症状
+        // 复现，用户复报「旧 bug 又回来了」）。
+        let card =
+            PressObserver::new(card, Message::FindBoxPressed).into_element();
         // 位置由应用层持有（用户点单：浮层遮住目标行要能拖开）：
         // 默认 = 窗口中间偏上（名义高度参与居中），拖动后 = 钳制过的左上角。
         // 整层挂 `on_move`/`on_release` 追踪拖动：该层**不设 on_press**，

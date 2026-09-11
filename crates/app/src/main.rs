@@ -213,6 +213,12 @@ enum Message {
     FindDragEnd,
     /// 双击拖动条：浮层位置复位到默认（窗口中间偏上）
     FindDragReset,
+    /// P153：正文内容被左键按下（自绘控件内、非浮层区域）——查找栏开着时
+    /// 让查找框转半透明，把被遮挡的正文让出来（见 `Editpad::find_dimmed`）
+    EditorBodyPressed,
+    /// P153：查找卡片被点击（卡片内任意未被内部控件消费的按下，含拖动条
+    /// 与空白处）——半透明态复位为不透明
+    FindBoxPressed,
     FindQueryChanged(String),
     FindNext,
     FindPrev,
@@ -677,6 +683,9 @@ mod state;
 use state::*;
 mod chrome;
 use chrome::*;
+// P153：查找卡片的「点击观察层」（内容消费了按下事件也要能观察到）。
+mod press_observer;
+pub(crate) use press_observer::PressObserver;
 mod hotkeys;
 use hotkeys::*;
 mod icon;

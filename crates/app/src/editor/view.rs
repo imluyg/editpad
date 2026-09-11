@@ -2004,6 +2004,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 let Some(pos) = cursor.position_over(bounds) else {
                     return;
                 };
+                // P153：正文内容被按下 → 应用层据此把查找浮层转半透明。
+                // 只有**未被上层消费**的按下才会走到这里：查找卡片（栈顶
+                // 独立层）由 PressObserver 消费落在卡片内的按下，故点查找
+                // 框不会让浮层淡出、也不会夺走正文的焦点归属判定。
+                shell.publish(crate::Message::EditorBodyPressed);
 
                 // 滚动条优先于文本命中：落在交互区则进入拖拽/轨道跳转，
                 // 不触发文本选区。垂直条优先判定，右下角归属垂直条。
