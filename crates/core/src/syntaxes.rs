@@ -1,7 +1,7 @@
 //! 内嵌迷你语法定义（P22 第一批）。
 //!
 //! syntect 默认包没有 Log 与 TOML 语法，而它们恰是记事本的高频格式；
-//! 这里以字符串内嵌两份迷你 `.sublime-syntax`，在语法集初始化时经
+//! 这里以字符串内嵌两份迷你语法定义（syntect 可解析的 YAML 格式），在语法集初始化时经
 //! [`SyntaxSetBuilder::add`] 注入——单文件分发、无需运行时资源目录。
 //!
 //! 着色走标准 scope 名（comment/string/keyword/invalid/
