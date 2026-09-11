@@ -77,6 +77,14 @@ pub fn base64_decode(src: &str) -> Option<Vec<u8>> {
 
 // ---------- URL 百分号编解码（RFC 3986） ----------
 
+/// 十六进制字符表。
+///
+/// 值域由半字节天然保证——`b >> 4` 与 `b & 0xF` 都落在 `0..=15`，索引
+/// 不可能越界。相比逐位走 `Option` 再解包，常量索引在十六进制摘要与 URL
+/// 编码这类可被成段文本反复触达的路径上更快，且这条路径上不再有 panic 面。
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
+const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
+
 fn is_url_unreserved(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
 }
@@ -90,8 +98,8 @@ pub fn url_encode(src: &str) -> String {
             out.push(b as char);
         } else {
             out.push('%');
-            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-            out.push(char::from_digit((b & 0xF) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(HEX_UPPER[(b >> 4) as usize] as char);
+            out.push(HEX_UPPER[(b & 0xF) as usize] as char);
         }
     }
     out
@@ -279,8 +287,8 @@ pub fn sha256_hex(src: &[u8]) -> String {
 fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((b & 0xF) as u32, 16).unwrap());
+        out.push(HEX_LOWER[(b >> 4) as usize] as char);
+        out.push(HEX_LOWER[(b & 0xF) as usize] as char);
     }
     out
 }
