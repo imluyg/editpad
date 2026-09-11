@@ -34,7 +34,12 @@ use super::*;
         combos.dedup();
         assert_eq!(combos.len(), combo_total, "默认组合存在冲突");
         for a in HOTKEY_ACTIONS {
-            assert!(!a.desc.trim().is_empty(), "动作 {} 说明不得为空", a.id);
+            assert!(
+                !a.desc.text(editpad_core::Lang::ZhCn).trim().is_empty()
+                    && !a.desc.text(editpad_core::Lang::En).trim().is_empty(),
+                "动作 {} 说明不得为空（两种语言）",
+                a.id
+            );
         }
     }
 
@@ -248,7 +253,7 @@ use super::*;
                 editpad_core::normalize_settings_page(page.key()),
                 page.key(),
                 "分类 {} 的持久化键不在 core 注册表中",
-                page.title()
+                page.title(editpad_core::Lang::ZhCn)
             );
         }
         // 顺序一致：ALL 的展示顺序 = 注册表顺序
@@ -283,12 +288,22 @@ use super::*;
         assert!(settings_search_hit("   ", "任意", "任意"));
 
         // 大小写不敏感：desc 里的 JSON 命中 "json" 查询（热键行描述）
+        let zh = editpad_core::Lang::ZhCn;
         let (_, json_desc) = HOTKEY_ACTIONS
             .iter()
-            .find(|a| a.desc.contains("JSON"))
-            .map(|a| (a.id, a.desc))
+            .find(|a| a.desc.text(zh).contains("JSON"))
+            .map(|a| (a.id, a.desc.text(zh)))
             .expect("热键动作必有 JSON 格式化条目");
         assert!(settings_search_hit("json", "Ctrl+Shift+F", json_desc));
+
+        // 英文文案同样参与过滤（切到英文后按英文关键词命中）
+        let en = editpad_core::Lang::En;
+        let (_, json_desc_en) = HOTKEY_ACTIONS
+            .iter()
+            .find(|a| a.desc.text(en).contains("JSON"))
+            .map(|a| (a.id, a.desc.text(en)))
+            .expect("英文表同样有 JSON 条目");
+        assert!(settings_search_hit("json", "Ctrl+Shift+F", json_desc_en));
 
         // 中文子串：标题命中（会话快照）与描述命中（关窗行为含「快照直退」）
         assert!(settings_search_hit("快照", "会话快照", "关窗时自动保存未存内容"));
@@ -300,7 +315,8 @@ use super::*;
 
     #[test]
     fn settings_row_catalog_covers_pages_and_controls() {
-        let rows: Vec<SettingsRow> = settings_rows().collect();
+        let zh = editpad_core::Lang::ZhCn;
+        let rows: Vec<SettingsRow> = settings_rows(zh).collect();
 
         // 行元数据完整：键/标题/描述非空，键全清单唯一（控件匹配的依据）
         let mut keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
@@ -321,7 +337,7 @@ use super::*;
             assert!(
                 rows.iter().any(|r| r.page == page),
                 "分类 {} 在行清单中没有条目",
-                page.title()
+                page.title(zh)
             );
         }
         assert!(
@@ -335,7 +351,7 @@ use super::*;
         assert_eq!(hotkey_rows.len(), HOTKEY_ACTIONS.len());
         for (action, r) in HOTKEY_ACTIONS.iter().zip(&hotkey_rows) {
             assert_eq!(r.key, action.id, "热键行键必须与动作 id 一致");
-            assert_eq!(r.title, action.desc);
+            assert_eq!(r.title, action.desc.text(zh));
             assert_eq!(
                 r.desc,
                 action.default_combos.join(" / "),
@@ -363,9 +379,12 @@ use super::*;
             );
         }
 
-        // 字体挑选块挂载点：FONT_ROW_KEY 行存在于字体页（键与标题同源）
+        // 字体挑选块挂载点：FONT_ROW_KEY 行存在于字体页（键语言无关、
+        // 标题为该语言下「正文字体」的文案）
         assert!(rows.iter().any(|r| {
-            r.page == SettingsPage::Font && r.key == FONT_ROW_KEY && r.title == FONT_ROW_KEY
+            r.page == SettingsPage::Font
+                && r.key == FONT_ROW_KEY
+                && r.title == editpad_core::Key::RowFontFamily.text(zh)
         }));
     }
 
@@ -415,7 +434,11 @@ use super::*;
         dispatch(&mut app, Message::HotkeyCaptureStarted("open"));
         dispatch(&mut app, Message::HotkeyCaptureKey("F10".into()));
         assert_eq!(app.hotkey_capture, Some("open"), "冲突保持捕获态");
-        assert!(app.status.contains("占用"));
+        assert!(
+            app.status.contains("占用"),
+            "冲突提示应说明被谁占用：{}",
+            app.status
+        );
         assert!(
             !app.settings.hotkeys.contains_key("open"),
             "被拒动作不得写入映射"
@@ -729,27 +752,27 @@ use super::*;
             "Noto Sans".to_owned(),
         ];
         assert_eq!(
-            pick_ui_font_family("zh-CN", &zh),
+            pick_ui_font_family(editpad_core::Lang::ZhCn, &zh),
             Some("Microsoft YaHei"),
             "中文简体应命中雅黑系"
         );
         assert_eq!(
-            pick_ui_font_family("zh-CN", &zh),
-            pick_ui_font_family("bogus", &zh),
+            pick_ui_font_family(editpad_core::Lang::ZhCn, &zh),
+            pick_ui_font_family(editpad_core::settings::normalize_language("bogus"), &zh),
             "未知语言回落中文简体（同一候选表）"
         );
         // 英文候选全不在清单里 → None（调用方回落 Font::DEFAULT，不失败）
-        assert_eq!(pick_ui_font_family("en", &zh), None);
+        assert_eq!(pick_ui_font_family(editpad_core::Lang::En, &zh), None);
         let en = vec!["Segoe UI".to_owned(), "Tahoma".to_owned()];
         assert_eq!(
-            pick_ui_font_family("en", &en),
+            pick_ui_font_family(editpad_core::Lang::En, &en),
             Some("Segoe UI"),
             "English 应命中 Segoe UI 系"
         );
         // 宽松匹配：大小写/空白变体也算命中
         let loose = vec!["microsoft  yahei  ui".to_owned()];
         assert_eq!(
-            pick_ui_font_family("zh-CN", &loose),
+            pick_ui_font_family(editpad_core::Lang::ZhCn, &loose),
             Some("Microsoft YaHei UI"),
             "候选匹配应忽略大小写与空白（复用 normalize_family）"
         );
@@ -788,7 +811,7 @@ use super::*;
             "Consolas".to_owned(),
         ];
         // 启动期解析语义：中文界面 → 雅黑；行号 → Consolas
-        app.ui_font_family = pick_ui_font_family("zh-CN", &app.available_fonts);
+        app.ui_font_family = pick_ui_font_family(editpad_core::Lang::ZhCn, &app.available_fonts);
         app.gutter_font_family = pick_gutter_font_family(&app.available_fonts);
         assert_eq!(app.ui_font_family, Some("Microsoft YaHei"));
         assert_eq!(app.gutter_font_family, Some("Consolas"));
@@ -809,7 +832,7 @@ use super::*;
 
         // 切语言：UI 换族，正文与行号**不受影响**，且即时落盘
         dispatch(&mut app, Message::LanguageToggled);
-        assert_eq!(app.settings.language, editpad_core::settings::LANG_EN);
+        assert_eq!(app.settings.language, editpad_core::Lang::En);
         assert_eq!(
             app.ui_font().family,
             iced::font::Family::Name("Segoe UI"),
@@ -822,13 +845,13 @@ use super::*;
         );
         assert_eq!(
             editpad_core::Settings::load_from(&config).language,
-            editpad_core::settings::LANG_EN,
+            editpad_core::Lang::En,
             "切语言必须即时写回 config.toml"
         );
 
         // 再切一次回到中文（循环两态）
         dispatch(&mut app, Message::LanguageToggled);
-        assert_eq!(app.settings.language, editpad_core::settings::LANG_ZH_CN);
+        assert_eq!(app.settings.language, editpad_core::Lang::ZhCn);
         assert_eq!(
             app.ui_font().family,
             iced::font::Family::Name("Microsoft YaHei")
@@ -837,13 +860,127 @@ use super::*;
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ---------- P155：界面文案 i18n + 语言下拉框 ----------
+
+    /// 用户点单的核心行为：设置里选 English → **界面文案**真的变英文
+    /// （不只是换字体）——菜单名、设置分类、行标题/描述、状态栏提示
+    /// 全部按新语言取文，且即时落盘。
+    #[test]
+    fn p155_language_selection_switches_ui_text_and_persists() {
+        let dir = scratch_dir("p155-i18n");
+        let config = dir.join("config.toml");
+        let mut app = Editpad::default();
+        app.settings_path_override = Some(config.clone());
+        app.available_fonts = vec![
+            "Microsoft YaHei".to_owned(),
+            "Segoe UI".to_owned(),
+            "Consolas".to_owned(),
+        ];
+        app.ui_font_family = pick_ui_font_family(editpad_core::Lang::ZhCn, &app.available_fonts);
+
+        // 中文界面（默认）：菜单与设置行都是中文
+        assert_eq!(app.lang(), editpad_core::Lang::ZhCn);
+        assert_eq!(app.t(editpad_core::Key::MenuFile), "文件");
+        assert_eq!(app.t(editpad_core::Key::Settings), "设置");
+        let zh_rows: Vec<SettingsRow> = app.rows_for(SettingsPage::Appearance);
+        assert!(
+            zh_rows.iter().any(|r| r.title == "界面语言"),
+            "中文界面下应显示中文行标题：{zh_rows:?}"
+        );
+
+        // 下拉框选中 English（pick_list 的选中消息 = LangOption）
+        dispatch(
+            &mut app,
+            Message::LanguageOptionSelected(editpad_core::LangOption {
+                lang: editpad_core::Lang::En,
+                ui: editpad_core::Lang::ZhCn,
+            }),
+        );
+        assert_eq!(app.lang(), editpad_core::Lang::En, "语言应切到英文");
+        assert_eq!(app.t(editpad_core::Key::MenuFile), "File");
+        assert_eq!(app.t(editpad_core::Key::Settings), "Settings");
+        let en_rows: Vec<SettingsRow> = app.rows_for(SettingsPage::Appearance);
+        assert!(
+            en_rows.iter().any(|r| r.title == "Interface Language"),
+            "英文界面下行标题应换英文：{en_rows:?}"
+        );
+        // 行键**语言无关**：两种语言下行键集合完全一致（控件匹配不失配）
+        let mut zh_keys: Vec<&str> = zh_rows.iter().map(|r| r.key.as_str()).collect();
+        let mut en_keys: Vec<&str> = en_rows.iter().map(|r| r.key.as_str()).collect();
+        zh_keys.sort_unstable();
+        en_keys.sort_unstable();
+        assert_eq!(zh_keys, en_keys, "切语言不得改变行键");
+
+        // 热键页同样换语言（标题 = 动作说明）
+        let hk_en = app.rows_for(SettingsPage::Hotkeys);
+        assert_eq!(hk_en[0].title, "Open a file", "热键说明也要翻译");
+
+        // 状态栏反馈用**切换后**的语言书写（不留中英混排）
+        assert_eq!(app.status, "Interface language switched (Segoe UI)");
+        assert_eq!(
+            editpad_core::Settings::load_from(&config).language,
+            editpad_core::Lang::En,
+            "语言选择必须即时落盘"
+        );
+
+        // 选同一语言 = no-op（不刷状态栏）
+        app.status.clear();
+        dispatch(
+            &mut app,
+            Message::LanguageOptionSelected(editpad_core::LangOption {
+                lang: editpad_core::Lang::En,
+                ui: editpad_core::Lang::En,
+            }),
+        );
+        assert!(app.status.is_empty(), "重复选中不应产生状态栏噪声");
+
+        // 英文界面下整体视图可构造（不 panic）
+        let _ = app.view();
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P155：设置搜索按**当前语言**过滤——切英文后中文关键词失效、
+    /// 英文关键词命中（数据源与渲染同源，不留两套文案）。
+    #[test]
+    fn p155_settings_search_follows_current_language() {
+        let zh = editpad_core::Lang::ZhCn;
+        let en = editpad_core::Lang::En;
+        let zh_hit = settings_rows(zh).any(|r| settings_search_hit("语言", &r.title, &r.desc));
+        let en_hit = settings_rows(en).any(|r| settings_search_hit("language", &r.title, &r.desc));
+        assert!(zh_hit, "中文关键词应命中中文行");
+        assert!(en_hit, "英文关键词应命中英文行");
+        assert!(
+            !settings_rows(en).any(|r| settings_search_hit("语言", &r.title, &r.desc)),
+            "英文界面下不该再被中文关键词命中"
+        );
+    }
+
+    /// P155：语言下拉框的选项覆盖全部支持语言（加语言只改 core 的
+    /// `Lang`，此处零改动即自动跟随）。
+    #[test]
+    fn p155_language_dropdown_covers_every_supported_language() {
+        let opts = editpad_core::LangOption::all(editpad_core::Lang::ZhCn);
+        assert_eq!(opts.len(), editpad_core::Lang::ALL.len());
+        let labels: Vec<String> = opts.iter().map(|o| o.to_string()).collect();
+        assert!(labels.contains(&"中文（简体）".to_owned()));
+        assert!(labels.contains(&"English".to_owned()));
+        // 下拉框当前选中项必须能在选项列表里找到（否则会显示成占位符）
+        for lang in editpad_core::Lang::ALL {
+            let selected = editpad_core::LangOption { lang, ui: lang };
+            assert!(
+                opts.contains(&selected),
+                "{lang:?} 的选中项必须存在于选项中"
+            );
+        }
+    }
+
     /// 候选全不命中时的降级：UI 回落 iced 默认、行号回落正文字体，
     /// 都不 panic、不引入失败模式。
     #[test]
-    fn p154_font_picking_degrades_gracefully_when_no_candidate() {
-        let mut app = Editpad::default();
+    fn p154_font_picking_degrades_gracefully_when_no_candidate() {        let mut app = Editpad::default();
         app.available_fonts = vec!["Some Random Font".to_owned()];
-        app.ui_font_family = pick_ui_font_family("en", &app.available_fonts);
+        app.ui_font_family = pick_ui_font_family(editpad_core::Lang::En, &app.available_fonts);
         app.gutter_font_family = pick_gutter_font_family(&app.available_fonts);
         assert!(app.ui_font_family.is_none());
         assert!(app.gutter_font_family.is_none());

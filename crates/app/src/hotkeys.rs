@@ -1,4 +1,6 @@
 use super::*;
+// P155：热键说明 = core 文案表的键（`Hk*` 变体），此处直接引名。
+use editpad_core::Key::*;
 
 /// 热键动作：持久化主键 `id` + 默认组合（可多个）+ 说明。
 ///
@@ -10,7 +12,7 @@ pub(crate) struct HotkeyAction {
     /// 默认组合列表：首个是设置页展示的主键位，其余为同义附加默认
     /// （如重做的 `Ctrl+Y` 与主流的 `Ctrl+Shift+Z`）。
     pub(crate) default_combos: &'static [&'static str],
-    pub(crate) desc: &'static str,
+    pub(crate) desc: editpad_core::Key,
 }
 
 /// 键盘热键动作注册表（展示顺序 = 设置热键页顺序）。
@@ -19,116 +21,116 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction {
         id: "open",
         default_combos: &["Ctrl+O"],
-        desc: "打开文件",
+        desc: HkOpen,
     },
     HotkeyAction {
         id: "save",
         default_combos: &["Ctrl+S"],
-        desc: "保存",
+        desc: HkSave,
     },
     HotkeyAction {
         id: "select_all",
         default_combos: &["Ctrl+A"],
-        desc: "全选",
+        desc: HkSelectAll,
     },
     HotkeyAction {
         id: "find",
         default_combos: &["Ctrl+F"],
-        desc: "查找/替换栏",
+        desc: HkFind,
     },
     HotkeyAction {
         id: "goto",
         default_combos: &["Ctrl+G"],
-        desc: "跳转到行",
+        desc: HkGoto,
     },
     HotkeyAction {
         id: "undo",
         default_combos: &["Ctrl+Z"],
-        desc: "撤销",
+        desc: HkUndo,
     },
     HotkeyAction {
         id: "redo",
         default_combos: &["Ctrl+Y", "Ctrl+Shift+Z"],
-        desc: "重做（Ctrl+Y 或主流的 Ctrl+Shift+Z）",
+        desc: HkRedo,
     },
     HotkeyAction {
         id: "copy",
         default_combos: &["Ctrl+C"],
-        desc: "复制选区",
+        desc: HkCopy,
     },
     HotkeyAction {
         id: "cut",
         default_combos: &["Ctrl+X"],
-        desc: "剪切选区",
+        desc: HkCut,
     },
     HotkeyAction {
         id: "paste",
         default_combos: &["Ctrl+V"],
-        desc: "粘贴",
+        desc: HkPaste,
     },
     // 行操作套件（第 57 轮，仿主流编辑器编辑菜单）
     HotkeyAction {
         id: "dup_line",
         default_combos: &["Ctrl+D"],
-        desc: "在下方复制当前行",
+        desc: HkDupLine,
     },
     HotkeyAction {
         id: "del_line",
         default_combos: &["Ctrl+L"],
-        desc: "删除当前行",
+        desc: HkDelLine,
     },
     HotkeyAction {
         id: "move_line_up",
         default_combos: &["Ctrl+Shift+Up"],
-        desc: "当前行上移",
+        desc: HkMoveLineUp,
     },
     HotkeyAction {
         id: "move_line_down",
         default_combos: &["Ctrl+Shift+Down"],
-        desc: "当前行下移",
+        desc: HkMoveLineDown,
     },
     // 大小写转换与行首尾清理（第 58 轮；大小写默认键与主流编辑器一致，
     // Trim 在主流编辑器无默认键——取 Ctrl+Shift+T/L/B 助记：Trim/Leading/Both）
     HotkeyAction {
         id: "to_uppercase",
         default_combos: &["Ctrl+Shift+U"],
-        desc: "转为大写（选区/全文）",
+        desc: HkToUppercase,
     },
     HotkeyAction {
         id: "to_lowercase",
         default_combos: &["Ctrl+U"],
-        desc: "转为小写（选区/全文）",
+        desc: HkToLowercase,
     },
     HotkeyAction {
         id: "trim_trailing",
         default_combos: &["Ctrl+Shift+T"],
-        desc: "去除行尾空白（选区行/全文）",
+        desc: HkTrimTrailing,
     },
     HotkeyAction {
         id: "trim_leading",
         default_combos: &["Ctrl+Shift+L"],
-        desc: "去除行首空白（选区行/全文）",
+        desc: HkTrimLeading,
     },
     HotkeyAction {
         id: "trim_both",
         default_combos: &["Ctrl+Shift+B"],
-        desc: "去除行首尾空白（选区行/全文）",
+        desc: HkTrimBoth,
     },
     // 行排序与去重（第 59 轮，仿主流编辑器行操作菜单；S/D=升/降序助记，K=去重）
     HotkeyAction {
         id: "sort_lines_asc",
         default_combos: &["Ctrl+Shift+S"],
-        desc: "行升序排序（选区行/全文）",
+        desc: HkSortLinesAsc,
     },
     HotkeyAction {
         id: "sort_lines_desc",
         default_combos: &["Ctrl+Shift+D"],
-        desc: "行降序排序（选区行/全文）",
+        desc: HkSortLinesDesc,
     },
     HotkeyAction {
         id: "dedupe_lines",
         default_combos: &["Ctrl+Shift+K"],
-        desc: "去除重复行（选区行/全文）",
+        desc: HkDedupeLines,
     },
     // 书签套件（第 60 轮，仿主流编辑器书签导航）。F2 家族与主流编辑器
     // 同默认键；Alt 系键位因 AltGr 保护不可用，清除全部取 Ctrl+Shift+F2；
@@ -136,140 +138,140 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction {
         id: "bookmark_toggle",
         default_combos: &["Ctrl+F2"],
-        desc: "切换当前行书签",
+        desc: HkBookmarkToggle,
     },
     HotkeyAction {
         id: "bookmark_next",
         default_combos: &["F2"],
-        desc: "跳到下一个书签",
+        desc: HkBookmarkNext,
     },
     HotkeyAction {
         id: "bookmark_prev",
         default_combos: &["Shift+F2"],
-        desc: "跳到上一个书签",
+        desc: HkBookmarkPrev,
     },
     HotkeyAction {
         id: "bookmark_clear_all",
         default_combos: &["Ctrl+Shift+F2"],
-        desc: "清除全部书签",
+        desc: HkBookmarkClearAll,
     },
     HotkeyAction {
         id: "copy_marked_lines",
         default_combos: &["Ctrl+Shift+C"],
-        desc: "复制全部标记行",
+        desc: HkCopyMarkedLines,
     },
     HotkeyAction {
         id: "del_marked_lines",
         default_combos: &["Ctrl+Shift+X"],
-        desc: "删除全部标记行",
+        desc: HkDelMarkedLines,
     },
     // 括号匹配（第 61 轮，仿主流编辑器；M=Matching 助记——主流的 Ctrl+\
     // 因反斜杠非字母/数字不入组合键白名单）
     HotkeyAction {
         id: "jump_bracket",
         default_combos: &["Ctrl+Shift+M"],
-        desc: "跳到配对括号",
+        desc: HkJumpBracket,
     },
     // 行操作扩充（第 62 轮；空闲字母键取 I/O/P/J/H/N/R，均可在设置页重映射）
     HotkeyAction {
         id: "tabs_to_spaces_leading",
         default_combos: &["Ctrl+Shift+I"],
-        desc: "行首制表符转空格（选区行/全文）",
+        desc: HkTabsToSpacesLeading,
     },
     HotkeyAction {
         id: "tabs_to_spaces_all",
         default_combos: &["Ctrl+Shift+O"],
-        desc: "全部制表符转空格（选区行/全文）",
+        desc: HkTabsToSpacesAll,
     },
     HotkeyAction {
         id: "spaces_to_tabs_leading",
         default_combos: &["Ctrl+Shift+P"],
-        desc: "行首空格转制表符（选区行/全文）",
+        desc: HkSpacesToTabsLeading,
     },
     HotkeyAction {
         id: "merge_lines",
         default_combos: &["Ctrl+Shift+J"],
-        desc: "合并行（触及块合成一行/并入下一行）",
+        desc: HkMergeLines,
     },
     HotkeyAction {
         id: "split_line",
         default_combos: &["Ctrl+Shift+H"],
-        desc: "拆分行（光标处断行/选区独立成行）",
+        desc: HkSplitLine,
     },
     HotkeyAction {
         id: "del_empty_lines",
         default_combos: &["Ctrl+Shift+N"],
-        desc: "删除空行（选区行/全文）",
+        desc: HkDelEmptyLines,
     },
     HotkeyAction {
         id: "del_blank_lines",
         default_combos: &["Ctrl+Shift+R"],
-        desc: "删除空白行（含纯空白行）",
+        desc: HkDelBlankLines,
     },
     // 查找全部结果面板（A = All matches 助记；数据源复用查找栏的后台扫描命中表）
     HotkeyAction {
         id: "find_all_panel",
         default_combos: &["Ctrl+Shift+A"],
-        desc: "查找全部结果面板",
+        desc: HkFindAllPanel,
     },
     // 第 63 轮：F5 插入日期时间（记事本同款裸功能键）+ 复制路径/文件名
     // （G/Q 为空闲字母，弱助记但 desc 明示；均可在设置页重映射）
     HotkeyAction {
         id: "insert_date_time",
         default_combos: &["F5"],
-        desc: "插入日期时间（YYYY-MM-DD HH:MM）",
+        desc: HkInsertDateTime,
     },
     HotkeyAction {
         id: "copy_file_path",
         default_combos: &["Ctrl+Shift+G"],
-        desc: "复制完整路径（当前页）",
+        desc: HkCopyFilePath,
     },
     HotkeyAction {
         id: "copy_file_name",
         default_combos: &["Ctrl+Shift+Q"],
-        desc: "复制文件名（当前页）",
+        desc: HkCopyFileName,
     },
     // 第 64 轮：行注释切换（Ctrl+Q，多编辑器通用的注释切换键位）+
     // 恢复上次关闭的标签页（W=与 Ctrl+W 关页互逆的助记）
     HotkeyAction {
         id: "toggle_line_comment",
         default_combos: &["Ctrl+Q"],
-        desc: "切换行注释（按语法选 // # -- 等）",
+        desc: HkToggleLineComment,
     },
     HotkeyAction {
         id: "reopen_closed_tab",
         default_combos: &["Ctrl+Shift+W"],
-        desc: "恢复上次关闭的标签页",
+        desc: HkReopenClosedTab,
     },
     HotkeyAction {
         id: "new_tab",
         default_combos: &["Ctrl+T"],
-        desc: "新建标签页",
+        desc: HkNewTab,
     },
     HotkeyAction {
         id: "close_tab",
         default_combos: &["Ctrl+W"],
-        desc: "关闭当前标签页",
+        desc: HkCloseTab,
     },
     HotkeyAction {
         id: "next_tab",
         default_combos: &["Ctrl+Tab"],
-        desc: "循环切换标签页",
+        desc: HkNextTab,
     },
     HotkeyAction {
         id: "format_json",
         default_combos: &["Ctrl+Shift+F"],
-        desc: "格式化 JSON（仅 JSON 文件）",
+        desc: HkFormatJson,
     },
     HotkeyAction {
         id: "doc_start",
         default_combos: &["Ctrl+Home"],
-        desc: "跳到文档首",
+        desc: HkDocStart,
     },
     HotkeyAction {
         id: "doc_end",
         default_combos: &["Ctrl+End"],
-        desc: "跳到文档尾",
+        desc: HkDocEnd,
     },
     // P134（路线图 C8）：Alt+Home/End = 逻辑行首/尾——⚠️ 不入注册表：
     // 热键契约禁含 Alt（AltGr 保护，见 handle_key 文档），走裸命名键
@@ -279,39 +281,39 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction {
         id: "find_next",
         default_combos: &["F3"],
-        desc: "查找下一个",
+        desc: HkFindNext,
     },
     HotkeyAction {
         id: "find_prev",
         default_combos: &["Shift+F3"],
-        desc: "查找上一个",
+        desc: HkFindPrev,
     },
     HotkeyAction {
         id: "prev_tab",
         default_combos: &["Ctrl+Shift+Tab"],
-        desc: "循环切换标签页（反向）",
+        desc: HkPrevTab,
     },
     // P122：词级导航与删词（Ctrl+←/→ 与主流编辑器同默认键；
     // Ctrl+Backspace/Delete 删到词首/词尾，Backspace 补入组合键白名单）
     HotkeyAction {
         id: "word_left",
         default_combos: &["Ctrl+Left"],
-        desc: "跳到上一个词首",
+        desc: HkWordLeft,
     },
     HotkeyAction {
         id: "word_right",
         default_combos: &["Ctrl+Right"],
-        desc: "跳到下一个词尾",
+        desc: HkWordRight,
     },
     HotkeyAction {
         id: "del_word_left",
         default_combos: &["Ctrl+Backspace"],
-        desc: "删除到词首",
+        desc: HkDelWordLeft,
     },
     HotkeyAction {
         id: "del_word_right",
         default_combos: &["Ctrl+Delete"],
-        desc: "删除到词尾",
+        desc: HkDelWordRight,
     },
     // P124：行操作扩展与词首大写（对标主流编辑器行操作；数字带
     // 1~5 = 排序/转换扩展助记，E=rEverse、Y=去连续重复，均空闲可重映射；
@@ -319,90 +321,90 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction {
         id: "reverse_lines",
         default_combos: &["Ctrl+Shift+E"],
-        desc: "行序反转（选区行/全文）",
+        desc: HkReverseLines,
     },
     HotkeyAction {
         id: "sort_lines_numeric_asc",
         default_combos: &["Ctrl+1"],
-        desc: "按数值升序（行首整数为键，无数字行排末尾）",
+        desc: HkSortLinesNumericAsc,
     },
     HotkeyAction {
         id: "sort_lines_numeric_desc",
         default_combos: &["Ctrl+2"],
-        desc: "按数值降序（行首整数为键）",
+        desc: HkSortLinesNumericDesc,
     },
     HotkeyAction {
         id: "sort_lines_length_asc",
         default_combos: &["Ctrl+3"],
-        desc: "按行长升序",
+        desc: HkSortLinesLengthAsc,
     },
     HotkeyAction {
         id: "sort_lines_length_desc",
         default_combos: &["Ctrl+4"],
-        desc: "按行长降序",
+        desc: HkSortLinesLengthDesc,
     },
     HotkeyAction {
         id: "dedupe_consecutive_lines",
         default_combos: &["Ctrl+Shift+Y"],
-        desc: "去连续重复行（保首次出现）",
+        desc: HkDedupeConsecutiveLines,
     },
     HotkeyAction {
         id: "to_titlecase",
         default_combos: &["Ctrl+5"],
-        desc: "词首大写（选区/全文；数字带 = 扩展转换助记）",
+        desc: HkToTitlecase,
     },
     // P126：文档与窗口（Ctrl+R 只读锁定；Ctrl+Shift+V 资源管理器定位；
     // F11 全屏与主流一致；F9 置顶，均空闲可重映射）
     HotkeyAction {
         id: "toggle_read_only",
         default_combos: &["Ctrl+R"],
-        desc: "切换只读锁定（编辑与撤销拒收）",
+        desc: HkToggleReadOnly,
     },
     HotkeyAction {
         id: "open_containing_folder",
         default_combos: &["Ctrl+Shift+V"],
-        desc: "打开所在文件夹（资源管理器定位当前文件）",
+        desc: HkOpenContainingFolder,
     },
     HotkeyAction {
         id: "toggle_fullscreen",
         default_combos: &["F11"],
-        desc: "切换全屏（全屏期间不记忆窗口几何）",
+        desc: HkToggleFullscreen,
     },
     HotkeyAction {
         id: "toggle_always_on_top",
         default_combos: &["F9"],
-        desc: "切换窗口置顶",
+        desc: HkToggleAlwaysOnTop,
     },
     // P128：选区文本工具（数字带 6~0 续编；SHA-256 取空闲 F7）
     HotkeyAction {
         id: "tool_base64_encode",
         default_combos: &["Ctrl+6"],
-        desc: "Base64 编码（选区）",
+        desc: HkToolBase64Encode,
     },
     HotkeyAction {
         id: "tool_base64_decode",
         default_combos: &["Ctrl+7"],
-        desc: "Base64 解码（选区）",
+        desc: HkToolBase64Decode,
     },
     HotkeyAction {
         id: "tool_url_encode",
         default_combos: &["Ctrl+8"],
-        desc: "URL 编码（选区）",
+        desc: HkToolUrlEncode,
     },
     HotkeyAction {
         id: "tool_url_decode",
         default_combos: &["Ctrl+9"],
-        desc: "URL 解码（选区）",
+        desc: HkToolUrlDecode,
     },
     HotkeyAction {
         id: "tool_md5",
         default_combos: &["Ctrl+0"],
-        desc: "计算 MD5 替换选区",
+        desc: HkToolMd5,
     },
     HotkeyAction {
         id: "tool_sha256",
         default_combos: &["F7"],
-        desc: "计算 SHA-256 替换选区",
+        desc: HkToolSha256,
     },
     // P129：命令面板 / 快速标签切换。Ctrl+Shift+P（主流编辑器同款）已被
     // spaces_to_tabs_leading 占用、26 个 Ctrl+Shift 字母全部用尽，命令
@@ -410,39 +412,39 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     HotkeyAction {
         id: "command_palette",
         default_combos: &["Ctrl+E"],
-        desc: "命令面板（模糊搜全部命令）",
+        desc: HkCommandPalette,
     },
     HotkeyAction {
         id: "quick_switch_tab",
         default_combos: &["Ctrl+P"],
-        desc: "快速切换标签页（模糊跳转）",
+        desc: HkQuickSwitchTab,
     },
     // P130：文件监视（Monitor 同语义：干净页自动重载 + 文末跟随）
     HotkeyAction {
         id: "toggle_monitor_file",
         default_combos: &["F8"],
-        desc: "切换当前页文件监视（tail 跟随）",
+        desc: HkToggleMonitorFile,
     },
     // B9：列编辑器（26 个 Ctrl+Shift 字母已全部占用（P129 记录），F 家族
     // 余量取 F6；Alt 系因 AltGr 保护不可入表）
     HotkeyAction {
         id: "column_editor",
         default_combos: &["F6"],
-        desc: "列编辑器（向列块插入序号/文本）",
+        desc: HkColumnEditor,
     },
     // B10 Phase 2：多光标添加下一匹配。Ctrl+D 已被 P73 行复制占用，
     // Ctrl+M 空闲（主流编辑器同语义键位）。
     HotkeyAction {
         id: "add_next_match",
         default_combos: &["Ctrl+M"],
-        desc: "多光标：添加下一匹配（环形搜索）",
+        desc: HkAddNextMatch,
     },
     // A8：在文件中查找。Ctrl+Shift+F 被 format_json 占用（26 个
     // Ctrl+Shift 字母占尽，P129 记录），F 家族空闲 F1/F4/F10/F12 取 F12。
     HotkeyAction {
         id: "find_in_files",
         default_combos: &["F12"],
-        desc: "在文件中查找（当前页所在目录，可换目录）",
+        desc: HkFindInFiles,
     },
 ];
 
@@ -771,21 +773,22 @@ pub(crate) fn handle_key(
 
 // ---------- P129：命令面板数据源与模糊匹配 ----------
 
-/// 面板条目：动作 id + 展示标题（desc）+ 次行细节（默认键位）。
+/// 面板条目：动作 id + 展示标题 + 次行细节（默认键位）。
 pub(crate) struct PaletteCommand {
     pub(crate) id: &'static str,
-    pub(crate) title: &'static str,
+    /// P155：标题按当前界面语言现取（原为直接指向中文说明的 `&'static str`）。
+    pub(crate) title: String,
     pub(crate) detail: String,
 }
 
 /// 命令面板数据源 = 热键注册表全量（id/desc/默认键位），执行经
 /// dispatch_action 复用既有映射——注册表加动作即自动入面板，零双维护。
-pub(crate) fn palette_commands() -> Vec<PaletteCommand> {
+pub(crate) fn palette_commands(lang: editpad_core::Lang) -> Vec<PaletteCommand> {
     HOTKEY_ACTIONS
         .iter()
         .map(|a| PaletteCommand {
             id: a.id,
-            title: a.desc,
+            title: a.desc.text(lang).to_owned(),
             detail: default_combo_of(a.id).unwrap_or("—").to_owned(),
         })
         .collect()

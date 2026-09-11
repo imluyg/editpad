@@ -10,6 +10,7 @@ pub mod error;
 pub mod find_in_files;
 pub mod highlight;
 pub mod json;
+pub mod lang;
 pub mod loader;
 pub mod markdown;
 pub mod paths;
@@ -26,6 +27,12 @@ pub use find_in_files::{filter_whole_word_text, find_in_file, find_in_file_with,
     FifMatcher, WalkOutput, IGNORED_DIRS, MAX_SCAN_FILE_BYTES, MAX_WALK_DEPTH};
 pub use highlight::{resolve_language, syntax_for_extension, LazyHighlighter, StyledRun};
 pub use json::{format_json, validate_json, JsonError};
+pub use lang::{
+    fmt_core_error, fmt_fif_panel_title, fmt_fif_summary, fmt_file_hits, fmt_find_counter,
+    fmt_font_picker_more, fmt_match_counter, fmt_match_total, fmt_page_count, fmt_replaced,
+    fmt_restore_note, fmt_selection, fmt_suffix, fmt_wrapped, untitled_prefix, Key, Lang,
+    LangOption, LANG_NAME_EN, LANG_NAME_ZH_CN,
+};
 pub use loader::{load_file, load_file_streaming, load_document_streaming, decode, LoadProgress,
     LoadedText, LoadedDocument};
 pub use paths::{data_root, data_root_for, data_root_for_base, instance_mutex_name,

@@ -336,11 +336,11 @@ fn add_next_match_word_cycle_skips_occupied() {
     assert_eq!(c.extra_cursors[1].anchor, Some(CursorPos { line: 0, col: 16 }));
     assert_eq!(c.extra_cursors[1].cursor, CursorPos { line: 0, col: 19 });
 
-    // 第 3 次：无更多匹配 → Err 提示，集合不动
+    // 第 3 次：无更多匹配 → Err，集合不动
     assert_eq!(
         c.add_next_match(),
-        Err("没有更多匹配".to_owned()),
-        "环形一圈无匹配 = Err 提示"
+        Err(EditErr::NoMoreMatch),
+        "环形一圈无匹配 = Err"
     );
     assert_eq!(c.extra_cursors.len(), 2);
 }
@@ -368,7 +368,7 @@ fn add_next_match_guards() {
     // 光标不在词上 → Err
     let mut c = core_with("foo , bar");
     c.cursor = CursorPos { line: 0, col: 5 }; // 空白处
-    assert!(c.add_next_match().is_err_and(|m| m.contains("词")));
+    assert!(c.add_next_match().is_err_and(|e| e == EditErr::CursorNotOnWord));
 
     // 折行开态拒绝（Ok(false) 静默）
     let mut c = core_with("foo foo");
@@ -730,7 +730,7 @@ fn add_next_match_multibyte_reports_no_more_match_without_panic() {
     // 起扫，切点落进续字节或命中坐标越过 ropey 字符口径，双双 panic。
     let mut c = core_with("日本語 x");
     c.cursor = CursorPos { line: 0, col: 5 }; // 词 "x" 上
-    assert_eq!(c.add_next_match(), Err("没有更多匹配".to_owned()));
+    assert_eq!(c.add_next_match(), Err(EditErr::NoMoreMatch));
     assert!(c.extra_cursors.is_empty());
 }
 

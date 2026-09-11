@@ -429,8 +429,9 @@ impl EditorCore {
     /// 扫描第一个**未占用**实例，扫到文档尾回绕开头（当前选区自身因
     /// 占用判定天然跳过）；命中 → 新增附加光标并让其实例带选区
     /// （anchor=实例起点），纵向滚动收敛让新实例进入视口。不改文档、
-    /// 不置脏；`Err` = 状态栏提示文案（不在词上/无匹配/封顶）。
-    pub(crate) fn add_next_match(&mut self) -> Result<bool, String> {
+    /// 不置脏；`Err` = 拒绝原因（由调用方按界面语言取文案，见
+    /// [`crate::editor::EditErr::text`]）。
+    pub(crate) fn add_next_match(&mut self) -> Result<bool, EditErr> {
         if self.wrap.borrow().enabled || self.block_sel.is_some() || self.preedit.is_some() {
             return Ok(false);
         }
@@ -440,7 +441,7 @@ impl EditorCore {
         } else {
             let (ws, we) = self
                 .word_range_at_cursor()
-                .ok_or_else(|| "光标不在词上（Ctrl+M 需要词或选区）".to_owned())?;
+                .ok_or(EditErr::CursorNotOnWord)?;
             let line_off = self.doc.line_to_char(self.cursor.line);
             let needle: String = self.line_text(self.cursor.line)
                 .chars()
@@ -450,7 +451,7 @@ impl EditorCore {
             (needle, line_off + we)
         };
         if self.extra_cursors.len() >= MAX_EXTRA_CURSORS {
-            return Err(format!("附加光标数量已达上限（{MAX_EXTRA_CURSORS}）"));
+            return Err(EditErr::ExtraCursorCap(MAX_EXTRA_CURSORS));
         }
         // 占用区间 = 各光标的选区/落点 + 主光标**当前实例**（选区本身或
         // 光标处词）——环形回绕扫到起点时不得把当前实例再加进来；命中
@@ -508,7 +509,7 @@ impl EditorCore {
             }
         }
         let Some((ms, me)) = hit else {
-            return Err("没有更多匹配".to_owned());
+            return Err(EditErr::NoMoreMatch);
         };
         let sl = self.doc.char_to_line(ms);
         let sc = ms - self.doc.line_to_char(sl);

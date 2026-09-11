@@ -448,8 +448,13 @@ enum Message {
 
     /// 深浅主题切换（写回设置）
     ThemeToggled,
-    /// P154：界面语言循环切换（中文简体 ⇄ English）。当前职责 = 重新解析
-    /// UI 字体族（文案 i18n 另行立项）；落盘并立即生效。
+    /// P155：下拉框选中项（`pick_list` 按选项类型发消息，故单列一档，
+    /// 由 update 解包转 [`Message::apply_language`] 并带上完整语言信息）。
+    LanguageOptionSelected(editpad_core::LangOption),
+    /// P154 兼容入口：界面语言循环切换（中文简体 → English → …）。
+    /// 下拉框上线后设置页不再用它；保留给键盘/测试路径（故生产构建里
+    /// 没有构造点，dead_code 豁免）。
+    #[allow(dead_code)]
     LanguageToggled,
     /// 字号增减（±2.0，clamp 后写回设置并即时生效）
     FontSizeDelta(f32),
@@ -521,23 +526,26 @@ enum Message {
 /// `unmappable` = 有字符无法用目标编码表示（已按 `&#N;` 写入），优先告警。
 /// 返回需要展示的提示；None 表示无需提示。
 fn transcode_notice(
+    lang: editpad_core::Lang,
     original_encoding: &str,
     target_label: &str,
     unmappable: bool,
 ) -> Option<String> {
+    use editpad_core::Key as K;
     if unmappable {
-        return Some(
-            "部分字符无法用目标编码表示，已按 &#编号; 形式写入".to_owned(),
-        );
+        return Some(K::NoticeEncodeSubstituted.text(lang).to_owned());
     }
     if original_encoding.is_empty() || original_encoding == target_label {
         return None;
     }
     match (original_encoding, target_label) {
-        ("UTF-8(BOM)", "UTF-8") => {
-            Some("已按 UTF-8（无 BOM）保存：原文件的 BOM 已丢失".to_owned())
-        }
-        (from, to) => Some(format!("已从 {from} 转码为 {to} 落盘（转码不可逆）")),
+        ("UTF-8(BOM)", "UTF-8") => Some(K::NoticeBomLost.text(lang).to_owned()),
+        (from, to) => Some(format!(
+            "{}{from}{}{to}{}",
+            K::NoticeTranscoded.text(lang),
+            K::NoticeTranscodedMiddle.text(lang),
+            K::NoticeTranscodedSuffix.text(lang)
+        )),
     }
 }
 
@@ -576,9 +584,14 @@ async fn drive_heartbeat(payload: HeartbeatPayload) -> Message {
         .map_err(|e| e.to_string());
         let _ = tx.send(result);
     });
-    let result = rx
-        .recv()
-        .unwrap_or_else(|e| Err(format!("心跳线程意外终止:{e}")));
+    let result = rx.recv().unwrap_or_else(|e| {
+        // P155 取舍：心跳线程 panic 到断了 channel 才走到这里；与自动保存
+        // 同口径固定取默认语言文案（不值得为不可达分支把 lang 透传下去）
+        Err(format!(
+            "{}{e}",
+            editpad_core::Key::StHeartbeatThreadGone.text(editpad_core::Lang::default())
+        ))
+    });
     Message::HeartbeatDone(HeartbeatOutcome {
         plan: payload.plan,
         rev: payload.rev,

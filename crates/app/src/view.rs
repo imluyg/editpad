@@ -34,6 +34,21 @@ impl Editpad {
         }
     }
 
+    /// P155：当前界面语言（全部用户可见文案的取值依据）。
+    ///
+    /// 单一来源 = `Settings.language`（P155 起是 [`editpad_core::Lang`]
+    /// 枚举）。视图层每帧现取即可：`Lang` 是 `Copy`，且切语言只改这一个
+    /// 字段，不存在「两处语言状态失步」的可能。
+    pub(crate) fn lang(&self) -> editpad_core::Lang {
+        self.settings.language
+    }
+
+    /// P155：取一条界面文案（`Key::text` 的薄封装，只为让视图层的调用
+    /// 短一点：`self.t(Key::MenuFile)`）。
+    pub(crate) fn t(&self, key: editpad_core::Key) -> &'static str {
+        key.text(self.settings.language)
+    }
+
     /// 正文字形族（P34 换装点，**只作用于正文与 Markdown 预览**）。
     /// 生效族名 Some → 以 `Family::Name` 引用（系统字体已在 fontdb 里，
     /// 无需装载字节）；None / 未配置 → 默认等宽（P33 的 CJK 钉字仍生效）。
@@ -190,7 +205,7 @@ impl Editpad {
                 for tab in &mut self.tabs {
                     tab.heartbeat_snap = None;
                 }
-                self.set_status_error(format!("快照心跳失败:{error}"));
+                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StSnapshotHeartbeatFailed, &error.to_string()));
             }
         }
     }
@@ -288,7 +303,7 @@ impl Editpad {
                 self.close_window()
             }
             Err(error) => {
-                self.set_status_error(format!("会话快照失败:{error}"));
+                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StSessionSnapshotFailed, &error.to_string()));
                 self.confirm_or_close()
             }
         }
@@ -547,13 +562,13 @@ impl Editpad {
     fn finish_restore_summary(&mut self) {
         let mut notes: Vec<String> = Vec::new();
         if self.restore_failed > 0 {
-            notes.push(format!("{} 页未能恢复原内容", self.restore_failed));
+            notes.push(editpad_core::fmt_restore_note(self.lang(), self.restore_failed, false));
         }
         if self.restore_dropped > 0 {
-            notes.push(format!("{} 页超出内存护栏未恢复", self.restore_dropped));
+            notes.push(editpad_core::fmt_restore_note(self.lang(), self.restore_dropped, true));
         }
         if !notes.is_empty() {
-            self.set_status(format!("会话恢复完成:{}", notes.join("，")));
+            self.set_status(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StSessionRestored, &notes.join(self.t(editpad_core::Key::ListSeparator))));
         }
         self.restore_failed = 0;
         self.restore_dropped = 0;
@@ -661,7 +676,7 @@ impl Editpad {
         if self.regex_enabled {
             if let Err(e) = editpad_core::compile_regex(&effective_query, self.case_sensitive) {
                 self.cancel_fif_scan();
-                self.set_status_error(format!("正则无效：{e}"));
+                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StInvalidRegex, &e.to_string()));
                 return Task::none();
             }
         }
@@ -713,7 +728,7 @@ impl Editpad {
         if self.regex_enabled {
             if let Err(e) = editpad_core::compile_regex(&effective_query, self.case_sensitive) {
                 self.cancel_find_scan();
-                self.set_status_error(format!("正则无效：{e}"));
+                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StInvalidRegex, &e.to_string()));
                 return Task::none();
             }
         }
@@ -821,7 +836,7 @@ impl Editpad {
         self.cur_handle
             .borrow_mut()
             .select_span(pos.line, pos.col, pos.len_chars);
-        self.set_find_status(format!("第 {}/{} 处匹配", index + 1, self.matches.len()));
+        self.set_find_status(editpad_core::fmt_match_counter(self.lang(), index + 1, self.matches.len()));
     }
 
     /// 第 63 轮：复制某页的完整路径或文件名到剪贴板。
@@ -833,7 +848,7 @@ impl Editpad {
             return Task::none();
         };
         let Some(path) = tab.path.clone() else {
-            self.set_status("未命名页没有路径可复制（先保存）".to_owned());
+            self.set_status(self.t(editpad_core::Key::StCopyPathUntitled).to_owned());
             return Task::none();
         };
         let payload = if full_path {
@@ -843,7 +858,7 @@ impl Editpad {
                 .map(|n| n.display().to_string())
                 .unwrap_or_else(|| path.display().to_string())
         };
-        self.set_status(format!("已复制 {payload}"));
+        self.set_status(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StCopied, &payload));
         iced::clipboard::write(payload)
     }
 
@@ -853,7 +868,7 @@ impl Editpad {
         }
         // 扫描在途：不基于过期命中表跳转
         if self.find_scanning() {
-            self.set_status("查找中…".to_owned());
+            self.set_status(self.t(editpad_core::Key::FindSearching).to_owned());
             return Task::none();
         }
         if self.matches.is_empty() {
@@ -890,7 +905,7 @@ impl Editpad {
             self.cur_handle
                 .borrow_mut()
                 .select_span(pos.line, pos.col, pos.len_chars);
-            self.set_find_status(format!("第 {}/{} 处匹配", i + 1, self.matches.len()));
+            self.set_find_status(editpad_core::fmt_match_counter(self.lang(), i + 1, self.matches.len()));
         }
         Task::none()
     }
@@ -947,8 +962,8 @@ impl Editpad {
             Some(name) => name,
             // P25：未命名页的另存为建议名带序号并补扩展名
             None => match self.tab().untitled_num {
-                Some(n) => format!("未命名{n}.txt"),
-                None => "未命名.txt".into(),
+                Some(n) => format!("{}{n}.txt", editpad_core::untitled_prefix(self.lang())),
+                None => format!("{}.txt", editpad_core::untitled_prefix(self.lang())),
             },
         }
     }
@@ -974,7 +989,12 @@ impl Editpad {
 
         let mut panel = column![
             row![
-                text(format!("「{}」", tab.base_name()))
+                text(editpad_core::fmt_wrapped(
+                    self.lang(),
+                    editpad_core::Key::TabHeaderPrefix,
+                    &tab.base_name_in(self.lang()),
+                    editpad_core::Key::TabHeaderSuffix,
+                ))
                     .size(uipx)
                     .font(uifont)
                     .color([0.5, 0.5, 0.5]),
@@ -992,7 +1012,11 @@ impl Editpad {
         // 固定 / 取消固定（固定页豁免一切关闭路径）。
         // P56：菜单项一律中性列表样式（透明底+悬停淡染），不再用 iced
         // 默认实心蓝（用户截图：菜单项像全选中的高亮条）
-        let pin_label = if tab.pinned { "取消固定" } else { "📌 固定标签页" };
+        let pin_label = if tab.pinned {
+            self.t(editpad_core::Key::TabUnpin)
+        } else {
+            self.t(editpad_core::Key::TabPin)
+        };
         panel = panel.push(
             button(container(text(pin_label).size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
@@ -1002,7 +1026,10 @@ impl Editpad {
         // 保存：仅置脏可用（与工具栏「保存」同一口径）；
         // 未命名页在 update 层自动落另存为
         panel = panel.push(
-            button(container(text("保存").size(uipx).font(uifont)).width(Fill))
+            button(
+                container(text(self.t(editpad_core::Key::TabSave)).size(uipx).font(uifont))
+                    .width(Fill),
+            )
                 .width(Fill)
                 .style(chrome_menu_item_style)
                 .on_press_maybe(
@@ -1010,7 +1037,11 @@ impl Editpad {
                 ),
         );
         // 另存为 / 重命名（v1 同一动作兜底，§3 P28 第 2 条）
-        let rename_label = if tab.path.is_some() { "重命名…" } else { "另存为…" };
+        let rename_label = if tab.path.is_some() {
+            self.t(editpad_core::Key::TabRename)
+        } else {
+            self.t(editpad_core::Key::TabSaveAs)
+        };
         panel = panel.push(
             button(container(text(rename_label).size(uipx).font(uifont)).width(Fill))
                 .width(Fill)
@@ -1020,7 +1051,10 @@ impl Editpad {
         // 第 63 轮：复制完整路径 / 文件名（未命名页无路径，菜单项灰掉）
         let named = tab.path.is_some();
         panel = panel.push(
-            button(container(text("复制完整路径").size(uipx).font(uifont)).width(Fill))
+            button(
+                container(text(self.t(editpad_core::Key::TabCopyPath)).size(uipx).font(uifont))
+                    .width(Fill),
+            )
                 .width(Fill)
                 .style(chrome_menu_item_style)
                 .on_press_maybe(
@@ -1028,7 +1062,10 @@ impl Editpad {
                 ),
         );
         panel = panel.push(
-            button(container(text("复制文件名").size(uipx).font(uifont)).width(Fill))
+            button(
+                container(text(self.t(editpad_core::Key::TabCopyName)).size(uipx).font(uifont))
+                    .width(Fill),
+            )
                 .width(Fill)
                 .style(chrome_menu_item_style)
                 .on_press_maybe(
@@ -1040,7 +1077,10 @@ impl Editpad {
 
         // 关闭：固定页拒绝（update 层守卫 + 菜单项灰掉双保险）
         panel = panel.push(
-            button(container(text("关闭").size(uipx).font(uifont)).width(Fill))
+            button(
+                container(text(self.t(editpad_core::Key::TabClose)).size(uipx).font(uifont))
+                    .width(Fill),
+            )
                 .width(Fill)
                 .style(chrome_menu_item_style)
                 .on_press_maybe(
@@ -1052,7 +1092,11 @@ impl Editpad {
         let right = batch_close_targets(&self.tabs, BatchCloseScope::RightOf(idx));
         panel = panel.push(
             button(
-                container(text(format!("关闭其他标签页({})", others.len()))
+                container(text(format!(
+                    "{}({})",
+                    self.t(editpad_core::Key::TabCloseOthers),
+                    others.len()
+                ))
                     .size(uipx)
                     .font(uifont))
                     .width(Fill),
@@ -1065,7 +1109,11 @@ impl Editpad {
         );
         panel = panel.push(
             button(
-                container(text(format!("关闭右侧标签页({})", right.len()))
+                container(text(format!(
+                    "{}({})",
+                    self.t(editpad_core::Key::TabCloseRight),
+                    right.len()
+                ))
                     .size(uipx)
                     .font(uifont))
                     .width(Fill),
@@ -1100,13 +1148,18 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // 第 76 轮（用户点单）：按钮改纯文字扁平（menubar_text_style，
         // 无背景无边框无凸起），行高压缩（按钮 padding [1,8] + 行内
         // padding [0,4]）——看起来不像按钮、更紧凑。
-        let menu_names = ["文件", "编辑", "查看", "设置"];
+        let menu_names = [
+            editpad_core::Key::MenuFile,
+            editpad_core::Key::MenuEdit,
+            editpad_core::Key::MenuView,
+            editpad_core::Key::MenuSettings,
+        ];
         let mut menubar_inner = row![].spacing(4);
         for (idx, name) in menu_names.iter().enumerate() {
             let open = self.menu_bar_open == Some(idx);
             menubar_inner = menubar_inner.push(
                 button(
-                    text(*name).size(uipx).font(uifont),
+                    text(self.t(*name)).size(uipx).font(uifont),
                 )
                 .padding([1, 8])
                 .style(move |theme, status| menubar_text_style(theme, status, open))
@@ -1146,7 +1199,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 if self.renaming_tab == Some(i) {
                     strip = strip.push(
                         row![
-                            text_input("新名称", &self.rename_input)
+                            text_input(self.t(editpad_core::Key::RenamePlaceholder), &self.rename_input)
                                 .id(rename_input_id()) // P64：与聚焦操作同源
                                 .size(uipx)
                                 .font(uifont)
@@ -1257,7 +1310,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if let Some((bytes_read, total_bytes)) = self.progress {
             body = body.push(
                 row![
-                    text("加载中…").size(uipx).font(uifont),
+                    text(self.t(editpad_core::Key::RecentsLoading)).size(uipx).font(uifont),
                     container(
                         progress_bar(0.0..=total_bytes.max(1) as f32, bytes_read as f32)
                     )
@@ -1280,7 +1333,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             let mut panel = column![].spacing(2).padding([4, 10]);
             if self.settings.recent_files.is_empty() {
                 panel = panel.push(
-                    text("（暂无最近文件）")
+                    text(self.t(editpad_core::Key::RecentsEmpty))
                         .size(uipx)
                         .font(uifont)
                         .color([0.5, 0.5, 0.5]),
@@ -1301,11 +1354,13 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 panel = panel.push(
                     button(
                         container(text(format!(
-                            "恢复上次关闭的文件（{}）",
+                            "{}{}{}",
+                            self.t(editpad_core::Key::RecentReopenPrefix),
                             self.closed_stack[0]
                                 .file_name()
                                 .map(|n| n.display().to_string())
-                                .unwrap_or_else(|| self.closed_stack[0].display().to_string())
+                                .unwrap_or_else(|| self.closed_stack[0].display().to_string()),
+                            self.t(editpad_core::Key::RecentReopenSuffix)
                         ))
                         .size(uipx)
                         .font(uifont))
@@ -1322,11 +1377,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             if !self.settings.recent_files.is_empty() {
                 panel = panel.push(
                     row![
-                        button(text("清空记录").size(uipx).font(uifont))
+                        button(text(self.t(editpad_core::Key::RecentsClear)).size(uipx).font(uifont))
                             .padding([2, 8])
                             .style(chrome_button_style)
                             .on_press_maybe((!self.busy).then_some(Message::RecentsCleared)),
-                        text("从 config.toml 移除全部路径")
+                        text(self.t(editpad_core::Key::RecentsClearHint))
                             .size(uipx)
                             .font(uifont)
                             .color([0.5, 0.5, 0.5]),
@@ -1345,14 +1400,14 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if self.goto_visible {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text("跳转到行:").size(uipx).font(uifont),
-                    text_input("行号", &self.goto_input)
+                    text(self.t(editpad_core::Key::GotoTitle)).size(uipx).font(uifont),
+                    text_input(self.t(editpad_core::Key::GotoPlaceholder), &self.goto_input)
                         .size(uipx)
                         .font(uifont)
                         .on_input(Message::GotoInputChanged)
                         .on_submit(Message::GotoSubmit)
                         .width(140),
-                    button(text("跳转").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::GotoButton)).size(uipx).font(uifont))
                         .style(chrome_button_style)
                         .on_press(Message::GotoSubmit),
                     button(text("×").size(uipx).font(uifont))
@@ -1372,20 +1427,20 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if self.confirm_visible {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text("文档有未保存的更改，确定要关闭吗？")
+                    text(self.t(editpad_core::Key::CloseConfirmDirty))
                         .size(uipx)
                         .font(uifont),
-                    button(text("保存并关闭").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonSaveAndClose)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press_maybe(
                             (!self.busy).then_some(Message::ConfirmSaveAndClose)
                         ),
-                    button(text("放弃更改").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonDiscardChanges)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::DiscardAndClose),
-                    button(text("取消").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::CancelClose),
@@ -1402,17 +1457,19 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             body = body.push(rule::horizontal(1)).push(
                 row![
                     text(format!(
-                        "第 {} 个标签页有未保存的更改",
-                        idx.saturating_add(1)
+                        "{}{}{}",
+                        self.t(editpad_core::Key::TabIndexDirtyPrefix),
+                        idx.saturating_add(1),
+                        self.t(editpad_core::Key::TabIndexDirtyMiddle),
                     ))
                     .size(uipx)
                     .font(uifont),
-                    button(text("放弃更改并关闭").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonDiscardAndClose)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::ConfirmCloseTabDiscard(idx)),
                     // P21 完整版：已命名的页可直接「保存并关闭」
-                    button(text("保存并关闭").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonSaveAndClose)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press_maybe(
@@ -1422,7 +1479,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                                 && self.tabs.get(idx).is_some_and(|t| t.path.is_some()))
                             .then_some(Message::CloseTabSave(idx)),
                         ),
-                    button(text("取消").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::CancelCloseTab),
@@ -1444,15 +1501,20 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             body = body.push(rule::horizontal(1)).push(
                 row![
                     text(format!(
-                        "要关闭的 {total} 个标签页中 {dirty} 个有未保存的更改，全部放弃并关闭？"
+                        "{}{}{}{}{}",
+                        self.t(editpad_core::Key::BatchCloseConfirmPrefix),
+                        total,
+                        self.t(editpad_core::Key::BatchCloseConfirmMiddle),
+                        dirty,
+                        self.t(editpad_core::Key::BatchCloseConfirmMiddle2),
                     ))
                     .size(uipx)
                     .font(uifont),
-                    button(text("放弃更改并关闭").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonDiscardAndClose)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::ConfirmBatchCloseDiscard),
-                    button(text("取消").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::CancelBatchCloseTabs),
@@ -1467,14 +1529,19 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if let Some(path) = &self.open_confirm {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text(format!("{} 有未保存的更改，放弃并打开？", path.display()))
-                        .size(uipx)
+                    text(editpad_core::fmt_wrapped(
+                        self.lang(),
+                        editpad_core::Key::DiscardOpenPrefix,
+                        &path.display().to_string(),
+                        editpad_core::Key::DiscardOpenSuffix,
+                    ))
+                    .size(uipx)
                         .font(uifont),
-                    button(text("放弃更改并打开").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonDiscardAndOpen)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::ConfirmOpenDiscard),
-                    button(text("取消").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::ConfirmOpenCancel),
@@ -1495,22 +1562,28 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         let mut bar = row![
                             text(if total > 1 {
                                 format!(
-                                    "「{}」已被外部修改（共 {total} 个文件），是否重新加载？",
-                                    tab.display_name()
+                                    "{}{}{}{}{}",
+                                    self.t(editpad_core::Key::TabHeaderPrefix),
+                                    tab.display_name(),
+                                    self.t(editpad_core::Key::ExternalModifiedFilesPrefix),
+                                    total,
+                                    self.t(editpad_core::Key::ExternalModifiedFilesSuffix),
                                 )
                             } else {
                                 format!(
-                                    "「{}」已被外部修改，是否重新加载？",
-                                    tab.display_name()
+                                    "{}{}{}",
+                                    self.t(editpad_core::Key::TabHeaderPrefix),
+                                    tab.display_name(),
+                                    self.t(editpad_core::Key::ExternalModifiedOneSuffix),
                                 )
                             })
                             .size(uipx)
                             .font(uifont),
-                            button(text("重新加载").size(uipx).font(uifont))
+                            button(text(self.t(editpad_core::Key::ButtonReload)).size(uipx).font(uifont))
                                 .padding([4, 12])
                                 .style(chrome_button_style)
                                 .on_press(Message::ConfirmExternalReload(first)),
-                            button(text("忽略").size(uipx).font(uifont))
+                            button(text(self.t(editpad_core::Key::ButtonIgnore)).size(uipx).font(uifont))
                                 .padding([4, 12])
                                 .style(chrome_button_style)
                                 .on_press(Message::IgnoreExternalChange(first)),
@@ -1520,7 +1593,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         .padding([6, 10]);
                         if total > 1 {
                             bar = bar.push(
-                                button(text("全部忽略").size(uipx).font(uifont))
+                                button(text(self.t(editpad_core::Key::ButtonIgnoreAll)).size(uipx).font(uifont))
                                     .padding([4, 12])
                                     .style(chrome_button_style)
                                     .on_press(Message::IgnoreAllExternalChanges),
@@ -1538,14 +1611,14 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if self.recover_prompt.is_some() {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text("检测到上次未正常退出的未保存工作区")
+                    text(self.t(editpad_core::Key::RestoreTitle))
                         .size(uipx)
                         .font(uifont),
-                    button(text("恢复").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonRestore)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::SessionRecoverAccepted),
-                    button(text("丢弃").size(uipx).font(uifont))
+                    button(text(self.t(editpad_core::Key::ButtonDiscard)).size(uipx).font(uifont))
                         .padding([4, 12])
                         .style(chrome_button_style)
                         .on_press(Message::SessionRecoverDiscarded),
@@ -1624,7 +1697,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             .path
             .as_deref()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| format!("({})", self.tab().base_name()));
+            .unwrap_or_else(|| format!("({})", self.tab().base_name_in(self.lang())));
         let path_show = {
             const MAX: usize = 40;
             let chars: Vec<char> = path_full.chars().collect();
@@ -1637,18 +1710,28 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let status_bar = row![
             text(path_show).size(uipx).font(uifont).width(280),
             sep_v(),
-            text(format!("长度: {doc_chars}")).size(uipx).font(uifont),
-            text(format!("行数: {line_count}")).size(uipx).font(uifont),
-            text(format!("行: {}", cursor.line + 1)).size(uipx).font(uifont),
-            text(format!("列: {}", cursor.col + 1)).size(uipx).font(uifont),
-            text(format!("位置: {cur_off}")).size(uipx).font(uifont),
+            text(format!("{}: {doc_chars}", self.t(editpad_core::Key::StatusLength)))
+                .size(uipx)
+                .font(uifont),
+            text(format!("{}: {line_count}", self.t(editpad_core::Key::StatusLines)))
+                .size(uipx)
+                .font(uifont),
+            text(format!("{}: {}", self.t(editpad_core::Key::StatusLine), cursor.line + 1))
+                .size(uipx)
+                .font(uifont),
+            text(format!("{}: {}", self.t(editpad_core::Key::StatusColumn), cursor.col + 1))
+                .size(uipx)
+                .font(uifont),
+            text(format!("{}: {cur_off}", self.t(editpad_core::Key::StatusPosition)))
+                .size(uipx)
+                .font(uifont),
             // 弹性段吸收中部余量：左右两组竖线位置恒定
             text("").width(Fill),
             sep_v(),
             // 选区段：定宽占位（无选区显示占位空白），保证右侧组零推移
             container(
                 text(match sel_chars {
-                    Some(n) => format!("选 {n} 字符"),
+                    Some(n) => editpad_core::fmt_selection(self.lang(), n),
                     None => String::new(),
                 })
                 .size(uipx)
@@ -1817,6 +1900,29 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 .style(chrome_menu_item_style)
                 .on_press_maybe(msg)
         };
+        // P155：菜单项文案组装——「（✓ ）<当前语言的主标签>  <键位提示>」。
+        //
+        // 键位提示（`Ctrl+S` 之类）是**快捷键字面量**，不随界面语言变化，
+        // 故与翻译无关；勾选前缀按开关态决定。抽出这一处是为了让菜单项
+        // 在两种语言下排版一致（标签与键位之间恒为两个空格）。
+        fn item_label(
+            lang: editpad_core::Lang,
+            key: editpad_core::Key,
+            checked: bool,
+            combo: Option<&str>,
+        ) -> String {
+            let mut s = String::with_capacity(48);
+            if checked {
+                s.push_str("✓ ");
+            }
+            s.push_str(key.text(lang));
+            if let Some(combo) = combo {
+                s.push_str("  ");
+                s.push_str(combo);
+            }
+            s
+        }
+        let lang = self.lang();
         let sep = || rule::horizontal(1);
         let is_markdown = self
             .cur_handle
@@ -1830,28 +1936,38 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             0 => {
                 panel = panel
                     .push(item(
-                        "打开…  Ctrl+O".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuOpen, false, Some("Ctrl+O")),
                         interactive.then_some(Message::OpenRequested),
                     ))
                     .push(item(
-                        "保存  Ctrl+S".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuSave, false, Some("Ctrl+S")),
                         (interactive && self.tab().dirty).then_some(Message::SaveRequested),
                     ))
                     .push(item(
-                        "另存为…".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuSaveAs, false, None),
                         interactive.then_some(Message::SaveAsRequested),
                     ))
                     .push(sep())
                     .push(item(
                         format!(
-                            "恢复上次关闭的标签页  Ctrl+Shift+W{}",
-                            if self.closed_stack.is_empty() { "（空）" } else { "" }
+                            "{}{}",
+                            item_label(
+                                lang,
+                                editpad_core::Key::MenuReopenClosed,
+                                false,
+                                Some("Ctrl+Shift+W")
+                            ),
+                            if self.closed_stack.is_empty() {
+                                self.t(editpad_core::Key::RecentsEmpty)
+                            } else {
+                                ""
+                            }
                         ),
                         (!self.busy && !self.closed_stack.is_empty())
                             .then_some(Message::ReopenLastClosedFile),
                     ))
                     .push(item(
-                        "最近文件".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuRecents, false, None),
                         interactive.then_some(Message::RecentsToggled),
                     ));
             }
@@ -1859,51 +1975,51 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             1 => {
                 panel = panel
                     .push(item(
-                        "撤销  Ctrl+Z".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuUndo, false, Some("Ctrl+Z")),
                         interactive.then_some(Message::Edit(EditOp::Undo)),
                     ))
                     .push(item(
-                        "重做  Ctrl+Y".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuRedo, false, Some("Ctrl+Y")),
                         interactive.then_some(Message::Edit(EditOp::Redo)),
                     ))
                     .push(sep())
                     .push(item(
-                        "剪切  Ctrl+X".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuCut, false, Some("Ctrl+X")),
                         interactive.then_some(Message::CutRequested),
                     ))
                     .push(item(
-                        "复制  Ctrl+C".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuCopy, false, Some("Ctrl+C")),
                         interactive.then_some(Message::CopyRequested),
                     ))
                     .push(item(
-                        "粘贴  Ctrl+V".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuPaste, false, Some("Ctrl+V")),
                         interactive.then_some(Message::PasteRequested),
                     ))
                     .push(item(
-                        "全选  Ctrl+A".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuSelectAll, false, Some("Ctrl+A")),
                         interactive.then_some(Message::Edit(EditOp::SelectAll)),
                     ))
                     .push(sep())
                     .push(item(
-                        "查找/替换栏  Ctrl+F".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuFind, false, Some("Ctrl+F")),
                         interactive.then_some(Message::FindToggled),
                     ))
                     .push(item(
-                        "跳转到行  Ctrl+G".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuGoto, false, Some("Ctrl+G")),
                         interactive.then_some(Message::GotoToggled),
                     ))
                     .push(sep())
                     .push(item(
-                        "插入日期时间  F5".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuInsertDateTime, false, Some("F5")),
                         interactive.then_some(Message::Edit(EditOp::InsertDateTime)),
                     ))
                     .push(item(
-                        "切换行注释  Ctrl+Q".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuToggleComment, false, Some("Ctrl+Q")),
                         interactive.then_some(Message::Edit(EditOp::ToggleLineComment)),
                     ))
                     .push(sep())
                     .push(item(
-                        "列编辑器…  F6".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuColumnEditor, false, Some("F6")),
                         interactive.then_some(Message::ColumnEditorToggled),
                     ));
             }
@@ -1912,37 +2028,51 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 let step = editor::FONT_ZOOM_STEP;
                 panel = panel
                     .push(item(
-                        "放大  Ctrl+滚轮".to_owned(),
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuZoomIn,
+                            false,
+                            Some(editpad_core::Key::ComboWheel.text(lang)),
+                        ),
                         interactive.then_some(Message::FontSizeDelta(step)),
                     ))
                     .push(item(
-                        "缩小  Ctrl+滚轮".to_owned(),
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuZoomOut,
+                            false,
+                            Some(editpad_core::Key::ComboWheel.text(lang)),
+                        ),
                         interactive.then_some(Message::FontSizeDelta(-step)),
                     ))
                     .push(item(
-                        "重置缩放".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuZoomReset, false, None),
                         interactive.then_some(Message::FontSizeDelta(
                             16.0 - self.display_font_size(),
                         )),
                     ))
                     .push(item(
-                        "切换深浅主题".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuThemeToggle, false, None),
                         interactive.then_some(Message::ThemeToggled),
                     ))
                     .push(sep())
                     .push(item(
-                        format!(
-                            "{}显示空白字符",
-                            if self.settings.show_whitespace { "✓ " } else { "" }
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuShowWhitespace,
+                            self.settings.show_whitespace,
+                            None,
                         ),
                         interactive.then_some(Message::SettingsShowWhitespaceToggled(
                             !self.settings.show_whitespace,
                         )),
                     ))
                     .push(item(
-                        format!(
-                            "{}显示行尾符",
-                            if self.settings.show_line_endings { "✓ " } else { "" }
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuShowLineEndings,
+                            self.settings.show_line_endings,
+                            None,
                         ),
                         interactive.then_some(Message::SettingsShowLineEndingsToggled(
                             !self.settings.show_line_endings,
@@ -1950,9 +2080,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     ))
                     // 第 73 轮 ⑯：自动换行开关（查看菜单入口，与设置页同消息）
                     .push(item(
-                        format!(
-                            "{}自动换行",
-                            if self.settings.word_wrap { "✓ " } else { "" }
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuWordWrap,
+                            self.settings.word_wrap,
+                            None,
                         ),
                         interactive.then_some(Message::SettingsWordWrapToggled(
                             !self.settings.word_wrap,
@@ -1962,15 +2094,30 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     // 本页关；有覆盖时全局项旁标注（标签条目自身即状态显示）
                     .push(item(
                         match self.tab().wrap_override {
-                            None => "本页自动换行（跟随全局）".to_owned(),
-                            Some(true) => "✓ 本页自动换行（开）".to_owned(),
-                            Some(false) => "本页自动换行（关）".to_owned(),
+                            None => item_label(
+                                lang,
+                                editpad_core::Key::MenuTabWrapFollow,
+                                false,
+                                None,
+                            ),
+                            Some(true) => item_label(
+                                lang,
+                                editpad_core::Key::MenuTabWrapOn,
+                                true,
+                                None,
+                            ),
+                            Some(false) => item_label(
+                                lang,
+                                editpad_core::Key::MenuTabWrapOff,
+                                false,
+                                None,
+                            ),
                         },
                         interactive.then_some(Message::TabWrapOverrideToggled),
                     ))
                     // P134（C7）：本页字号重置——仅在有覆盖时可用
                     .push(item(
-                        "本页字号重置（跟随全局）".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuTabFontReset, false, None),
                         (interactive && self.tab().font_size_override.is_some())
                             .then_some(Message::TabFontSizeReset),
                     ))
@@ -1979,9 +2126,9 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     .push(sep())
                     .push(item(
                         if self.preview_visible {
-                            "关闭 MD 预览".to_owned()
+                            item_label(lang, editpad_core::Key::MenuPreviewClose, false, None)
                         } else {
-                            "MD 预览".to_owned()
+                            item_label(lang, editpad_core::Key::MenuPreview, false, None)
                         },
                         (interactive && is_markdown).then_some(Message::PreviewToggled),
                     ));
@@ -1990,18 +2137,21 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             _ => {
                 panel = panel
                     .push(item(
-                        "打开设置…".to_owned(),
+                        item_label(lang, editpad_core::Key::MenuOpenSettings, false, None),
                         interactive.then_some(Message::SettingsToggled),
                     ))
                     .push(item(
                         format!(
-                            "保存时备份：{}",
+                            "{}：{}",
+                            self.t(editpad_core::Key::MenuBackupMode),
                             match self.settings.backup_mode.as_str() {
-                                editpad_core::settings::BACKUP_MODE_SIMPLE => "覆盖式",
-                                editpad_core::settings::BACKUP_MODE_TIMESTAMPED => {
-                                    "时间戳历史"
+                                editpad_core::settings::BACKUP_MODE_SIMPLE => {
+                                    self.t(editpad_core::Key::BackupSimpleShort)
                                 }
-                                _ => "关闭",
+                                editpad_core::settings::BACKUP_MODE_TIMESTAMPED => {
+                                    self.t(editpad_core::Key::BackupTimestampedShort)
+                                }
+                                _ => self.t(editpad_core::Key::BackupOff),
                             }
                         ),
                         interactive.then_some(Message::SettingsBackupModeToggled),
@@ -2022,7 +2172,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
     /// 会话全部页。title 参与模糊匹配，detail 仅展示。
     pub(crate) fn palette_all_entries(&self) -> Vec<crate::view::PaletteEntry> {
         match self.palette_mode {
-            crate::state::PaletteMode::Commands => palette_commands()
+            crate::state::PaletteMode::Commands => palette_commands(self.lang())
                 .into_iter()
                 .map(|c| PaletteEntry {
                     command_id: Some(c.id),
@@ -2043,7 +2193,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         .path
                         .as_ref()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "（未保存）".to_owned()),
+                        .unwrap_or_else(|| self.t(editpad_core::Key::TabUnsaved).to_owned()),
                 })
                 .collect(),
         }
@@ -2103,7 +2253,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let mut rows = column![].spacing(0).width(Fill);
         if total == 0 {
             rows = rows.push(
-                text("无匹配命令或标签").size(uipx).font(uifont).width(Fill),
+                text(self.t(editpad_core::Key::PaletteNoMatch)).size(uipx).font(uifont).width(Fill),
             );
         }
         for (i, e) in entries.iter().enumerate().skip(win_start).take(12) {
@@ -2129,7 +2279,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         }
         let card = opaque(container(
             column![
-                text_input("输入命令或标签名…", &self.palette_input)
+                text_input(self.t(editpad_core::Key::PalettePlaceholder), &self.palette_input)
                     .id(palette_input_id())
                     .size(uipx)
                     .font(uifont)
@@ -2201,7 +2351,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let mut body = column![].spacing(8).width(Fill);
         body = body.push(
             row![
-                text("列编辑器").size(uipx).font(uifont).width(Fill),
+                text(self.t(editpad_core::Key::ColumnEditorTitle)).size(uipx).font(uifont).width(Fill),
                 button(text("×").size(uipx).font(uifont))
                     .padding([1, 6])
                     .style(chrome_button_style)
@@ -2211,31 +2361,34 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             .align_y(Alignment::Center),
         );
         body = body.push(
-            row![mode_btn("文本", !d.number_mode), mode_btn("序号", d.number_mode)]
+            row![
+                mode_btn(self.t(editpad_core::Key::CeModeText), !d.number_mode),
+                mode_btn(self.t(editpad_core::Key::CeModeNumber), d.number_mode)
+            ]
                 .spacing(6),
         );
         if d.number_mode {
             body = body
                 .push(labeled(
-                    "起始",
-                    text_input_w("如 1（整数，可负）", &d.start, Message::ColumnEditorStartChanged),
+                    self.t(editpad_core::Key::CeStart),
+                    text_input_w(self.t(editpad_core::Key::CeStartHint), &d.start, Message::ColumnEditorStartChanged),
                     uipx,
                     uifont,
                 ))
                 .push(labeled(
-                    "步长",
-                    text_input_w("如 1（整数，可负）", &d.step, Message::ColumnEditorStepChanged),
+                    self.t(editpad_core::Key::CeStep),
+                    text_input_w(self.t(editpad_core::Key::CeStepHint), &d.step, Message::ColumnEditorStepChanged),
                     uipx,
                     uifont,
                 ))
                 .push(labeled(
-                    "进制",
+                    self.t(editpad_core::Key::CeBase),
                     button(
                         text(match d.base {
-                            editor::NumBase::Dec => "十进制".to_owned(),
-                            editor::NumBase::Hex => "十六进制".to_owned(),
-                            editor::NumBase::Bin => "二进制".to_owned(),
-                            editor::NumBase::Oct => "八进制".to_owned(),
+                            editor::NumBase::Dec => self.t(editpad_core::Key::CeBaseDec).to_owned(),
+                            editor::NumBase::Hex => self.t(editpad_core::Key::CeBaseHex).to_owned(),
+                            editor::NumBase::Bin => self.t(editpad_core::Key::CeBaseBin).to_owned(),
+                            editor::NumBase::Oct => self.t(editpad_core::Key::CeBaseOct).to_owned(),
                         })
                         .size(uipx)
                         .font(uifont),
@@ -2247,15 +2400,15 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     uifont,
                 ))
                 .push(labeled(
-                    "补零宽",
-                    text_input_w("0 = 不补，上限 32", &d.pad_width, Message::ColumnEditorWidthChanged),
+                    self.t(editpad_core::Key::CePadWidth),
+                    text_input_w(self.t(editpad_core::Key::CePadHint), &d.pad_width, Message::ColumnEditorWidthChanged),
                     uipx,
                     uifont,
                 ));
             if d.base == editor::NumBase::Hex {
                 body = body.push(
                     iced::widget::Checkbox::new(d.hex_upper)
-                        .label("十六进制字母大写（A-F）")
+                        .label(self.t(editpad_core::Key::CeHexUpper))
                         .font(uifont)
                         .text_size(uipx)
                         .on_toggle(|_| Message::ColumnEditorHexUpperToggled),
@@ -2263,9 +2416,9 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             }
         } else {
             body = body.push(labeled(
-                "文本",
+                self.t(editpad_core::Key::CeModeText),
                 text_input_w(
-                    "每行插入的内容（多行 = 循环填充）",
+                    self.t(editpad_core::Key::CeTextContent),
                     &d.text,
                     Message::ColumnEditorTextChanged,
                 ),
@@ -2275,17 +2428,22 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         }
         // 目标块实时反馈：行数提示替代打开守卫的二次检查
         let rows_info = match self.cur_handle.borrow().active_block() {
-            Some((r0, r1, _, _)) => format!("目标列块：{} 行", r1 - r0 + 1),
-            None => "⚠ 当前无列块选区，确认前请先框选".to_owned(),
+            Some((r0, r1, _, _)) => format!(
+                    "{}{}{}",
+                    self.t(editpad_core::Key::CeTargetBlockPrefix),
+                    r1 - r0 + 1,
+                    self.t(editpad_core::Key::CeTargetBlockSuffix)
+                ),
+            None => self.t(editpad_core::Key::CeNoBlockWarn).to_owned(),
         };
         body = body.push(text(rows_info).size(uipx).font(uifont));
         body = body.push(
             row![
-                button(text("确定").size(uipx).font(uifont))
+                button(text(self.t(editpad_core::Key::ButtonOk)).size(uipx).font(uifont))
                     .padding([3, 14])
                     .style(chrome_button_style)
                     .on_press(Message::ColumnEditorConfirmed),
-                button(text("取消").size(uipx).font(uifont))
+                button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
                     .padding([3, 14])
                     .style(chrome_button_style)
                     .on_press(Message::ColumnEditorToggled),
@@ -2312,11 +2470,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // 标题行：文本 width(Fill) 把关闭按钮推到右缘
         let header = row![
             text(if scanning {
-                "查找中…".to_owned()
+                self.t(editpad_core::Key::FindSearching).to_owned()
             } else if total == 0 {
-                "无匹配".to_owned()
+                self.t(editpad_core::Key::FindNoMatch).to_owned()
             } else {
-                format!("全部匹配：{total} 处")
+                editpad_core::fmt_match_total(self.lang(), total)
             })
             .size(uipx)
             .font(uifont)
@@ -2353,7 +2511,12 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if total > shown {
             rows = rows.push(
                 text(format!(
-                    "已显示前 {shown} 条（共 {total} 处）——请细化关键词"
+                    "{}{}{}{}{}",
+                    self.t(editpad_core::Key::FindAllShownPrefix),
+                    shown,
+                    self.t(editpad_core::Key::FindAllShownTotalMiddle),
+                    total,
+                    self.t(editpad_core::Key::FindAllShownTotalSuffix),
                 ))
                 .size(uipx)
                 .font(uifont),
@@ -2381,17 +2544,19 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let total_hits: usize = self.fif_results.iter().map(|f| f.hits.len()).sum();
         let title = if scanning {
             format!(
-                "目录扫描中…（已扫 {} 个文件）",
-                self.fif_progress.load(std::sync::atomic::Ordering::Relaxed)
+                "{}{}{}",
+                self.t(editpad_core::Key::ScanProgressPrefix),
+                self.fif_progress.load(std::sync::atomic::Ordering::Relaxed),
+                self.t(editpad_core::Key::ScanProgressSuffix)
             )
         } else if total_hits == 0 {
-            "目录中无匹配".to_owned()
+            self.t(editpad_core::Key::DirNoMatch).to_owned()
         } else {
-            format!("在文件中查找：{total_files} 个文件 {total_hits} 处")
+            editpad_core::fmt_fif_panel_title(self.lang(), total_files, total_hits, false)
         };
         let header = row![
             text(if self.fif_truncated {
-                format!("{title}（已达封顶，结果不完整）")
+                format!("{title}{}", self.t(editpad_core::Key::FifReachedCapSuffix))
             } else {
                 title
             })
@@ -2408,7 +2573,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
 
         let mut rows = column![].spacing(0).width(Fill);
         if !scanning && self.find_query.is_empty() {
-            rows = rows.push(text("先输入查询内容").size(uipx).font(uifont));
+            rows = rows.push(text(self.t(editpad_core::Key::FifQueryEmpty)).size(uipx).font(uifont));
         } else if !scanning {
             let mut budget = FIND_ALL_MAX_ROWS;
             'outer: for (fi, fh) in self.fif_results.iter().enumerate() {
@@ -2419,7 +2584,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     .display()
                     .to_string();
                 rows = rows.push(
-                    text(format!("{rel}  （{} 处）", fh.hits.len()))
+                    text(editpad_core::fmt_file_hits(self.lang(), &rel, fh.hits.len()))
                         .size(uipx)
                         .font(uifont),
                 );
@@ -2444,7 +2609,12 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             }
             if budget == 0 {
                 rows = rows.push(
-                    text(format!("已显示前 {} 条——请细化关键词", FIND_ALL_MAX_ROWS))
+                    text(format!(
+                        "{}{}{}",
+                        self.t(editpad_core::Key::FindAllShownPrefix),
+                        FIND_ALL_MAX_ROWS,
+                        self.t(editpad_core::Key::FindAllShownSuffix)
+                    ))
                         .size(uipx)
                         .font(uifont),
                 );
@@ -2474,13 +2644,13 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // P10：扫描在途时明确显示状态，按钮基于过期结果禁用
         let scanning = self.find_scanning();
         let position_label = if scanning {
-            "查找中…".to_owned()
+            self.t(editpad_core::Key::FindSearching).to_owned()
         } else if total == 0 {
-            "无匹配".to_owned()
+            self.t(editpad_core::Key::FindNoMatch).to_owned()
         } else {
             match self.match_idx {
-                Some(i) => format!("第 {}/{} 处", i + 1, total),
-                None => format!("{total} 处"),
+                Some(i) => editpad_core::fmt_find_counter(self.lang(), Some(i), total),
+                None => editpad_core::fmt_find_counter(self.lang(), None, total),
             }
         };
         let has_matches = !scanning && !self.matches.is_empty();
@@ -2497,7 +2667,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // 拖动条（用户点单）：按住卡片顶部这条即可拖走浮层，双击复位到
         // 默认位置。`on_move`/`on_release` 挂在整层（见函数尾部）——按下
         // 只有这里捕获，其它位置点击照旧穿透到正文。
-        let grip_text = text("≡  拖动（双击复位）")
+        let grip_text = text(self.t(editpad_core::Key::FindGrip))
             .size(uipx * 0.8)
             .font(uifont)
             .width(Fill)
@@ -2516,7 +2686,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
 
         // ①查询行：P150 起输入框带 Id（打开查找栏即聚焦，修前焦点留正文）
         let query_row = row![
-            text_input("查找内容", &self.find_query)
+            text_input(self.t(editpad_core::Key::FindQueryPlaceholder), &self.find_query)
                 .id(find_input_widget_id())
                 .size(uipx)
                 .font(uifont)
@@ -2524,10 +2694,10 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 .on_submit(Message::FindNext)
                 .style(move |theme, status| find_input_style(theme, status, dim))
                 .width(Fill),
-            button(text("↑ 上一个").size(uipx).font(uifont))
+            button(text(self.t(editpad_core::Key::FindPrev)).size(uipx).font(uifont))
                 .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press_maybe(doc_nav.then_some(Message::FindPrev)),
-            button(text("↓ 下一个").size(uipx).font(uifont))
+            button(text(self.t(editpad_core::Key::FindNext)).size(uipx).font(uifont))
                 .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press_maybe(doc_nav.then_some(Message::FindNext)),
             button(text("×").size(uipx).font(uifont))
@@ -2547,14 +2717,14 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         };
         let options_row = row![
             checkbox(self.case_sensitive)
-                .label("区分大小写")
+                .label(self.t(editpad_core::Key::FindCaseSensitive))
                 .text_size(uipx)
                 .font(uifont)
                 .style(move |theme, status| find_checkbox_style(theme, status, dim))
                 .on_toggle(Message::CaseToggled),
             // P70：正则模式开关（.* 是各编辑器通用的正则图标语义）
             checkbox(self.regex_enabled)
-                .label(".* 正则")
+                .label(self.t(editpad_core::Key::FindRegexMode))
                 .text_size(uipx)
                 .font(uifont)
                 .style(move |theme, status| find_checkbox_style(theme, status, dim))
@@ -2562,7 +2732,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             // 整词匹配：命中前后均非词字符（正则模式下不参与——扫描与
             // 替换路径均按 regex 分支先行返回）
             checkbox(self.whole_word)
-                .label("整词")
+                .label(self.t(editpad_core::Key::FindWholeWord))
                 .text_size(uipx)
                 .font(uifont)
                 .style(move |theme, status| find_checkbox_style(theme, status, dim))
@@ -2577,9 +2747,9 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let third_row: Element<'_, Message> = if self.fif_visible {
             let dir_text = match &self.fif_dir {
                 Some(d) => d.display().to_string(),
-                None => "（当前页未命名：先保存得到所在目录，或「浏览…」选择）".to_owned(),
+                None => self.t(editpad_core::Key::FifDirUnnamed).to_owned(),
             };
-            let dir_label = text("目录:".to_owned()).size(uipx).font(uifont);
+            let dir_label = text(self.t(editpad_core::Key::FindDir).to_owned()).size(uipx).font(uifont);
             let dir_label: Element<'_, Message> = match label_color {
                 Some(c) => dir_label.color(c).into(),
                 None => dir_label.into(),
@@ -2591,8 +2761,10 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             };
             let scan_label = text(if self.fif_scan.is_some() {
                 format!(
-                    "扫描中…（已扫 {} 个文件）",
-                    self.fif_progress.load(std::sync::atomic::Ordering::Relaxed)
+                    "{}{}{}",
+                    self.t(editpad_core::Key::ScanProgressPrefix),
+                    self.fif_progress.load(std::sync::atomic::Ordering::Relaxed),
+                    self.t(editpad_core::Key::ScanProgressSuffix)
                 )
             } else {
                 String::new()
@@ -2607,7 +2779,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 dir_label,
                 // 长路径裁剪显示：不撑破定宽卡片（取舍：卡片内不可横向滚动）
                 container(dir_path).width(Fill).clip(true),
-                button(text("浏览…").size(uipx).font(uifont))
+                button(text(self.t(editpad_core::Key::FindBrowse)).size(uipx).font(uifont))
                     .style(move |theme, status| find_button_style(theme, status, dim))
                     .on_press(Message::FifBrowseFolder),
                 scan_label,
@@ -2617,14 +2789,14 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             .into()
         } else {
             row![
-                text_input("替换为", &self.replace_query)
+                text_input(self.t(editpad_core::Key::ReplaceQueryPlaceholder), &self.replace_query)
                     .size(uipx)
                     .font(uifont)
                     .on_input(Message::ReplaceQueryChanged)
                     .style(move |theme, status| find_input_style(theme, status, dim))
                     .width(Fill),
                 // P70：正则模式替换当前 = 对命中做 $1 展开替换
-                button(text("替换当前").size(uipx).font(uifont))
+                button(text(self.t(editpad_core::Key::FindReplaceCurrent)).size(uipx).font(uifont))
                     .style(move |theme, status| find_button_style(theme, status, dim))
                     .on_press_maybe(has_matches.then_some(if self.regex_enabled {
                         Message::ReplaceCurrentRegex
@@ -2632,7 +2804,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         Message::ReplaceCurrent
                     })),
                 // 扫描在途时禁用：此刻的全文快照可能是过期的
-                button(text("全部替换").size(uipx).font(uifont))
+                button(text(self.t(editpad_core::Key::FindReplaceAll)).size(uipx).font(uifont))
                     .style(move |theme, status| find_button_style(theme, status, dim))
                     .on_press_maybe((!scanning).then_some(Message::ReplaceAll)),
             ]
@@ -2645,16 +2817,16 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let panel_row = row![
             // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用；
             // A8：FIF 开态禁用——两套面板同槽互斥）
-            button(text("查找全部").size(uipx).font(uifont))
+            button(text(self.t(editpad_core::Key::FindFindAll)).size(uipx).font(uifont))
                 .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press_maybe(
                     (has_matches && doc_nav).then_some(Message::FindAllToggled),
                 ),
             // A8：在文件中查找模式开关（F12 同义入口）
             button(text(if self.fif_visible {
-                "退出目录查找"
+                self.t(editpad_core::Key::FindInFilesExit)
             } else {
-                "在文件中查找"
+                self.t(editpad_core::Key::FindInFilesMode)
             })
             .size(uipx)
             .font(uifont))
@@ -2795,14 +2967,14 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             .on_press_maybe(named.then_some(Message::SaveWithEncoding(enc)))
         };
         let panel = column![
-            item("以 UTF-8 保存", editpad_core::SaveEncoding::Utf8),
-            item("以 UTF-8(BOM) 保存", editpad_core::SaveEncoding::Utf8Bom),
-            item("以 GBK 保存", editpad_core::SaveEncoding::Gbk),
+            item(&enc_label(self.lang(), "UTF-8"), editpad_core::SaveEncoding::Utf8),
+            item(&enc_label(self.lang(), "UTF-8(BOM)"), editpad_core::SaveEncoding::Utf8Bom),
+            item(&enc_label(self.lang(), "GBK"), editpad_core::SaveEncoding::Gbk),
             // P127：CJK 传统编码扩展（无法映射字符照旧按数值实体写入）
-            item("以 Big5 保存", editpad_core::SaveEncoding::Big5),
-            item("以 Shift_JIS 保存", editpad_core::SaveEncoding::ShiftJis),
-            item("以 EUC-JP 保存", editpad_core::SaveEncoding::EucJp),
-            item("以 EUC-KR 保存", editpad_core::SaveEncoding::EucKr),
+            item(&enc_label(self.lang(), "Big5"), editpad_core::SaveEncoding::Big5),
+            item(&enc_label(self.lang(), "Shift_JIS"), editpad_core::SaveEncoding::ShiftJis),
+            item(&enc_label(self.lang(), "EUC-JP"), editpad_core::SaveEncoding::EucJp),
+            item(&enc_label(self.lang(), "EUC-KR"), editpad_core::SaveEncoding::EucKr),
         ]
         .spacing(2);
         self.status_menu_overlay(W, ITEM_H * 3.0 + 12.0, panel.into())
@@ -2830,14 +3002,27 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             .on_press_maybe((!disabled).then_some(Message::ConvertEol(target)))
         };
         let panel = column![
-            text(format!("当前行尾：{}", eol_label(current)))
+            text(format!("{}{}", self.t(editpad_core::Key::EolCurrentPrefix), eol_label(current)))
                 .size(uipx)
                 .font(uifont),
             item(
-                "转换为 CRLF（Windows）",
+                &format!(
+                    "{}{}{}",
+                    self.t(editpad_core::Key::ConvertEolPrefix),
+                    "CRLF",
+                    self.t(editpad_core::Key::ConvertEolCrLfSuffix)
+                ),
                 editpad_core::LineEnding::CrLf
             ),
-            item("转换为 LF（Unix）", editpad_core::LineEnding::Lf),
+            item(
+                &format!(
+                    "{}{}{}",
+                    self.t(editpad_core::Key::ConvertEolPrefix),
+                    "LF",
+                    self.t(editpad_core::Key::ConvertEolLfSuffix)
+                ),
+                editpad_core::LineEnding::Lf,
+            ),
         ]
         .spacing(4);
         self.status_menu_overlay(W, ITEM_H * 2.0 + 28.0, panel.into())
@@ -2848,6 +3033,17 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
 }
 
 // ---------- 「查找全部」结果面板助手（第 62 轮） ----------
+
+/// P155：编码弹出菜单的条目文案（`以 UTF-8 保存` / `Save as UTF-8`）。
+/// 编码名本身是事实数据，不翻译；只包装语言相关的动词与语序。
+fn enc_label(lang: editpad_core::Lang, enc: &str) -> String {
+    format!(
+        "{}{}{}",
+        editpad_core::Key::SaveAsEncodingPrefix.text(lang),
+        enc,
+        editpad_core::Key::SaveAsEncodingSuffix.text(lang)
+    )
+}
 
 /// 结果面板渲染行数封顶：chrome 行按钮无虚拟化，超出部分在面板尾部
 /// 明示截断（提示细化关键词），避免超大命中集拖垮每帧构建。

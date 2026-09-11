@@ -76,16 +76,16 @@ pub(crate) const GUTTER_FONT_CANDIDATES: [&str; 5] = [
 
 /// P154：按语言从系统清单里挑 UI 字体族（纯函数便于单测）。
 /// 全不命中 → None（调用方回落 `Font::DEFAULT` 默认无衬线，不引入失败）。
+///
+/// P155：入参由字符串短码改为 [`editpad_core::Lang`]——语言自 P155 起是
+/// 类型化的枚举（文案字符串表按它索引），字体只是它的**下游消费者之一**。
 pub(crate) fn pick_ui_font_family(
-    language: &str,
+    language: editpad_core::Lang,
     available: &[String],
 ) -> Option<&'static str> {
-    let candidates: &[&str] = if editpad_core::settings::normalize_language(language)
-        == editpad_core::settings::LANG_EN
-    {
-        &UI_FONT_CANDIDATES_EN
-    } else {
-        &UI_FONT_CANDIDATES_ZH
+    let candidates: &[&str] = match language {
+        editpad_core::Lang::En => &UI_FONT_CANDIDATES_EN,
+        editpad_core::Lang::ZhCn => &UI_FONT_CANDIDATES_ZH,
     };
     candidates.iter().copied().find(|cand| {
         let want = editor::normalize_family(cand);

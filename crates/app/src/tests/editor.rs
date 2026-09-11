@@ -546,7 +546,21 @@ fn perform_backup_modes_and_guards() {
 
     // simple：同名 .bak 覆盖式，内容 = 磁盘旧版
     let note = perform_backup_before_overwrite(&target, BACKUP_MODE_SIMPLE).unwrap();
-    assert!(note.starts_with("已备份"), "{note}");
+    // P155：备份结果是语言无关的结果类型（文案由状态栏按语言取）——
+    // 断言改成「确实是已备份到该 .bak 路径」，比原来的前缀匹配更精确
+    assert_eq!(
+        note,
+        BackupNote::Backed(dir.join("note.txt.bak")),
+        "simple 模式应报已备份到同目录 .bak"
+    );
+    assert!(
+        note.text(editpad_core::Lang::ZhCn).contains("已备份"),
+        "中文文案仍应是「已备份…」"
+    );
+    assert!(
+        note.text(editpad_core::Lang::En).starts_with("Previous version"),
+        "英文文案应本地化"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("note.txt.bak")).unwrap(),
         "OLD-VERSION"
@@ -556,7 +570,10 @@ fn perform_backup_modes_and_guards() {
     // （.bak.d 与 simple 的 .bak 文件不同名——模式切换互不污染，
     // 本用例顺序即先 simple 后 timestamped 的实证）
     let note = perform_backup_before_overwrite(&target, BACKUP_MODE_TIMESTAMPED).unwrap();
-    assert!(note.starts_with("已备份"), "{note}");
+    assert!(
+        matches!(note, BackupNote::Backed(_)),
+        "timestamped 模式也应报已备份：{note:?}"
+    );
     let bakdir = dir.join("note.txt.bak.d");
     assert!(bakdir.is_dir(), "时间戳模式建目录留存");
     let entries: Vec<_> = std::fs::read_dir(&bakdir)
@@ -580,7 +597,11 @@ fn perform_backup_modes_and_guards() {
     f.set_len(MAX_BACKUP_SOURCE_BYTES + 1).unwrap();
     drop(f);
     let note = perform_backup_before_overwrite(&big, BACKUP_MODE_SIMPLE).unwrap();
-    assert!(note.contains("跳过备份"), "{note}");
+    assert_eq!(note, BackupNote::SkippedLarge, "超过 64MB 应报跳过备份");
+    assert!(
+        note.text(editpad_core::Lang::En).contains("64MB"),
+        "英文文案应说明阈值"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

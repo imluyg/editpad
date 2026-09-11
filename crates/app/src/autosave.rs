@@ -64,7 +64,15 @@ pub(crate) async fn drive_autosave_once(
     });
     let outcome = rx
         .recv()
-        .unwrap_or_else(|_| AutosaveOutcome::Failed("自动保存线程意外终止".to_owned()));
+        // P155 取舍披露：这条只在「写盘线程 panic 到连 channel 都断了」时
+        // 出现，且 AutosaveOutcome::Failed 收的是 String（IO 错误本就是
+        // 系统 locale 文本，无法可靠翻译）。故此处固定取默认语言的文案，
+        // 不为一个近乎不可达的分支把 lang 一路透传到后台任务。
+        .unwrap_or_else(|_| AutosaveOutcome::Failed(
+            editpad_core::Key::StAutosaveThreadGone
+                .text(editpad_core::Lang::default())
+                .to_owned(),
+        ));
     // 路径本体已随闭包移入写盘线程；回报携带同内容的克隆
     Message::TabAutosaved(tab_id, version, thread_path, outcome)
 }
@@ -114,7 +122,37 @@ pub(crate) const MAX_BACKUP_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 ///   `name.bak` 文件不同名，两模式可自由切换互不污染）；
 /// * 任何 IO 失败都**不阻断保存**——降级为状态栏提示（备份是锦上添
 ///   花，不能成为丢保存的理由）。
-pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option<String> {
+///
+/// P155：写盘前备份的结果说明（**语言无关**）。
+///
+/// 文案是界面语言的一部分，故这里只带「哪种结果 + 必要的动态值」，
+/// 由展示侧（状态栏）按当前语言取文——与 [`crate::editor::EditErr`]
+/// 同一口径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BackupNote {
+    /// 源文件超过 64MB，按策略跳过
+    SkippedLarge,
+    /// 已备份到该路径
+    Backed(std::path::PathBuf),
+    /// 备份失败（不阻断保存）
+    Failed(String),
+}
+
+impl BackupNote {
+    /// 按界面语言取状态栏文案。
+    pub(crate) fn text(&self, lang: editpad_core::Lang) -> String {
+        use editpad_core::Key as K;
+        match self {
+            BackupNote::SkippedLarge => K::StBackupSkipLarge.text(lang).to_owned(),
+            BackupNote::Backed(p) => {
+                format!("{}{}", K::StBackupDone.text(lang), p.display())
+            }
+            BackupNote::Failed(e) => format!("{}{e}", K::StBackupFailed.text(lang)),
+        }
+    }
+}
+
+pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option<BackupNote> {
     use editpad_core::settings::{BACKUP_MODE_SIMPLE, BACKUP_MODE_TIMESTAMPED};
     if mode == editpad_core::settings::BACKUP_MODE_NONE {
         return None;
@@ -124,12 +162,12 @@ pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option
         return None;
     }
     if meta.len() > MAX_BACKUP_SOURCE_BYTES {
-        return Some("文件超过 64MB，按策略跳过备份".to_owned());
+        return Some(BackupNote::SkippedLarge);
     }
     let name = path.file_name()?.to_string_lossy().to_string();
     let report = |r: std::io::Result<PathBuf>| match r {
-        Ok(p) => Some(format!("已备份旧版 → {}", p.display())),
-        Err(e) => Some(format!("备份失败（继续保存）：{e}")),
+        Ok(p) => Some(BackupNote::Backed(p)),
+        Err(e) => Some(BackupNote::Failed(e.to_string())),
     };
     match mode {
         BACKUP_MODE_SIMPLE => {
@@ -139,7 +177,7 @@ pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option
         BACKUP_MODE_TIMESTAMPED => {
             let dir = path.with_file_name(format!("{name}.bak.d"));
             if let Err(e) = std::fs::create_dir_all(&dir) {
-                return Some(format!("备份失败（继续保存）：{e}"));
+                return Some(BackupNote::Failed(e.to_string()));
             }
             let stamp = editor::local_datetime_stamp_compact();
             // P148：时间戳粒度为秒——同秒内的第二次保存曾直接覆盖前一次

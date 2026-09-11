@@ -202,10 +202,10 @@ impl EditorCore {
     /// - 摘要输出小写十六进制并替换选区；解码失败 → Err 不动文档；
     /// - 结果与原文相同时幂等 no-op（Ok(false) 不产快照）；
     /// - 转换后选区保持覆盖新文本（与 convert_case 同款偏移重建）。
-    pub fn apply_tool(&mut self, kind: ToolKind) -> Result<bool, String> {
+    pub fn apply_tool(&mut self, kind: ToolKind) -> Result<bool, EditErr> {
         let (start, end) = match self.selection_offsets() {
             Some((s, e)) if s < e => (s, e),
-            _ => return Err("请先选中要处理的文本".to_owned()),
+            _ => return Err(EditErr::NoSelection),
         };
         let src = self.doc.slice_text(start, end);
         let out = match kind {
@@ -213,15 +213,13 @@ impl EditorCore {
                 editpad_core::toolkit::base64_encode(src.as_bytes())
             }
             ToolKind::ToolBase64Decode => {
-                let bytes = editpad_core::toolkit::base64_decode(&src).ok_or_else(|| {
-                    "Base64 解码失败：选区不是有效的 Base64 文本".to_owned()
-                })?;
-                String::from_utf8(bytes)
-                    .map_err(|_| "Base64 解码结果不是有效的 UTF-8 文本".to_owned())?
+                let bytes = editpad_core::toolkit::base64_decode(&src)
+                    .ok_or(EditErr::Base64DecodeInvalid)?;
+                String::from_utf8(bytes).map_err(|_| EditErr::Base64DecodeNotUtf8)?
             }
             ToolKind::ToolUrlEncode => editpad_core::toolkit::url_encode(&src),
             ToolKind::ToolUrlDecode => editpad_core::toolkit::url_decode(&src)
-                .ok_or_else(|| "URL 解码失败：选区含有无效的百分号转义".to_owned())?,
+                .ok_or(EditErr::UrlDecodeInvalid)?,
             ToolKind::ToolMd5 => editpad_core::toolkit::md5_hex(src.as_bytes()),
             ToolKind::ToolSha256 => editpad_core::toolkit::sha256_hex(src.as_bytes()),
         };

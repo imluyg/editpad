@@ -1,5 +1,40 @@
-use super::*;
 use iced::widget::column;
+
+// ---------- P155：设置行的语言无关键 ----------
+//
+// 历史（P154 及以前）行键直接借用中文文案（`pub(crate) const FONT_ROW_KEY:
+// &str = "正文字体"`）。切到英文后：①行键本身是中文，语义上不属于任何
+// 语言；②搜索/控件匹配都会随文案漂移。P155 起行键一律走 core 的
+// `lang::ROW_*` 常量（`debug_assert` 钉住 ASCII 与唯一性）。
+pub(crate) use editpad_core::lang::{
+    ROW_ABOUT_LICENSE, ROW_ABOUT_NAME, ROW_ABOUT_RENDERER, ROW_ABOUT_VERSION, ROW_AUTOSAVE,
+    ROW_AUTOSAVE_DELAY, ROW_BACKUP_MODE, ROW_EDGE_COLUMN, ROW_EXIT_MODE, ROW_FONT_FAMILY,
+    ROW_FONT_SIZE, ROW_INDENT_GUIDES, ROW_LANGUAGE, ROW_REMEMBER_RECENT, ROW_REMEMBER_SESSION,
+    ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE, ROW_SNAPSHOTS, ROW_SNAPSHOT_INTERVAL, ROW_THEME,
+    ROW_WORD_WRAP,
+};
+
+/// 「正文字体」行的行键（控件匹配与字体挑选块挂载点共用同一常量）。
+pub(crate) const FONT_ROW_KEY: &str = ROW_FONT_FAMILY;
+
+/// P154：界面语言行的行键。
+pub(crate) const LANGUAGE_ROW_KEY: &str = ROW_LANGUAGE;
+
+/// 「编辑后自动写盘」行的行键（P63 改名，原「即时保存」）。
+pub(crate) const AUTOSAVE_ROW_KEY: &str = ROW_AUTOSAVE;
+
+/// 设置行的统一视图：静态元数据（SETTINGS_ROWS）+ 热键行动态展开，
+/// 渲染与搜索共用同一清单（防「展示一套、过滤另一套」的数据漂移）。
+/// P62：字段改 String——热键行的描述是当前生效组合（随重映射变化，
+/// 非 'static）。P155：文案按当前界面语言现取，故全为 `String`。
+#[derive(Debug, Clone)]
+pub(crate) struct SettingsRow {
+    pub(crate) page: SettingsPage,
+    /// 控件匹配键（语言无关的行键 / 热键行的动作 id，全清单唯一）
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) desc: String,
+}
 
 // ---------- 设置弹窗分类导航（P47，侧栏分类风格） ----------
 
@@ -32,16 +67,17 @@ impl SettingsPage {
         Self::About,
     ];
 
-    /// 侧栏项 / 内容区分组小标题
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::Appearance => "外观",
-            Self::Font => "字体",
-            Self::Save => "保存",
-            Self::Session => "会话与隐私",
-            Self::Hotkeys => "快捷键",
-            Self::About => "关于",
-        }
+    /// 侧栏项 / 内容区分组小标题（P155：按当前界面语言取文）。
+    pub(crate) fn title(self, lang: editpad_core::Lang) -> &'static str {
+        let key = match self {
+            Self::Appearance => editpad_core::Key::PageAppearance,
+            Self::Font => editpad_core::Key::PageFont,
+            Self::Save => editpad_core::Key::PageSave,
+            Self::Session => editpad_core::Key::PageSession,
+            Self::Hotkeys => editpad_core::Key::PageHotkeys,
+            Self::About => editpad_core::Key::PageAbout,
+        };
+        key.text(lang)
     }
 
     /// config 持久化键（P51）。与 core `SETTINGS_PAGES` 注册表的对应
@@ -63,176 +99,196 @@ impl SettingsPage {
     // 每次打开都落在第一分类（外观），原 from_key 恢复入口随之移除。
 }
 
-/// 「正文字体」行的行键：控件匹配与字体挑选块挂载点共用同一常量，
-/// 防止文案改动后两处漂移。
-pub(crate) const FONT_ROW_KEY: &str = "正文字体";
+use super::*;
 
-/// P154：「界面语言」行的行键：控件匹配与元数据声明共用同一常量。
-pub(crate) const LANGUAGE_ROW_KEY: &str = "界面语言";
-
-/// 「编辑后自动写盘」行的行键（P63 改名，原「即时保存」）：控件匹配
-/// 与元数据声明共用同一常量，防止文案改动后两处漂移。
-pub(crate) const AUTOSAVE_ROW_KEY: &str = "编辑后自动写盘";
-
-/// 设置行的统一视图：静态元数据（SETTINGS_ROWS）+ 热键行动态展开，
-/// 渲染与搜索共用同一清单（防「展示一套、过滤另一套」的数据漂移）。
-/// P62：字段改 String——热键行的描述是当前生效组合（随重映射变化，
-/// 非 'static）。
-#[derive(Debug, Clone)]
-pub(crate) struct SettingsRow {
-    pub(crate) page: SettingsPage,
-    /// 控件匹配键（= title；热键行 = 动作 id，全清单唯一）
-    pub(crate) key: String,
-    pub(crate) title: String,
-    pub(crate) desc: String,
-}
-
-/// 设置行静态元数据（P47）：标题 / 描述文案与所属页。热键行不在此列
-/// （P62 起热键页为动态行，由 view::rows_for 构建），关于页信息在此登记。
+/// P155：静态设置行注册表（标题/描述来自 core 的文案表）。
+///
+/// 顺序 = 各分类页内自上而下的展示顺序；热键页不在表内（P62 起为
+/// 由动作注册表与当前重映射动态生成的行）。
 pub(crate) struct StaticRow {
     page: SettingsPage,
     key: &'static str,
-    title: &'static str,
-    desc: &'static str,
+    title: editpad_core::Key,
+    desc: editpad_core::Key,
 }
 
-/// 设置行静态元数据（P47）：标题 / 描述文案与所属页。
+/// 设置行静态元数据（P47/P155）：行键 / 文案键与所属页。
 pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
     StaticRow {
         page: SettingsPage::Appearance,
-        key: LANGUAGE_ROW_KEY,
-        title: LANGUAGE_ROW_KEY,
-        desc: "界面字体按语言选族（中文简体 → 微软雅黑系；English → Segoe UI 系）。\
-               界面文案暂不随语言切换（i18n 另行立项）。",
+        key: ROW_LANGUAGE,
+        title: editpad_core::Key::RowLanguage,
+        desc: editpad_core::Key::RowLanguageDesc,
     },
     StaticRow {
         page: SettingsPage::Appearance,
-        key: "主题",
-        title: "主题",
-        desc: "切换深色 / 浅色主题，立即生效并记住。",
+        key: ROW_THEME,
+        title: editpad_core::Key::RowTheme,
+        desc: editpad_core::Key::RowThemeDesc,
     },
     StaticRow {
         page: SettingsPage::Appearance,
-        key: "显示空白字符",
-        title: "显示空白字符",
-        desc: "在空格与制表符位置画淡色标记（不改文档内容）。",
+        key: ROW_SHOW_WHITESPACE,
+        title: editpad_core::Key::RowShowWhitespace,
+        desc: editpad_core::Key::RowShowWhitespaceDesc,
     },
     StaticRow {
         page: SettingsPage::Appearance,
-        key: "显示行尾符",
-        title: "显示行尾符",
-        desc: "在每行末尾画一个短标，标出换行位置。",
+        key: ROW_SHOW_LINE_ENDINGS,
+        title: editpad_core::Key::RowShowLineEndings,
+        desc: editpad_core::Key::RowShowLineEndingsDesc,
     },
     StaticRow {
         page: SettingsPage::Appearance,
-        key: "缩进参考线",
-        title: "缩进参考线",
-        desc: "在行首缩进的每个制表位层级画淡竖线，辅助对齐嵌套层级。",
+        key: ROW_WORD_WRAP,
+        title: editpad_core::Key::RowWordWrap,
+        desc: editpad_core::Key::RowWordWrapDesc,
     },
     StaticRow {
         page: SettingsPage::Appearance,
-        key: "右缘标尺列",
-        title: "右缘标尺列",
-        desc: "在指定显示列处画一条纵向辅助线（如 80 列限宽提醒）；0 = 关闭。",
+        key: ROW_INDENT_GUIDES,
+        title: editpad_core::Key::RowIndentGuides,
+        desc: editpad_core::Key::RowIndentGuidesDesc,
+    },
+    StaticRow {
+        page: SettingsPage::Appearance,
+        key: ROW_EDGE_COLUMN,
+        title: editpad_core::Key::RowEdgeColumn,
+        desc: editpad_core::Key::RowEdgeColumnDesc,
     },
     StaticRow {
         page: SettingsPage::Font,
-        key: FONT_ROW_KEY,
-        title: FONT_ROW_KEY,
-        desc: "正文字体族（只作用于正文与 Markdown 预览；菜单/状态栏/行号等界面\
-               文字由「界面语言」选族）；建议选含中文字形的等宽字体，非等宽字体的\
-               列对齐会漂移。",
+        key: ROW_FONT_FAMILY,
+        title: editpad_core::Key::RowFontFamily,
+        desc: editpad_core::Key::RowFontFamilyDesc,
     },
     // 第 68 轮用户点单：字号从外观移入字体分类（族与大小同页调）
     StaticRow {
         page: SettingsPage::Font,
-        key: "字号",
-        title: "字号",
-        desc: "正文文字大小；编辑器内 Ctrl+滚轮 缩放，或在此步进调节。",
+        key: ROW_FONT_SIZE,
+        title: editpad_core::Key::RowFontSize,
+        desc: editpad_core::Key::RowFontSizeDesc,
     },
     StaticRow {
         page: SettingsPage::Save,
-        key: AUTOSAVE_ROW_KEY,
-        title: AUTOSAVE_ROW_KEY,
-        desc: "默认关闭（主流编辑器口径）：修改留在窗口内，Ctrl+S 才写原文件；崩溃防护由会话快照兜底。开启后若文件被外部改动会先拒写并提示。",
+        key: ROW_AUTOSAVE,
+        title: editpad_core::Key::RowAutosave,
+        desc: editpad_core::Key::RowAutosaveDesc,
     },
     StaticRow {
         page: SettingsPage::Save,
-        key: "自动写盘延迟（秒）",
-        title: "自动写盘延迟（秒）",
-        desc: "停手多少秒后执行自动写盘；仅在上面的开关开启时生效。",
+        key: ROW_AUTOSAVE_DELAY,
+        title: editpad_core::Key::RowAutosaveDelay,
+        desc: editpad_core::Key::RowAutosaveDelayDesc,
     },
     StaticRow {
         page: SettingsPage::Save,
-        key: "保存时备份",
-        title: "保存时备份",
-        desc: "覆盖已有文件前把磁盘旧版复制一份：「覆盖式」= 同目录 name.bak；「时间戳历史」= name.bak.d 目录内逐次留存；超过 64MB 的文件自动跳过，备份失败不阻断保存。",
+        key: ROW_BACKUP_MODE,
+        title: editpad_core::Key::RowBackupMode,
+        desc: editpad_core::Key::RowBackupModeDesc,
     },
     StaticRow {
         page: SettingsPage::Session,
-        key: "记住最近打开的文件",
-        title: "记住最近打开的文件",
-        desc: "在「最近打开」保留历史；关闭开关会一并清空存量记录。",
+        key: ROW_REMEMBER_RECENT,
+        title: editpad_core::Key::RowRememberRecent,
+        desc: editpad_core::Key::RowRememberRecentDesc,
     },
     StaticRow {
         page: SettingsPage::Session,
-        key: "会话快照",
-        title: "会话快照",
-        desc: "关窗时自动保存未存内容，异常退出后可恢复。",
+        key: ROW_SNAPSHOTS,
+        title: editpad_core::Key::RowSnapshots,
+        desc: editpad_core::Key::RowSnapshotsDesc,
     },
     StaticRow {
         page: SettingsPage::Session,
-        key: "启动时恢复上次界面",
-        title: "启动时恢复上次界面",
-        desc: "启动时还原上次的标签页与内容。",
+        key: ROW_REMEMBER_SESSION,
+        title: editpad_core::Key::RowRememberSession,
+        desc: editpad_core::Key::RowRememberSessionDesc,
     },
     StaticRow {
         page: SettingsPage::Session,
-        key: "关窗行为",
-        title: "关窗行为",
-        desc: "「快照直退」不打断；「每次询问」先确认未保存内容。",
+        key: ROW_EXIT_MODE,
+        title: editpad_core::Key::RowExitMode,
+        desc: editpad_core::Key::RowExitModeDesc,
     },
     StaticRow {
         page: SettingsPage::Session,
-        key: "快照心跳间隔（秒）",
-        title: "快照心跳间隔（秒）",
-        desc: "后台周期保存快照的间隔。",
+        key: ROW_SNAPSHOT_INTERVAL,
+        title: editpad_core::Key::RowSnapshotInterval,
+        desc: editpad_core::Key::RowSnapshotIntervalDesc,
     },
     StaticRow {
         page: SettingsPage::About,
-        key: "名称",
-        title: "名称",
-        desc: "Editpad —— 轻量文本编辑器。",
+        key: ROW_ABOUT_NAME,
+        title: editpad_core::Key::RowAboutName,
+        desc: editpad_core::Key::RowAboutNameDesc,
     },
     StaticRow {
         page: SettingsPage::About,
-        key: "版本",
-        title: "版本",
-        desc: env!("CARGO_PKG_VERSION"),
+        key: ROW_ABOUT_VERSION,
+        title: editpad_core::Key::RowAboutVersion,
+        desc: editpad_core::Key::RowAboutVersion,
     },
     StaticRow {
         page: SettingsPage::About,
-        key: "渲染后端",
-        title: "渲染后端",
-        desc: "tiny-skia 软渲染（P41 内存取舍：进程内存约为 GPU 路径的 1/12）。",
+        key: ROW_ABOUT_RENDERER,
+        title: editpad_core::Key::RowAboutRenderer,
+        desc: editpad_core::Key::RowAboutRendererDesc,
     },
     StaticRow {
         page: SettingsPage::About,
-        key: "开源协议",
-        title: "开源协议",
-        desc: "Apache-2.0",
+        key: ROW_ABOUT_LICENSE,
+        title: editpad_core::Key::RowAboutLicense,
+        desc: editpad_core::Key::RowAboutLicense,
     },
 ];
+
+/// 非文案表的静态描述（版本号 / 许可证名）：与 [`SETTINGS_ROWS`] 的行键
+/// 对应，取文时按行键查这里，命中即用它（不翻译，属事实数据）。
+const ROW_LITERAL_DESC: &[(&str, &str)] = &[
+    (ROW_ABOUT_VERSION, env!("CARGO_PKG_VERSION")),
+    (ROW_ABOUT_LICENSE, "Apache-2.0"),
+];
+
+/// 取某行在给定语言下的描述（文案表 / 事实数据两条来源统一在此）。
+fn row_desc(key: &str, lang: editpad_core::Lang) -> String {
+    if let Some((_, literal)) = ROW_LITERAL_DESC.iter().find(|(k, _)| *k == key) {
+        return (*literal).to_owned();
+    }
+    SETTINGS_ROWS
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.desc.text(lang).to_owned())
+        .unwrap_or_default()
+}
+
+/// 取某行在给定语言下的标题（**唯一实现**：静态设置行与动态热键行共用）。
+///
+/// 入参是语言无关的行键：命中静态目录走文案表；命中热键动作 id 走该动作
+/// 在本语言下的说明；两者都不命中才回落键本身（防未来新增行漏登记）。
+pub(crate) fn row_title(key: &str, lang: editpad_core::Lang) -> String {
+    if let Some(r) = SETTINGS_ROWS.iter().find(|r| r.key == key) {
+        return r.title.text(lang).to_owned();
+    }
+    if let Some(a) = HOTKEY_ACTIONS.iter().find(|a| a.id == key) {
+        return a.desc.text(lang).to_owned();
+    }
+    key.to_owned()
+}
+
 
 /// 静态设置行清单（P62 起**不含热键行**——热键页为动态行，由
 /// view::rows_for 按动作注册表与当前重映射构建）。顺序 = 分类内
 /// 自上而下的展示顺序；搜索过滤与行渲染都从这里出发。
-pub(crate) fn settings_rows() -> impl Iterator<Item = SettingsRow> {
-    SETTINGS_ROWS.iter().map(|r| SettingsRow {
+///
+/// P155：文案按当前界面语言现取（`title`/`desc` 是组装好的 `String`）——
+/// 搜索过滤因此天然按**当前语言**匹配，切语言即换过滤词。
+pub(crate) fn settings_rows(lang: editpad_core::Lang) -> impl Iterator<Item = SettingsRow> {
+    SETTINGS_ROWS.iter().map(move |r| SettingsRow {
         page: r.page,
         key: r.key.to_owned(),
-        title: r.title.to_owned(),
-        desc: r.desc.to_owned(),
+        title: r.title.text(lang).to_owned(),
+        desc: row_desc(r.key, lang),
     })
 }
 
@@ -513,6 +569,56 @@ pub(crate) fn settings_input_style(theme: &Theme, status: text_input::Status) ->
     }
 }
 
+/// P155：界面语言下拉框（`pick_list`）本体样式——与
+/// [`chrome_button_style`] 同观感（控件底 + 1px 描边 + 5px 圆角），
+/// 保证下拉框与旁边的「深色/浅色」「快照直退」等按钮**长得一样**，
+/// 不像 iced 默认那样带独立配色。展开态描边转点缀色（与输入框聚焦同款）。
+pub(crate) fn settings_pick_list_style(
+    theme: &Theme,
+    status: iced::widget::pick_list::Status,
+) -> iced::widget::pick_list::Style {
+    use iced::widget::pick_list;
+    let sc = settings_colors(theme);
+    let (border_color, background) = match status {
+        pick_list::Status::Opened { .. } => (sc.accent, sc.control_bg),
+        pick_list::Status::Hovered => (sc.control_border, sc.hover),
+        pick_list::Status::Active => (sc.control_border, sc.control_bg),
+    };
+    pick_list::Style {
+        text_color: sc.text,
+        placeholder_color: sc.desc,
+        handle_color: sc.desc,
+        background: Background::Color(background),
+        border: Border {
+            color: border_color,
+            width: 1.0,
+            radius: Radius::from(5.0),
+        },
+    }
+}
+
+/// P155：界面语言下拉框的**展开列表**样式——卡片底 + 描边，悬停/选中用
+/// 淡染与点缀色文字（与 [`chrome_menu_item_style`] 同一口径，不用 iced
+/// 默认的实心蓝选中条——P56 用户已明确否掉那种观感）。
+pub(crate) fn settings_pick_list_menu_style(
+    theme: &Theme,
+) -> iced::widget::overlay::menu::Style {
+    use iced::widget::overlay::menu;
+    let sc = settings_colors(theme);
+    menu::Style {
+        background: Background::Color(sc.card_bg),
+        border: Border {
+            color: sc.control_border,
+            width: 1.0,
+            radius: Radius::from(5.0),
+        },
+        text_color: sc.text,
+        selected_text_color: sc.accent,
+        selected_background: Background::Color(sc.hover),
+        shadow: Shadow::default(),
+    }
+}
+
 /// P47：设置行复选框——选中 = 点缀色底白勾，未选中 = 控件底 + 描边。
 pub(crate) fn settings_checkbox_style(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
     let sc = settings_colors(theme);
@@ -613,7 +719,7 @@ impl Editpad {
         // 标题行：「设置」+ 右上角 ×（关闭按钮放在标题栏右侧）
         let header = container(
             row![
-                text("设置").size(uipx * 1.25).font(uifont),
+                text(self.t(editpad_core::Key::Settings)).size(uipx * 1.25).font(uifont),
                 container(
                     button(text("×").size(uipx).font(uifont))
                         .padding([2, 9])
@@ -660,7 +766,7 @@ impl Editpad {
             let selected = !searching && self.settings_page == page;
             nav = nav.push(
                 button(
-                    container(text(page.title()).size(uipx).font(uifont))
+                    container(text(page.title(self.lang())).size(uipx).font(uifont))
                         .width(Fill)
                         .align_x(iced::alignment::Horizontal::Left),
                 )
@@ -674,13 +780,16 @@ impl Editpad {
         }
 
         column![
-            text_input("搜索设置…", &self.settings_search)
+            text_input(self.t(editpad_core::Key::SettingsSearchPlaceholder), &self.settings_search)
                 .size(uipx)
                 .font(uifont)
                 .on_input(Message::SettingsSearchChanged)
                 .style(settings_input_style)
                 .width(Fill),
-            text("选项").size(uipx * 0.85).font(uifont).color(sc.desc),
+            text(self.t(editpad_core::Key::SettingsOptions))
+                .size(uipx * 0.85)
+                .font(uifont)
+                .color(sc.desc),
             nav,
         ]
         .spacing(10)
@@ -704,7 +813,7 @@ impl Editpad {
             // 分类浏览：页首标题 + 该页全部行
             list = list.push(
                 container(
-                    text(current_page.title())
+                    text(current_page.title(self.lang()))
                         .size(uipx * 1.25)
                         .font(uifont),
                 )
@@ -715,13 +824,17 @@ impl Editpad {
                 list = list.push(
                     container(
                         row![
-                            button(text("全部恢复默认").size(uipx).font(uifont))
+                            button(
+                                text(self.t(editpad_core::Key::SettingsRestoreDefaults))
+                                    .size(uipx)
+                                    .font(uifont)
+                            )
                                 .padding([3, 12])
                                 .style(chrome_button_style)
                                 .on_press_maybe(
                                     (!self.busy).then_some(Message::HotkeysResetAll)
                                 ),
-                            text("修改后立即生效并写入 config.toml")
+                            text(self.t(editpad_core::Key::SettingsApplyHint))
                                 .size(uipx * 0.85)
                                 .font(uifont)
                                 .color(sc.desc),
@@ -750,7 +863,7 @@ impl Editpad {
                 total_hits += hits.len();
                 list = list.push(
                     container(
-                        text(page.title())
+                        text(page.title(self.lang()))
                             .size(uipx * 0.9)
                             .font(uifont)
                             .color(sc.desc),
@@ -764,7 +877,12 @@ impl Editpad {
             if total_hits == 0 {
                 list = list.push(
                     container(
-                        text(format!("没有匹配「{query}」的设置"))
+                        text(editpad_core::fmt_wrapped(
+                            self.lang(),
+                            editpad_core::Key::SettingsNoMatchPrefix,
+                            query,
+                            editpad_core::Key::SettingsNoMatchSuffix,
+                        ))
                             .size(uipx)
                             .font(uifont)
                             .color(sc.desc),
@@ -785,14 +903,18 @@ impl Editpad {
 
     /// 某分类页的全部设置行（P62）：热键页为**动态行**——标题 = 动作
     /// 说明、描述 = 当前生效组合（随重映射变化），其余页走静态目录。
+    ///
+    /// P155：两路的标题都经 [`row_title`] 取——「行键 → 本语言标题」只有
+    /// 一条实现，静态页与动态热键页共用（row_title 里同时登记动作 id）。
     pub(crate) fn rows_for(&self, page: SettingsPage) -> Vec<SettingsRow> {
         if page == SettingsPage::Hotkeys {
+            let lang = self.lang();
             return HOTKEY_ACTIONS
                 .iter()
                 .map(|a| SettingsRow {
                     page,
                     key: a.id.to_owned(),
-                    title: a.desc.to_owned(),
+                    title: row_title(a.id, lang),
                     // 未重映射时展示全部默认组合（多默认同义键位，如重做
                     // 的 Ctrl+Y / Ctrl+Shift+Z）；重映射后只展示当前生效值
                     desc: self
@@ -804,7 +926,7 @@ impl Editpad {
                 })
                 .collect();
         }
-        settings_rows().filter(|r| r.page == page).collect()
+        settings_rows(self.lang()).filter(|r| r.page == page).collect()
     }
 
     /// 单个设置行（P47）：左「标题 + 灰色描述」、右对齐控件，行下 1px
@@ -848,7 +970,7 @@ impl Editpad {
             if self.hotkey_capture == Some(key) {
                 let sc = settings_colors(&self.theme());
                 return Some(
-                    text("按下新组合键…（Esc 取消）")
+                    text(self.t(editpad_core::Key::HotkeyCaptureHint))
                         .size(uipx)
                         .font(uifont)
                         .color(sc.accent)
@@ -856,7 +978,7 @@ impl Editpad {
                 );
             }
             return Some(
-                button(text("修改").size(uipx).font(uifont))
+                button(text(self.t(editpad_core::Key::ButtonModify)).size(uipx).font(uifont))
                     .padding([3, 12])
                     .style(chrome_button_style)
                     .on_press_maybe(
@@ -875,22 +997,29 @@ impl Editpad {
 
         let control: Element<'_, Message> = match key {
             // ---- 外观 ----
-            // P154：界面语言（当前职责 = 选 UI 字体；文案 i18n 另行立项）
-            LANGUAGE_ROW_KEY => button(
-                text(if s.language == editpad_core::settings::LANG_EN {
-                    "English"
+            // P155：界面语言 = 下拉框（原 P154 的两态循环按钮）。
+            // 可扩展性：选项来自 `Lang::ALL`，加一门语言只需在 core 的
+            // `Lang` 加变体并补文案表——这里零改动、零条件分支。
+            LANGUAGE_ROW_KEY => {
+                let options = editpad_core::LangOption::all(self.lang());
+                iced::widget::pick_list(
+                    options,
+                    Some(editpad_core::LangOption { lang: s.language, ui: self.lang() }),
+                    Message::LanguageOptionSelected,
+                )
+                .text_size(uipx)
+                .font(uifont)
+                .padding([4, 8])
+                .style(settings_pick_list_style)
+                .menu_style(settings_pick_list_menu_style)
+                .into()
+            }
+            ROW_THEME => button(
+                text(if s.is_dark() {
+                    self.t(editpad_core::Key::ThemeDark)
                 } else {
-                    "中文简体"
+                    self.t(editpad_core::Key::ThemeLight)
                 })
-                .size(uipx)
-                .font(uifont),
-            )
-            .padding([3, 12])
-            .style(chrome_button_style)
-            .on_press(Message::LanguageToggled)
-            .into(),
-            "主题" => button(
-                text(if s.is_dark() { "深色" } else { "浅色" })
                     .size(uipx)
                     .font(uifont),
             )
@@ -898,7 +1027,7 @@ impl Editpad {
             .style(chrome_button_style)
             .on_press(Message::ThemeToggled)
             .into(),
-            "字号" => self.settings_stepper(
+            ROW_FONT_SIZE => self.settings_stepper(
                 format!("{:.0}", self.display_font_size()),
                 (self.display_font_size()
                     > editpad_core::settings::MIN_FONT_SIZE)
@@ -908,7 +1037,7 @@ impl Editpad {
                     .then_some(Message::FontSizeDelta(editor::FONT_ZOOM_STEP)),
             ),
             // ---- 字体 ----
-            FONT_ROW_KEY => button(text("回退默认").size(uipx).font(uifont))
+            FONT_ROW_KEY => button(text(self.t(editpad_core::Key::ButtonResetDefault)).size(uipx).font(uifont))
                 .padding([3, 12])
                 .style(chrome_button_style)
                 .on_press_maybe(
@@ -920,7 +1049,7 @@ impl Editpad {
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsAutosaveToggled)
                 .into(),
-            "自动写盘延迟（秒）" => self.settings_stepper(
+            ROW_AUTOSAVE_DELAY => self.settings_stepper(
                 format!("{}s", s.autosave_delay_secs),
                 (s.autosave_delay_secs
                     > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
@@ -930,11 +1059,15 @@ impl Editpad {
                     .then_some(Message::SettingsAutosaveDelayDelta(1)),
             ),
             // ---- 第 64 轮 ⑭：保存时备份（三态循环按钮，仿关窗行为） ----
-            "保存时备份" => button(
+            ROW_BACKUP_MODE => button(
                 text(match s.backup_mode.as_str() {
-                    editpad_core::settings::BACKUP_MODE_SIMPLE => "覆盖式 name.bak",
-                    editpad_core::settings::BACKUP_MODE_TIMESTAMPED => "时间戳历史",
-                    _ => "关闭",
+                    editpad_core::settings::BACKUP_MODE_SIMPLE => {
+                        self.t(editpad_core::Key::BackupSimple)
+                    }
+                    editpad_core::settings::BACKUP_MODE_TIMESTAMPED => {
+                        self.t(editpad_core::Key::BackupTimestamped)
+                    }
+                    _ => self.t(editpad_core::Key::BackupOff),
                 })
                 .size(uipx)
                 .font(uifont),
@@ -944,27 +1077,27 @@ impl Editpad {
             .on_press(Message::SettingsBackupModeToggled)
             .into(),
             // ---- 会话与隐私 ----
-            "显示空白字符" => checkbox(s.show_whitespace)
+            ROW_SHOW_WHITESPACE => checkbox(s.show_whitespace)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsShowWhitespaceToggled)
                 .into(),
-            "显示行尾符" => checkbox(s.show_line_endings)
+            ROW_SHOW_LINE_ENDINGS => checkbox(s.show_line_endings)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsShowLineEndingsToggled)
                 .into(),
             // ---- 第 73 轮 ⑯：自动换行（软换行） ----
-            "自动换行" => checkbox(s.word_wrap)
+            ROW_WORD_WRAP => checkbox(s.word_wrap)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsWordWrapToggled)
                 .into(),
             // ---- P132：缩进参考线 / 右缘标尺 ----
-            "缩进参考线" => checkbox(s.indent_guides)
+            ROW_INDENT_GUIDES => checkbox(s.indent_guides)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsIndentGuidesToggled)
                 .into(),
-            "右缘标尺列" => self.settings_stepper(
+            ROW_EDGE_COLUMN => self.settings_stepper(
                 if s.edge_column == 0 {
-                    "关".to_owned()
+                    self.t(editpad_core::Key::SwitchOff).to_owned()
                 } else {
                     format!("{}", s.edge_column)
                 },
@@ -972,23 +1105,23 @@ impl Editpad {
                 (s.edge_column < editpad_core::settings::MAX_EDGE_COLUMN)
                     .then_some(Message::SettingsEdgeColumnDelta(4)),
             ),
-            "记住最近打开的文件" => checkbox(s.remember_recent_files)
+            ROW_REMEMBER_RECENT => checkbox(s.remember_recent_files)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsRememberRecentToggled)
                 .into(),
-            "会话快照" => checkbox(s.enable_snapshots)
+            ROW_SNAPSHOTS => checkbox(s.enable_snapshots)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsSnapshotsToggled)
                 .into(),
-            "启动时恢复上次界面" => checkbox(s.remember_session)
+            ROW_REMEMBER_SESSION => checkbox(s.remember_session)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsRememberSessionToggled)
                 .into(),
-            "关窗行为" => button(
+            ROW_EXIT_MODE => button(
                 text(if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
-                    "快照直退"
+                    self.t(editpad_core::Key::ExitSnapshot)
                 } else {
-                    "每次询问"
+                    self.t(editpad_core::Key::ExitAsk)
                 })
                 .size(uipx)
                 .font(uifont),
@@ -997,7 +1130,7 @@ impl Editpad {
             .style(chrome_button_style)
             .on_press(Message::SettingsExitModeToggled)
             .into(),
-            "快照心跳间隔（秒）" => self.settings_stepper(
+            ROW_SNAPSHOT_INTERVAL => self.settings_stepper(
                 format!("{}s", s.snapshot_interval_secs),
                 (s.snapshot_interval_secs
                     > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
@@ -1050,19 +1183,24 @@ impl Editpad {
         let sc = settings_colors(&self.theme());
 
         let current = text(match (&s.font_family, &self.active_font_family) {
-            (Some(cfg), Some(eff)) if cfg.as_str() == *eff => {
-                format!("当前：{eff}")
-            }
-            (Some(cfg), _) => {
-                format!("当前：默认等宽（配置的「{cfg}」未安装）")
-            }
-            (None, _) => "当前：默认（等宽）".to_owned(),
+            (Some(cfg), Some(eff)) if cfg.as_str() == *eff => editpad_core::fmt_suffix(
+                self.lang(),
+                editpad_core::Key::FontCurrentPrefix,
+                eff,
+            ),
+            (Some(cfg), _) => editpad_core::fmt_wrapped(
+                self.lang(),
+                editpad_core::Key::FontCurrentMissingPrefix,
+                cfg,
+                editpad_core::Key::FontCurrentMissingSuffix,
+            ),
+            (None, _) => self.t(editpad_core::Key::FontCurrentDefault).to_owned(),
         })
         .size(uipx * 0.85)
         .font(uifont)
         .color(sc.desc);
 
-        let filter = text_input("输入关键字过滤字体", &self.font_filter)
+        let filter = text_input(self.t(editpad_core::Key::FontFilterPlaceholder), &self.font_filter)
             .size(uipx)
             .font(uifont)
             .on_input(Message::FontFilterChanged)
@@ -1071,7 +1209,7 @@ impl Editpad {
 
         // 显式标注：两个分支的 widget 类型不同，靠 Into 目标统一
         let picker: Element<'_, Message> = if self.available_fonts.is_empty() {
-            text("无法枚举系统字体（保持默认等宽）")
+            text(self.t(editpad_core::Key::FontNoneAvailable))
                 .size(uipx)
                 .font(uifont)
                 .color([0.7, 0.4, 0.1])
@@ -1105,9 +1243,7 @@ impl Editpad {
             }
             if total > FONT_PICKER_MAX_ROWS {
                 list = list.push(
-                    text(format!(
-                        "…共 {total} 个命中，请继续输入关键字缩小范围"
-                    ))
+                    text(editpad_core::fmt_font_picker_more(self.lang(), total))
                     .size(uipx * 0.85)
                     .font(uifont)
                     .color(sc.desc),

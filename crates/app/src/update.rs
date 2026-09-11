@@ -330,7 +330,7 @@ impl Editpad {
         // 解耦；候选全未命中则 None（UI 回落 iced 默认、行号回落 UI 字体），
         // 不引入失败模式。
         let ui_font_family =
-            pick_ui_font_family(&settings.language, &available_fonts)
+            pick_ui_font_family(settings.language, &available_fonts)
                 .map(|name| leak_font_family(name.to_owned()));
         let gutter_font_family = pick_gutter_font_family(&available_fonts)
             .map(|name| leak_font_family(name.to_owned()));        // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
@@ -372,7 +372,7 @@ impl Editpad {
         }
         if configured_font_missing {
             if let Some(name) = state.settings.font_family.as_deref() {
-                state.status = format!("配置的字体「{name}」未安装，本次启动回退默认等宽");
+                state.status = format!("{}{name}{}", editpad_core::Key::StFontMissing.text(state.settings.language), editpad_core::Key::StFontMissingSuffix.text(state.settings.language));
             }
         }
         // P149：caret 闪烁 / 快照心跳的节拍链已改为订阅时钟驱动（见
@@ -502,6 +502,7 @@ impl Editpad {
             | Message::HotkeysResetAll
             | Message::ThemeToggled
             | Message::LanguageToggled
+            | Message::LanguageOptionSelected(..)
             | Message::FontSizeDelta(..)
             | Message::TabFontSizeDelta(..)
             | Message::TabFontSizeReset
@@ -675,9 +676,9 @@ impl Editpad {
                     handle.overwrite
                 };
                 self.set_status(if now {
-                    "覆写模式（Insert 切回插入）：打字将逐字替换光标处字符".to_owned()
+                    self.t(editpad_core::Key::StOverwriteOn).to_owned()
                 } else {
-                    "插入模式".to_owned()
+                    self.t(editpad_core::Key::StInsertMode).to_owned()
                 });
                 Task::none()
             }
@@ -692,9 +693,9 @@ impl Editpad {
                     handle.read_only
                 };
                 self.set_status(if now {
-                    "已锁定只读：编辑与撤销被拒收（Ctrl+R 解除）".to_owned()
+                    self.t(editpad_core::Key::StReadOnlyOn).to_owned()
                 } else {
-                    "已解除只读".to_owned()
+                    self.t(editpad_core::Key::StReadOnlyOff).to_owned()
                 });
                 Task::none()
             }
@@ -824,7 +825,7 @@ impl Editpad {
                 const FORMAT_JSON_MAX_CHARS: usize = 4_000_000;
                 // 仅当前语法为 JSON 时生效（P22 第二批：按当前语法判断）
                 if self.cur_handle.borrow().highlight_syntax_name().as_deref() != Some("JSON") {
-                    self.set_status("格式化 JSON 仅对 JSON 文件可用（Ctrl+Shift+F）".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StJsonOnly).to_owned());
                     return Task::none();
                 }
                 let (text, chars) = {
@@ -834,7 +835,16 @@ impl Editpad {
                 if chars > FORMAT_JSON_MAX_CHARS {
                     // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
                     self.status = format!(
-                        "文档过大（{chars} 字符），暂不支持格式化（上限 {FORMAT_JSON_MAX_CHARS}）"
+                        "{}{chars}{}{FORMAT_JSON_MAX_CHARS}{}",
+                        self.t(
+editpad_core::Key::
+StTooLargeJsonPrefix),
+                        self.t(
+editpad_core::Key::
+StTooLargeJsonMiddle),
+                        self.t(
+editpad_core::Key::
+StTooLargeJsonSuffix)
                     );
                     return Task::none();
                 }
@@ -847,7 +857,7 @@ impl Editpad {
                         self.tab_mut().dirty = true;
                         // P18：内容版本与防抖起点同步推进
                         self.tab_mut().note_mutation();
-                        self.set_status("已格式化 JSON".to_owned());
+                        self.set_status(self.t(editpad_core::Key::StJsonFormatted).to_owned());
                         if self.find_visible {
                             // 内容变了：命中表过期，走后台防抖重扫（P10 同款）
                             let find_task = self.schedule_find_scan();
@@ -856,7 +866,7 @@ impl Editpad {
                         self.maybe_schedule_autosave()
                     }
                     Err(error) => {
-                        self.set_status_error(format!("JSON 格式化失败：{error}"));
+                        self.set_status_error(self.t_suffix(editpad_core::Key::StJsonFailed, &error.to_string()));
                         Task::none()
                     }
                 }
@@ -871,7 +881,7 @@ impl Editpad {
                         / editpad_core::highlight::STRIDE)
                         .max(1);
                     let pct = (strides_done as usize).min(total_strides) * 100 / total_strides;
-                    self.set_status(format!("语法分析中…{pct}%（后台）"));
+                    self.set_status(format!("{}{pct}{}", self.t(editpad_core::Key::StSyntaxAnalyzing), self.t(editpad_core::Key::StSyntaxAnalyzingMiddle)));
                 }
                 Task::none()
             }
@@ -895,7 +905,7 @@ impl Editpad {
                     // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
                     // needs_paving 重新评估并续排（从存活检查点出发，代价小）
                     let _ = installed;
-                    if self.status.starts_with("语法分析") {
+                    if self.status.starts_with(self.t(editpad_core::Key::StSyntaxAnalyzing)) {
                         self.status.clear();
                     }
                 }
@@ -916,7 +926,7 @@ impl Editpad {
                 if self.cur_handle.borrow().highlight_syntax_name().as_deref() == Some("Markdown") {
                     self.preview_visible = !self.preview_visible;
                 } else {
-                    self.set_status("预览仅支持 Markdown 文件".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StPreviewMarkdownOnly).to_owned());
                 }
                 Task::none()
             }
@@ -955,10 +965,10 @@ impl Editpad {
                 let path = self.tab().path.clone();
                 match path {
                     Some(path) => match reveal_in_explorer(&path) {
-                        Ok(()) => self.set_status("已在资源管理器中定位文件".to_owned()),
-                        Err(e) => self.set_status_error(format!("打开所在文件夹失败：{e}")),
+                        Ok(()) => self.set_status(self.t(editpad_core::Key::StRevealedInExplorer).to_owned()),
+                        Err(e) => self.set_status_error(self.t_suffix(editpad_core::Key::StRevealFailed, &e.to_string())),
                     },
-                    None => self.set_status("未命名页需先保存才能定位所在文件夹".to_owned()),
+                    None => self.set_status(self.t(editpad_core::Key::StRevealNeedsSave).to_owned()),
                 }
                 Task::none()
             }
@@ -969,7 +979,7 @@ impl Editpad {
                     return Task::none();
                 }
                 let Some(path) = self.closed_stack.pop() else {
-                    self.set_status("没有可恢复的已关闭文件".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StNoClosedTab).to_owned());
                     return Task::none();
                 };
                 // 复用打开管线：置脏走既有确认流，光标记忆由 P32 免费找回
@@ -1044,7 +1054,7 @@ impl Editpad {
                 let idx = self.active_tab;
                 // P28：固定页对键盘路径（Ctrl+W）同样豁免，与右键菜单一致
                 if self.tabs[idx].pinned {
-                    self.set_status("固定标签页需先取消固定再关闭".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StPinnedMustUnpin).to_owned());
                 } else if self.tabs[idx].dirty {
                     // 置脏页先确认（骨架版仅提供「放弃更改」出口）
                     self.close_tab_confirm = Some(idx);
@@ -1081,7 +1091,7 @@ impl Editpad {
                     return Task::none();
                 }
                 if self.tabs[idx].path.is_none() {
-                    self.set_status("未命名标签页请先另存为再关闭".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StRenameUntitledFirst).to_owned());
                     return Task::none();
                 }
                 self.enter_busy();
@@ -1176,7 +1186,7 @@ impl Editpad {
                 self.tab_context_menu = None;
                 if !self.busy && idx < self.tabs.len() {
                     if self.tabs[idx].pinned {
-                        self.set_status("固定标签页需先取消固定再关闭".to_owned());
+                        self.set_status(self.t(editpad_core::Key::StPinnedMustUnpin).to_owned());
                     } else if self.tabs[idx].dirty {
                         // 置脏走既有单页确认条（含「保存并关闭」出口）
                         self.batch_close_confirm = None;
@@ -1280,13 +1290,17 @@ impl Editpad {
             }
             Message::HotkeyCaptureStarted(id) => {
                 self.hotkey_capture = Some(id);
-                self.set_status(format!(
-                    "为「{}」按下新组合键（Esc 取消）",
-                    HOTKEY_ACTIONS
-                        .iter()
-                        .find(|a| a.id == id)
-                        .map(|a| a.desc)
-                        .unwrap_or("")
+                let lang = self.lang();
+                let name = HOTKEY_ACTIONS
+                    .iter()
+                    .find(|a| a.id == id)
+                    .map(|a| a.desc.text(lang))
+                    .unwrap_or("");
+                self.set_status(editpad_core::fmt_wrapped(
+                    lang,
+                    editpad_core::Key::StHotkeyCapturePromptPrefix,
+                    name,
+                    editpad_core::Key::StHotkeyCapturePromptSuffix,
                 ));
                 Task::none()
             }
@@ -1300,7 +1314,7 @@ impl Editpad {
                 self.settings.hotkeys.clear();
                 self.persist_settings();
                 self.hotkey_capture = None;
-                self.set_status("已恢复默认热键".to_owned());
+                self.set_status(self.t(editpad_core::Key::StHotkeysDefault).to_owned());
                 Task::none()
             }
             // ---------- 外观 ----------
@@ -1316,23 +1330,28 @@ impl Editpad {
                 }
                 Task::none()
             }
-            // P154：界面语言切换（中文简体 ⇄ English）——重新解析 UI 字体族
-            // 并立即生效（UI 文字下一帧换族）；行号族与语言无关，但若从未
-            // 下发过则一并补发。正文族**不受影响**（与 UI 彻底解耦）。
+            // P155：界面语言选择（下拉框）——与 P154 的循环按钮同一条链路，
+            // 只多一层「目标语言」入参。三件事一起发生：界面**文案**换语言
+            // （view 层每帧按 `Settings.language` 取文，无需额外失效）、
+            // UI 字体族重解析、设置落盘。已选中同一语言 = no-op。
+            Message::LanguageOptionSelected(opt) => {
+                if opt.lang == self.settings.language {
+                    return Task::none();
+                }
+                self.apply_language(opt.lang);
+                Task::none()
+            }
+            // P154 兼容入口：循环切换（下拉框上线后仅测试路径使用）
             Message::LanguageToggled => {
-                let next = if self.settings.language == editpad_core::settings::LANG_EN {
-                    editpad_core::settings::LANG_ZH_CN
-                } else {
-                    editpad_core::settings::LANG_EN
-                };
-                self.settings.set_language(next);
-                self.persist_settings();
-                self.ui_font_family = pick_ui_font_family(next, &self.available_fonts)
-                    .map(|name| leak_font_family(name.to_owned()));
-                self.set_status(match self.ui_font_family {
-                    Some(family) => format!("界面语言已切换（界面字体：{family}）"),
-                    None => "界面语言已切换（未命中候选字体，回落系统默认）".to_owned(),
-                });
+                let cur = self.settings.language;
+                let next = editpad_core::Lang::ALL
+                    .iter()
+                    .copied()
+                    .cycle()
+                    .skip_while(|l| *l != cur)
+                    .nth(1)
+                    .unwrap_or(editpad_core::Lang::ZhCn);
+                self.apply_language(next);
                 Task::none()
             }
             // P134（C7）：全局默认字号（设置步进器入口）——「跟随全局」
@@ -1361,8 +1380,17 @@ impl Editpad {
                 tab.font_size_override = Some(next);
                 tab.editor.borrow_mut().set_font_size(next);
                 self.set_status(format!(
-                    "本页字号 {next:.0}（全局默认 {:.0}；查看菜单可重置）",
-                    self.settings.font_size
+                    "{}{next:.0}{}{:.0}{}",
+                    self.t(
+editpad_core::Key::
+StTabFontSizePrefix),
+                    self.t(
+editpad_core::Key::
+StTabFontSizeMiddle),
+                    self.settings.font_size,
+                    self.t(
+editpad_core::Key::
+StTabFontSizeSuffix)
                 ));
                 Task::none()
             }
@@ -1371,7 +1399,7 @@ impl Editpad {
                 let tab = self.tab_mut();
                 tab.font_size_override = None;
                 tab.editor.borrow_mut().set_font_size(global);
-                self.set_status(format!("本页字号已重置为全局默认 {global:.0}"));
+                self.set_status(format!("{}{global:.0}", self.t(editpad_core::Key::StTabFontReset)));
                 Task::none()
             }
             Message::TabWrapOverrideToggled => {
@@ -1458,9 +1486,9 @@ impl Editpad {
                 .to_owned();
                 self.persist_settings();
                 self.set_status(match self.settings.backup_mode.as_str() {
-                    BACKUP_MODE_SIMPLE => "保存时备份：同目录 name.bak 覆盖式".to_owned(),
-                    BACKUP_MODE_TIMESTAMPED => "保存时备份：name.bak/ 目录按时间戳留存".to_owned(),
-                    _ => "保存时备份：已关闭".to_owned(),
+                    BACKUP_MODE_SIMPLE => self.t(editpad_core::Key::StBackupSimpleShort).to_owned(),
+                    BACKUP_MODE_TIMESTAMPED => self.t(editpad_core::Key::StBackupTimestampedShort).to_owned(),
+                    _ => self.t(editpad_core::Key::StBackupOffShort).to_owned(),
                 });
                 Task::none()
             }
@@ -1527,10 +1555,13 @@ impl Editpad {
                 }
                 self.enter_busy();
                 self.status.clear();
+                // P155：过滤器文案先取出（async 块不能捕获 &self——闭包
+                // 要 Send，而编辑器句柄是 Rc<RefCell<..>>）
+                let all_files = self.t(editpad_core::Key::StFileTypesAll);
                 Task::perform(
-                    async {
+                    async move {
                         rfd::AsyncFileDialog::new()
-                            .add_filter("所有文件", &["*"])
+                            .add_filter(all_files, &["*"])
                             .pick_file()
                             .await
                     },
@@ -1724,7 +1755,7 @@ impl Editpad {
                         if is_restore {
                             self.restore_failed += 1;
                         } else {
-                            self.set_status("目标标签页已关闭，本次加载结果已丢弃".to_owned());
+                            self.set_status(self.t(editpad_core::Key::StTabGone).to_owned());
                         }
                     }
                     (Err(error), target) => {
@@ -1739,7 +1770,7 @@ impl Editpad {
                             self.busy = false;
                         } else {
                             self.busy = false;
-                            self.set_status_error(format!("打开失败:{error}"));
+                            self.set_status_error(self.t_suffix(editpad_core::Key::StOpenFailed, &error.to_string()));
                         }
                     }
                 }
@@ -1776,8 +1807,8 @@ impl Editpad {
             // ---------- P133：链接 Ctrl+点击（路线图 E2） ----------
             Message::LinkClicked(editor::LinkTarget::Url(url)) => {
                 match open_external(&url) {
-                    Ok(()) => self.set_status(format!("已用系统默认程序打开 {url}")),
-                    Err(e) => self.set_status_error(format!("打开失败：{e}")),
+                    Ok(()) => self.set_status(format!("{}{url}", self.t(editpad_core::Key::StOpenedExternal))),
+                    Err(e) => self.set_status_error(self.t_suffix(editpad_core::Key::StOpenFailed, &e.to_string())),
                 }
                 Task::none()
             }
@@ -1857,7 +1888,9 @@ impl Editpad {
                 // 无转码时补显暂存的备份提示（备份消息写在异步落盘完成
                 // 之前，直接进状态栏会被本分支立即覆盖/抹掉）
                 let backup_note = self.pending_backup_notice.take();
-                if let Some(text) = transcode_notice(&prev_label, target_label, notice.unmappable) {
+                if let Some(text) =
+                    transcode_notice(self.lang(), &prev_label, target_label, notice.unmappable)
+                {
                     self.set_status(text);
                 } else if let Some(text) = backup_note {
                     self.set_status(text);
@@ -1897,7 +1930,7 @@ impl Editpad {
                         }
                         return self.close_window();
                     }
-                    self.set_status("保存期间切换了标签页，已取消关窗".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StSwitchCancelledClose).to_owned());
                 }
                 Task::none()
             }
@@ -1905,7 +1938,7 @@ impl Editpad {
                 self.busy = false;
                 // 保存失败不关窗：留在应用里让用户处理
                 self.pending_close = false;
-                self.set_status_error(format!("保存失败:{error}"));
+                self.set_status_error(self.t_suffix(editpad_core::Key::StSaveFailed, &error.to_string()));
                 // 保存失败时备份已发生（写前备份），但「已备份」提示对
                 // 失败的保存没有意义，弃置防陈旧
                 self.pending_backup_notice = None;
@@ -1959,13 +1992,13 @@ impl Editpad {
                             if !queue.contains(&idx) {
                                 queue.push(idx);
                             }
-                            self.status = "文件已被外部修改，已跳过自动写盘".to_owned();
+                            self.status = self.t(editpad_core::Key::StExternallyModifiedSkip).to_owned();
                         }
                     }
                     AutosaveOutcome::Failed(error) => {
                         // 失败必须留痕（不能无声吞掉），但不打断编辑；
                         // 清掉 inflight 后，下一次编辑会重新排队
-                        self.set_status_error(format!("自动保存失败:{error}"));
+                        self.set_status_error(self.t_suffix(editpad_core::Key::StAutosaveFailed, &error.to_string()));
                     }
                     AutosaveOutcome::Superseded => {
                         // P146：调度后页被编辑/撤销回基线/改路径作废——本轮
@@ -2060,7 +2093,7 @@ impl Editpad {
                     return Task::none();
                 }
                 if self.tab().path.is_none() {
-                    self.set_status("未命名页请先「另存为」取得路径，再选择保存编码".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StUntitledPickEncoding).to_owned());
                     return Task::none();
                 }
                 // 记住偏好：此后本页每次保存（含自动保存）都沿用该编码
@@ -2081,12 +2114,21 @@ impl Editpad {
                 };
                 if chars > EOL_CONVERT_MAX_CHARS {
                     self.set_status_error(format!(
-                        "文档过大（{chars} 字符），暂不支持行尾转换（上限 {EOL_CONVERT_MAX_CHARS}）"
+                        "{}{chars}{}{EOL_CONVERT_MAX_CHARS}{}",
+                        self.t(
+editpad_core::Key::
+StTooLargeEolPrefix),
+                        self.t(
+editpad_core::Key::
+StTooLargeEolMiddle),
+                        self.t(
+editpad_core::Key::
+StTooLargeEolSuffix)
                     ));
                     return Task::none();
                 }
                 if current == target {
-                    self.set_status(format!("行尾已是 {}", eol_label(target)));
+                    self.set_status(format!("{}{}", self.t(editpad_core::Key::StEolAlreadyMiddle), eol_label(target)));
                     return Task::none();
                 }
                 // P9 的归一函数即行尾转换：CRLF/LF/孤立 CR 全部统一到目标
@@ -2101,7 +2143,7 @@ impl Editpad {
                     // P18：内容版本与防抖起点同步推进
                     tab.note_mutation();
                 }
-                self.set_status(format!("已转换为 {}", eol_label(target)));
+                self.set_status(format!("{}{}", self.t(editpad_core::Key::StEolConverted), eol_label(target)));
                 // 内容变了：命中表过期重扫（查找栏开着才扫）+ 排队自动保存
                 if self.find_visible {
                     let find_task = self.schedule_find_scan();
@@ -2135,11 +2177,11 @@ impl Editpad {
                             }
                             self.pending_close_tab = None;
                         } else {
-                            self.set_status("保存后又有新改动，已取消自动关闭".to_owned());
+                            self.set_status(self.t(editpad_core::Key::StCancelledAutoClose).to_owned());
                         }
                     }
                     Err(error) => {
-                        self.set_status_error(format!("保存失败:{error}"));
+                        self.set_status_error(self.t_suffix(editpad_core::Key::StSaveFailed, &error.to_string()));
                         self.pending_close_tab = None;
                     }
                 }
@@ -2198,7 +2240,7 @@ impl Editpad {
                 if path.exists() {
                     self.request_open(path)
                 } else {
-                    self.set_status_error(format!("文件不存在或已被移动：{entry}"));
+                    self.set_status_error(self.t_suffix(editpad_core::Key::StRecentMissing, &entry));
                     Task::none()
                 }
             }
@@ -2206,7 +2248,7 @@ impl Editpad {
                 // P20 隐私：立即写回空列表，config.toml 不再含历史路径
                 self.settings.clear_recent_files();
                 self.persist_settings();
-                self.set_status("已清空最近文件记录".to_owned());
+                self.set_status(self.t(editpad_core::Key::StRecentsCleared).to_owned());
                 Task::none()
             }
             Message::BarsDismissed => {
@@ -2339,9 +2381,9 @@ impl Editpad {
                     None => Task::none(),
                 };
                 self.set_status(if self.fullscreen {
-                    "已进入全屏（F11 退出；全屏期间不记忆窗口几何）".to_owned()
+                    self.t(editpad_core::Key::StFullscreenOn).to_owned()
                 } else {
-                    "已退出全屏".to_owned()
+                    self.t(editpad_core::Key::StFullscreenOff).to_owned()
                 });
                 task
             }
@@ -2358,9 +2400,9 @@ impl Editpad {
                     None => Task::none(),
                 };
                 self.set_status(if self.always_on_top {
-                    "窗口已置顶（F9 取消）".to_owned()
+                    self.t(editpad_core::Key::StAlwaysOnTopOn).to_owned()
                 } else {
-                    "已取消置顶".to_owned()
+                    self.t(editpad_core::Key::StAlwaysOnTopOff).to_owned()
                 });
                 task
             }
@@ -2512,7 +2554,7 @@ impl Editpad {
                 self.regex_enabled = value;
                 if value {
                     self.set_status(
-                        "正则模式：替换支持 $1/${1} 组引用，^$ 逐行锚定用 (?m)".to_owned(),
+                        self.t(editpad_core::Key::StRegexModeHint).to_owned(),
                     );
                 }
                 self.schedule_active_scan()
@@ -2572,10 +2614,19 @@ impl Editpad {
                     self.fif_truncated = truncated;
                     if truncated {
                         self.set_status(format!(
-                            "在文件中查找：已达封顶截断，结果不完整（{files} 个文件 / {hits} 处）"
+                            "{}{files}{}{hits}{}",
+                            self.t(
+editpad_core::Key::
+StFifTruncatedPrefix),
+                            self.t(
+editpad_core::Key::
+StFifTruncatedMiddle),
+                            self.t(
+editpad_core::Key::
+StFifTruncatedSuffix)
                         ));
                     } else {
-                        self.set_status(format!("在文件中查找：{files} 个文件共 {hits} 处"));
+                        self.set_status(editpad_core::fmt_fif_summary(self.lang(), files, hits));
                     }
                 }
                 Task::none()
@@ -2669,7 +2720,7 @@ impl Editpad {
                             self.schedule_find_scan()
                         }
                         Err(e) => {
-                            self.set_status_error(format!("正则无效：{e}"));
+                            self.set_status_error(self.t_suffix(editpad_core::Key::StInvalidRegex, &e.to_string()));
                             Task::none()
                         }
                     };
@@ -2686,7 +2737,7 @@ impl Editpad {
                         self.schedule_find_scan()
                     }
                     Err(e) => {
-                        self.set_status_error(format!("正则无效：{e}"));
+                        self.set_status_error(self.t_suffix(editpad_core::Key::StInvalidRegex, &e.to_string()));
                         Task::none()
                     }
                 }
@@ -2710,7 +2761,16 @@ impl Editpad {
                     };
                     if chars > REGEX_REPLACE_MAX_CHARS {
                         self.set_status_error(format!(
-                            "文档过大（{chars} 字符），正则替换暂不支持（上限 {REGEX_REPLACE_MAX_CHARS}）；可改用字面模式"
+                            "{}{chars}{}{REGEX_REPLACE_MAX_CHARS}{}",
+                            self.t(
+editpad_core::Key::
+StTooLargeRegexPrefix),
+                            self.t(
+editpad_core::Key::
+StTooLargeRegexMiddle),
+                            self.t(
+editpad_core::Key::
+StTooLargeRegexSuffix)
                         ));
                         return Task::none();
                     }
@@ -2718,7 +2778,7 @@ impl Editpad {
                     let replacement = self.replace_query.clone();
                     let case_sensitive = self.case_sensitive;
                     self.enter_busy();
-                    self.set_status("正则替换中…（后台）".to_owned());
+                    self.set_status(self.t(editpad_core::Key::StRegexReplacing).to_owned());
                     return Task::perform(
                         async move {
                             editpad_core::replace_all_regex(
@@ -2738,7 +2798,16 @@ impl Editpad {
                     };
                     if chars > WHOLE_WORD_MAX_CHARS {
                         self.set_status_error(format!(
-                            "文档过大（{chars} 字符），整词替换暂不支持（上限 {WHOLE_WORD_MAX_CHARS}）；可关闭整词后重试"
+                            "{}{chars}{}{WHOLE_WORD_MAX_CHARS}{}",
+                            self.t(
+editpad_core::Key::
+StTooLargeWordPrefix),
+                            self.t(
+editpad_core::Key::
+StTooLargeWordMiddle),
+                            self.t(
+editpad_core::Key::
+StTooLargeWordSuffix)
                         ));
                         return Task::none();
                     }
@@ -2760,7 +2829,7 @@ impl Editpad {
                         tasks.push(self.schedule_find_scan());
                         tasks.push(self.maybe_schedule_autosave());
                     }
-                    self.set_status(format!("已替换 {count} 处"));
+                    self.set_status(editpad_core::fmt_replaced(self.lang(), count));
                     return Task::batch(tasks);
                 }
                 // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
@@ -2788,7 +2857,7 @@ impl Editpad {
                     // P18：内容变了 → 排队一次防抖自动保存
                     tasks.push(self.maybe_schedule_autosave());
                 }
-                self.set_status(format!("已替换 {count} 处"));
+                self.set_status(editpad_core::fmt_replaced(self.lang(), count));
                 Task::batch(tasks)
             }
             Message::ReplaceAllRegexDone(result) => {
@@ -2811,7 +2880,7 @@ impl Editpad {
                             tasks.push(self.schedule_find_scan());
                             tasks.push(self.maybe_schedule_autosave());
                         }
-                        self.set_status(format!("已替换 {count} 处"));
+                        self.set_status(editpad_core::fmt_replaced(self.lang(), count));
                         if tasks.is_empty() {
                             Task::none()
                         } else {
@@ -2819,7 +2888,7 @@ impl Editpad {
                         }
                     }
                     Err(e) => {
-                        self.set_status_error(format!("正则替换失败：{e}"));
+                        self.set_status_error(self.t_suffix(editpad_core::Key::StRegexReplaceFailed, &e.to_string()));
                         Task::none()
                     }
                 }
@@ -2862,9 +2931,9 @@ impl Editpad {
                     tab.monitor
                 };
                 self.set_status(if on {
-                    "已开启文件监视：磁盘变化时自动重载（干净页）并跟随文末（F8 关闭）".to_owned()
+                    self.t(editpad_core::Key::StMonitorOn).to_owned()
                 } else {
-                    "已关闭文件监视".to_owned()
+                    self.t(editpad_core::Key::StMonitorOff).to_owned()
                 });
                 // P149：监视节拍已改订阅时钟驱动（subscription 按「存在
                 // 监视页」门控），开关翻转不再手动起链
@@ -2933,11 +3002,11 @@ impl Editpad {
                     return Task::none();
                 }
                 if self.cur_handle.borrow().wrap_enabled() {
-                    self.set_status_error("自动换行开启时不可用列编辑器（先关闭折行）");
+                    self.set_status_error(self.t(editpad_core::Key::StColumnEditorWrapOff));
                     return Task::none();
                 }
                 if !self.cur_handle.borrow().has_block() {
-                    self.set_status_error("先建立列块选区（Alt+Shift 拖拽，竖直拖出零宽插入列亦可）");
+                    self.set_status_error(self.t(editpad_core::Key::StColumnEditorNeedBlock));
                     return Task::none();
                 }
                 // 浮层互斥：对话框与设置弹窗/命令面板不同框
@@ -2989,7 +3058,7 @@ impl Editpad {
                     Task::none()
                 }
                 _ => {
-                    self.set_status_error("请输入有效行号（从 1 开始）".to_owned());
+                    self.set_status_error(self.t(editpad_core::Key::GotoInvalidLine).to_owned());
                     Task::none()
                 }
             },
@@ -3010,7 +3079,7 @@ impl Editpad {
         let d = self.column_editor.clone();
         let payload = if !d.number_mode {
             if d.text.is_empty() {
-                Err("请输入要插入的文本".to_owned())
+                Err(self.t(editpad_core::Key::ColumnEditorNoText).to_owned())
             } else {
                 Ok(d.text)
             }
@@ -3039,27 +3108,33 @@ impl Editpad {
             .start
             .trim()
             .parse()
-            .map_err(|_| "起始值须为整数（可负）".to_owned())?;
+            .map_err(|_| self.t(editpad_core::Key::ColumnEditorStartInteger).to_owned())?;
         let step: i64 = d
             .step
             .trim()
             .parse()
-            .map_err(|_| "步长须为整数（可负）".to_owned())?;
+            .map_err(|_| self.t(editpad_core::Key::ColumnEditorStepInteger).to_owned())?;
         let width: usize = d
             .pad_width
             .trim()
             .parse()
-            .map_err(|_| "补零宽度须为非负整数（0 = 不补）".to_owned())?;
+            .map_err(|_| self.t(editpad_core::Key::ColumnEditorPadInteger).to_owned())?;
         if width > editor::MAX_COLUMN_SEQ_WIDTH {
-            return Err(format!("补零宽度上限 {} 位", editor::MAX_COLUMN_SEQ_WIDTH));
+            return Err(format!("{}{}{}", self.t(editpad_core::Key::StColumnEditorPadCapPrefix), editor::MAX_COLUMN_SEQ_WIDTH, self.t(editpad_core::Key::StColumnEditorPadCapSuffix)));
         }
         let rows = match self.cur_handle.borrow().active_block() {
             Some((r0, r1, _, _)) => r1 - r0 + 1,
-            None => return Err("先建立列块选区（Alt+Shift 拖拽）".to_owned()),
+            None => return Err(self.t(editpad_core::Key::ColumnEditorNoBlock).to_owned()),
         };
         if rows > editor::MAX_COLUMN_SEQ_ROWS {
             return Err(format!(
-                "列块行数 {rows} 超过列编辑器上限 {}",
+                "{}{rows}{}{}",
+                self.t(
+editpad_core::Key::
+StColumnEditorRowsPrefix),
+                self.t(
+editpad_core::Key::
+StColumnEditorRowsMiddle),
                 editor::MAX_COLUMN_SEQ_ROWS
             ));
         }
@@ -3076,7 +3151,7 @@ impl Editpad {
         // 「纯导航/纯标注」白名单的变体一律视为可变拒绝），被拒动作
         // 不清列块、不留任何状态痕迹
         if self.cur_handle.borrow().read_only && edit_op_mutates(&op) {
-            self.set_status("文档已锁定只读（Ctrl+R 解除）".to_owned());
+            self.set_status(self.t(editpad_core::Key::StDocReadOnlyLocked).to_owned());
             return false;
         }
 
@@ -3125,7 +3200,7 @@ impl Editpad {
             E::Undo => {
                 let changed = editor.undo();
                 if !changed {
-                    hint = Some("没有更多撤销历史".to_owned());
+                    hint = Some(self.t(editpad_core::Key::HintNoMoreUndo).to_owned());
                 } else {
                     back_to_saved = editor.is_at_saved_content();
                 }
@@ -3134,7 +3209,7 @@ impl Editpad {
             E::Redo => {
                 let changed = editor.redo();
                 if !changed {
-                    hint = Some("已在最新状态".to_owned());
+                    hint = Some(self.t(editpad_core::Key::HintAtLatest).to_owned());
                 } else {
                     back_to_saved = editor.is_at_saved_content();
                 }
@@ -3176,9 +3251,10 @@ impl Editpad {
             }
             E::AddNextMatch => {
                 // B10 Phase 2：添加下一匹配（Ctrl+M，纯光标集操作不置脏）；
-                // Err = 具体原因上状态栏（不在词上/无匹配/封顶）
-                if let Err(msg) = editor.add_next_match() {
-                    hint = Some(msg);
+                // Err = 具体原因上状态栏（不在词上/无匹配/封顶）——P155 起
+                // 错误是类型化的，按当前界面语言取文
+                if let Err(err) = editor.add_next_match() {
+                    hint = Some(err.text(self.lang()));
                 }
                 false
             }
@@ -3234,7 +3310,7 @@ impl Editpad {
             // 纯光标移动：恒返回 false（不置脏），失败给状态栏提示
             E::JumpToMatchingBracket => {
                 if !editor.jump_to_matching_bracket() {
-                    hint = Some("光标不在括号旁（或未找到配对）".to_owned());
+                    hint = Some(self.t(editpad_core::Key::HintNoBracketPair).to_owned());
                 }
                 false
             }
@@ -3274,14 +3350,14 @@ impl Editpad {
             // changed 驱动）；时间戳文本给状态栏反馈
             E::InsertDateTime => {
                 let stamp = editor.insert_date_time();
-                hint = Some(format!("已插入 {stamp}"));
+                hint = Some(format!("{}{stamp}", self.t(editpad_core::Key::StInsertedStampPrefix)));
                 true
             }
             // ---------- P128：选区文本工具（无选区/解码失败给状态栏提示） ----------
             E::ApplyTool(kind) => match editor.apply_tool(kind) {
                 Ok(changed) => changed,
-                Err(msg) => {
-                    hint = Some(msg);
+                Err(err) => {
+                    hint = Some(err.text(self.lang()));
                     false
                 }
             },
@@ -3334,7 +3410,7 @@ impl Editpad {
             .map(|t| t.editor.borrow().doc.text_len())
             .sum();
         if !mem_guard_allows(existing, incoming, MULTI_TAB_MEM_CAP_BYTES) {
-            self.status = "内存保护：合计内容超过上限，请先关闭部分大文档再打开".to_owned();
+            self.status = self.t(editpad_core::Key::StMemoryGuard).to_owned();
             return Task::none();
         }
         if tab >= self.tabs.len() {
@@ -3400,29 +3476,42 @@ impl Editpad {
             return Task::none();
         };
         if editpad_core::normalize_combo(&combo).is_none() {
-            self.set_status_error(format!("「{combo}」不是有效的热键组合"));
+            self.set_status_error(format!(
+                "{}{combo}{}",
+                editpad_core::Key::StHotkeyConflictPrefix.text(self.lang()),
+                editpad_core::Key::StInvalidHotkey.text(self.lang())
+            ));
             return Task::none();
         }
         if let Some(other) = HOTKEY_ACTIONS
             .iter()
             .find(|a| a.id != id && self.hotkey_capture_conflicts_with(a.id, &combo))
         {
+            let lang = self.lang();
             self.status = format!(
-                "「{combo}」已被「{}」占用，换一个组合再试（Esc 取消）",
-                other.desc
+                "{}{combo}{}{}{}",
+                editpad_core::Key::StHotkeyConflictPrefix.text(lang),
+                editpad_core::Key::StHotkeyConflictMiddle.text(lang),
+                other.desc.text(lang),
+                editpad_core::Key::StHotkeyConflictSuffix.text(lang),
             );
             return Task::none();
         }
         self.settings.hotkeys.insert(id.to_owned(), combo.clone());
         self.persist_settings();
         self.hotkey_capture = None;
-        self.set_status(format!("「{}」已绑定 {combo}", {
-            HOTKEY_ACTIONS
+        {
+            let lang = self.lang();
+            let name = HOTKEY_ACTIONS
                 .iter()
                 .find(|a| a.id == id)
-                .map(|a| a.desc)
-                .unwrap_or(id)
-        }));
+                .map(|a| a.desc.text(lang))
+                .unwrap_or(id);
+            self.set_status(format!(
+                "{}{name}{combo}",
+                editpad_core::Key::StHotkeyRebound.text(lang)
+            ));
+        }
         Task::none()
     }
 
@@ -3487,11 +3576,11 @@ impl Editpad {
             return Task::none();
         };
         if self.busy || self.active_load.is_some() {
-            self.set_status("加载/保存进行中，请稍后再重命名".to_owned());
+            self.set_status(self.t(editpad_core::Key::StBusyRetry).to_owned());
             return Task::none();
         }
         let Some(target) = rename_target_path(&old, &self.rename_input) else {
-            self.set_status_error("名称不能为空或含 \\/:*?\"<>| 等字符".to_owned());
+            self.set_status_error(self.t(editpad_core::Key::StRenameInvalid).to_owned());
             return Task::none(); // 保持输入态
         };
         if target == old {
@@ -3502,7 +3591,7 @@ impl Editpad {
             return Task::none();
         }
         if target.exists() {
-            self.set_status_error(format!("重命名失败:目标已存在「{}」", target.display()));
+            self.set_status_error(format!("{}{}", self.t(editpad_core::Key::StRenameExists), target.display()));
             return Task::none(); // 保持输入态
         }
         match fs::rename(&old, &target) {
@@ -3538,10 +3627,10 @@ impl Editpad {
                 self.touch_manifest_stale();
                 self.renaming_tab = None;
                 self.rename_input.clear();
-                self.set_status(format!("已重命名为「{new_key}」"));
+                self.set_status(format!("{}{new_key}", self.t(editpad_core::Key::StRenamed)));
             }
             Err(error) => {
-                self.set_status_error(format!("重命名失败:{error}"));
+                self.set_status_error(self.t_suffix(editpad_core::Key::StRenameFailed, &error.to_string()));
             }
         }
         Task::none()
@@ -3655,7 +3744,7 @@ impl Editpad {
                     queue.push(idx);
                 }
                 self.status =
-                    "检测到外部修改，已暂停保存：请先在提示条选择「重新加载」或「忽略」".to_owned();
+                    self.t(editpad_core::Key::StExternalPaused).to_owned();
                 return Task::none();
             }
         }
@@ -3666,7 +3755,9 @@ impl Editpad {
         if let Some(note) =
             crate::perform_backup_before_overwrite(&path, &self.settings.backup_mode)
         {
-            self.pending_backup_notice = Some(note);
+            // P155：备份说明是语言无关的结果类型，展示时按当前语言取文
+            let lang = self.lang();
+            self.pending_backup_notice = Some(note.text(lang));
         }
         // P67：按页编码偏好落盘（None = 默认 UTF-8，历史行为）
         let encoding = self
@@ -3785,6 +3876,38 @@ impl Editpad {
         }
     }
 
+    /// P155：`Key` + 运行期值的拼接（`fmt_suffix` 的短封装）。
+    /// 注：`self.t(..)` 定义在 view.rs（同一 `impl Editpad`，全局唯一）。
+    fn t_suffix(&self, key: editpad_core::Key, value: &str) -> String {
+        editpad_core::fmt_suffix(self.settings.language, key, value)
+    }
+
+    /// P155：切换界面语言的**唯一落地点**（下拉框与兼容循环入口都走它）。
+    ///
+    /// 界面文案不需要任何「失效」动作——view 层每帧按 `Settings.language`
+    /// 现取；这里只做两件有副作用的事：① 重新解析 UI 字体族（候选链按
+    /// 语言分派）；② 落盘 + 状态栏反馈（**用切换后的语言**书写，否则英文
+    /// 界面会蹦出一句中文）。正文/预览与行号族完全不受影响。
+    pub(crate) fn apply_language(&mut self, lang: editpad_core::Lang) {
+        self.settings.language = lang;
+        self.persist_settings();
+        self.ui_font_family = pick_ui_font_family(lang, &self.available_fonts)
+            .map(|name| leak_font_family(name.to_owned()));
+        let key = editpad_core::Key::StLanguageSwitched;
+        let status = match self.ui_font_family {
+            Some(family) => {
+                // 括号宽窄随语言（中文全角 / 英文半角）——英文界面里冒出
+                // 全角括号是很显眼的混排瑕疵
+                let wrap = match lang {
+                    editpad_core::Lang::En => format!(" ({family})"),
+                    editpad_core::Lang::ZhCn => format!("（{family}）"),
+                };
+                editpad_core::fmt_suffix(lang, key, &wrap)
+            }
+            None => key.text(lang).to_owned(),
+        };
+        self.set_status(status);
+    }
     /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到
     /// 临时目录，绝不动真实 %APPDATA%；否则走系统配置目录（尽力而为）。
     pub(crate) fn persist_settings(&self) {

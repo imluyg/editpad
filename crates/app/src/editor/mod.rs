@@ -45,6 +45,49 @@ pub(crate) use cursors::MultiEditKind;
 // P133：链接识别（E2）——update.rs 消费 LinkTarget，view.rs 消费 link_at
 pub(crate) use links::{link_at, LinkTarget};
 
+/// P155：编辑器动作被拒的**类型化**原因。
+///
+/// 为什么不直接返回文案：文案是界面语言的一部分（切到英文要换），而
+/// editor 层是纯逻辑——把「拒绝原因」与「怎么写给用户看」分开，文案
+/// 由 app 层经 [`EditErr::text`] 按当前语言取（翻译表在 core::lang）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditErr {
+    /// Ctrl+M 时既无选区、光标也不在词上
+    CursorNotOnWord,
+    /// 附加光标数量达上限（带实际上限值）
+    ExtraCursorCap(usize),
+    /// 环形扫描一圈都没有未占用实例
+    NoMoreMatch,
+    /// 文本工具需要非空选区
+    NoSelection,
+    /// Base64 解码失败（非法字符/长度）
+    Base64DecodeInvalid,
+    /// Base64 解码出的字节不是合法 UTF-8
+    Base64DecodeNotUtf8,
+    /// URL 解码遇到无效百分号转义
+    UrlDecodeInvalid,
+}
+
+impl EditErr {
+    /// 按界面语言取提示文案。
+    pub(crate) fn text(self, lang: editpad_core::Lang) -> String {
+        use editpad_core::Key as K;
+        match self {
+            EditErr::CursorNotOnWord => K::EmCursorNotOnWord.text(lang).to_owned(),
+            EditErr::ExtraCursorCap(cap) => format!(
+                "{}{cap}{}",
+                K::EmExtraCursorCapPrefix.text(lang),
+                K::EmExtraCursorCapSuffix.text(lang)
+            ),
+            EditErr::NoMoreMatch => K::EmNoMoreMatch.text(lang).to_owned(),
+            EditErr::NoSelection => K::EmNoSelection.text(lang).to_owned(),
+            EditErr::Base64DecodeInvalid => K::EmBase64DecodeInvalid.text(lang).to_owned(),
+            EditErr::Base64DecodeNotUtf8 => K::EmBase64DecodeNotUtf8.text(lang).to_owned(),
+            EditErr::UrlDecodeInvalid => K::EmUrlDecodeInvalid.text(lang).to_owned(),
+        }
+    }
+}
+
 // ---------- 视觉常量（core/view 共用） ----------
 
 /// 行号与正文的最小间距。

@@ -709,33 +709,33 @@ use super::*;
         use editpad_core::SaveEncoding;
         // P67 口径：提示按「原标签 vs 实际目标」判定
         // 纯 UTF-8 → UTF-8 / 未打开：无需提示
-        assert_eq!(transcode_notice("UTF-8", "UTF-8", false), None);
-        assert_eq!(transcode_notice("", "UTF-8", false), None);
+        assert_eq!(transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", "UTF-8", false), None);
+        assert_eq!(transcode_notice(editpad_core::Lang::ZhCn, "", "UTF-8", false), None);
 
         // 用户显式选择 GBK 且原文件就是 GBK：不提示（非意外转码）
         assert_eq!(
-            transcode_notice("GBK", SaveEncoding::Gbk.label(), false),
+            transcode_notice(editpad_core::Lang::ZhCn, "GBK", SaveEncoding::Gbk.label(), false),
             None
         );
 
         // 不可映射字符优先告警
-        let m = transcode_notice("UTF-8", "GBK", true).expect("应有告警");
+        let m = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", "GBK", true).expect("应有告警");
         assert!(m.contains("&#"), "应说明数值实体写入：{m}");
 
         // BOM 丢失要提示
-        let bom = transcode_notice("UTF-8(BOM)", "UTF-8", false).expect("BOM 丢失应有提示");
+        let bom = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8(BOM)", "UTF-8", false).expect("BOM 丢失应有提示");
         assert!(bom.contains("BOM"));
 
         // 转码要提示且带出原编码名与目标
         for label in ["GBK", "UTF-16LE", "UTF-16BE"] {
             let notice =
-                transcode_notice(label, "UTF-8", false).expect("转码应有提示");
+                transcode_notice(editpad_core::Lang::ZhCn, label, "UTF-8", false).expect("转码应有提示");
             assert!(notice.contains(label), "提示需含原编码 {label}: {notice}");
             assert!(notice.contains("UTF-8"));
         }
 
         // 反向：UTF-8 → GBK 同样提示
-        let back = transcode_notice("UTF-8", SaveEncoding::Gbk.label(), false)
+        let back = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", SaveEncoding::Gbk.label(), false)
             .expect("反向转码应有提示");
         assert!(back.contains("GBK") && back.contains("UTF-8"));
     }
