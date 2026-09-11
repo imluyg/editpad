@@ -782,6 +782,32 @@ impl EditorCore {
         w.index.total()
     }
 
+    /// P154：把整表软换行索引对账到当前文档（全量逐行 `segments_of_line`）。
+    ///
+    /// **为什么必须在本帧做**：行数变化（按回车/粘贴多行/删行）会让换行表
+    /// 整表重置为「每行 1 段」，`visual_rows_total()` 因此在收敛前系统性
+    /// 偏小；而 `ensure_visible` 的滚动夹紧与滚动条行程都在**绘制之前**取
+    /// 该值算上限 → 视口被错误拉回上方，下一帧收敛后又跳回（用户复报：
+    /// 末尾按回车「行号闪一下」，实测 scroll 24.9 → 2.9 → 25.9）。
+    /// 由编辑汇点 [`Self::invalidate_highlight_from`] 在帧末调用；此时本帧
+    /// 的夹紧已经发生（用的是旧上限，无害——夹紧是幂等钳制），对账后下一
+    /// 帧一切读数都可信。
+    ///
+    /// 成本：逐行一次 `segments_of_line`。同代 memo 命中直接返回（不重算
+    /// 断点、不 touch BIT），仅编辑点邻域重算；未命中的行才做真实字形断行。
+    /// 只在「重置后尚未对账」时执行（`needs_reconcile`），稳态零开销。
+    pub(crate) fn reconcile_wrap_index(&mut self) {
+        if !self.wrap.borrow().enabled || !self.wrap.borrow().needs_reconcile() {
+            return;
+        }
+        let lines = self.doc.line_count();
+        for line in 0..lines {
+            let text = self.line_text(line);
+            self.segments_of_line(line, &text);
+        }
+        self.wrap.borrow_mut().mark_reconciled();
+    }
+
     /// 可信的真实字形布局：与正文**逐字符对齐**（字符数 + 1）**且字号与
     /// 当前一致**才返回。所有 [`WrapCache::segments_of`] 调用点必须经此
     /// 取 xs——换文档/换行内容的帧里 row_layouts 尚存上一帧布局，残缺 xs

@@ -39,6 +39,10 @@ impl EditorCore {
         // 第 73 轮 ⑯：软换行缓存同汇点失效——行数变化整表重置，
         // 否则只推代次（memo 过期由下次查询懒惰重算）
         self.wrap.borrow_mut().after_edit(self.doc.line_count());
+        // P154：整表重置后立刻对账（否则「每行 1 段」的偏小 total 会被
+        // 下一帧的滚动夹紧/滚动条行程当成真值 → 视口先被拉回再跳回，
+        // 表现为行号闪一下；见 reconcile_wrap_index 注释）
+        self.reconcile_wrap_index();
         if let Some(hl) = &self.highlight {
             let line = self.doc.char_to_line(offset.min(self.doc.text_len()));
             hl.borrow_mut().invalidate_from(line);

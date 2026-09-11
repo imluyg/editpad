@@ -242,6 +242,14 @@ impl WrapIndex {
 ///   由下次查询懒惰重算（未查询行 BIT 短暂陈旧随窗口收敛，v1 已披露）；
 /// * 列预算/像素预算/行数漂移（窗口缩放、字号、gutter 变宽、行数变化
 ///   漏网）在每次查询入口 `ensure_synced` 兜底全清。
+///
+/// ⚠️ P154：整表重置（`reset`）会把**每行暂记 1 段**，于是 `total()` 在
+/// 收敛前**系统性偏小**。此前只有绘制路径（逐可见行查询）会收敛它，而
+/// `ensure_visible` 的滚动夹紧（以及滚动条行程）在绘制**之前**就用
+/// `total()` 算上限 → 用偏小上限把 `scroll_top` 拉回上方，下一帧收敛后
+/// 视口又跳回原处（用户复报：末尾按回车「行号闪一下」）。故新增
+/// [`Self::needs_reconcile`] / [`Self::mark_reconciled`]，由编辑汇点在
+/// 本帧夹紧**之后、下一帧之前**做一次全量对账（见 `EditorCore::reconcile_wrap_index`）。
 pub(crate) struct WrapCache {
     pub(crate) enabled: bool,
     /// 最近同步的显示列预算（≥1，列模型回退路径用）。
@@ -251,6 +259,8 @@ pub(crate) struct WrapCache {
     pub(crate) index: WrapIndex,
     /// 最近同步的逻辑行数。
     last_lines: usize,
+    /// 索引是否「整表重置后尚未对账」（total/prefix 只可信到「每行 1 段」）。
+    needs_reconcile: bool,
 }
 
 impl WrapCache {
@@ -266,7 +276,18 @@ impl WrapCache {
                 gen: 0,
             },
             last_lines: 0,
+            needs_reconcile: false,
         }
+    }
+
+    /// 整表是否已重置但未对账（`total()` 此刻偏小，滚动夹紧不得据此定上限）。
+    pub(crate) fn needs_reconcile(&self) -> bool {
+        self.needs_reconcile
+    }
+
+    /// 标记「已按当前文档对账完毕」（`total()`/`prefix_rows` 恢复可信）。
+    pub(crate) fn mark_reconciled(&mut self) {
+        self.needs_reconcile = false;
     }
 
     /// 开启软换行：整表重置起步（每行暂记 1 段，可见行随查询填充收敛）。
@@ -276,6 +297,7 @@ impl WrapCache {
         self.max_px = max_px.max(1.0);
         self.index.reset(lines);
         self.last_lines = lines;
+        self.needs_reconcile = true;
     }
 
     /// 关闭软换行：只翻开关，缓存原地保留（重新开启时 enable 全清）。
@@ -289,6 +311,7 @@ impl WrapCache {
         if lines != self.last_lines {
             self.index.reset(lines);
             self.last_lines = lines;
+            self.needs_reconcile = true;
         } else {
             self.index.bump_gen();
         }
@@ -304,9 +327,11 @@ impl WrapCache {
             self.max_px = mpx;
             self.index.reset(lines);
             self.last_lines = lines;
+            self.needs_reconcile = true;
         } else if lines != self.last_lines {
             self.index.reset(lines);
             self.last_lines = lines;
+            self.needs_reconcile = true;
         }
     }
 

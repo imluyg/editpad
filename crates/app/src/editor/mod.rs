@@ -67,3 +67,8 @@ pub(crate) const TEXT_LAYER_INSET: f32 = 1.0;
 pub(crate) const FONT_SIZE_DEFAULT: f32 = 16.0;
 /// 行号栏字号相对正文的比例（16px 正文时即原来的 13px）。
 pub(crate) const GUTTER_FONT_SCALE: f32 = 13.0 / 16.0;
+
+// P154：软换行索引对账（行数变化后不得让滚动夹紧用偏小的总数）
+#[cfg(test)]
+#[path = "wrap_reconcile_tests.rs"]
+mod wrap_reconcile_tests;
