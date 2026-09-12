@@ -1,21 +1,21 @@
 # Generate the large-file acceptance sample referenced by the README
-# ("open dev-assets/bench-50mb.log") and by core/examples/*_bench.rs.
+# ("open dev-assets/bench-large.log") and by core/examples/*_bench.rs.
 #
 # The sample itself is NOT in the repository: dev-assets/ is gitignored,
-# so a fresh clone has no bench-50mb.log. Run this script to create one.
+# so a fresh clone has no bench-large.log. Run this script to create one.
 #
 # Usage (from the repo root, Windows PowerShell 5.1+):
 #   powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1
-#   powershell -File .\tools\gen-bench-log.ps1 -Lines 600000 -Out dev-assets\bench-50mb.log
+#   powershell -File .\tools\gen-bench-log.ps1 -Lines 600000 -Out dev-assets\bench-large.log
 #
-# Tuning: -Lines 600000 yields about 68 MB, matching the README claim.
+# Tuning: -Lines controls the sample size (default 600k lines, roughly 68 MB).
 # NOTE: keep this file ASCII-only. The harness shell reads .ps1 files without
 # a BOM using the legacy ANSI codepage, so non-ASCII comments turn into
 # mojibake (same rule as package.ps1).
 
 param(
     [int]$Lines = 600000,
-    [string]$Out = "dev-assets\bench-50mb.log"
+    [string]$Out = "dev-assets\bench-large.log"
 )
 
 $ErrorActionPreference = 'Stop'

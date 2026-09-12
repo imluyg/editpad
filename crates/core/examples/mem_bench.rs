@@ -25,7 +25,7 @@ fn main() {
     let path: PathBuf = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("bench-50mb.log"));
+        .unwrap_or_else(|| PathBuf::from("bench-large.log"));
 
     // 阶段 0：小文档地板值（空进程 + ropey 运行时的常驻底数）
     let tiny = Document::from_str("hello, editpad!\n");

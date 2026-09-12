@@ -108,7 +108,7 @@ pub(crate) fn autosave_must_skip(
 
 /// 大文件豁免阈值：源文件超过此字节数跳过备份（复制耗时会拖慢保存，
 /// 且 64MB+ 的日志类文件通常有专门的轮转手段）。取值对齐性能基准
-/// bench-50mb.log 量级再留余量。
+/// 几十 MB 日志量级再留余量。
 pub(crate) const MAX_BACKUP_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 写前备份磁盘旧版（⑭）。返回状态栏提示文本；None = 无事发生。

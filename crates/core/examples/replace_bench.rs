@@ -32,7 +32,7 @@ fn main() {
     };
 
     // 高频命中 + 等长替换：隔离「扫描与搬运」本身的耗时，
-    // 不让输出膨胀/收缩干扰对比（bench-50mb.log 是中英混排的
+    // 不让输出膨胀/收缩干扰对比（bench-large.log 是中英混排的
     // GBK 文本，每行一个 "abcdefg"，约 60 万处命中）
     let query = "abcdefg";
     let replacement = "ABCDEFG";
