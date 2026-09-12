@@ -96,7 +96,6 @@ fn hash_text(text: &str) -> u64 {
 }
 
 /// 可选语言下的懒高亮器。
-#[derive(Clone)]
 pub struct LazyHighlighter {    syntax_name: String,
     /// 主题明暗档：配色在解析期由主题烘焙进 [`StyledRun`]，换主题必须
     /// 走 [`Self::set_dark_mode`] 整体重建（状态、缓存、代次一并换新）。
@@ -129,6 +128,33 @@ pub struct LazyHighlighter {    syntax_name: String,
     /// 的在途结果按它过滤——代次不符即整体丢弃，杜绝拿旧文档状态
     /// 覆盖新文档。全局单调计数保证跨实例也不重号。
     generation: u64,
+    /// P165：编译期选择器缓存的宿主（syntect 主题选择器在首次高亮时
+    /// 编译并留在 Highlighter 内）。此前 styled_line / styled_line_approx
+    /// / advance_checkpoints 每次调用都 `Highlighter::new`——缓存随实例
+    /// 用完即弃，逐行高亮重复付选择器编译。主题是 'static（OnceLock），
+    /// 字段直接持有；克隆走手写 [`Clone for LazyHighlighter`]（新建实例，
+    /// 缓存在使用方线程懒重建——与克隆前行为一致）。
+    highlighter: Highlighter<'static>,
+}
+
+// Highlighter 非 Clone（内部选择器缓存不可复制），手写 Clone：结构与
+// 状态缓存照抄，Highlighter 换全新实例——选择器编译是纯函数式的
+// （只依赖 dark 档主题），懒重建不改变任何高亮产出。
+impl Clone for LazyHighlighter {
+    fn clone(&self) -> Self {
+        Self {
+            syntax_name: self.syntax_name.clone(),
+            dark: self.dark,
+            checkpoints: self.checkpoints.clone(),
+            line_cache: self.line_cache.clone(),
+            approx_line_cache: self.approx_line_cache.clone(),
+            runs_cache: self.runs_cache.clone(),
+            approx_runs_cache: self.approx_runs_cache.clone(),
+            phantom_from: self.phantom_from,
+            generation: self.generation,
+            highlighter: Highlighter::new(theme(self.dark)),
+        }
+    }
 }
 
 // ParseState/HighlightState 在 fancy-regex 后端下均为纯数据字段
@@ -175,19 +201,21 @@ impl LazyHighlighter {
 
     fn from_syntax_in(syntax: syntect::parsing::SyntaxReference, dark: bool) -> Self {
         let highlighter = Highlighter::new(theme(dark));
+        let initial = (
+            ParseState::new(&syntax),
+            HighlightState::new(&highlighter, ScopeStack::new()),
+        );
         Self {
             syntax_name: syntax.name.clone(),
             dark,
-            checkpoints: vec![(
-                ParseState::new(&syntax),
-                HighlightState::new(&highlighter, ScopeStack::new()),
-            )],
+            checkpoints: vec![initial],
             line_cache: HashMap::new(),
             approx_line_cache: HashMap::new(),
             runs_cache: HashMap::new(),
             approx_runs_cache: HashMap::new(),
             phantom_from: None,
             generation: next_generation(),
+            highlighter,
         }
     }
 
@@ -297,7 +325,10 @@ impl LazyHighlighter {
             }
         }
         let ss = syntax_set();
-        let highlighter = Highlighter::new(theme(self.dark));
+        // P165：复用实例——选择器缓存在多次调用间存续（此前每次调用
+        // 重建，缓存用完即弃）。借用是字段级的，与下方 checkpoints/
+        // line_cache 的读写不相交。
+        let highlighter = &self.highlighter;
 
         // 补齐缺失的检查点（大跳转时一次性补齐沿途所有档位）
         while self.checkpoints.len() * STRIDE <= line_idx {
@@ -310,12 +341,12 @@ impl LazyHighlighter {
                 self.checkpoints.last().cloned().expect("初始检查点恒存在");
             let real_end = (start + STRIDE).min(total_lines);
             for i in start..real_end {
-                advance(&mut parse, &mut highlight, &text_of(i), ss, &highlighter);
+                advance(&mut parse, &mut highlight, &text_of(i), ss, highlighter);
             }
             // 档位内越过文末的部分垫空行，保持「检查点 k = 第 k*STRIDE-1 行
             // 后状态」的不变量（供 invalidate_from 的整除算术使用）
             for _ in real_end..start + STRIDE {
-                advance(&mut parse, &mut highlight, "", ss, &highlighter);
+                advance(&mut parse, &mut highlight, "", ss, highlighter);
             }
             if real_end < start + STRIDE {
                 // 记录垫付起点：下次失效时含垫付的档位会被整体截掉
@@ -338,13 +369,13 @@ impl LazyHighlighter {
             (line_idx / STRIDE) * STRIDE
         };
         for i in walk_from..line_idx {
-            advance(&mut parse, &mut highlight, &text_of(i), ss, &highlighter);
+            advance(&mut parse, &mut highlight, &text_of(i), ss, highlighter);
         }
 
         // 解析目标行：HighlightIterator 直接产出 (Style, 文本片段)
         let ops = parse.parse_line(target_text, ss).unwrap_or_default();
         let regions =
-            HighlightIterator::new(&mut highlight, &ops[..], target_text, &highlighter);
+            HighlightIterator::new(&mut highlight, &ops[..], target_text, highlighter);
 
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut char_pos = 0usize;
@@ -441,7 +472,8 @@ impl LazyHighlighter {
             }
         }
         let ss = syntax_set();
-        let highlighter = Highlighter::new(theme(self.dark));
+        // P165：复用实例（同 styled_line）
+        let highlighter = &self.highlighter;
         let syntax = syntax_set()
             .find_syntax_by_name(&self.syntax_name)
             .expect("语法名来自构造期，必然存在");
@@ -454,14 +486,14 @@ impl LazyHighlighter {
                 None => {
                     let mut state = (
                         ParseState::new(syntax),
-                        HighlightState::new(&highlighter, ScopeStack::new()),
+                        HighlightState::new(highlighter, ScopeStack::new()),
                     );
                     let from = anchor.min(line_idx);
                     for i in from..line_idx {
                         if i >= total_lines {
                             break;
                         }
-                        advance(&mut state.0, &mut state.1, &text_of(i), ss, &highlighter);
+                        advance(&mut state.0, &mut state.1, &text_of(i), ss, highlighter);
                     }
                     state
                 }
@@ -469,14 +501,14 @@ impl LazyHighlighter {
         } else {
             (
                 ParseState::new(syntax),
-                HighlightState::new(&highlighter, ScopeStack::new()),
+                HighlightState::new(highlighter, ScopeStack::new()),
             )
         };
 
         // 解析目标行：与精确路径同一产出管线
         let ops = parse.parse_line(target_text, ss).unwrap_or_default();
         let regions =
-            HighlightIterator::new(&mut highlight, &ops[..], target_text, &highlighter);
+            HighlightIterator::new(&mut highlight, &ops[..], target_text, highlighter);
 
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut char_pos = 0usize;
@@ -536,7 +568,8 @@ impl LazyHighlighter {
         text_of: &mut dyn FnMut(usize) -> String,
     ) -> usize {
         let ss = syntax_set();
-        let highlighter = Highlighter::new(theme(self.dark));
+        // P165：复用实例（同 styled_line）——后台铺建批内多档共享选择器缓存
+        let highlighter = &self.highlighter;
         let mut built = 0usize;
         while built < max_strides {
             // P147：下一档 = 检查点 k=len，覆盖 [(len-1)*STRIDE, len*STRIDE)
@@ -549,7 +582,7 @@ impl LazyHighlighter {
             let (mut parse, mut highlight) =
                 self.checkpoints.last().cloned().expect("初始检查点恒存在");
             for i in start..start + STRIDE {
-                advance(&mut parse, &mut highlight, &text_of(i), ss, &highlighter);
+                advance(&mut parse, &mut highlight, &text_of(i), ss, highlighter);
             }
             self.checkpoints.push((parse, highlight));
             built += 1;
