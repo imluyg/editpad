@@ -890,6 +890,14 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 组字与已有文字重叠/光标不前进）。display_right_edge：
         // 开态 = 折行边界（P114 让位后预算），关态 = 控件右缘。
         let preedit_text: Option<String> = core.preedit.clone().filter(|s| !s.is_empty());
+        // P164：组字实测宽每帧只 shape 一次。此前折行/关态两分支的
+        // pre_slot、下划线（C 层）与光标偏移定位各自调用
+        // measure_preedit_w，一帧最多对同一段组字串做 3 次完整段落
+        // shaping——组字期每击键帧白付两份（组字串是瞬态、同一帧内
+        // 宽度不会变）。
+        let preedit_w = preedit_text
+            .as_deref()
+            .map(|p| measure_preedit_w(body_font, core.font_size(), p));
         let display_right_edge = if core.wrap_enabled() {
             bounds.x + gutter_w + core.wrap_max_px() - core.scroll_left
         } else {
@@ -1044,15 +1052,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     // （新文档/空白行输入）与行尾组字是老浮层实现本可
                     // 显示、三段式嵌入行绘制后会被整行跳过（用户复报
                     // 「组字直接没了」）；空行只有段 0 且无正文
-                    let pre_slot: Option<(&str, usize, f32)> =
-                        preedit_text.as_deref().and_then(|p| {
-                            (core.cursor.line == line && core.cursor.col <= lens).then(|| {
-                                (
-                                    p,
-                                    core.cursor.col,
-                                    measure_preedit_w(body_font, core.font_size(), p),
-                                )
-                            })
+                    let pre_slot: Option<(&str, usize, f32)> = preedit_text
+                        .as_deref()
+                        .zip(preedit_w)
+                        .and_then(|(p, w)| {
+                            (core.cursor.line == line && core.cursor.col <= lens)
+                                .then_some((p, core.cursor.col, w))
                         });
                     if seg_start >= lens {
                         // 空行/幻影行：仅首段且无正文——组字画在段首，
@@ -1198,15 +1203,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             let lens = text.chars().count();
             // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
             // 同款注释——新文档/空白行输入是老浮层的常见场景）
-            let pre_slot: Option<(&str, usize, f32)> =
-                preedit_text.as_deref().and_then(|p| {
-                    (core.cursor.line == line && core.cursor.col <= lens).then(|| {
-                        (
-                            p,
-                            core.cursor.col,
-                            measure_preedit_w(body_font, core.font_size(), p),
-                        )
-                    })
+            let pre_slot: Option<(&str, usize, f32)> = preedit_text
+                .as_deref()
+                .zip(preedit_w)
+                .and_then(|(p, w)| {
+                    (core.cursor.line == line && core.cursor.col <= lens)
+                        .then_some((p, core.cursor.col, w))
                 });
             if text.is_empty() {
                 // 空行：组字画在行首（col 必 0；clip = 控件右缘，关态
@@ -1286,8 +1288,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // preedit_visual_w 可显示宽）；组字重排存在时**逐段**绘制：组字
         // 串跨越多段（自动换行折到下段）时，每段的组字部分都有下划线
         // （用户复报「下一行的换行没有下划线」，Word 系组字折行同款）
-        if let Some(preedit) = preedit_text.as_deref() {
-            let w = measure_preedit_w(body_font, core.font_size(), preedit);
+        if preedit_text.is_some() {
+            // P164：帧首已实测（此处必有 Some）
+            let w = preedit_w.unwrap_or_default();
             if let Some(r) = &reflow {
                 let s1 = (r.col_p + r.pel).min(r.s.chars().count());
                 for (bi, &bs) in r.breaks.iter().enumerate() {
@@ -1366,8 +1369,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     None => (bounds.x + caret.x + 0.0, bounds.y + caret.y),
                 }
             } else {
-                let pre_dx = preedit_text.as_deref().map_or(0.0f32, |p| {
-                    let w = measure_preedit_w(body_font, core.font_size(), p);
+                // P164：帧首已实测，直接消费
+                let pre_dx = preedit_w.map_or(0.0f32, |w| {
                     core.preedit_visual_w(core.cursor.col, w)
                 });
                 (bounds.x + caret.x + pre_dx, bounds.y + caret.y)

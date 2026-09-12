@@ -9,7 +9,7 @@ pub(super) use iced::advanced::text as core_text;
 pub(super) use iced::advanced::text::Paragraph as _;
 pub(super) use iced::alignment;
 pub(super) use iced::{Pixels, Size};
-pub(super) use super::super::metrics::{is_wide, shape_row_xs};
+pub(super) use super::super::metrics::is_wide;
 pub(super) use super::super::scrollbars::{
     HScrollbar, THUMB_MIN_H, THUMB_MIN_W, VScrollbar,
 };
