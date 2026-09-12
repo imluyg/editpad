@@ -1330,6 +1330,27 @@ fn caret_blink_phase_toggles_and_activity_forces_visible() {
     assert!(c.caret_visible(), "活动窗口期内不得隐没");
 }
 
+#[test]
+fn caret_hidden_while_preedit_composing() {
+    // P167：组字进行中应用光标恒隐藏——组字串自带插入点指示，应用光标
+    // 叠画组字尾且随闪烁忽隐忽现，主流编辑器组字期均不显示文本光标
+    // （用户对照截图复报「光标不对」）。空组字串不闸（等价无组字）。
+    let mut c = core_with("hello");
+    c.poke_caret();
+    assert!(c.caret_visible(), "无组字时光标照常");
+
+    c.ime_preedit("da pin yin".to_owned());
+    assert!(!c.caret_visible(), "组字进行中光标必须隐藏");
+
+    // 闪烁相位翻转、活动窗过期都不改变隐藏闸
+    c.tick_blink_at(std::time::Instant::now());
+    assert!(!c.caret_visible(), "组字中相位无关");
+
+    // 组字结束（上屏/取消）光标恢复
+    c.ime_preedit(String::new());
+    assert!(c.caret_visible(), "组字结束后光标恢复");
+}
+
 // ---------- 拖选边缘自动滚动 ----------
 
 #[test]
