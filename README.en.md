@@ -4,14 +4,14 @@
 
 [简体中文](README.md) | **English**
 
-A windowed notepad built from scratch in Rust: multi-tab, session snapshot restore, and a custom virtualized editor. The hard target is **opening a 50MB file instantly and never lagging**; in practice a 68MB / 600k-line log scrolls and edits just fine.
+A windowed notepad built from scratch in Rust: multi-tab, session snapshot restore, and a custom virtualized editor, polished for large logs, Chinese input, and everyday text editing.
 
 ## Highlights
 
-- **Large files** — rope storage + background streaming load + viewport-virtualized rendering, so a 68MB file costs the same per frame as a 5KB one;
+- **Large files** — rope storage + background streaming load + viewport-virtualized rendering, so multi-megabyte logs cost about the same per frame as a few-KB file, and the UI stays draggable while a load is in progress;
 - **Chinese-friendly** — system IME inline composition (underline, following text yields, cursor advances with the composition), CJK double-width alignment layered on real glyph metrics, so the cursor, clicks, and selection never drift;
 - **Never lose work** — closing a dirty window asks nothing: snapshots are flushed write-ahead and it exits directly, and the last session is restored as-is on next launch; a runtime heartbeat does incremental backups, so a crash loses at most one interval;
-- **Every key rebindable** — all 78 actions can be remapped in Settings; the `Ctrl+E` command palette reaches any command by fuzzy search;
+- **Every key rebindable** — every action can be remapped in Settings; the `Ctrl+E` command palette reaches any command by fuzzy search;
 - **Portable distribution** — a single exe; config and snapshots are isolated by the exe's location, so multiple copies don't interfere with one another.
 
 ## Quick Start
@@ -29,10 +29,10 @@ cargo fmt                    # format (rustfmt.toml)
 Large-file acceptance: **the sample is not in the repo** (`dev-assets/` is gitignored), so generate it once first:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # ~65MB / 600k lines
+powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # generate a log sample
 ```
 
-Then open `dev-assets/bench-50mb.log` — the UI stays draggable during loading and the progress bar advances in real time; once it opens, scrolling and editing don't lag. Open `.rs` / `.py` / `.md` files to see syntax highlighting.
+Then open the generated log sample — the UI stays draggable during loading and the progress bar advances in real time; once it opens, scrolling and editing stay smooth. Open `.rs` / `.py` / `.md` files to see syntax highlighting.
 
 ## Features
 
@@ -209,7 +209,7 @@ The same copy runs **only one instance at a time** (the mutex name derives from 
 
 ## Technical Approach
 
-Three things together make a large file as smooth as a 5KB one:
+Three pieces keep large files as smooth as small ones:
 
 | Stage | Approach | Corresponding crate |
 |------|------|-----------|
@@ -240,7 +240,7 @@ editpad/
 │       │   ├── view.rs         # main view assembly (menu bar / tab strip / command palette overlay)
 │       │   ├── settings_ui.rs  # settings popup UI + neutral styling
 │       │   ├── state.rs        # Editpad state struct + Default
-│       │   ├── hotkeys.rs      # hotkey registry (78 actions, same data source as the command palette)
+│       │   ├── hotkeys.rs      # hotkey registry (same data source as the command palette)
 │       │   ├── load / find_scan / highlight_pave / md_preview / fonts / session /
 │       │   │   tab / autosave / heartbeat / chrome / single_instance / icon.rs
 │       │   ├── editor/         # custom virtualized editor
@@ -252,7 +252,7 @@ editpad/
 │       └── assets/             # assets such as app.ico (embedded into the exe by build.rs)
 ├── vendor/iced_tiny_skia/      # in-place-maintained render-layer patch
 ├── tools/                      # in-repo helper scripts (gen-bench-log.ps1 builds the sample)
-├── dev-assets/                 # large-file acceptance sample (bench-50mb.log, gitignored)
+├── dev-assets/                 # large-file acceptance sample (script-generated, gitignored)
 └── package.ps1                 # release packaging (build → stage → zip → SHA256)
 ```
 
@@ -262,7 +262,7 @@ editpad/
 - Random edit sequences (interleaved insert / delete / replace-all / undo-redo, mixing three kinds of line endings, CJK, and emoji) are differentially compared step-by-step against a `String` reference implementation (`core/tests/edit_sequence_fuzz.rs`, reproducible with a fixed seed);
 - The editor layer separately checks structural invariants under random mixed operations and differentially verifies "undo all the way back to the initial, redo all the way up to a consistent final state";
 - Rendering regressions use headless pixel-level assertions (composition, wrapping, selection band, scrollbar stability, etc.);
-- 50MB performance and memory use script-generated log files as regression benchmarks (`core/examples/*_bench.rs`);
+- Large-file performance and memory use the script-generated log sample as regression benchmarks (`core/examples/*_bench.rs`);
 - Zero clippy warnings is the discipline line (`workspace.lints`).
 
 ## Development History

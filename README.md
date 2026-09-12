@@ -4,15 +4,16 @@
 
 **简体中文** | [English](README.en.md)
 
-用 Rust 从零实现的窗口化记事本：多标签页、会话快照恢复、自绘虚拟化编辑器。
-硬指标是 **50MB 文件秒开、全程不卡**，实测 68MB / 60 万行日志照常滚动与编辑。
+用 Rust 从零实现的窗口化记事本：多标签页、会话快照恢复、自绘虚拟化编辑器，
+为大文件日志、中文输入与日常文本编辑场景打磨。
 
 ## 亮点
 
-- **大文件**——rope 存储 + 后台流式加载 + 视口虚拟化渲染，68MB 文件与 5KB 文件的每帧成本相同；
+- **大文件**——rope 存储 + 后台流式加载 + 视口虚拟化渲染，超大日志与几 KB 的小文件
+  每帧成本同量级，加载期间界面可拖动、进度条实时推进；
 - **中文友好**——系统输入法内联组字（带下划线、后文让位、光标随组字前进），CJK 双宽对齐叠加真实字形定位，光标/点击/选区零漂移；
 - **不丢工作**——置脏关窗零询问：快照 write-ahead 落盘后直退，下次启动原样还原；运行中心跳增量备份，崩溃至多丢一个间隔；
-- **全键位可改**——78 个动作全部在设置里可重映射，`Ctrl+E` 命令面板模糊直达任意命令；
+- **全键位可改**——全部动作都可在设置里重映射，`Ctrl+E` 命令面板模糊直达任意命令；
 - **绿色分发**——单 exe，配置与快照按 exe 所在路径自动隔离，多份拷贝互不干扰。
 
 ## 快速开始
@@ -27,13 +28,13 @@ cargo fmt                    # 格式化（rustfmt.toml）
 ./package.ps1                # 发布打包：build → stage → zip → SHA256
 ```
 
-大文件验收：**样本不在仓库里**（`dev-assets/` 已 gitignore），先用脚本生成一次：
+大文件验收样本不在仓库里（`dev-assets/` 已 gitignore），先用脚本生成一份大日志：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 约 65MB / 60 万行
+powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日志样本
 ```
 
-再打开 `dev-assets/bench-50mb.log`——加载期间界面可拖动、进度条实时推进；打开后滚动与编辑不卡顿。
+打开生成的日志样本——加载期间界面可拖动、进度条实时推进，打开后滚动与编辑保持流畅。
 打开 `.rs` / `.py` / `.md` 等文件可看到语法着色。
 
 ## 功能一览
@@ -310,7 +311,7 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
 
 ## 技术路线
 
-三件事凑齐，大文件就和 5KB 一样流畅：
+大文件的流畅来自三块基石：
 
 | 环节 | 方案 | 对应 crate |
 |------|------|-----------|
@@ -344,7 +345,7 @@ editpad/
 │       │   ├── view.rs         # 主视图组装（菜单栏/标签条/命令面板浮层）
 │       │   ├── settings_ui.rs  # 设置弹窗 UI + 中性样式
 │       │   ├── state.rs        # Editpad 状态结构体 + Default
-│       │   ├── hotkeys.rs      # 热键注册表（78 个动作，命令面板同源数据）
+│       │   ├── hotkeys.rs      # 热键注册表（命令面板同源数据）
 │       │   ├── load / find_scan / highlight_pave / md_preview / fonts / session /
 │       │   │   tab / autosave / heartbeat / chrome / single_instance / icon.rs
 │       │   ├── editor/         # 自绘虚拟化编辑器
@@ -356,7 +357,7 @@ editpad/
 │       └── assets/             # app.ico 等资源（build.rs 编入 exe）
 ├── vendor/iced_tiny_skia/      # 就地维护的渲染层补丁
 ├── tools/                      # 仓库内工具脚本（gen-bench-log.ps1 生成验收样本）
-├── dev-assets/                 # 大文件验收样本（bench-50mb.log，gitignore）
+├── dev-assets/                 # 大文件验收样本（脚本生成，gitignore）
 └── package.ps1                 # 发布打包（build → stage → zip → SHA256）
 ```
 
@@ -367,7 +368,7 @@ editpad/
   与 String 参照实现逐步对拍（`core/tests/edit_sequence_fuzz.rs`，固定种子可复现）；
 - 编辑器层另有随机混合操作的结构不变量与「撤销到底回初始、重放到顶终态一致」对拍；
 - 渲染回归采用 headless 像素级断言（组字、折行、选区带、滚动条稳定性等）；
-- 50MB 性能与内存用脚本生成的日志文件做回归基准（`core/examples/*_bench.rs`）；
+- 大文件性能与内存用脚本生成的日志样本做回归基准（`core/examples/*_bench.rs`）；
 - clippy 零警告为纪律线（`workspace.lints`）。
 
 ## 开发历程
