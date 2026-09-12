@@ -293,7 +293,7 @@ StTooLargeJsonSuffix)
                             self.tabs[idx]
                                 .editor
                                 .borrow_mut()
-                                .install_highlighter_if_current(gen, paved)
+                                .install_highlighter_if_current(gen, *paved)
                         });
                     // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
                     // needs_paving 重新评估并续排（从存活检查点出发，代价小）

@@ -1432,7 +1432,7 @@ fn stale_hl_pave_result_is_dropped_after_generation_change() {
     let mut enriched_hl = stale_payload.highlighter.clone();
     enriched_hl.advance_checkpoints(4, 600, &mut |i| format!("let e{i} = {i};"));
     let tid = app.tabs[0].id;
-    dispatch(&mut app, Message::HlPaved(gen0, tid, enriched_hl));
+    dispatch(&mut app, Message::HlPaved(gen0, tid, Box::new(enriched_hl)));
 
     assert_eq!(app.hl_paving, None, "过期任务的登记必须解除");
     assert_eq!(

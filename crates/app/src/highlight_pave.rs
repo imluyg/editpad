@@ -73,7 +73,7 @@ pub(crate) async fn drive_hl_pave<F>(
 {
     enum HlEvent {
         Progress(u64),
-        Done(editpad_core::LazyHighlighter),
+        Done(Box<editpad_core::LazyHighlighter>),
     }
     let (notify_tx, notify_rx) = std_mpsc::channel::<HlEvent>();
     let gen = payload.gen;
@@ -87,8 +87,8 @@ pub(crate) async fn drive_hl_pave<F>(
                 })
             }));
         let done = match outcome {
-            Ok(hl) => HlEvent::Done(hl),
-            Err(..) => HlEvent::Done(payload.highlighter.clone()),
+            Ok(hl) => HlEvent::Done(Box::new(hl)),
+            Err(..) => HlEvent::Done(Box::new(payload.highlighter.clone())),
         };
         let _ = notify_tx.send(done);
         // notify_tx 在此 drop：接收端循环随之结束

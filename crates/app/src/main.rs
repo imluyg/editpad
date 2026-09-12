@@ -484,8 +484,9 @@ enum Message {
     /// 后台高亮铺建进度：(代次, 已铺检查点档位累计数)
     HlPaveProgress(u64, u64),
     /// 后台高亮铺建完成：(代次, 推进后的高亮器)。期间编辑过（换代）
-    /// 则整体丢弃，缺口由下一帧重新评估续排（P12）
-    HlPaved(u64, u64, editpad_core::LazyHighlighter),
+    /// 则整体丢弃，缺口由下一帧重新评估续排（P12）。高亮器装箱：
+    /// 该分支载荷远大于其余消息，装箱后整枚消息按值传参不再放大。
+    HlPaved(u64, u64, Box<editpad_core::LazyHighlighter>),
 
     GotoToggled,
     GotoInputChanged(String),
