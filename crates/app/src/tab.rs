@@ -109,12 +109,6 @@ impl Tab {
         }
     }
 
-    /// 不含置脏标记的基础显示名：真实文件名优先，
-    /// 未命名页显示「未命名N」（N 为全局单调序号）。
-    pub(crate) fn base_name(&self) -> String {
-        self.base_name_in(editpad_core::Lang::ZhCn)
-    }
-
     /// P155：按界面语言取基础显示名——真实文件名与语言无关，只有
     /// 「未命名」这一占位名需要翻译（中文 `未命名1` / 英文 `Untitled1`）。
     pub(crate) fn base_name_in(&self, lang: editpad_core::Lang) -> String {
@@ -131,11 +125,6 @@ impl Tab {
             Some(n) => format!("{prefix}{n}"),
             None => prefix.to_owned(),
         }
-    }
-
-    /// 标签条上的显示名：基础名 + 置脏前缀 ●。
-    pub(crate) fn display_name(&self) -> String {
-        self.display_name_in(editpad_core::Lang::ZhCn)
     }
 
     /// P155：按界面语言取标签条显示名（置脏前缀是符号，与语言无关）。

@@ -91,18 +91,18 @@ fn pasted_text_enters_document_as_dominant_eol() {
 fn untitled_tabs_get_unique_sequential_names() {
     let mut app = Editpad::default();
     // 初始页即「未命名1」
-    assert_eq!(app.tab().base_name(), "未命名1");
+    assert_eq!(app.tab().base_name_in(editpad_core::Lang::ZhCn), "未命名1");
     assert_eq!(app.title(), "未命名1 - Editpad");
 
     // 连开两页：未命名2、未命名3，全局唯一
     dispatch(&mut app, Message::NewTab);
     dispatch(&mut app, Message::NewTab);
-    let names: Vec<String> = app.tabs.iter().map(|t| t.base_name()).collect();
+    let names: Vec<String> = app.tabs.iter().map(|t| t.base_name_in(editpad_core::Lang::ZhCn)).collect();
     assert_eq!(names, vec!["未命名1", "未命名2", "未命名3"]);
 
     // 置脏前缀进标签名但不进 title 的基础名判断之外重复
     dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-    assert!(app.tab().display_name().starts_with("● 未命名"));
+    assert!(app.tab().display_name_in(editpad_core::Lang::ZhCn).starts_with("● 未命名"));
 }
 
 #[test]
@@ -113,24 +113,24 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
     // （旧口径全局单调不复用，序号只增不减——用户复报关 3 出 4、
     // 关 4 出 5 的爬梯）
     dispatch(&mut app, Message::NewTab);
-    assert_eq!(app.tabs[1].base_name(), "未命名2");
+    assert_eq!(app.tabs[1].base_name_in(editpad_core::Lang::ZhCn), "未命名2");
     app.set_active_tab(1);
     dispatch(&mut app, Message::CloseTabRequest);
     assert_eq!(app.tabs.len(), 1);
 
     dispatch(&mut app, Message::NewTab);
-    assert_eq!(app.tabs[1].base_name(), "未命名2", "腾出的号码立即复用");
+    assert_eq!(app.tabs[1].base_name_in(editpad_core::Lang::ZhCn), "未命名2", "腾出的号码立即复用");
 
     // 中段空洞优先填补：开 3 个页关掉中间的 2，新页拿 2 而非 4
     dispatch(&mut app, Message::NewTab);
     dispatch(&mut app, Message::NewTab);
-    assert_eq!(app.tabs[2].base_name(), "未命名3");
-    assert_eq!(app.tabs[3].base_name(), "未命名4");
+    assert_eq!(app.tabs[2].base_name_in(editpad_core::Lang::ZhCn), "未命名3");
+    assert_eq!(app.tabs[3].base_name_in(editpad_core::Lang::ZhCn), "未命名4");
     app.set_active_tab(2); // 激活中间页「未命名3」
     dispatch(&mut app, Message::CloseTabRequest);
     dispatch(&mut app, Message::NewTab);
     assert_eq!(
-        app.tabs.last().unwrap().base_name(),
+        app.tabs.last().unwrap().base_name_in(editpad_core::Lang::ZhCn),
         "未命名3",
         "优先填补最小空洞"
     );
@@ -146,7 +146,7 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
         Some(Path::new("C:/x/real.txt"))
     );
     assert_eq!(app.tabs[1].untitled_num, None);
-    assert_eq!(app.tabs[1].base_name(), "real.txt");
+    assert_eq!(app.tabs[1].base_name_in(editpad_core::Lang::ZhCn), "real.txt");
 
     // 加载真实文件同样清除序号（Loaded 路径）
     let mut app2 = Editpad::default();
@@ -164,13 +164,13 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
         ),
     );
     assert_eq!(app2.tabs[0].untitled_num, None);
-    assert_eq!(app2.tabs[0].base_name(), "a.md");
+    assert_eq!(app2.tabs[0].base_name_in(editpad_core::Lang::ZhCn), "a.md");
 }
 
 #[test]
 fn english_ui_names_tab_and_window_title_untitled() {
     // P168：英文界面下标签条与窗口标题必须用 UntitledN——此前
-    // display_name()/base_name() 硬编码中文，状态栏/重命名占位已是
+    // 页签名取值硬编码中文，状态栏/重命名占位已是
     // UntitledN 而标签/标题仍是「未命名N」，同屏混排（用户复报）
     let mut app = Editpad::default();
     dispatch(&mut app, Message::LanguageToggled);
