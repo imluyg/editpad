@@ -140,24 +140,11 @@ impl EditorView {
     /// 零误差」——不再依赖任何静态列宽假设（主流编辑器的 DirectWrite
     /// glyph placement 同款思路）。
     fn refresh_row_layouts(&self) {
-        let (font, size) = (self.font, self.core.borrow().font_size());
-        let rows: Vec<(usize, Vec<f32>)> = {
-            let core = self.core.borrow();
-            let (first, last) = core.visible_range();
-            let mut out = Vec::with_capacity((last - first + 1).min(512));
-            for line in first..=last {
-                let text = core.line_text(line);
-                if let Some(xs) = shape_row_xs(font, size, &text) {
-                    out.push((line, xs));
-                }
-            }
-            out
-        };
+        // P162：memo 化注入——(字体, 字号, 内容纪元) 键控，命中行零
+        // shaping 零文本读取；语义与旧「每帧全量先清后注」等价
+        // （行内容/字体/字号变化后键自然失配，下一帧自动重算）。
         let mut core = self.core.borrow_mut();
-        core.clear_row_layouts();
-        for (line, xs) in rows {
-            core.set_row_layout(line, xs);
-        }
+        core.refresh_visible_row_layouts(self.font);
     }
 }
 

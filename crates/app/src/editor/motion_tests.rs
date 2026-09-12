@@ -475,8 +475,10 @@ fn row_layout_drives_caret_selection_and_hit_test() {
     assert!((c.max_row_width_px() - xs.last().unwrap()).abs() < 1e-3);
     assert_eq!(c.row_width_px(0), Some(xs.last().copied().unwrap()));
 
-    // 清空 → 全部回退列模型（既有路径行为不变）
-    c.clear_row_layouts();
+    // 清空 → 全部回退列模型（既有路径行为不变；P162 起清空内联在
+    // refresh_visible_row_layouts，此处直接操作字段模拟）
+    c.row_layouts.clear();
+    c.max_row_width_px = 0.0;
     assert_eq!(c.max_row_width_px(), 0.0);
     assert_eq!(c.row_width_px(0), None);
     let caret = c.caret_rect_relative();
@@ -715,7 +717,8 @@ fn content_width_merges_column_highwater_and_real_rows() {
     let mut c = core_with("a");
     c.set_row_layout(0, vec![0.0, 200.0]); // 注入超宽真实行（如全宽符号）
     assert_eq!(c.content_width_px(), 200.0, "真实行宽接管行程");
-    c.clear_row_layouts();
+    c.row_layouts.clear();
+    c.max_row_width_px = 0.0;
     assert_eq!(
         c.content_width_px(),
         c.max_line_cols as f32 * c.char_width(),
@@ -2161,4 +2164,53 @@ fn wrap_home_end_operate_on_visual_row_and_logical_variants() {
     c.cursor = CursorPos { line: 0, col: 2 };
     c.apply_motion(Motion::End, false);
     assert_eq!(c.cursor.col, c.line_display_len(0));
+}
+
+// ---------- P162：可见行 shaping memo ----------
+
+#[test]
+fn row_layout_memo_reuses_on_unchanged_frame_and_recomputes_after_edit() {
+    let mut c = core_with("hello\nworld");
+    c.set_viewport_height(1000.0);
+    c.set_viewport_width(800.0);
+
+    // 首帧：可见行现算并回填 memo
+    c.refresh_visible_row_layouts(BODY_FONT);
+    assert_eq!(c.row_layouts.len(), 2, "两可见行都应有布局");
+    assert_eq!(c.row_layout_memo.len(), 2, "现算行应回填 memo");
+    let hello_xs = c.row_layouts[&0].clone();
+
+    // 内容未变的下一帧：memo 命中，注入布局与首帧一致
+    c.refresh_visible_row_layouts(BODY_FONT);
+    assert_eq!(c.row_layouts[&0], hello_xs, "命中帧布局应与首帧一致");
+
+    // 编辑第 0 行 → 唯一汇点自增纪元 → 该行键失配，下一帧按新内容重算
+    let old_epoch = c.content_epoch;
+    c.cursor = CursorPos { line: 0, col: 5 };
+    c.insert_str("XY");
+    assert_eq!(c.content_epoch, old_epoch + 1, "编辑必须自增内容纪元");
+    c.refresh_visible_row_layouts(BODY_FONT);
+    let lens = c.line_text(0).chars().count();
+    assert_eq!(
+        c.row_layouts[&0].len(),
+        lens + 1,
+        "编辑行布局长度应跟随新内容（字符数+1）"
+    );
+    // 未编辑行（纪元失配但键相同）命中复用，不丢布局
+    assert_eq!(c.row_layouts[&1].len(), "world".chars().count() + 1);
+}
+
+#[test]
+fn row_layout_memo_misses_when_font_changes() {
+    let mut c = core_with("abc");
+    c.set_viewport_height(1000.0);
+    c.set_viewport_width(800.0);
+    c.refresh_visible_row_layouts(BODY_FONT);
+    let first = c.row_layouts[&0].clone();
+
+    // 换字体族：显式键失配必须整体重算（纪元未动也失效）
+    let other = Font::with_name("Consolas");
+    c.refresh_visible_row_layouts(other);
+    assert_eq!(c.row_layout_memo[&0].0, other, "memo 键应记录新字体");
+    assert_eq!(c.row_layouts[&0].len(), first.len(), "布局长度口径不变");
 }

@@ -27,6 +27,10 @@ impl EditorCore {
 
     /// 第 `offset` 字符偏移之后的高亮状态失效。
     pub(crate) fn invalidate_highlight_from(&mut self, offset: usize) {
+        // P162：内容纪元自增——行布局 memo（EditorCore::row_layout_memo）
+        // 及未来帧间缓存的新鲜度键。本函数是全部正文突变的唯一汇点
+        // （第 61 轮口径），undo/重做/换文档同经此路。
+        self.content_epoch = self.content_epoch.wrapping_add(1);
         // 第 61 轮：本函数是全部正文突变路径的唯一汇点——括号匹配缓存
         // 在此统一失效（光标键控的缓存对「同位异文」不可见，必须显式清）
         self.bracket_cache.borrow_mut().take();

@@ -14,8 +14,8 @@ pub(crate) use editpad_core::{
 };
 
 pub(crate) use super::metrics::{
-    char_cols, display_cols, measure_insertion, prefix_width, validate_measured_char_width,
-    RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
+    char_cols, display_cols, measure_insertion, prefix_width, shape_row_xs,
+    validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
 };
 pub(crate) use super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
 pub(crate) use super::wrap::{segment_index, WrapCache};
@@ -531,6 +531,10 @@ pub struct EditorCore {
     /// 避免每帧重测；字体切换（P34）/字号变更 / **行号字体下发（P154）**
     /// 时换键重测校准。行号字体为 None = 跟随正文字体（旧键语义）。
     pub(crate) metric_key: Option<(Font, f32, Option<Font>)>,
+    /// P162：文档内容纪元——`invalidate_highlight_from`（全部正文突变
+    /// 的唯一汇点）每次自增。行布局 memo（下）及未来一切「按行内容
+    /// 键控的帧间缓存」的新鲜度底座：纪元相同 ⇒ 内容未变。
+    pub(crate) content_epoch: u64,
     /// 行级真实布局缓存（第 40 轮根治）：line → 每个字符起点的真实像素 x
     /// （长度 = 行字符数 + 1，末项 = 行尾 x）。由控件层每帧按可见行 shaping
     /// 注入（与正文绘制同源段落）；未注入的行回退列模型。命中时光标/选区/
@@ -538,6 +542,12 @@ pub struct EditorCore {
     /// 分数宽度、连字、TAB 实际展开全部如实反映，静态列模型的任何假设
     /// 破缺（非等宽字体、非整倍字号）都不再产生累计漂移。
     pub(crate) row_layouts: HashMap<usize, Vec<f32>>,
+    /// P162：可见行 shaping memo。key = 行号，值 = (正文字体, 字号, 内容纪元, xs)。
+    /// 三元键全匹配才复用——行内容变化经纪元失配（汇点自增）、字体/字号
+    /// 变化经显式键失配，均无外部失效点。命中行零 shaping、零行文本读取；
+    /// 此前每帧对 ~50 个可见行全量重做段落 shaping（闪烁/滚动帧白付），
+    /// memo 后仅编辑行与滚入行现算。容量超限整体清空（有界内存）。
+    pub(crate) row_layout_memo: HashMap<usize, (Font, f32, u64, Vec<f32>)>,
     /// P116 字号戳：row_layouts 注入时的字号——缩放下旧字号布局会
     /// 「长度对齐但字宽过期」（旧 xs 在缩放帧被 px_of/断行误用 →
     /// 缩小留白/放大超右缘，用户复报；trusted_xs/px_of 必须按字号
@@ -693,7 +703,9 @@ impl Default for EditorCore {
             // P89：默认 0 = 未实测（decoration_inset 自动退化为整行盒）
             ink_height: 0.0,
             metric_key: None,
+            content_epoch: 0,
             row_layouts: HashMap::new(),
+            row_layout_memo: HashMap::new(),
             row_layouts_font_size: 0.0,
             max_row_width_px: 0.0,
             max_cols_stale: false,
@@ -801,12 +813,51 @@ impl EditorCore {
         self.row_layouts.insert(line, xs);
     }
 
-    /// 清空全部行级布局与行宽高水位（控件层每帧重建可见行时调用，
-    /// 保证无陈旧残留——编译/滚动后旧行布局不会冒充新内容）。
-    pub fn clear_row_layouts(&mut self) {
+    /// P162：可见行布局注入的 memo 化版（控件层 `layout` 每帧调用）。
+    ///
+    /// 对可见行做 (正文字体, 字号, 内容纪元) 键控的 shaping memo：命中行
+    /// 直接复用缓存 xs（零 shaping、零行文本读取）；未命中行按与绘制
+    /// 同源段落现算并回填 memo。row_layouts 仍每帧先清后注（旧口径，
+    /// 无陈旧残留）；memo 跨帧存续，命中键失配的途径：
+    /// * 行内容变化 → [`Self::invalidate_highlight_from`] 自增纪元
+    ///   （全部正文突变的唯一汇点，undo/重做/换文档同经此路）；
+    /// * 字体/字号变化 → 显式键失配（set_font_size 另有 row_layouts
+    ///   整表清空的既有口径）。
+    ///
+    /// memo 容量超限整体清空：可见行 ~50 条，滚动积累有界；单条 =
+    /// 行字符数 × 4 字节，极端超宽行也仅 KB 级。
+    pub(crate) fn refresh_visible_row_layouts(&mut self, font: Font) {
+        const ROW_LAYOUT_MEMO_CAP: usize = 2048;
+        let size = self.font_size;
+        let epoch = self.content_epoch;
+        let (first, last) = self.visible_range();
         self.row_layouts.clear();
         self.row_layouts_font_size = 0.0;
         self.max_row_width_px = 0.0;
+        for line in first..=last {
+            let cached = match self.row_layout_memo.get(&line) {
+                Some((f, s, e, xs)) if *f == font && *s == size && *e == epoch => {
+                    Some(xs.clone())
+                }
+                _ => None,
+            };
+            let xs = match cached {
+                Some(xs) => xs,
+                None => {
+                    let text = self.line_text(line);
+                    let Some(xs) = shape_row_xs(font, size, &text) else {
+                        continue;
+                    };
+                    if self.row_layout_memo.len() >= ROW_LAYOUT_MEMO_CAP {
+                        self.row_layout_memo.clear();
+                    }
+                    self.row_layout_memo
+                        .insert(line, (font, size, epoch, xs.clone()));
+                    xs
+                }
+            };
+            self.set_row_layout(line, xs);
+        }
     }
 
     /// 行内第 `col` 个字符起点的真实像素 x；未注入返回 None（调用方回退
