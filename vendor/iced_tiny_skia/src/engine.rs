@@ -62,7 +62,61 @@ impl Engine {
                 .min(quad.bounds.height / 2.0);
         }
 
-        let path = rounded_rectangle(quad.bounds, fill_border_radius);
+        // P163：零圆角 quad 走 tiny_skia fill_rect 快路径——恒等变换下
+        // 有专用扫描线填充（免 Path 构造、边缘裁剪与分块），空白标记/
+        // 缩进参考线/选区带等每帧成百上千个微型矩形的主要栅格化开销
+        // 就在 fill_path 的路径管线上。非恒等变换 fill_rect 内部自动
+        // 回退 from_rect+fill_path，行为等价；简单矩形下 Winding 与
+        // EvenOdd 同判。含圆角/阴影的 quad 仍走既有 fill_path 路径。
+        let fill_shader = || tiny_skia::Paint {
+            shader: match background {
+                Background::Color(color) => {
+                    tiny_skia::Shader::SolidColor(into_color(*color))
+                }
+                Background::Gradient(Gradient::Linear(linear)) => {
+                    let (start, end) = linear.angle.to_distance(&quad.bounds);
+
+                    let stops: Vec<tiny_skia::GradientStop> = linear
+                        .stops
+                        .into_iter()
+                        .flatten()
+                        .map(|stop| {
+                            tiny_skia::GradientStop::new(
+                                stop.offset,
+                                tiny_skia::Color::from_rgba(
+                                    stop.color.b,
+                                    stop.color.g,
+                                    stop.color.r,
+                                    stop.color.a,
+                                )
+                                .expect("Create color"),
+                            )
+                        })
+                        .collect();
+
+                    tiny_skia::LinearGradient::new(
+                        tiny_skia::Point {
+                            x: start.x,
+                            y: start.y,
+                        },
+                        tiny_skia::Point { x: end.x, y: end.y },
+                        if stops.is_empty() {
+                            vec![tiny_skia::GradientStop::new(
+                                0.0,
+                                tiny_skia::Color::BLACK,
+                            )]
+                        } else {
+                            stops
+                        },
+                        tiny_skia::SpreadMode::Pad,
+                        tiny_skia::Transform::identity(),
+                    )
+                    .expect("Create linear gradient")
+                }
+            },
+            anti_alias: true,
+            ..tiny_skia::Paint::default()
+        };
 
         let shadow = quad.shadow;
 
@@ -144,62 +198,37 @@ impl Engine {
             }
         }
 
-        pixels.fill_path(
-            &path,
-            &tiny_skia::Paint {
-                shader: match background {
-                    Background::Color(color) => {
-                        tiny_skia::Shader::SolidColor(into_color(*color))
-                    }
-                    Background::Gradient(Gradient::Linear(linear)) => {
-                        let (start, end) =
-                            linear.angle.to_distance(&quad.bounds);
-
-                        let stops: Vec<tiny_skia::GradientStop> = linear
-                            .stops
-                            .into_iter()
-                            .flatten()
-                            .map(|stop| {
-                                tiny_skia::GradientStop::new(
-                                    stop.offset,
-                                    tiny_skia::Color::from_rgba(
-                                        stop.color.b,
-                                        stop.color.g,
-                                        stop.color.r,
-                                        stop.color.a,
-                                    )
-                                    .expect("Create color"),
-                                )
-                            })
-                            .collect();
-
-                        tiny_skia::LinearGradient::new(
-                            tiny_skia::Point {
-                                x: start.x,
-                                y: start.y,
-                            },
-                            tiny_skia::Point { x: end.x, y: end.y },
-                            if stops.is_empty() {
-                                vec![tiny_skia::GradientStop::new(
-                                    0.0,
-                                    tiny_skia::Color::BLACK,
-                                )]
-                            } else {
-                                stops
-                            },
-                            tiny_skia::SpreadMode::Pad,
-                            tiny_skia::Transform::identity(),
-                        )
-                        .expect("Create linear gradient")
-                    }
-                },
-                anti_alias: true,
-                ..tiny_skia::Paint::default()
-            },
-            tiny_skia::FillRule::EvenOdd,
-            transform,
-            clip_mask,
-        );
+        // 内区守卫：fill_rect_aa 对「AA 后内区宽度为 0」的矩形（如
+        // x=15.5、w=1.0——左右 AA 边各占半像素后内区消失，即 fdot8
+        // 分解里 width == 0）有 debug_assert!，debug 构建直接 panic
+        // （上游对 0 尺寸内区未实现）。fill_path 无此问题。故仅当
+        // 「floor(x+w) − ceil(x) ≥ 1」——去掉两侧 AA 边后内区仍至少
+        // 1px——才走快路径，其余回退 fill_path（同一 rect 的 AA 覆盖
+        // 率两种管线一致，逐像素等价）。守卫只可能误回退，不会放行
+        // panic 形态。
+        if fill_border_radius.iter().all(|&radius| radius == 0.0)
+            && (quad.bounds.x + quad.bounds.width).floor() - quad.bounds.x.ceil() >= 1.0
+        {
+            // P163 快路径：Rect::from_xywh 对零宽/高返回 None——与旧
+            // fill_path 对空路径警告并跳过的行为一致（守卫已排除该态）
+            if let Some(rect) = tiny_skia::Rect::from_xywh(
+                quad.bounds.x,
+                quad.bounds.y,
+                quad.bounds.width,
+                quad.bounds.height,
+            ) {
+                pixels.fill_rect(rect, &fill_shader(), transform, clip_mask);
+            }
+        } else {
+            let path = rounded_rectangle(quad.bounds, fill_border_radius);
+            pixels.fill_path(
+                &path,
+                &fill_shader(),
+                tiny_skia::FillRule::EvenOdd,
+                transform,
+                clip_mask,
+            );
+        }
 
         if border_width > 0.0 {
             // Border path is offset by half the border width
