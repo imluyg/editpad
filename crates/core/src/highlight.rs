@@ -86,6 +86,15 @@ pub struct StyledRun {
 
 type State = (ParseState, HighlightState);
 
+/// P161：行内容哈希（产物缓存命中的防御键）。DefaultHasher 每次新建
+/// 哈希一行文本（百字节级）纳秒量级，相对一次 parse_line 可忽略。
+fn hash_text(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// 可选语言下的懒高亮器。
 #[derive(Clone)]
 pub struct LazyHighlighter {    syntax_name: String,
@@ -101,6 +110,17 @@ pub struct LazyHighlighter {    syntax_name: String,
     /// 精确铺建到达后调用方自然改用精确结果，近似条目沦为死键
     /// （容量超限整体清空）。任何失效（编辑）整体清空。
     approx_line_cache: HashMap<usize, State>,
+    /// P161 着色片段**产物**缓存：key = 行号，值 = (行内容哈希, runs)。
+    /// 此前 `styled_line` 每次调用都现跑 `parse_line` + `HighlightIterator`，
+    /// 而绘制层对每个可见行每帧调用一次——光标闪烁/滚动/打字帧都在为
+    /// 未变的行重复付出 ~75µs/行的解析成本。失效与 `line_cache` 同源：
+    /// `invalidate_from`（全部正文突变的唯一汇点）按行截断/带垫付截断；
+    /// 内容哈希是对「汇点不变量意外破缺」的廉价保险——命中但哈希不符
+    /// 即重算，绝不返回旧文配色。
+    runs_cache: HashMap<usize, (u64, Vec<StyledRun>)>,
+    /// P161 近似路径的产物缓存（与精确 `runs_cache` 严格隔离，理由同
+    /// `approx_line_cache`）：编辑整体清空，容量超限整体清空。
+    approx_runs_cache: HashMap<usize, (u64, Vec<StyledRun>)>,
     /// 补建时被垫付空行的起始行号（P23）：文档当时在此结束，档位内
     /// 之后的部分是垫付的。任何失效发生时，含垫付的检查点一并截掉，
     /// 杜绝「跳到文末 → 文档增长 → 从脏检查点续算」的错色。
@@ -128,6 +148,7 @@ impl std::fmt::Debug for LazyHighlighter {
             .field("syntax_name", &self.syntax_name)
             .field("checkpoints", &self.checkpoints.len())
             .field("cached_lines", &self.line_cache.len())
+            .field("cached_runs", &self.runs_cache.len())
             .field("generation", &self.generation)
             .finish_non_exhaustive()
     }
@@ -163,6 +184,8 @@ impl LazyHighlighter {
             )],
             line_cache: HashMap::new(),
             approx_line_cache: HashMap::new(),
+            runs_cache: HashMap::new(),
+            approx_runs_cache: HashMap::new(),
             phantom_from: None,
             generation: next_generation(),
         }
@@ -228,6 +251,9 @@ impl LazyHighlighter {
         // P61：近似状态全部作废（基于旧文档内容，且与精确路径隔离的
         // 独立缓存——整体清空最简单，可视区会在后续帧重新近似）
         self.approx_line_cache.clear();
+        // P161：两份产物缓存与状态缓存同寿命——近似整体清空（同上），
+        // 精确按行截断（含垫付区，口径与下方 line_cache 完全一致）
+        self.approx_runs_cache.clear();
         let mut keep = line_idx / STRIDE + 1;
         if let Some(p) = self.phantom_from {
             // 检查点 k 覆盖 [k*STRIDE, (k+1)*STRIDE)；含垫付行的档位全部不要
@@ -237,8 +263,10 @@ impl LazyHighlighter {
         if let Some(p) = self.phantom_from.take() {
             // 行缓存里落在垫付区之后的条目同样不可信
             self.line_cache.retain(|k, _| *k < line_idx && *k < p);
+            self.runs_cache.retain(|k, _| *k < line_idx && *k < p);
         } else {
             self.line_cache.retain(|k, _| *k < line_idx);
+            self.runs_cache.retain(|k, _| *k < line_idx);
         }
     }
 
@@ -261,6 +289,13 @@ impl LazyHighlighter {
         total_lines: usize,
         text_of: &mut dyn FnMut(usize) -> String,
     ) -> Vec<StyledRun> {
+        // P161：产物命中直接返回——跳过 Highlighter 构造与整行解析。
+        // 内容哈希不符（汇点不变量意外破缺）则照常重算并覆盖旧条目。
+        if let Some((hash, runs)) = self.runs_cache.get(&line_idx) {
+            if *hash == hash_text(target_text) {
+                return runs.clone();
+            }
+        }
         let ss = syntax_set();
         let highlighter = Highlighter::new(theme(self.dark));
 
@@ -342,6 +377,12 @@ impl LazyHighlighter {
         }
         self.line_cache.insert(line_idx, (parse, highlight));
 
+        // P161：产物随状态同批入缓存（容量口径同 line_cache）
+        if self.runs_cache.len() >= LINE_CACHE_CAP {
+            self.runs_cache.clear();
+        }
+        self.runs_cache.insert(line_idx, (hash_text(target_text), runs.clone()));
+
         runs
     }
 
@@ -392,6 +433,13 @@ impl LazyHighlighter {
         total_lines: usize,
         text_of: &mut dyn FnMut(usize) -> String,
     ) -> Vec<StyledRun> {
+        // P161：近似产物命中直接返回（内容哈希防御，见 runs_cache 注释）；
+        // 隔离在 approx_runs_cache，绝不供精确路径消费
+        if let Some((hash, runs)) = self.approx_runs_cache.get(&line_idx) {
+            if *hash == hash_text(target_text) {
+                return runs.clone();
+            }
+        }
         let ss = syntax_set();
         let highlighter = Highlighter::new(theme(self.dark));
         let syntax = syntax_set()
@@ -461,6 +509,12 @@ impl LazyHighlighter {
             self.approx_line_cache.clear();
         }
         self.approx_line_cache.insert(line_idx, (parse, highlight));
+
+        // P161：近似产物同批入缓存（容量口径同 approx_line_cache）
+        if self.approx_runs_cache.len() >= LINE_CACHE_CAP {
+            self.approx_runs_cache.clear();
+        }
+        self.approx_runs_cache.insert(line_idx, (hash_text(target_text), runs.clone()));
 
         runs
     }
@@ -716,6 +770,74 @@ mod tests {
         let runs =
             hl.styled_line(160, "let b;", usize::MAX, &mut |i| format!("let f{i} = {i};"));
         assert!(!runs.is_empty());
+    }
+
+    // ---------- P161：着色片段产物缓存 ----------
+
+    #[test]
+    fn styled_line_caches_runs_and_reuses_on_hit() {
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let line = "fn main() { let x = 1; }";
+        let first = hl.styled_line(0, line, usize::MAX, &mut |_| String::new());
+        assert!(!hl.runs_cache.is_empty(), "产物应随状态同批入缓存");
+
+        let mut text_of_calls = 0;
+        let second = hl.styled_line(0, line, usize::MAX, &mut |_| {
+            text_of_calls += 1;
+            String::new()
+        });
+        assert_eq!(first, second, "命中缓存应返回完全相同的片段");
+        assert_eq!(text_of_calls, 0, "命中路径不得触碰 text_of");
+    }
+
+    #[test]
+    fn invalidate_from_truncates_runs_cache() {
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let _ = hl.styled_line(300, "let a;", usize::MAX, &mut |i| format!("let f{i} = {i};"));
+        assert!(!hl.runs_cache.is_empty());
+
+        hl.invalidate_from(150);
+        assert!(
+            hl.runs_cache.iter().all(|(k, _)| *k < 150),
+            "编辑行（含）之后的产物必须作废，残留 {:?}",
+            hl.runs_cache.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn runs_cache_hit_requires_matching_content() {
+        // 内容哈希防御：绕过失效汇点直接换文本查询，命中必须被判假、
+        // 重算并覆盖旧条目（保险丝，正常路径编辑必经 invalidate_from）
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let _ = hl.styled_line(0, "fn main() {}", usize::MAX, &mut |_| String::new());
+        let cached_len = hl.runs_cache[&0].1.len();
+
+        let changed = hl.styled_line(0, "/* fn main() {} */", usize::MAX, &mut |_| String::new());
+        let entry = &hl.runs_cache[&0];
+        assert_eq!(entry.1, changed, "覆盖后的条目应是新文本的产物");
+        assert_ne!(entry.1.len(), cached_len, "新文本配色应与旧文本不同");
+    }
+
+    #[test]
+    fn approx_path_caches_runs_and_clears_on_invalidate() {
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        // 越过内联预算走近似路径（app 层 styled_line_limited 返回 None 的场景）
+        let first = hl.styled_line_approx(
+            300,
+            300,
+            "let a;",
+            usize::MAX,
+            &mut |i| format!("let f{i} = {i};"),
+        );
+        assert!(!hl.approx_runs_cache.is_empty(), "近似产物应入缓存");
+
+        let second = hl.styled_line_approx(300, 0, "let a;", usize::MAX, &mut |_| {
+            panic!("命中近似缓存不应重算")
+        });
+        assert_eq!(first, second);
+
+        hl.invalidate_from(0);
+        assert!(hl.approx_runs_cache.is_empty(), "编辑必须整体清空近似产物");
     }
 
     // ---------- P23：文末不对齐档位时补建不得越界 ----------
