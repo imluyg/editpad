@@ -1,11 +1,13 @@
-// P71：exe 资源——图标 + 版本信息（由 build.rs 调 rc.exe 编译链接）。
+// P71：exe 资源模板——图标 + 版本信息。本文件是模板：@VERSION@ 与
+// @VERSION_COMMA@ 占位符由 build.rs 以 CARGO_PKG_VERSION 注入后写入
+// OUT_DIR 再交 rc.exe 编译（直接编译本文件会因占位符不合法而失败）。
 // 图标资源 ID 恒为 1：winit 在未设置窗口图标时会取 exe 内第一个图标
 // 组作为窗口/任务栏图标。
 1 ICON "assets\\app.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION @VERSION_COMMA@
+PRODUCTVERSION @VERSION_COMMA@
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -18,8 +20,8 @@ BEGIN
             // P79 用户点单：任务管理器进程组显示的就是 FileDescription，
             // 「Editpad - 轻量文本编辑器」太长，简化为裸产品名
             VALUE "FileDescription", "Editpad"
-            VALUE "FileVersion", "0.1.0"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "FileVersion", "@VERSION@"
+            VALUE "ProductVersion", "@VERSION@"
             VALUE "LegalCopyright", "Apache-2.0"
             VALUE "OriginalFilename", "editpad.exe"
         END

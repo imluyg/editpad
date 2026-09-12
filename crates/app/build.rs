@@ -4,6 +4,11 @@
 //! winresource 这类构建 crate，P70 已有先例）。产物 .res 经
 //! `cargo:rustc-link-arg` 交给 MSVC link.exe（link 原生接受 .res 输入）。
 //! 非 Windows 目标直接跳过。
+//!
+//! 版本注入（0.1.1 打包勘误）：assets/app.rc 是模板，@VERSION@ /
+//! @VERSION_COMMA@ 由 CARGO_PKG_VERSION 替换后写入 OUT_DIR 再编译——
+//! 此前版本号硬编码在 .rc 里，升工作区版本后 exe 资源仍报旧号
+//! （0.1.1 打包实测：FileVersion 恒 0.1.0）。
 
 use std::env;
 use std::fs;
@@ -22,22 +27,41 @@ fn main() {
     let rc_src = manifest_dir.join("assets").join("app.rc");
     let res = out_dir.join("app.res");
 
+    // 版本注入：数值段 0,1,1,0（FILEVERSION 四元组 = 三段 + 0）、
+    // 字符串段 0.1.1，与工作区版本严格同源
+    let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let version_comma = format!("{},0", version.replace('.', ","));
+
     // 资源产物比所有输入（.rc 与其引用的 .ico）都新 → 跳过 rc.exe 调用
     // （增量构建不重复编译资源）。⚠️ 必须把 .ico 一并纳入：P74 教训——
     // 只盯 .rc 时，换图标不动 .rc 会导致 .res 永不重编，exe 一直嵌旧图标。
+    // 另有版本戳：升工作区版本不触碰模板文件，仅靠 mtime 会复用旧 .res。
     let ico_src = manifest_dir.join("assets").join("app.ico");
     let newest_src = [&rc_src, &ico_src]
         .into_iter()
         .filter_map(|p| fs::metadata(p).ok()?.modified().ok())
         .max();
-    let up_to_date = matches!(
-        (fs::metadata(&res).ok().and_then(|m| m.modified().ok()), newest_src),
-        (Some(r), Some(s)) if r >= s
-    );
+    let stamp_path = out_dir.join("app.res.version");
+    let version_ok =
+        fs::read_to_string(&stamp_path).ok().is_some_and(|s| s == version);
+    let up_to_date = version_ok
+        && matches!(
+            (fs::metadata(&res).ok().and_then(|m| m.modified().ok()), newest_src),
+            (Some(r), Some(s)) if r >= s
+        );
     if up_to_date {
         println!("cargo:rustc-link-arg={}", res.display());
         return;
     }
+
+    // 模板 → 注入版本 → OUT_DIR。rc.exe 以 manifest_dir 为工作目录运行，
+    // 模板内的 "assets\\app.ico" 相对路径仍指向原位。
+    let generated = out_dir.join("app_versioned.rc");
+    let template = fs::read_to_string(&rc_src).expect("read app.rc template");
+    let generated_src = template
+        .replace("@VERSION_COMMA@", &version_comma)
+        .replace("@VERSION@", &version);
+    fs::write(&generated, generated_src).expect("write versioned app.rc");
 
     let rc_exe = find_rc().unwrap_or_else(|| {
         panic!(
@@ -55,13 +79,14 @@ fn main() {
             // into_owned 后走 String::as_str（Cow::as_str 会解析到
             // 不稳定的 str::as_str，E0658）
             res.to_string_lossy().into_owned().as_str(),
-            rc_src.to_string_lossy().into_owned().as_str(),
+            generated.to_string_lossy().into_owned().as_str(),
         ])
         .status()
         .expect("启动 rc.exe 失败");
     if !status.success() {
-        panic!("rc.exe 编译资源失败（assets/app.rc → {res:?}）");
+        panic!("rc.exe 编译资源失败（{generated:?} → {res:?}）");
     }
+    fs::write(&stamp_path, &version).expect("write version stamp");
 
     // MSVC link.exe 原生接受 .res 文件作为链接输入
     println!("cargo:rustc-link-arg={}", res.display());

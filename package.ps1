@@ -77,5 +77,6 @@ Write-Host ("zip size: {0:N1} MB   sha256: {1}" -f ((Get-Item $zip).Length / 1MB
 Write-Host ("exe sha256: {0}" -f $exeSha.Substring(0, 16))
 Write-Host ("version resource: {0} / {1} v{2}" -f $vi.ProductName, $vi.FileDescription, $vi.FileVersion)
 if ($vi.ProductName -ne 'Editpad') { throw 'version resource broken (ProductName != Editpad) - check build.rs resource pipeline' }
+if ($vi.FileVersion -ne $version) { throw "version resource stale (FileVersion '$($vi.FileVersion)' != workspace version '$version') - check build.rs version injection" }
 Write-Host 'package contents:'
 Get-ChildItem $stage | ForEach-Object { Write-Host ("  {0,-20} {1,10:N0} bytes" -f $_.Name, $_.Length) }
