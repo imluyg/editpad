@@ -106,7 +106,9 @@ impl Editpad {
     }
 
     pub(crate) fn title(&self) -> String {
-        let name = self.tab().base_name();
+        // P168：窗口标题走当前界面语言（此前硬编码中文，英文界面下
+        // 标题栏「未命名N」与标签/状态栏的 UntitledN 混排）
+        let name = self.tab().base_name_in(self.lang());
         if self.tab().dirty {
             format!("● {name} - Editpad")
         } else {

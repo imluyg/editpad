@@ -379,7 +379,7 @@ impl Editpad {
                 .map(|(i, t)| PaletteEntry {
                     command_id: None,
                     tab_index: Some(i),
-                    title: t.display_name(),
+                    title: t.display_name_in(self.lang()),
                     detail: t
                         .path
                         .as_ref()

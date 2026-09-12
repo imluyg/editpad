@@ -168,6 +168,28 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
 }
 
 #[test]
+fn english_ui_names_tab_and_window_title_untitled() {
+    // P168：英文界面下标签条与窗口标题必须用 UntitledN——此前
+    // display_name()/base_name() 硬编码中文，状态栏/重命名占位已是
+    // UntitledN 而标签/标题仍是「未命名N」，同屏混排（用户复报）
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::LanguageToggled);
+    assert_eq!(app.lang(), editpad_core::Lang::En, "zh→en 循环切换");
+
+    assert!(
+        app.title().contains("Untitled1"),
+        "窗口标题应为英文，实际 {}",
+        app.title()
+    );
+    dispatch(&mut app, Message::NewTab);
+    assert_eq!(app.tabs[1].base_name_in(app.lang()), "Untitled2");
+    assert!(
+        !app.tabs[1].base_name_in(app.lang()).contains("未命名"),
+        "英文界面下标签名不得混入中文占位名"
+    );
+}
+
+#[test]
 fn tab_keymap_new_next_close() {
     use iced::keyboard::{self};
     let ctrl = keyboard::Modifiers::CTRL;

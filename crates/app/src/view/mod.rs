@@ -240,6 +240,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 }
                 let marker = if i == self.active_tab { "▸ " } else { "  " };
                 let pin = if tab.pinned { "📌 " } else { "" };
+                // P168：页签名走当前界面语言——此前 display_name() 硬编码
+                // 中文，英文界面下标签仍是「未命名N」（状态栏/重命名占位
+                // 已是 UntitledN，同屏混排，用户复报）。
+                let tab_label =
+                    tab.display_name_in(self.lang());
                 // P57：页签换中性样式——活动页淡底描边、非活动透明悬停淡染
                 let active = i == self.active_tab;
                 // P112：页签 = 「胶囊容器 + 文字按钮 + × 关闭按钮」。
@@ -254,7 +259,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     button(
                         text(format!(
                             "{marker}{pin}{}",
-                            tab.display_name()
+                            tab_label
                         ))
                         .size(uipx)
                         .font(uifont),
@@ -582,7 +587,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                                 format!(
                                     "{}{}{}{}{}",
                                     self.t(editpad_core::Key::TabHeaderPrefix),
-                                    tab.display_name(),
+                                    tab.display_name_in(self.lang()),
                                     self.t(editpad_core::Key::ExternalModifiedFilesPrefix),
                                     total,
                                     self.t(editpad_core::Key::ExternalModifiedFilesSuffix),
@@ -591,7 +596,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                                 format!(
                                     "{}{}{}",
                                     self.t(editpad_core::Key::TabHeaderPrefix),
-                                    tab.display_name(),
+                                    tab.display_name_in(self.lang()),
                                     self.t(editpad_core::Key::ExternalModifiedOneSuffix),
                                 )
                             })
