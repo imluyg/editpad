@@ -1,11 +1,21 @@
+<div align="center">
+
 # Editpad
 
-> 轻量文本编辑器 · Rust + iced 自绘 · 大文件不卡 · 中文输入法可用
+**轻量文本编辑器 · Rust + iced 自绘 · 大文件不卡 · 中文输入法可用**
 
 **简体中文** | [English](README.md)
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE-APACHE)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
+![Rust](https://img.shields.io/badge/rust-stable-DEA584?logo=rust)
+
+<img src="docs/assets/screenshot-dark.png" width="820" alt="Editpad — 深色主题、Rust 语法着色、标签条与状态栏">
+
 用 Rust 从零实现的窗口化记事本：多标签页、会话快照恢复、自绘虚拟化编辑器，
 为大文件日志、中文输入与日常文本编辑场景打磨。
+
+</div>
 
 ## 亮点
 
@@ -95,7 +105,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 冲突会被拒绝；「全部恢复默认」一键还原）。`Enter` / `Tab` / `Insert` / `Esc` 属固定语义，
 不入注册表。忘记键位时按 `Ctrl+E` 打开命令面板，模糊搜索任意命令直接执行。
 
-### 文件与标签页
+<details>
+<summary><strong>文件与标签页</strong></summary>
 
 | 默认组合 | 功能 |
 |------|------|
@@ -109,7 +120,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 | F8 | 切换当前页文件监视（tail 跟随） |
 | F12 | 在文件中查找：后台扫描当前页所在目录（可「浏览…」换目录），点击命中打开/切换并定位 |
 
-### 编辑
+</details>
+
+<details>
+<summary><strong>编辑</strong></summary>
 
 | 默认组合 | 功能 |
 |------|------|
@@ -128,7 +142,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 | F5 | 在光标处插入当前日期时间（`YYYY-MM-DD HH:MM`，本地时区） |
 | Ctrl+Q | 切换行注释（`//` `#` `--` `::` 按语法自动选前缀） |
 
-### 行操作与文本转换
+</details>
+
+<details>
+<summary><strong>行操作与文本转换</strong></summary>
 
 有选区只处理触及行，无选区作用全文；每次操作一个撤销快照，书签按行映射搬迁。
 
@@ -148,7 +165,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 | Ctrl+8 / Ctrl+9 | 选区 URL 百分号编码 / 解码 |
 | Ctrl+0 / F7 | 选区 MD5 / SHA-256 摘要（结果替换选区） |
 
-### 查找、书签与导航
+</details>
+
+<details>
+<summary><strong>查找、书签与导航</strong></summary>
 
 | 默认组合 | 功能 |
 |------|------|
@@ -162,7 +182,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 | Ctrl+F2 / F2 / Shift+F2 | 切换当前行书签 / 下一个 / 上一个（到边缘自动回绕，行号栏左缘琥珀圆点） |
 | Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | 清除全部书签 / 复制全部标记行 / 删除全部标记行 |
 
-### 视图与窗口
+</details>
+
+<details>
+<summary><strong>视图与窗口</strong></summary>
 
 | 默认组合 | 功能 |
 |------|------|
@@ -172,6 +195,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 
 查看菜单另提供「本页自动换行」三态（跟随全局 / 本页开 / 本页关）与
 「本页字号重置」；两类覆盖随会话快照保存。
+
+</details>
 
 ## 界面
 
@@ -327,6 +352,9 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
 
 ## 目录结构
 
+<details>
+<summary><strong>项目布局</strong></summary>
+
 ```
 editpad/
 ├── Cargo.toml                  # workspace：core + app
@@ -360,6 +388,8 @@ editpad/
 ├── dev-assets/                 # 大文件验收样本（脚本生成，gitignore）
 └── package.ps1                 # 发布打包（build → stage → zip → SHA256）
 ```
+
+</details>
 
 ## 测试与质量
 

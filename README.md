@@ -1,10 +1,20 @@
+<div align="center">
+
 # Editpad
 
-> Lightweight text editor · Rust + iced custom rendering · smooth on large files · Chinese IME capable
+**Lightweight text editor · Rust + iced custom rendering · smooth on large files · Chinese IME capable**
 
 [简体中文](README.zh.md) | **English**
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE-APACHE)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
+![Rust](https://img.shields.io/badge/rust-stable-DEA584?logo=rust)
+
+<img src="docs/assets/screenshot-dark.png" width="820" alt="Editpad — dark theme, Rust syntax highlighting, tab bar and status bar">
+
 A windowed notepad built from scratch in Rust: multi-tab, session snapshot restore, and a custom virtualized editor, polished for large logs, Chinese input, and everyday text editing.
+
+</div>
 
 ## Highlights
 
@@ -56,7 +66,8 @@ Then open the generated log sample — the UI stays draggable during loading and
 
 The following are the default combos, all remappable on the **Settings → Keyboard Shortcuts ("设置 → 快捷键")** page (click "Modify" ("修改") and press the new combo; Esc cancels; conflicts are rejected; "Restore All Defaults" ("全部恢复默认") resets everything in one click). `Enter` / `Tab` / `Insert` / `Esc` have fixed semantics and are not in the registry. If you forget a key, press `Ctrl+E` to open the command palette and fuzzy-search any command to run directly.
 
-### Files & Tabs
+<details>
+<summary><strong>Files &amp; Tabs</strong></summary>
 
 | Default combo | Action |
 |------|------|
@@ -70,7 +81,10 @@ The following are the default combos, all remappable on the **Settings → Keybo
 | F8 | Toggle file watching for the current tab (tail follow) |
 | F12 | Find in files: background scan of the current file's folder (changeable via a folder picker); clicking a hit opens/switches to it and locates the match |
 
-### Editing
+</details>
+
+<details>
+<summary><strong>Editing</strong></summary>
 
 | Default combo | Action |
 |------|------|
@@ -89,7 +103,10 @@ The following are the default combos, all remappable on the **Settings → Keybo
 | F5 | Insert current date/time at the cursor (`YYYY-MM-DD HH:MM`, local timezone) |
 | Ctrl+Q | Toggle line comment (`//` `#` `--` `::` prefix auto-selected by syntax) |
 
-### Line Operations & Text Conversion
+</details>
+
+<details>
+<summary><strong>Line Operations &amp; Text Conversion</strong></summary>
 
 With a selection only the touched lines are processed; without one the operation applies to the whole document. Each operation is a single undo snapshot, and bookmarks move along by the line mapping.
 
@@ -109,7 +126,10 @@ With a selection only the touched lines are processed; without one the operation
 | Ctrl+8 / Ctrl+9 | Selection URL percent-encode / decode |
 | Ctrl+0 / F7 | Selection MD5 / SHA-256 digest (replaces the selection with the result) |
 
-### Find, Bookmarks & Navigation
+</details>
+
+<details>
+<summary><strong>Find, Bookmarks &amp; Navigation</strong></summary>
 
 | Default combo | Action |
 |------|------|
@@ -123,7 +143,10 @@ With a selection only the touched lines are processed; without one the operation
 | Ctrl+F2 / F2 / Shift+F2 | Toggle bookmark on current line / Next / Previous (wraps around at the edges; amber dot on the left of the line-number gutter) |
 | Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | Clear all bookmarks / Copy all marked lines / Delete all marked lines |
 
-### View & Window
+</details>
+
+<details>
+<summary><strong>View &amp; Window</strong></summary>
 
 | Default combo | Action |
 |------|------|
@@ -133,6 +156,8 @@ With a selection only the touched lines are processed; without one the operation
 
 The View menu also offers a per-tab word-wrap three-state switch (follow global / on / off)
 and "reset tab font size"; both overrides are saved with the session snapshot.
+
+</details>
 
 ## Interface
 
@@ -222,6 +247,9 @@ Architecturally, **core and shell are separated**: `crates/core` is the pure log
 
 ## Directory Structure
 
+<details>
+<summary><strong>Project layout</strong></summary>
+
 ```
 editpad/
 ├── Cargo.toml                  # workspace: core + app
@@ -255,6 +283,8 @@ editpad/
 ├── dev-assets/                 # large-file acceptance sample (script-generated, gitignored)
 └── package.ps1                 # release packaging (build → stage → zip → SHA256)
 ```
+
+</details>
 
 ## Testing & Quality
 

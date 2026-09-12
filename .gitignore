@@ -42,7 +42,10 @@ dev-assets/
 #
 # ⚠️ 若将来要放单份文档入库，必须写 `docs/*` + `!docs/x.md` 白名单——
 # 写 `docs/` 会让否定规则失效：父目录被排除后，子文件无法被重新包含。
-docs/
+docs/*
+# README 首屏截图等入库资源：两级白名单（目录 + 内容）
+!docs/assets/
+!docs/assets/**
 
 # ===== 平台 / 工具目录 =====
 # 代码托管与 CI 平台配置：.github/ 随仓库发布（GitHub Actions 需要），
