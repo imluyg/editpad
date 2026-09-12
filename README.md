@@ -1,393 +1,284 @@
 # Editpad
 
-> 轻量文本编辑器 · Rust + iced 自绘 · 大文件不卡 · 中文输入法可用
+> Lightweight text editor · Rust + iced custom rendering · smooth on large files · Chinese IME capable
 
-**简体中文** | [English](README.en.md)
+[简体中文](README.zh.md) | **English**
 
-用 Rust 从零实现的窗口化记事本：多标签页、会话快照恢复、自绘虚拟化编辑器，
-为大文件日志、中文输入与日常文本编辑场景打磨。
+A windowed notepad built from scratch in Rust: multi-tab, session snapshot restore, and a custom virtualized editor, polished for large logs, Chinese input, and everyday text editing.
 
-## 亮点
+## Highlights
 
-- **大文件**——rope 存储 + 后台流式加载 + 视口虚拟化渲染，超大日志与几 KB 的小文件
-  每帧成本同量级，加载期间界面可拖动、进度条实时推进；
-- **中文友好**——系统输入法内联组字（带下划线、后文让位、光标随组字前进），CJK 双宽对齐叠加真实字形定位，光标/点击/选区零漂移；
-- **不丢工作**——置脏关窗零询问：快照 write-ahead 落盘后直退，下次启动原样还原；运行中心跳增量备份，崩溃至多丢一个间隔；
-- **全键位可改**——全部动作都可在设置里重映射，`Ctrl+E` 命令面板模糊直达任意命令；
-- **绿色分发**——单 exe，配置与快照按 exe 所在路径自动隔离，多份拷贝互不干扰。
+- **Large files** — rope storage + background streaming load + viewport-virtualized rendering, so multi-megabyte logs cost about the same per frame as a few-KB file, and the UI stays draggable while a load is in progress;
+- **Chinese-friendly** — system IME inline composition (underline, following text yields, cursor advances with the composition), CJK double-width alignment layered on real glyph metrics, so the cursor, clicks, and selection never drift;
+- **Never lose work** — closing a dirty window asks nothing: snapshots are flushed write-ahead and it exits directly, and the last session is restored as-is on next launch; a runtime heartbeat does incremental backups, so a crash loses at most one interval;
+- **Every key rebindable** — every action can be remapped in Settings; the `Ctrl+E` command palette reaches any command by fuzzy search;
+- **Portable distribution** — a single exe; config and snapshots are isolated by the exe's location, so multiple copies don't interfere with one another.
 
-## 快速开始
+## Quick Start
 
-环境：Windows 10/11 + Rust stable（工具链由 `rust-toolchain.toml` 锁定）。
+Environment: Windows 10/11 + Rust stable (toolchain locked by `rust-toolchain.toml`).
 
 ```powershell
-cargo run --release          # 运行
-cargo test --workspace       # 全量测试（core 单测 + app 层测试 + fuzz 对拍）
+cargo run --release          # run
+cargo test --workspace       # full test run (core unit tests + app-layer tests + fuzz differential)
 cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt                    # 格式化（rustfmt.toml）
-./package.ps1                # 发布打包：build → stage → zip → SHA256
+cargo fmt                    # format (rustfmt.toml)
+./package.ps1                # release packaging: build → stage → zip → SHA256
 ```
 
-大文件验收样本不在仓库里（`dev-assets/` 已 gitignore），先用脚本生成一份大日志：
+Large-file acceptance: **the sample is not in the repo** (`dev-assets/` is gitignored), so generate it once first:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日志样本
+powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # generate a log sample
 ```
 
-打开生成的日志样本——加载期间界面可拖动、进度条实时推进，打开后滚动与编辑保持流畅。
-打开 `.rs` / `.py` / `.md` 等文件可看到语法着色。
+Then open the generated log sample — the UI stays draggable during loading and the progress bar advances in real time; once it opens, scrolling and editing stay smooth. Open `.rs` / `.py` / `.md` files to see syntax highlighting.
 
-## 功能一览
+## Features
 
-- **编辑**：打开 / 编辑 / 保存（原子写：临时文件 + rename）、撤销 / 重做（rope 结构共享快照）、
-  光标导航全家桶与 Shift 选区、词级导航与删词、鼠标点击定位 / 拖选 / 滚轮滚动、书签、
-  列块（矩形）编辑、回车智能缩进与 Tab/Shift+Tab 块缩进、Insert 覆写模式、
-  行操作（上移/下移/复制/删除/合并/拆分/反转/排序/去重/删空行）、
-  大小写与词首大写转换、首尾空白清理、行注释、Tab↔空格互转、插入日期时间
-- **查找与定位**：查找 / 替换（防抖后台扫描）、正则模式（捕获组 + `$1` 引用）、整词匹配、
-  视口内全部命中高亮 + 实时计数、查找全部结果面板、跳转到行、括号配对跳转、
-  最近文件（光标位置记忆）
-- **中文输入**：系统输入法（IME）可用；预编辑串内联显示——组字带下划线画在光标处、
-  行中组字后文自动让位、折行开态跨段逐行下划线，候选框跟随光标矩形；
-  CJK 双宽列映射叠加真实字形布局，列模型仅作未排版行的兜底
-- **大文件**：ropey 文档模型（O(log n) 编辑）；后台线程流式加载 + 编码识别
-  （UTF-8/BOM、UTF-16LE/BE，GBK 兜底）；自绘虚拟化渲染——只为可见行排版和高亮；
-  syntect 逐行懒高亮：检查点式状态机支持视口随机访问，编辑只失效改动处之后的状态，
-  大跳转先用近似配色即时显示、精确铺建随后替换
-- **查看**：按扩展名自动语法着色（未知类型走纯文本快速路径）、Log/TOML 内嵌迷你语法、
-  无扩展名内容嗅探、Markdown 预览面板、JSON 一键校验与格式化、不可见字符标记、
-  深浅主题（高亮配色随主题重建）、正文字号缩放（10~48px）、软换行（词边界优先折行）
-- **文本工具**：选区 Base64 / URL 编解码、MD5 / SHA-256 摘要（零第三方依赖，标准向量钉死）
-- **编辑安全**：只读锁定（改内容动作总闸拒收）、置脏标记（标签页 ● 前缀 + 标题栏）、
-  自动保存（停手防抖后落盘）、保存前备份（覆盖式 `.bak` / 时间戳历史目录）、
-  外部修改检测（拒写与重载提示）、单页关闭确认、批量关闭聚合确认
-- **会话恢复**：置脏关窗零询问——快照按 write-ahead 顺序落盘后直退；运行中心跳增量备份；
-  启动静默恢复上次界面（标签/光标/滚动/未命名内容）；异常退出识别与一次性恢复提示
-- **窗口与标签页**：多标签（双击空白新建、× 关闭按钮、中键关页、固定、右键菜单、
-  恢复上次关闭、`Ctrl+P` 模糊快速切换）、命令面板、菜单栏收编常用命令、状态栏固定分区、
-  快捷键全局可重映射、窗口位置与大小记忆、全屏 / 置顶、多份拷贝数据自动隔离、
-  单实例互斥与文件转发、窗口标题栏图标、命令行 / 资源管理器双击 / 「打开方式」打开文件
-- **日志场景**：文件监视（tail 跟随）、`.LOG` 首行文件打开时自动追加时间戳、
-  Log 语法着色、`F5` 插入日期时间
-- **导航辅助**：滚动条标记条（命中橙 / 书签琥珀刻度，点击跳转）、缩进参考线、
-  右缘标尺列、链接识别（URL / `file:///` 外开，`路径:行号` 内开跳行）、
-  拖拽移动 / 复制选区（Ctrl 松开 = 复制，插入点指示，一次撤销）
-- **多光标**：`Alt+点击` 加 / 删附加光标（普通点击或 `Esc` 一键收合），
-  `Ctrl+M` 把当前词 / 选区的下一处匹配连词带选区加入光标集（环形搜索，
-  自动跳过已占用实例）；多光标下输入 / 退格 / 删除逐点同步应用，
-  一次撤销整步、撤销 / 重做完整还原多光标态（数量封顶 1000）
-- **在文件中查找**：查找栏「在文件中查找」按钮或 `F12` 进入（查询串、
-  大小写与正则开关与文档查找共享）；目录默认当前页所在目录，可
-  「浏览…」换目录；后台线程扫描可取消、实时显示已扫文件数，编码
-  嗅探与二进制拒绝全继承，跳过隐藏目录与常见构建目录（2 万文件 /
-  5000 命中封顶，超出明示截断）；点击命中——已开页直接选中，未开页
-  自动打开并定位
-- **列编辑器**：`F6` 打开对话框（编辑菜单同款入口），向列块（含 Alt+Shift
-  竖直拖出的零宽插入列）按行插入重复文本或递增序号（十/十六/二/八进制、
-  步长可负、补零定宽），一次撤销整步；确认前逐项校验并提示
-- **每页显示独立**：本页自动换行三态（跟随全局 / 本页开 / 本页关，查看菜单）、
-  本页字号覆盖（Ctrl+滚轮只影响当前页，查看菜单可重置）、随会话快照保存；
-  软换行开态 `Home` / `End` 走视觉行、`Alt+Home` / `Alt+End` 直达逻辑行边界
+- **Editing**: open / edit / save (atomic write: temp file + rename), undo / redo (rope structure shares snapshots), the full cursor-navigation set with Shift selection, word navigation and word deletion, mouse click positioning / drag select / scroll-wheel scrolling, bookmarks, column (rectangular) editing, smart indent on Enter and Tab/Shift+Tab block indent, Insert overwrite mode, line operations (move up/down, duplicate, delete, merge, split, reverse, sort, dedupe, delete empty lines), case and capitalize conversions, trim leading/trailing whitespace, line comment, Tab↔space conversion, insert date/time
+- **Find & locate**: find / replace (debounced background scan), regex mode (capture groups + `$1` references), whole-word matching, highlighting of all in-viewport matches + live count, Find All results panel, go to line, bracket-pair jump, recent files (cursor position remembered)
+- **Chinese input**: the system IME works; the pre-edit string is shown inline — composition is underlined at the cursor, text after the composition point yields, and with wrap on the underline continues segment by segment across wrapped rows, while the candidate box follows the cursor rectangle; a CJK double-width column map is layered on real glyph layout, the column model serving only as a fallback for unshaped lines
+- **Large files**: ropey document model (O(log n) edits); background-thread streaming load + encoding detection (UTF-8/BOM, UTF-16LE/BE, GBK fallback); custom virtualized rendering — layout and highlight only for the visible lines; syntect line-by-line lazy highlighting: a checkpoint-style state machine supports random viewport access, edits invalidate only the state after the change, and large jumps first show an approximate coloring immediately before the precise pass replaces it
+- **Viewing**: automatic syntax coloring by extension (unknown types take the plain-text fast path), embedded mini-syntax for Log/TOML, content sniffing for extensionless files, Markdown preview panel, one-click JSON validation and formatting, invisible-character marks, light/dark themes (highlight colors are rebuilt with the theme), body font-size scaling (10–48px), soft wrap (word-boundary-preferred wrapping)
+- **Text tools**: Base64 / URL encode-decode on the selection, MD5 / SHA-256 digests (zero third-party deps, pinned by standard test vectors)
+- **Editing safety**: read-only lock (all content-changing actions rejected at the master gate), dirty marker (tab ● prefix + title bar), auto-save (flushed after a debounce once you stop typing), backup before save (overwrite `.bak` / timestamped history directory), external-modification detection (reject write and offer a reload prompt), per-tab close confirmation, aggregate confirmation for batch close
+- **Session restore**: closing a dirty window asks nothing — snapshots flush in write-ahead order, then it exits; a runtime heartbeat does incremental backups; on startup the last UI is silently restored (tabs / cursors / scroll / unnamed content); abnormal exits are detected with a one-time restore prompt
+- **Windows & tabs**: multiple tabs (double-click blank to create, × close button, middle-click close, pin, context menu, restore last closed, `Ctrl+P` fuzzy quick-switch), command palette, menu bar consolidating common commands, fixed status-bar sections, globally remappable hotkeys, window position & size memory, fullscreen / always-on-top, automatic data isolation between copies, single-instance mutex and file forwarding, window title-bar icon, open files from the command line / double-click in Explorer / "Open with" ("打开方式")
+- **Log scenarios**: file watching (tail follow), files whose first line is `.LOG` auto-append a timestamp when opened, Log syntax coloring, `F5` insert date/time
+- **Navigation aids**: scrollbar mark strip (orange hit / amber bookmark ticks, click to jump), indent guides, right-edge ruler column, link detection (URL / `file:///` open externally, `path:line` open in-editor with line jump), drag-and-drop of the selection (hold Ctrl on release to copy, insertion-point indicator, single undo step)
+- **Multi-cursor**: `Alt+click` adds / removes extra cursors (a plain click or `Esc` collapses back to one); `Ctrl+M` adds the next match of the current word / selection as a full cursor with its own selection (cyclic search, occupied occurrences skipped); with multiple cursors, typing / backspace / delete apply at every point in sync — one undo step per action, and undo / redo restore the full multi-cursor state (capped at 1000 cursors)
+- **Find in files**: enter via the "在文件中查找" button in the find bar or `F12` (query, case and regex toggles shared with document search); the folder defaults to the current file's directory and can be changed via a folder picker; background scanning is cancellable with a live scanned-file counter, encoding sniffing and binary rejection are inherited, hidden and common build directories are skipped (capped at 20k files / 5k matches with explicit truncation); clicking a hit selects it in an open tab or opens the file and locates the match
+- **Column editor**: `F6` opens a dialog (also in the Edit menu) that inserts repeated text or incrementing numbers into a column block line-by-line — including the zero-width insertion column from an Alt+Shift vertical drag — with number base (dec/hex/bin/oct), negative steps, and zero-padding; each confirm is a single undo step with per-field validation
+- **Per-tab display**: per-tab word wrap three-state (follow global / on / off, View menu), per-tab font-size override (Ctrl+scroll affects only the current tab, reset via View menu), both saved with the session snapshot; with soft wrap on, `Home` / `End` move by visual row and `Alt+Home` / `Alt+End` go to the logical line edges
 
-## 快捷键
+## Keyboard Shortcuts
 
-以下为默认组合，均可在 **设置 → 快捷键** 页重映射（点击「修改」按下新组合键，Esc 取消；
-冲突会被拒绝；「全部恢复默认」一键还原）。`Enter` / `Tab` / `Insert` / `Esc` 属固定语义，
-不入注册表。忘记键位时按 `Ctrl+E` 打开命令面板，模糊搜索任意命令直接执行。
+The following are the default combos, all remappable on the **Settings → Keyboard Shortcuts ("设置 → 快捷键")** page (click "Modify" ("修改") and press the new combo; Esc cancels; conflicts are rejected; "Restore All Defaults" ("全部恢复默认") resets everything in one click). `Enter` / `Tab` / `Insert` / `Esc` have fixed semantics and are not in the registry. If you forget a key, press `Ctrl+E` to open the command palette and fuzzy-search any command to run directly.
 
-### 文件与标签页
+### Files & Tabs
 
-| 默认组合 | 功能 |
+| Default combo | Action |
 |------|------|
-| Ctrl+O / Ctrl+S | 打开 / 保存 |
-| Ctrl+T / Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | 新建 / 关闭 / 循环切换 / 反向切换标签页 |
-| Ctrl+Shift+W | 恢复上次关闭的标签页（会话内记忆最近 10 个命名页） |
-| Ctrl+P / Ctrl+E | 快速切换标签页（模糊） / 命令面板（模糊搜全部命令） |
-| Ctrl+Shift+G / Ctrl+Shift+Q | 复制完整路径 / 复制文件名（当前页） |
-| Ctrl+Shift+V | 打开所在文件夹（资源管理器定位当前文件） |
-| Ctrl+R | 切换只读锁定（编辑与撤销一律拒收） |
-| F8 | 切换当前页文件监视（tail 跟随） |
-| F12 | 在文件中查找：后台扫描当前页所在目录（可「浏览…」换目录），点击命中打开/切换并定位 |
+| Ctrl+O / Ctrl+S | Open / Save |
+| Ctrl+T / Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | New / Close / cycle forward / cycle backward through tabs |
+| Ctrl+Shift+W | Restore the last closed tab (remembers the most recent 10 named tabs in-session) |
+| Ctrl+P / Ctrl+E | Quick tab switch (fuzzy) / Command palette (fuzzy-search all commands) |
+| Ctrl+Shift+G / Ctrl+Shift+Q | Copy full path / Copy file name (current tab) |
+| Ctrl+Shift+V | Open containing folder (locate the current file in Explorer) |
+| Ctrl+R | Toggle read-only lock (edits and undo are all rejected) |
+| F8 | Toggle file watching for the current tab (tail follow) |
+| F12 | Find in files: background scan of the current file's folder (changeable via a folder picker); clicking a hit opens/switches to it and locates the match |
 
-### 编辑
+### Editing
 
-| 默认组合 | 功能 |
+| Default combo | Action |
 |------|------|
-| Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z | 撤销 / 重做（两套默认键位并存） |
-| Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A | 复制 / 剪切 / 粘贴 / 全选（无选区时复制剪切整行） |
-| Ctrl+← / Ctrl+→ | 词级导航（Shift 透传 = 扩展选区到词边界） |
-| Ctrl+Backspace / Ctrl+Delete | 删除到词首 / 词尾 |
-| Enter / Tab / Shift+Tab | 智能缩进换行 / 块缩进（无选区插制表符） / 反缩进 |
-| Insert | 切换覆写模式（打字逐字替换；粘贴与 IME 上屏恒为插入） |
-| Ctrl+D / Ctrl+L | 在下方复制当前行 / 删除当前行 |
-| Ctrl+Shift+↑ / Ctrl+Shift+↓ | 当前行上移 / 下移（多行选区整块移动） |
-| Alt+Shift+拖拽 | 列块（矩形）选区：输入/退格逐行替换或删除，Ctrl+C/X 复制/剪切块，Esc 取消；竖直拖出零宽插入列（2px 竖指示条）= 在该列前插入 |
-| Alt+点击 | 多光标：点击处加 / 删附加光标（普通点击或 Esc 收合为单光标） |
-| Ctrl+M | 多光标：添加下一匹配（当前词 / 选区的下一处实例，环形搜索；软换行 / 列块 / 组字态不可用） |
-| F6 | 列编辑器对话框：向列块逐行插入重复文本或递增序号（进制/步长/补零可调） |
-| F5 | 在光标处插入当前日期时间（`YYYY-MM-DD HH:MM`，本地时区） |
-| Ctrl+Q | 切换行注释（`//` `#` `--` `::` 按语法自动选前缀） |
+| Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z | Undo / Redo (two default key sets coexist) |
+| Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+A | Copy / Cut / Paste / Select All (copies or cuts the whole line when there's no selection) |
+| Ctrl+← / Ctrl+→ | Word navigation (Shift passes through = extend selection to the word boundary) |
+| Ctrl+Backspace / Ctrl+Delete | Delete to start / end of word |
+| Enter / Tab / Shift+Tab | Smart-indent newline / block indent (inserts a tab when there's no selection) / outdent |
+| Insert | Toggle overwrite mode (typing replaces character-by-character; paste and IME commit always insert) |
+| Ctrl+D / Ctrl+L | Duplicate current line below / Delete current line |
+| Ctrl+Shift+↑ / Ctrl+Shift+↓ | Move current line up / down (a multi-line selection moves as a block) |
+| Alt+Shift+drag | Column (rectangular) selection: typing/backspace replaces or deletes line-by-line, Ctrl+C/X copy or cut the block, Esc cancels; a vertical drag creates a zero-width insertion column (2px indicator) = insert before that column |
+| Alt+click | Multi-cursor: add / remove an extra cursor at the clicked spot (plain click or Esc collapses to a single cursor) |
+| Ctrl+M | Multi-cursor: add next match (next occurrence of the current word / selection, cyclic search; unavailable with soft-wrap / column block / IME composing) |
+| F6 | Column editor dialog: insert repeated text or incrementing numbers into the block line-by-line (base / step / zero-padding adjustable) |
+| F5 | Insert current date/time at the cursor (`YYYY-MM-DD HH:MM`, local timezone) |
+| Ctrl+Q | Toggle line comment (`//` `#` `--` `::` prefix auto-selected by syntax) |
 
-### 行操作与文本转换
+### Line Operations & Text Conversion
 
-有选区只处理触及行，无选区作用全文；每次操作一个撤销快照，书签按行映射搬迁。
+With a selection only the touched lines are processed; without one the operation applies to the whole document. Each operation is a single undo snapshot, and bookmarks move along by the line mapping.
 
-| 默认组合 | 功能 |
+| Default combo | Action |
 |------|------|
-| Ctrl+Shift+S / Ctrl+Shift+D | 行升序 / 降序排序（码点序，大小写敏感） |
-| Ctrl+1 / Ctrl+2 | 按数值升序 / 降序（行内首个带符号整数为键，无数字行恒排末尾） |
-| Ctrl+3 / Ctrl+4 | 按行长升序 / 降序（字符数为键） |
-| Ctrl+Shift+E | 行序反转（回文块 no-op） |
-| Ctrl+Shift+K / Ctrl+Shift+Y | 去除重复行（保留首次出现） / 去连续重复行（每段保首现） |
-| Ctrl+Shift+N / Ctrl+Shift+R | 删除空行 / 删除空白行（含只含空白字符的行） |
-| Ctrl+Shift+J / Ctrl+Shift+H | 合并行 / 拆分行 |
-| Ctrl+Shift+U / Ctrl+U / Ctrl+5 | 转大写 / 转小写 / 词首大写 |
-| Ctrl+Shift+T / L / B | 去除行尾 / 行首 / 行首尾空白（全角空格与 NBSP 也算） |
-| Ctrl+Shift+I / O / P | 行首制表符转空格 / 全部制表符转空格 / 行首空格转制表符 |
-| Ctrl+6 / Ctrl+7 | 选区 Base64 编码 / 解码 |
-| Ctrl+8 / Ctrl+9 | 选区 URL 百分号编码 / 解码 |
-| Ctrl+0 / F7 | 选区 MD5 / SHA-256 摘要（结果替换选区） |
+| Ctrl+Shift+S / Ctrl+Shift+D | Sort lines ascending / descending (code-point order, case-sensitive) |
+| Ctrl+1 / Ctrl+2 | Sort by number ascending / descending (the first signed integer in the line is the key; lines with no number always sort last) |
+| Ctrl+3 / Ctrl+4 | Sort by line length ascending / descending (character count is the key) |
+| Ctrl+Shift+E | Reverse line order (palindromic blocks are a no-op) |
+| Ctrl+Shift+K / Ctrl+Shift+Y | Remove duplicate lines (keep first occurrence) / remove consecutive duplicate lines (keep the first of each run) |
+| Ctrl+Shift+N / Ctrl+Shift+R | Delete empty lines / delete blank lines (including lines containing only whitespace) |
+| Ctrl+Shift+J / Ctrl+Shift+H | Merge lines / Split lines |
+| Ctrl+Shift+U / Ctrl+U / Ctrl+5 | Uppercase / Lowercase / Capitalize each word |
+| Ctrl+Shift+T / L / B | Trim trailing / leading / both leading & trailing whitespace (full-width spaces and NBSP count too) |
+| Ctrl+Shift+I / O / P | Leading tabs to spaces / all tabs to spaces / leading spaces to tabs |
+| Ctrl+6 / Ctrl+7 | Selection Base64 encode / decode |
+| Ctrl+8 / Ctrl+9 | Selection URL percent-encode / decode |
+| Ctrl+0 / F7 | Selection MD5 / SHA-256 digest (replaces the selection with the result) |
 
-### 查找、书签与导航
+### Find, Bookmarks & Navigation
 
-| 默认组合 | 功能 |
+| Default combo | Action |
 |------|------|
-| Ctrl+F / F3 / Shift+F3 | 查找替换栏（有选区自动带入） / 查找下一个 / 上一个 |
-| Ctrl+Shift+A | 「查找全部」结果面板（行:列 + 行摘录，点击跳转；超大结果集只显示前 500 条） |
-| Ctrl+G | 跳转到行 |
-| Ctrl+Home / Ctrl+End | 跳到文档首 / 尾 |
-| Home / End | 行首 / 行尾（软换行开态 = 当前视觉行首 / 尾） |
-| Alt+Home / Alt+End | 逻辑行首 / 行尾（软换行开态穿越折行段；固定语义不入注册表） |
-| Ctrl+Shift+M | 跳到配对括号的另一侧（光标邻接 `()` `[]` `{}` 时生效，两侧同步显示下划线） |
-| Ctrl+F2 / F2 / Shift+F2 | 切换当前行书签 / 下一个 / 上一个（到边缘自动回绕，行号栏左缘琥珀圆点） |
-| Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | 清除全部书签 / 复制全部标记行 / 删除全部标记行 |
+| Ctrl+F / F3 / Shift+F3 | Find/replace bar (auto-fills the selection if any) / Find next / Find previous |
+| Ctrl+Shift+A | "Find All" ("查找全部") results panel (line:col + line excerpt, click to jump; huge result sets show only the first 500) |
+| Ctrl+G | Go to line |
+| Ctrl+Home / Ctrl+End | Go to start / end of document |
+| Home / End | Start / end of line (with soft wrap on: start / end of the current **visual** row) |
+| Alt+Home / Alt+End | Start / end of the **logical** line (crosses wrapped segments; fixed semantics, not remappable) |
+| Ctrl+Shift+M | Jump to the other side of a matching bracket (works when the cursor is adjacent to `()` `[]` `{}`; both sides show an underline simultaneously) |
+| Ctrl+F2 / F2 / Shift+F2 | Toggle bookmark on current line / Next / Previous (wraps around at the edges; amber dot on the left of the line-number gutter) |
+| Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | Clear all bookmarks / Copy all marked lines / Delete all marked lines |
 
-### 视图与窗口
+### View & Window
 
-| 默认组合 | 功能 |
+| Default combo | Action |
 |------|------|
-| Ctrl+滚轮 / Shift+滚轮 | 缩放**当前页**字号（10~48px，本页覆盖；全局默认在设置→字体调） / 横向滚动 |
-| F11 / F9 | 切换全屏 / 窗口置顶 |
-| Ctrl+Shift+F | 格式化 JSON（仅 JSON 文件，错误定位到行列） |
+| Ctrl+scroll / Shift+scroll | Zoom **current tab** font size (10–48px, per-tab override; the global default lives in Settings → Font) / horizontal scroll |
+| F11 / F9 | Toggle fullscreen / always-on-top |
+| Ctrl+Shift+F | Format JSON (JSON files only; errors point to line:col) |
 
-查看菜单另提供「本页自动换行」三态（跟随全局 / 本页开 / 本页关）与
-「本页字号重置」；两类覆盖随会话快照保存。
+The View menu also offers a per-tab word-wrap three-state switch (follow global / on / off)
+and "reset tab font size"; both overrides are saved with the session snapshot.
 
-## 界面
+## Interface
 
-**菜单栏**：顶部「文件 / 编辑 / 查看 / 设置」承载常用命令入口（文件：打开/保存/另存为/
-最近文件/恢复上次关闭；编辑：剪贴板与编辑套件/查找跳转/时间戳/行注释；查看：缩放/主题/
-不可见字符标记/MD 预览/最近文件面板；设置：弹窗入口与备份模式）。展开的浮层位置恒定，
-点击菜单栏其他项直接横移切换，点空白处或 Esc 收起。未进菜单的动作（只读、监视、
-文本工具等）走命令面板或快捷键。
+**Menu bar ("菜单栏")**: The top "File / Edit / View / Settings" hosts the common command entries (File: open / save / save as / recent files / restore last closed; Edit: clipboard and edit suite / find & go / timestamp / line comment; View: zoom / theme / invisible-character marks / Markdown preview / recent files panel; Settings: popup entry and backup mode). The expanded overlay keeps a stable position; clicking another menu-bar item slides straight across to it, and clicking blank space or pressing Esc collapses it. Actions that didn't make it onto the menus (read-only, watch, text tools, etc.) go through the command palette or hotkeys.
 
-**命令面板（Ctrl+E）/ 快速切换（Ctrl+P）**：数据源就是热键注册表全量与当前会话标签页，
-注册表新增动作自动进面板；模糊匹配大小写不敏感（连续命中与词首加权），命令可用 id 片段
-（如 `readonly`）检索、标签可用路径片段检索；↑↓ 选择、Enter 执行、Esc 关闭。
+**Command palette (Ctrl+E) / quick switch (Ctrl+P)**: The data source is the full hotkey registry plus the current session's tabs, so a newly registered action automatically shows up in the palette; fuzzy matching is case-insensitive (contiguous hits and word starts are weighted); commands can be looked up by id fragment (e.g. `readonly`) and tabs by path fragment; ↑↓ selects, Enter runs, Esc closes.
 
-**标签页右键菜单**：📌 固定/取消固定（固定页豁免单页与批量关闭）、保存、另存为/重命名、
-复制完整路径、复制文件名、关闭、关闭其他标签页、关闭右侧标签页；批量关闭遇未保存改动
-弹一次聚合确认。标签条空白双击新建页，中键点击关闭页。
+**Tab context menu ("标签页右键菜单")**: 📌 Pin/Unpin (pinned tabs are exempt from single and batch close), Save, Save As / Rename, Copy Full Path, Copy File Name, Close, Close Other Tabs, Close Tabs to the Right; a batch close with unsaved changes pops one aggregate confirmation. Double-click the blank area of the tab strip to create a new tab, and middle-click closes a tab.
 
-**状态栏（固定分区）**：最左为文件路径（定宽截断），竖线分隔后是常驻统计组
-「长度 · 行数 · 行 · 列 · 位置」（位置 = 光标全文字符偏移，1 起），中部弹性空白，
-右竖线分隔后固定「选区 · 行尾 · 编码」——两条竖线位置恒定，选区出现/消失只更新数字。
-行尾/编码可点击弹出菜单。
+**Status bar ("状态栏", fixed sections)**: The far left is the file path (truncated to a fixed width); the vertical bar is followed by the persistent statistics group "Length · Lines · Line · Column · Position" ("长度 · 行数 · 行 · 列 · 位置"; Position = the cursor's character offset in the whole document, 1-based), then elastic blank space in the middle; the right vertical bar separates the fixed "Selection · Line endings · Encoding" ("选区 · 行尾 · 编码") — the two bar positions stay constant, so a selection appearing or disappearing only updates the numbers. The line-ending / encoding labels are clickable and pop a menu.
 
-## 查找与替换
+## Find & Replace
 
-默认字面匹配；查找栏「.* 正则」开关切换正则模式——支持捕获组，替换可用 `$1` 引用
-（`^$` 逐行锚定需先开 `(?m)`）；「区分大小写」与「整词」两个开关按需收窄命中
-（整词在正则模式下不参与，边界语义交给正则自身表达）。
-扫描在后台防抖执行（200ms），视口内全部命中带琥珀底色、查找栏实时显示命中计数
-（扫描中显示「扫描中…」）。`Ctrl+F` 开栏时若有选区，自动带入其文本作为查询
-（上限 1 万字符）。无效正则在状态栏报错；超大文档的正则替换有字符上限，超限提示改用字面模式。
+Default is literal matching; the find bar's ".* Regex" (".* 正则") toggle switches regex mode — capture groups are supported and replacement can reference `$1` (`^$` per-line anchoring requires `(?m)` on first); the "Match Case" ("区分大小写") and "Whole Word" ("整词") toggles narrow the hits as needed (whole word is not applied in regex mode, where boundary semantics are expressed by the pattern itself). The scan runs in the background debounced (200ms); all in-viewport matches get an amber background and the find bar shows a live hit count ("Scanning…" ("扫描中…") while scanning). `Ctrl+F` with a selection auto-fills its text as the query (up to 10,000 characters). An invalid regex reports an error in the status bar; regex replacement in very large documents has a character cap, beyond which it prompts you to switch to literal mode.
 
-## 软换行与显示
+## Soft Wrap & Display
 
-**软换行（自动换行）**：设置 → 外观「自动换行」（默认关闭，「查看」菜单同步开关）。
-折行按真实字形像素宽断行，词边界优先（空格/连字符/CJK 边界给出断行机会，行首禁则回避），
-非等宽/CJK 字体不失准；光标、选区、书签、括号提示、行号与行尾标都按视觉行定位；
-竖向移动保持目标列；开态隐藏水平滚动条、拒绝列块编辑；行尾与右缘恒留一个汉字宽。
+**Soft wrapping (word wrap)**: Settings → Appearance ("设置 → 外观"), the "Word Wrap" ("自动换行") toggle (default off; the "View" menu keeps it in sync). Lines break at real glyph pixel width with word boundaries preferred (spaces, hyphens, and CJK boundaries offer break opportunities; forbidden line-start characters are avoided), so non-monospace / CJK fonts stay accurate; the cursor, selection, bookmarks, bracket hints, line numbers, and line-end markers are all positioned by visual line; vertical motion keeps the target column; while on, the horizontal scrollbar is hidden and column editing is refused; the line end and right edge always reserve one CJK character width.
 
-**不可见字符标记（设置→外观）**：「显示空白字符」在空格位置画淡色小点、制表符画短横；
-「显示行尾符」在每行末尾画短竖标。纯渲染层叠加，不改文档内容与光标行为。
+**Invisible-character marks (Settings → Appearance)**: "Show Whitespace" ("显示空白字符") draws a faint dot at space positions and a short dash for tabs; "Show Line-End Symbols" ("显示行尾符") draws a short vertical mark at each line's end. Purely a render-layer overlay; document content and cursor behavior are unchanged.
 
-**正文字体选择**：设置弹窗里可从系统已安装字体中按关键字过滤并选定正文与 UI 的字形族，
-「回退默认」恢复内置等宽字体。所选字体未安装时本次启动自动回退并在状态栏提示一次，
-不抹掉配置。建议选含中文字形的等宽字体（如更纱黑体、Noto Sans Mono CJK SC、新宋体）；
-非等宽字体的列对齐观感不整齐，但光标/点击/选区仍按真实字形位置贴合。
+**Body font selection**: In the settings popup you can filter the installed system fonts by keyword and pick the glyph family for body and UI; "Restore Default" ("回退默认") restores the built-in monospace font. If the selected font isn't installed, this launch auto-falls-back and warns once in the status bar, without discarding the config. A monospace font that includes CJK glyphs is recommended (e.g. 更纱黑体 (Sarasa Gothic), Noto Sans Mono CJK SC, 新宋体 (NSimSun)); a non-monospace font makes column alignment look uneven, but the cursor, clicks, and selection still snap to real glyph positions.
 
-**界面语言（设置→外观，下拉框）**：中文（简体）/ English 两档。切换后**全部界面文案**
-即时换语言——菜单栏与各下拉菜单、设置弹窗（分类名/行标题/行描述/取值文案）、查找浮层、
-命令面板、标签右键菜单、状态栏分区标签、确认条与提示条按钮、快捷键说明、状态与错误提示
-全部跟着变；界面字形族也按语言切换（中文→微软雅黑系、英文→Segoe UI 系），
-**正文与 Markdown 预览的字体不受影响**。语言选择即时写入 `config.toml`（`language = "zh-CN"` / `"en"`，
-手改的旧值与未知值读取时安全回落中文简体，不阻断启动）。设置搜索按当前语言过滤。
-加一门新语言只需在 core 的文案表里补一列——漏译会直接编译失败。
+**Interface language (Settings → Appearance, dropdown)**: Simplified Chinese or English. Switching it re-labels **every** user-visible string immediately — the menu bar and every drop-down menu, the settings dialog (page names, row titles, row descriptions, value labels), the find overlay, the command palette, the tab context menu, the status-bar section labels, the confirmation and banner buttons, the shortcut descriptions, and all status and error messages. The interface font family follows the language too (Chinese → Microsoft YaHei family, English → Segoe UI family), while **the editor text and Markdown preview are unaffected**. The choice is written to `config.toml` immediately (`language = "zh-CN"` / `"en"`); hand-edited or unknown values fall back to Simplified Chinese on load without blocking startup. Settings search filters in the current language. Adding another language means one more column in the core string table — and a missing translation fails the build.
 
-## 文件监视与只读
+## File Watching & Read-only
 
-**文件监视（F8）**：开启后每 2 秒巡检当前页的 (mtime, size)——干净页被外部改动即静默重载，
-置脏页绝不静默重载（仍由提示条交给你裁决）。**tail 跟随**：重载前若视图在底部，
-重载后光标落文末并滚到底；否则还原重载前视图。适合盯日志。监视状态仅会话内有效、不入快照。
+**File watching (F8)**: When on, it patrols the current tab's (mtime, size) every 2 seconds — a clean tab changed externally is silently reloaded; a dirty tab is never silently reloaded (it's still left to the prompt bar for you to decide). **Tail follow**: if the view was at the bottom before a reload, after it the cursor lands at the end and scrolls to the bottom; otherwise the pre-reload view is restored. Great for watching logs. Watch state is session-only and isn't saved into the snapshot.
 
-**`.LOG` 自动时间戳**：首行恰为 `.LOG` 的文件被普通打开时，文末自动追加当前日期时间
-（经典 `.LOG` 约定）；会话恢复路径不追加，追加后如实置脏。
+**`.LOG` auto-timestamp**: A file whose first line is exactly `.LOG` gets the current date/time appended to the end when opened normally (the classic `.LOG` convention); the session-restore path doesn't append, and after appending the file is truthfully marked dirty.
 
-**只读锁定（Ctrl+R）**：一切改内容的动作（含撤销/重做）在总闸处被拒收，
-未识别的新动作 fail-safe 默认拒绝；导航、书签、复制等只读动作照常，被拒动作只提示不置脏。
+**Read-only lock (Ctrl+R)**: Every content-changing action (including undo/redo) is rejected at the master gate; unrecognized new actions fail-safe to a default deny. Navigation, bookmarks, copy, and other read-only actions still work; a rejected action only warns and never marks dirty.
 
-## 会话快照与启动恢复
+## Session Snapshots & Startup Restore
 
-关闭窗口时有未保存改动**不再弹确认**：全部置脏页（含未命名页）自动写入快照区
-（`%APPDATA%\editpad\instances\<实例键>\snapshot\`）后直接退出——「要不要保存」推迟到下次启动再问。
-写盘采用先页文件后清单的 write-ahead 顺序，任何时刻断电/崩溃都不会出现半截会话；
-快照总量超 64MB 按最旧优先淘汰。确认条「放弃更改」= 连快照一起丢。
+Closing the window with unsaved changes **no longer asks for confirmation**: all dirty tabs (including unnamed ones) are automatically written to the snapshot area (`%APPDATA%\editpad\instances\<instance key>\snapshot\`) and then it exits directly — asking "save or not?" is deferred to the next launch. Writes use a write-ahead order of page files first and the manifest second, so a power cut or crash at any moment never leaves a half-written session; when snapshots total more than 64MB the oldest are evicted first. The confirmation bar's "Discard Changes" ("放弃更改") means discarding the snapshots too.
 
-**再次打开 = 上次的界面**：启动时按会话清单静默重建全部标签页——未保存的内容从快照原样回来
-（保持置脏），干净文件自动重新加载，标签顺序、激活页、每页光标与滚动位置一并还原；
-未命名页编号延续。若上次是异常退出（清单缺正常收尾标记），会弹一次性「检测到未保存的工作区」
-提示，由你选择恢复或丢弃。恢复总量受内存护栏（256MB）约束，超出时优先保留激活页并在状态栏汇总。
-若通过命令行传入了文件（双击 / 「打开方式」），本次跳过会话恢复、逐个打开文件；
-快照原封留存，下次无参启动仍可恢复。
+**Reopening = the last interface**: On startup it silently rebuilds all tabs from the session manifest — unsaved content returns as-is from the snapshot (staying dirty), clean files automatically reload, and the tab order, active tab, and each tab's cursor and scroll position are all restored; unnamed-tab numbering continues. If the last run was an abnormal exit (the manifest lacks a proper shutdown marker), it pops a one-time "Detected an unsaved workspace" ("检测到未保存的工作区") prompt for you to choose restore or discard. Restore volume is bounded by a memory guardrail (256MB); when exceeded it keeps the active tab and summarizes in the status bar. If files were passed on the command line (double-click / "Open with"), session restore is skipped this launch and each file is opened directly; the snapshot is left untouched, so the next parameterless launch can still restore.
 
-**运行中心跳兜底**：编辑过程中每隔 `snapshot_interval_secs` 秒（默认 10，允许 5~120）巡检置脏页，
-只把内容有变化的页增量写进快照区——打字中途崩溃/杀进程，重启至多丢一个间隔的输入。
-超过 16MB 的大文档不参与心跳重写（只在退出时写）。心跳写的中间清单不带「正常收尾」标记，
-正是异常退出检测的判据。
+**Runtime heartbeat fallback**: While editing, every `snapshot_interval_secs` seconds (default 10, allowed 5–120) it patrols dirty tabs and incrementally writes only tabs whose content changed into the snapshot area — crash or kill mid-typing, and after restart you lose at most one interval of input. Documents over 16MB don't take part in heartbeat rewrites (written only on exit). The intermediate manifest the heartbeat writes lacks the "normal shutdown" marker, which is precisely the criterion the abnormal-exit detection uses.
 
-隐私开关（配置在实例目录下的 `config.toml`）：
+Privacy switches (configured in `config.toml` in the instance directory):
 
-- `enable_snapshots = false`——完全关闭（启动时清空存量快照区）；
-- `remember_session = false`——不恢复界面、退出也不写清单（启动时清空存量会话）；
-- `exit_mode = "ask"`——恢复旧的「每次询问确认条」行为。
+- `enable_snapshots = false` — turn it off entirely (clears the existing snapshot area on startup);
+- `remember_session = false` — don't restore the UI and don't write a manifest on exit (clears existing sessions on startup);
+- `exit_mode = "ask"` — restore the old "ask every time" confirmation-bar behavior.
 
-以上开关连同主题/字号/编辑后自动写盘（默认关闭：修改留在窗口内，Ctrl+S 才写原文件；
-开启后若文件被外部改动会先拒写并提示；延迟秒数可调）都收编在「设置」弹窗里，
-改动即时写回 `config.toml`，无需手改文件；弹窗尾部附只读热键速查表。
+These switches, together with theme / font size / auto-write-after-edit (default off: edits stay in the window and only `Ctrl+S` writes the original file; when on, an externally changed file refuses the write first and prompts; the delay seconds are adjustable), are all collected into the "Settings" ("设置") popup, and changes are written back to `config.toml` immediately — no manual editing of the file needed; the popup's tail includes a read-only hotkey quick-reference table.
 
-## 保存、备份与编码
+## Save, Backup & Encoding
 
-**保存时备份（设置→保存）**：覆盖已有文件前把磁盘旧版复制一份——「覆盖式 name.bak」
-每次覆盖同目录单个备份；「时间戳历史」写入 `name.bak.d/` 目录按秒留档。超过 64MB 的文件
-自动跳过；备份失败只在状态栏提示、绝不阻断保存本身。
+**Backup on save (Settings → Save)**: Before overwriting an existing file, a copy of the on-disk old version is made — "Overwrite `name.bak`" ("覆盖式 name.bak") writes a single backup in the same directory each time; "Timestamped history" ("时间戳历史") writes into the `name.bak.d/` directory, archived per second. Files over 64MB are automatically skipped; a failed backup only warns in the status bar and never blocks the save itself.
 
-**编码与行尾（状态栏可点）**：编码菜单可选「以 UTF-8 / UTF-8(BOM) / GBK / Big5 /
-Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此后每次保存沿用，
-重新载入或另存为新路径时重置）；传统编码无法表示的字符（如 emoji）按 `&#编号;`
-数值实体写入并明确提示。转码不可逆（如 GBK→UTF-8、去 BOM）时状态栏都会说明。
-行尾菜单显示当前主导行尾，可一键转换为 CRLF（Windows）或 LF（Unix），混合行尾一并归一；
-转换是普通文档编辑，可撤销、参与自动保存与快照。未命名页需先「另存为」取得路径后才能选择保存编码。
+**Encoding & line endings (clickable in the status bar)**: The encoding menu lets you choose "Save as UTF-8 / UTF-8(BOM) / GBK / Big5 / Shift_JIS / EUC-JP / EUC-KR" — after choosing, the tab remembers that preference (used on every subsequent save, reset on reload or save-as to a new path); characters that a legacy encoding can't represent (such as emoji) are written as `&#number;` numeric entities with an explicit notice. Where transcoding is irreversible (e.g. GBK→UTF-8, removing the BOM) the status bar explains it. The line-ending menu shows the current dominant line ending and can convert to CRLF (Windows) or LF (Unix) in one click, normalizing mixed endings; conversion is an ordinary document edit — undoable, and it participates in auto-save and snapshots. An unnamed tab needs a "Save As" first to get a path before it can choose a save encoding.
 
-**最近文件光标记忆**：重新打开「最近文件」里的文件时，光标与垂直滚动自动回到上次关闭该页时的位置
-（每条记忆随文件走；「记住最近文件」关闭时光标记录一并清空，不留隐私痕迹）。列表在展示前
-预检文件是否仍存在。
+**Recent-files cursor memory**: When you reopen a file from "Recent Files", the cursor and vertical scroll return automatically to where they were when that tab closed (each memory travels with its file; with "Remember Recent Files" ("记住最近文件") off the cursor records are cleared too, leaving no privacy trace). Before displaying, the list pre-checks whether the files still exist.
 
-## 多份拷贝与单实例
+## Multiple Copies & Single Instance
 
-配置与会话快照存在 `%APPDATA%\editpad\instances\<实例键>\`——实例键由 **exe 所在路径**
-自动导出（FNV-1a 64 哈希），**每份拷贝各搞各的数据**：设置、最近文件、未保存会话互不可见
-（更新/重装到同一位置时数据延续不丢）。首次运行时旧版布局的 `%APPDATA%\editpad\`
-内容会整体搬入首个实例目录。
+Config and session snapshots live in `%APPDATA%\editpad\instances\<instance key>\` — the instance key is derived automatically from **the exe's location** (FNV-1a 64-bit hash), so **each copy keeps its own data**: settings, recent files, and unsaved sessions are mutually invisible (updating / reinstalling to the same location keeps the data). On first run, a legacy-layout `%APPDATA%\editpad\` is moved wholesale into the first instance directory.
 
-同一份拷贝**同时只跑一个实例**（互斥体名派生自实例键，不同位置的拷贝彼此共存）：
-第二次启动若带文件参数，会把路径写入握手文件转发给已运行实例、在新标签页里打开；
-不带参数则弹一次原生提示后退出。
+The same copy runs **only one instance at a time** (the mutex name derives from the instance key; copies at different locations coexist): a second launch with a file argument writes the path into a handshake file and forwards it to the running instance, opening it in a new tab; without an argument it pops a one-time native prompt and exits.
 
-**窗口记忆**：窗口位置与大小在关闭前记入 `config.toml`，下次启动按上次的样子恢复
-（拖动/拉伸实时节流落盘、关闭时兜底补写；全屏期间不记忆几何）。
+**Window memory**: The window position and size are recorded to `config.toml` just before closing, and the next launch restores them (drag/resize is throttled and flushed live, with a fallback write on close; geometry isn't remembered while fullscreen).
 
-## 格式适配
+## Format Support
 
-- 常见代码语言按扩展名自动着色（syntect 内建 + 自维护别名表：
-  `log`/`md`/`markdown`/`toml`/`ini`/`cfg`/`conf`/`mk`/`yml` 等）；
-- 内嵌迷你语法：**Log**（ERROR/WARN/INFO/DEBUG 级别分色 + 时间戳）、
-  **TOML**（节名/键/字符串/注释），随单文件分发；
-- 无扩展名文件按内容嗅探：shebang、`<?xml`、JSON/YAML 启发，以及 `Dockerfile`/`Makefile` 约定文件名；
-- Markdown 文件提供 `MD 预览` 面板（标题/列表/引用/代码块/分隔线/粗体斜体行内样式，只读渲染）；
-- JSON 文件支持 `Ctrl+Shift+F` 一键校验并格式化；
-- 深浅主题切换时高亮配色整体重建，深色下不再出现浅色主题残留配色。
+- Common code languages are colored automatically by extension (built into syntect plus a maintained alias table: `log` / `md` / `markdown` / `toml` / `ini` / `cfg` / `conf` / `mk` / `yml`, etc.);
+- Embedded mini-syntaxes: **Log** (ERROR/WARN/INFO/DEBUG levels colored + timestamps) and **TOML** (section names / keys / strings / comments), shipped with the single binary;
+- Extensionless files are sniffed by content: shebang, `<?xml`, JSON/YAML heuristics, plus the conventional filenames `Dockerfile` / `Makefile`;
+- Markdown files offer a "Markdown preview" ("MD 预览") panel (headings / lists / quotes / code blocks / horizontal rules / bold & italic inline styles, rendered read-only);
+- JSON files support `Ctrl+Shift+F` to validate and format in one click;
+- Switching between light and dark themes rebuilds the highlight colors wholesale, so no light-theme residual colors remain in dark mode.
 
-## 技术路线
+## Technical Approach
 
-大文件的流畅来自三块基石：
+Three pieces keep large files as smooth as small ones:
 
-| 环节 | 方案 | 对应 crate |
+| Stage | Approach | Corresponding crate |
 |------|------|-----------|
-| 存储 | Rope 树状结构，O(log n) 编辑 | `ropey` |
-| 加载 | 后台线程流式读取 + 编码检测（UTF-8 / GBK / UTF-16） | `encoding_rs` |
-| 渲染 | 视口虚拟化——只为可见的几十行排版和高亮 | 自绘组件 |
-| 着色 | 检查点式逐行懒高亮，支持视口随机访问 | `syntect` |
+| Storage | Rope tree structure, O(log n) edits | `ropey` |
+| Loading | Background-thread streaming read + encoding detection (UTF-8 / GBK / UTF-16) | `encoding_rs` |
+| Rendering | Viewport virtualization — layout & highlight only for the visible few dozen lines | Custom-drawn component |
+| Coloring | Checkpoint-style per-line lazy highlighting, supporting random viewport access | `syntect` |
 
-架构上 **core 与壳分离**：`crates/core` 是零 GUI 依赖的纯逻辑层（文档模型、编码加载、
-原子保存、搜索、高亮、快照、文本工具等），`crates/app` 是 iced（0.14，tiny-skia 软渲染）
-界面壳。将来想加终端版，core 直接复用。`vendor/iced_tiny_skia` 是就地维护的渲染层补丁
-（部分损伤呈现引发的选区残线与层栈增长在此修复）。
+Architecturally, **core and shell are separated**: `crates/core` is the pure logic layer with zero GUI dependencies (document model, encoding loading, atomic save, search, highlighting, snapshots, text tools, etc.), and `crates/app` is the iced (0.14, tiny-skia software rendering) UI shell. If a terminal version is ever wanted, core is reused as-is. `vendor/iced_tiny_skia` is the in-place-maintained render-layer patch (selection residue lines and layer-stack growth caused by partial-invalid rendering are fixed here).
 
-## 目录结构
+## Directory Structure
 
 ```
 editpad/
-├── Cargo.toml                  # workspace：core + app
-├── rust-toolchain.toml         # 工具链锁定；rustfmt.toml 为格式配置
+├── Cargo.toml                  # workspace: core + app
+├── rust-toolchain.toml         # toolchain locked; rustfmt.toml is the format config
 ├── crates/
-│   ├── core/                   # 纯逻辑层（零 GUI 依赖，可单独测试/复用）
+│   ├── core/                   # pure logic layer (zero GUI deps, testable/reusable standalone)
 │   │   ├── src/                # document / search / find_in_files / highlight / loader / saver /
 │   │   │                       # settings / snapshot / json / markdown / brackets /
 │   │   │                       # toolkit / paths / syntaxes / error
-│   │   ├── tests/              # 边界输入批 + 随机编辑对拍 fuzz
-│   │   └── examples/           # 加载/查找/替换/高亮/内存基准
-│   └── app/                    # iced 界面壳
+│   │   ├── tests/              # edge-case input batch + random-edit differential fuzz
+│   │   └── examples/           # load / find / replace / highlight / memory benchmarks
+│   └── app/                    # iced UI shell
 │       ├── src/
-│       │   ├── main.rs         # iced 入口 + Message 枚举 + 模块注册
-│       │   ├── update.rs       # update() 分发 + 域方法（editor/file/find/tabs/…）
-│       │   ├── view.rs         # 主视图组装（菜单栏/标签条/命令面板浮层）
-│       │   ├── settings_ui.rs  # 设置弹窗 UI + 中性样式
-│       │   ├── state.rs        # Editpad 状态结构体 + Default
-│       │   ├── hotkeys.rs      # 热键注册表（命令面板同源数据）
+│       │   ├── main.rs         # iced entry + Message enum + module registration
+│       │   ├── update.rs       # update() dispatch + domain methods (editor/file/find/tabs/…)
+│       │   ├── view.rs         # main view assembly (menu bar / tab strip / command palette overlay)
+│       │   ├── settings_ui.rs  # settings popup UI + neutral styling
+│       │   ├── state.rs        # Editpad state struct + Default
+│       │   ├── hotkeys.rs      # hotkey registry (same data source as the command palette)
 │       │   ├── load / find_scan / highlight_pave / md_preview / fonts / session /
 │       │   │   tab / autosave / heartbeat / chrome / single_instance / icon.rs
-│       │   ├── editor/         # 自绘虚拟化编辑器
-│       │   │   ├── core.rs     # EditorCore 结构体 + 几何/布局访问器
-│       │   │   ├── undo / motion / edit / block / highlight.rs   # impl 按域拆分
+│       │   ├── editor/         # custom virtualized editor
+│       │   │   ├── core.rs     # EditorCore struct + geometry/layout accessors
+│       │   │   ├── undo / motion / edit / block / highlight.rs   # impl split by domain
 │       │   │   ├── view.rs / wrap.rs / metrics.rs / scrollbars.rs
-│       │   │   └── *_tests.rs  # 随实现文件的测试（#[path] 挂子模块）
-│       │   └── tests/          # app 层测试按域拆分（tabs/file/find/session/…）
-│       └── assets/             # app.ico 等资源（build.rs 编入 exe）
-├── vendor/iced_tiny_skia/      # 就地维护的渲染层补丁
-├── tools/                      # 仓库内工具脚本（gen-bench-log.ps1 生成验收样本）
-├── dev-assets/                 # 大文件验收样本（脚本生成，gitignore）
-└── package.ps1                 # 发布打包（build → stage → zip → SHA256）
+│       │   │   └── *_tests.rs  # tests accompanying the impl files (#[path]-mounted submodules)
+│       │   └── tests/          # app-layer tests split by domain (tabs/file/find/session/…)
+│       └── assets/             # assets such as app.ico (embedded into the exe by build.rs)
+├── vendor/iced_tiny_skia/      # in-place-maintained render-layer patch
+├── tools/                      # in-repo helper scripts (gen-bench-log.ps1 builds the sample)
+├── dev-assets/                 # large-file acceptance sample (script-generated, gitignored)
+└── package.ps1                 # release packaging (build → stage → zip → SHA256)
 ```
 
-## 测试与质量
+## Testing & Quality
 
-- core 层纯逻辑全部单测覆盖；
-- 随机编辑序列（插入/删除/全部替换/撤销重做交错，混排三种行尾、CJK 与 emoji）
-  与 String 参照实现逐步对拍（`core/tests/edit_sequence_fuzz.rs`，固定种子可复现）；
-- 编辑器层另有随机混合操作的结构不变量与「撤销到底回初始、重放到顶终态一致」对拍；
-- 渲染回归采用 headless 像素级断言（组字、折行、选区带、滚动条稳定性等）；
-- 大文件性能与内存用脚本生成的日志样本做回归基准（`core/examples/*_bench.rs`）；
-- clippy 零警告为纪律线（`workspace.lints`）。
+- Every core-layer pure-logic function is covered by unit tests;
+- Random edit sequences (interleaved insert / delete / replace-all / undo-redo, mixing three kinds of line endings, CJK, and emoji) are differentially compared step-by-step against a `String` reference implementation (`core/tests/edit_sequence_fuzz.rs`, reproducible with a fixed seed);
+- The editor layer separately checks structural invariants under random mixed operations and differentially verifies "undo all the way back to the initial, redo all the way up to a consistent final state";
+- Rendering regressions use headless pixel-level assertions (composition, wrapping, selection band, scrollbar stability, etc.);
+- Large-file performance and memory use the script-generated log sample as regression benchmarks (`core/examples/*_bench.rs`);
+- Zero clippy warnings is the discipline line (`workspace.lints`).
 
-## 开发历程
+## Development History
 
-| 里程碑 | 内容 | 状态 |
+| Milestone | Content | Status |
 |--------|------|------|
-| M0 | 骨架 + 打开/编辑/保存/脏标记/原子保存 | ✅ 完成 |
-| M1 | 日用可用：后台流式加载+进度、查找替换、跳转行、设置与最近文件、快捷键 | ✅ 完成 |
-| M2a | 大文件攻坚：iced 0.14（IME 可用）+ 自绘虚拟化编辑器 + rope 数据源 + 撤销重做 | ✅ 完成 |
-| M2b | syntect 逐行懒高亮、IME 预编辑内联、CJK 列映射 | ✅ 完成 |
-| M3 | 关闭确认、拖拽打开、深色主题+字号设置、dirty 替换保护、打开/另存为死锁修复 | ✅ 完成 |
-| M4 | 多标签页、即时保存、JSON 校验格式化、Log/TOML 着色+无扩展名嗅探+MD 预览 | ✅ 完成 |
-| M5 | 会话快照：置脏关窗零询问 + 启动恢复上次界面，异常退出可恢复 | ✅ 完成 |
+| M0 | Skeleton + open / edit / save / dirty marker / atomic save | ✅ Done |
+| M1 | Everyday usability: background streaming load + progress, find & replace, go to line, settings & recent files, hotkeys | ✅ Done |
+| M2a | Large-file push: iced 0.14 (IME works) + custom virtualized editor + rope data source + undo/redo | ✅ Done |
+| M2b | syntect per-line lazy highlighting, IME pre-edit inline, CJK column mapping | ✅ Done |
+| M3 | Close confirmation, drag-open, dark theme + font-size settings, dirty replace protection, open/save-as deadlock fixes | ✅ Done |
+| M4 | Multi-tab, instant save, JSON validate & format, Log/TOML coloring + extensionless sniffing + Markdown preview | ✅ Done |
+| M5 | Session snapshots: close a dirty window with no prompt + restore the last interface on startup, recoverable after an abnormal exit | ✅ Done |
 
-M5 之后按候选池与用户点单持续迭代：软换行 v2（词边界折行）、正则与整词查找、书签、
-列块编辑 v2、菜单栏/状态栏重构、多实例隔离与单实例互斥、命令行打开、词级导航与智能缩进、
-行操作扩展、覆写模式、只读锁定、文本工具、编码扩展、命令面板、文件监视 tail 跟随，
-以及一轮结构重构（update/view/core 分域拆分、clippy 清零）与 IME/折行/渲染的多轮根治。
+After M5, iteration continues from a candidate pool and user requests: soft wrap v2 (word-boundary wrapping), regex & whole-word search, bookmarks, column-block editing v2, menu-bar/status-bar refactor, multi-instance isolation and single-instance mutex, command-line open, word navigation and smart indent, extended line operations, overwrite mode, read-only lock, text tools, encoding expansion, command palette, file-watch tail follow — plus a round of structural refactoring (update/view/core domain splits, clippy zeroed) and repeated root-cause fixes for IME / wrapping / rendering.
 
 ## License
 
-Licensed under `Apache-2.0`（见 `LICENSE-APACHE`），与 Rust 生态惯例一致。
+Licensed under `Apache-2.0` (see `LICENSE-APACHE`), consistent with Rust ecosystem convention.

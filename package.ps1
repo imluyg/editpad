@@ -59,6 +59,7 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item $exe $stage
 Copy-Item (Join-Path $root 'README.md') $stage
+Copy-Item (Join-Path $root 'README.zh.md') $stage
 Copy-Item (Join-Path $root 'LICENSE-APACHE') $stage
 
 # 3. Zip.
