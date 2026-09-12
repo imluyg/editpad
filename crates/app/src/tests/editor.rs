@@ -106,10 +106,12 @@ fn untitled_tabs_get_unique_sequential_names() {
 }
 
 #[test]
-fn closed_untitled_numbers_are_never_reused_and_saving_clears_them() {
+fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
     let mut app = Editpad::default();
 
-    // 关闭「未命名2」（干净直接关）后新建：号码不复用，拿「未命名3」
+    // P168 最小空闲复用：关闭「未命名2」后新建，重新拿「未命名2」
+    // （旧口径全局单调不复用，序号只增不减——用户复报关 3 出 4、
+    // 关 4 出 5 的爬梯）
     dispatch(&mut app, Message::NewTab);
     assert_eq!(app.tabs[1].base_name(), "未命名2");
     app.set_active_tab(1);
@@ -117,9 +119,24 @@ fn closed_untitled_numbers_are_never_reused_and_saving_clears_them() {
     assert_eq!(app.tabs.len(), 1);
 
     dispatch(&mut app, Message::NewTab);
-    assert_eq!(app.tabs[1].base_name(), "未命名3", "单调分配杜绝重名");
+    assert_eq!(app.tabs[1].base_name(), "未命名2", "腾出的号码立即复用");
+
+    // 中段空洞优先填补：开 3 个页关掉中间的 2，新页拿 2 而非 4
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::NewTab);
+    assert_eq!(app.tabs[2].base_name(), "未命名3");
+    assert_eq!(app.tabs[3].base_name(), "未命名4");
+    app.set_active_tab(2); // 激活中间页「未命名3」
+    dispatch(&mut app, Message::CloseTabRequest);
+    dispatch(&mut app, Message::NewTab);
+    assert_eq!(
+        app.tabs.last().unwrap().base_name(),
+        "未命名3",
+        "优先填补最小空洞"
+    );
 
     // 另存为转正后序号清除，标签显示真实文件名
+    app.set_active_tab(1);
     dispatch(
         &mut app,
         Message::SaveTargetChosen(Some(PathBuf::from("C:/x/real.txt"))),

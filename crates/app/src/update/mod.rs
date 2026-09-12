@@ -164,11 +164,17 @@ impl Editpad {
         self.cur_handle.clone()
     }
 
-    /// 为第 `idx` 页分配下一个未命名序号（P25）：全局单调、不复用
-    /// 已关闭页的号码——杜绝两个同名未命名页。
+    /// 为第 `idx` 页分配未命名序号。P25 原为「全局单调、不复用」——用户
+    /// 复报关一个未命名页序号就爬一级（关 3 出 4、关 4 出 5），改为
+    /// **最小空闲复用**（P168）：取未被任何打开页占用的最小正整数。
+    /// 同名歧义防护不变：同号页在打开页集合内唯一；未命名草稿的会话
+    /// 快照按代次+页下标命名（snapshot::page_file_name），磁盘上不存在
+    /// 「未命名N」文件，复用号码无落盘冲突。`untitled_next` 仍随快照
+    /// 维护（格式兼容），赋号不再消费。
     fn assign_untitled_num(&mut self, idx: usize) {
-        let n = self.untitled_next;
-        self.untitled_next += 1;
+        let used: std::collections::HashSet<u64> =
+            self.tabs.iter().filter_map(|t| t.untitled_num).collect();
+        let n = (1u64..).find(|n| !used.contains(n)).unwrap_or(1);
         if let Some(tab) = self.tabs.get_mut(idx) {
             tab.untitled_num = Some(n);
         }
