@@ -735,6 +735,11 @@ pub(crate) fn handle_key(
 
     match &key {
         Key::Character(chars) => edit(EditOp::InsertText(chars.to_string())),
+        // P166：空格以 Named(Space) 形态上报（winit 把 VK_SPACE 映射为
+        // NamedKey::Space，不走 Character），缺此分支 = 空格永远插不进
+        // 文档（IME 关闭态直接打空格、组字上屏后补空格均吞键）。输入法
+        // 全角空格走 Ime::Commit 另一路径，不经此处。
+        Key::Named(Named::Space) => edit(EditOp::InsertText(" ".to_string())),
         Key::Named(Named::Backspace) => edit(EditOp::Backspace),
         Key::Named(Named::Delete) => edit(EditOp::Delete),
         // P121：回车改走智能缩进（插入换行 + 当前行行首空白）；换行仍由

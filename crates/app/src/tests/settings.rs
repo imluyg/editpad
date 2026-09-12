@@ -1082,3 +1082,32 @@ use super::*;
             )))
         ));
     }
+
+    #[test]
+    fn space_key_inserts_space_regardless_of_ime_state() {
+        // P166：空格以 Named(Space) 形态上报（winit VK_SPACE → NamedKey::
+        // Space，不经 Character）——缺分支 = 空格永远插不进文档：IME 关闭
+        // 态直接打空格、组字上屏后补空格分隔均吞键（用户复报）。全角空格
+        // 走 Ime::Commit 另一路径，不在此测。
+        use iced::keyboard::{key::Named, Key};
+        let remap = std::collections::HashMap::new();
+        assert!(matches!(
+            handle_key(
+                Key::Named(Named::Space),
+                iced::keyboard::Modifiers::empty(),
+                &remap
+            ),
+            Some(Message::Edit(crate::editor::EditOp::InsertText(text)))
+            if text == " "
+        ));
+        // Shift+空格（部分输入法的全半角切换残留 Shift 时）仍插半角空格
+        assert!(matches!(
+            handle_key(
+                Key::Named(Named::Space),
+                iced::keyboard::Modifiers::SHIFT,
+                &remap
+            ),
+            Some(Message::Edit(crate::editor::EditOp::InsertText(text)))
+            if text == " "
+        ));
+    }
