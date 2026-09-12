@@ -13,7 +13,7 @@
 //!   输入法（`request_input_method`）并接收中文上屏事件。
 //! * metrics.rs = CJK 双宽列宽换算 + P42 运行时实测；scrollbars.rs =
 //!   纵横滚动条几何。测试经 `#[path]` 挂为 core/view 的子模块
-//!   （core_tests.rs / view_tests.rs），保留对私有字段的直接访问。
+//!   （core_tests.rs / view/tests.rs），保留对私有字段的直接访问。
 //!
 //! 已知取舍（v1）：等宽字体假设（CJK 列映射近似）；预编辑串由系统浮窗
 //! 显示；语法高亮以逐行状态缓存接入（M2b 起）。

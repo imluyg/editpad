@@ -1,5 +1,16 @@
-//! 控件实现：`EditorView` 的布局/事件/绘制（P66 三层裁剪）与主题配色
-//! （P68 自 editor.rs 拆出，纯移动零行为变更）。
+//! 控件实现：`EditorView` 的布局/事件/绘制（P66 三层裁剪）与主题配色。
+//!
+//! （P68 自 editor.rs 拆出；P160 再按域拆为目录，均为纯移动零行为变更。）
+//!
+//! 本文件保留 [`EditorView`] 本体、它的固有方法，以及 **`impl Widget`**——
+//! 后者含 `draw` 1385 行 / `update` 529 行，是编辑器渲染的主战场；**trait impl
+//! 不可拆分**，故仍在此处。拆分 `draw` 需先为其十余个共享局部量（colors /
+//! font / lh / char_w / scroll_left / gutter_w …）设计一个上下文结构体，属重构
+//! 而非搬运，另议。
+//!
+//! 分域文件：`font`（字体与字号换算，项经 `pub use` 再导出以保
+//! `editor::view::*` 对外路径不变）、`paint`（绘制原语）、`colors`（配色常量与
+//! 主题派生）、`tests`（原 view_tests.rs，已随目录迁入）。
 
 use iced::advanced::{
     input_method,
@@ -29,6 +40,16 @@ use super::{
     BOOKMARK_DOT, BOOKMARK_STRIP, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET,
 };
 
+
+// P160：按域拆出的自由项（纯移动零行为变更）。font 的项经 `pub use` 再导出，
+// 以维持 `editor::view::*` 对外路径不变（editor/mod.rs 有 `pub use view::*`）。
+mod colors;
+mod font;
+mod paint;
+use colors::*;
+pub use font::*;
+use paint::*;
+
 impl super::core::EditorHandle {
     /// 构造可加入视图树的自绘控件。
     ///
@@ -46,323 +67,20 @@ impl super::core::EditorHandle {
 // 正文与 UI 的单一换装点：画布、行号栏、UI 控件全部引用 BODY_FONT，
 // 字号全部从正文字号推导——P34（字体选择设置）落地时只需替换常量。
 
-/// 正文与 UI 共用的字形族。
-///
-/// 现状 = `Font::MONOSPACE`，其 CJK 缺口由 [`apply_default_cjk_mono_pin`]
-/// 在启动期把 `Family::Monospace` 的解析目标钉到系统里的 CJK 等宽字体来补齐
-/// （方案 c：零体积治本，不捆绑字体文件）。
-pub const BODY_FONT: Font = Font::MONOSPACE;
 
-/// UI 控件字号的固定基准（px）。**P36 用户裁决：UI 不随正文字号缩放**——
-/// Ctrl+滚轮（P48 落地）与设置弹窗的步进只调节文件内容，UI 控件保持
-/// 固定尺寸。取 16px = iced 默认文本尺寸（`Settings::default_text_size`），
-/// 与未缩放时的既有观感持平。
-pub const UI_FONT_BASE_PX: f32 = 16.0;
 
-/// Ctrl+滚轮缩放与设置面板步进共用的单步字号增量（px）。单一来源：
-/// 两处入口的手感必须一致。
-pub(crate) const FONT_ZOOM_STEP: f32 = 2.0;
 
-/// UI 字号相对基准的微调系数（[`GUTTER_FONT_SCALE`] 先例；1.0 = 持平）。
-pub const UI_FONT_SCALE: f32 = 1.0;
 
-/// UI 控件统一字号（全项目唯一换算点）：`UI_FONT_BASE_PX × UI_FONT_SCALE`。
-///
-/// 勘误留痕：iced 0.14 默认文本尺寸实测为 **16px**
-/// （`iced_core::settings::Settings::default_text_size`），与默认正文字号相同
-/// ——第 25 轮「UI 14px vs 正文 16px」的记录有误，两层割裂实际只在字形族。
-pub fn ui_font_px() -> f32 {
-    UI_FONT_BASE_PX * UI_FONT_SCALE
-}
 
-/// CJK 等宽候选优先级表（P33 方案 c 钉字）：启动期从左到右扫描，
-/// 第一个系统已安装的族名被设为 fontdb `Family::Monospace` 的解析目标。
-///
-/// - 更纱黑体 / Noto Mono CJK SC：社区推荐的中文等宽（用户自装时最优）；
-/// - NSimSun（新宋体）/ MingLiU（细明体）：Windows 自带简/繁中文等宽；
-/// - MS Gothic（ＭＳ ゴシック）/ Yu Gothic Mono：Windows 自带日文等宽；
-/// - 全部未命中 → 不动（保持系统默认等宽解析，非 CJK 环境零行为变化）。
-///
-/// 刻意不含 SimSun（宋体）：其 ASCII 半宽非严格等宽，会破坏 P14 列映射。
-pub const CJK_MONO_CANDIDATES: [&str; 6] = [
-    "Sarasa Mono SC",
-    "Noto Sans Mono CJK SC",
-    "NSimSun",
-    "MingLiU",
-    "MS Gothic",
-    "Yu Gothic Mono",
-];
 
-/// 族名归一：去空白 + 小写。候选表条目都是 ASCII 形态族名，
-/// 与 fontdb 枚举出的本地化族名做同样宽松的比较即可覆盖大小写/空格变体。
-/// P34 起公开：app 层的「配置字体 ↔ 系统清单」宽松匹配复用同一实现。
-pub fn normalize_family(name: &str) -> String {
-    name.chars()
-        .filter(|c| !c.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
 
-/// 从已装字体族名集中挑出第一个命中的 CJK 等宽候选（纯函数便于测试）：
-/// 候选表顺序即优先级；无命中返回 None（调用方保持现状不动）。
-pub fn pick_cjk_mono_family(available: &[String]) -> Option<&'static str> {
-    CJK_MONO_CANDIDATES.iter().find_map(|cand| {
-        let want = normalize_family(cand);
-        available
-            .iter()
-            .any(|family| normalize_family(family) == want)
-            .then_some(*cand)
-    })
-}
 // ---------- 控件实现 ----------
 
-/// P48：Ctrl+滚轮缩放的单步判定（纯函数可单测）。
-/// * `Lines`（滚轮格）：非零即一步，方向取符号（Windows 一格 y=±1）；
-/// * `Pixels`（触控板）：增量已折算成行数累积，|累积| ≥ 1 行发一步并
-///   **清零**（保留余量会触控板轻扫连发多步；清零 = 一步一格，与滚轮
-///   手感一致）。反向增量先抵消同向累积。
-///   返回 (新累积值, 步数符号；0 = 本帧不发)。
-pub(crate) fn wheel_zoom_step(accum: f32, delta_lines: f32, is_pixels: bool) -> (f32, f32) {
-    if is_pixels {
-        let accum = accum + delta_lines;
-        if accum.abs() >= 1.0 {
-            (0.0, if accum > 0.0 { 1.0 } else { -1.0 })
-        } else {
-            (accum, 0.0)
-        }
-    } else if delta_lines != 0.0 {
-        (accum, delta_lines.signum())
-    } else {
-        (accum, 0.0)
-    }
-}
 
-/// P115：组字串实测宽（px）：与正文绘制同源的整串 shaping 末项（连字/
-/// 混合宽度如实反映）；失败（字体未就绪）回退列模型保守宽（组字是
-/// 瞬态，占位偏移误差可接受）。
-fn measure_preedit_w(font: Font, size: f32, preedit: &str) -> f32 {
-    shape_row_xs(font, size, preedit)
-        .and_then(|xs| xs.last().copied())
-        .unwrap_or_else(|| display_cols(preedit) * size * 0.5625)
-}
 
-/// P115：正文列区间 `[lo, hi)` 的单片绘制（组字三段式复用；也承载原
-/// 折行/关态两分支的整段/整行路径，pixel 批守护等价）。`seg_start` =
-/// 段内像素基准列（关态 0）；`dx` = 段起点外的附加偏移（组字 C 段 =
-/// preedit 占位后移）；无 runs 时整片一色，有 runs 时逐 run 裁色。
-#[allow(clippy::too_many_arguments)]
-fn paint_text_slice(
-    renderer: &mut iced::Renderer,
-    core: &super::core::EditorCore,
-    font: Font,
-    x0: f32,
-    y: f32,
-    line: usize,
-    seg_start: usize,
-    text: &str,
-    lo: usize,
-    hi: usize,
-    dx: f32,
-    color: Color,
-    runs: &[editpad_core::StyledRun],
-    clip: Rectangle,
-) {
-    if lo >= hi {
-        return;
-    }
-    let lh = core.line_height();
-    let size = core.font_size();
-    if runs.is_empty() {
-        let segment: String = text.chars().skip(lo).take(hi - lo).collect();
-        if segment.is_empty() {
-            return;
-        }
-        renderer.fill_text(
-            core_text::Text {
-                content: segment,
-                bounds: Size::new(f32::INFINITY, lh),
-                size: Pixels(size),
-                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                font,
-                align_x: core_text::Alignment::Default,
-                align_y: alignment::Vertical::Top,
-                shaping: core_text::Shaping::Advanced,
-                wrapping: core_text::Wrapping::None,
-            },
-            Point::new(x0 + dx, y),
-            color,
-            clip,
-        );
-    } else {
-        for run in runs {
-            let s = run.start_col.max(lo);
-            let e = run.end_col.min(hi);
-            if e <= s {
-                continue;
-            }
-            let segment: String = text.chars().skip(s).take(e - s).collect();
-            if segment.is_empty() {
-                continue;
-            }
-            let offset_px = core.px_of(line, text, s) - core.px_of(line, text, seg_start) + dx;
-            let [r, g, b, a] = run.color;
-            renderer.fill_text(
-                core_text::Text {
-                    content: segment,
-                    bounds: Size::new(f32::INFINITY, lh),
-                    size: Pixels(size),
-                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                    font,
-                    align_x: core_text::Alignment::Default,
-                    align_y: alignment::Vertical::Top,
-                    shaping: core_text::Shaping::Advanced,
-                    wrapping: core_text::Wrapping::None,
-                },
-                Point::new(x0 + offset_px, y),
-                Color::from_rgba8(
-                    (r * 255.0).round() as u8,
-                    (g * 255.0).round() as u8,
-                    (b * 255.0).round() as u8,
-                    a,
-                ),
-                clip,
-            );
-        }
-    }
-}
 
-/// P115 续：组字行「插入重排」的预计算结果——合成串 S = 前文 + 组字 +
-/// 后文；`s_xs`/`breaks` 按真实字形宽（shape 同源）与折行预算（含右缘
-/// 一个汉字宽余量、P99 滚动条让位）断行；`k` = 该行视觉段数增量（后续
-/// 逻辑行绘制整体下移 k 行）；`v0` = 该行原首段视觉行号。
-struct ReflowLayout {
-    line: usize,
-    col_p: usize,
-    pel: usize,
-    s: String,
-    s_xs: Vec<f32>,
-    breaks: Vec<usize>,
-    k: isize,
-    v0: u32,
-}
 
-/// P115 续：组字重排段的绘制——合成串段 `[bs, be)` 内最多三块（前文/
-/// 组字/后文）逐块上屏，x 全按合成串真实 xs 定位；前/后文块继承原行
-/// runs 逐色（后文源列 = 合成索引 − pel），组字块用组字色。
-#[allow(clippy::too_many_arguments)]
-fn paint_composed_segment(
-    renderer: &mut iced::Renderer,
-    core: &super::core::EditorCore,
-    font: Font,
-    x0: f32,
-    y: f32,
-    s: &str,
-    s_xs: &[f32],
-    bs: usize,
-    be: usize,
-    col_p: usize,
-    pel: usize,
-    text_color: Color,
-    preedit_color: Color,
-    runs: &[editpad_core::StyledRun],
-    clip: Rectangle,
-) {
-    if be <= bs {
-        return;
-    }
-    let lh = core.line_height();
-    let size = core.font_size();
-    let mut paint = |lo: usize, hi: usize, color: Color| {
-        let seg: String = s.chars().skip(lo).take(hi - lo).collect();
-        if seg.is_empty() {
-            return;
-        }
-        let bx = s_xs[bs.min(s_xs.len().saturating_sub(1))];
-        let lo_x = s_xs[lo.min(s_xs.len().saturating_sub(1))];
-        renderer.fill_text(
-            core_text::Text {
-                content: seg,
-                bounds: Size::new(f32::INFINITY, lh),
-                size: Pixels(size),
-                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                font,
-                align_x: core_text::Alignment::Default,
-                align_y: alignment::Vertical::Top,
-                shaping: core_text::Shaping::Advanced,
-                wrapping: core_text::Wrapping::None,
-            },
-            Point::new(x0 + (lo_x - bx), y),
-            color,
-            clip,
-        );
-    };
-    // 前文块 [bs, col_p)
-    if bs < col_p {
-        let hi = be.min(col_p);
-        if hi > bs {
-            if runs.is_empty() {
-                paint(bs, hi, text_color);
-            } else {
-                for run in runs {
-                    let s0 = run.start_col.max(bs);
-                    let e0 = run.end_col.min(hi);
-                    if e0 > s0 {
-                        paint(
-                            s0,
-                            e0,
-                            Color::from_rgba8(
-                                (run.color[0] * 255.0).round() as u8,
-                                (run.color[1] * 255.0).round() as u8,
-                                (run.color[2] * 255.0).round() as u8,
-                                run.color[3],
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    // 组字块 [col_p, col_p + pel)
-    let blo = bs.max(col_p);
-    let bhi = be.min(col_p + pel);
-    if bhi > blo {
-        paint(blo, bhi, preedit_color);
-    }
-    // 后文块 [col_p + pel, ..)：源列 = 合成索引 − pel
-    let blo = bs.max(col_p + pel);
-    if be > blo {
-        if runs.is_empty() {
-            paint(blo, be, text_color);
-        } else {
-            for run in runs {
-                let s0 = run.start_col.max(blo - pel);
-                let e0 = run.end_col.min(be - pel);
-                if e0 > s0 {
-                    paint(
-                        s0 + pel,
-                        e0 + pel,
-                        Color::from_rgba8(
-                            (run.color[0] * 255.0).round() as u8,
-                            (run.color[1] * 255.0).round() as u8,
-                            (run.color[2] * 255.0).round() as u8,
-                            run.color[3],
-                        ),
-                    );
-                }
-            }
-        }
-    }
-}
 
-/// 合成流断点表中包含索引 `idx` 的段序号（断点向量首项恒 0）。
-fn reflow_seg_of(breaks: &[usize], idx: usize) -> Option<usize> {
-    breaks
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, &b)| b <= idx)
-        .map(|(i, _)| i)
-}
 
 struct EditorView {
     core: EditorHandle,
@@ -443,107 +161,9 @@ impl EditorView {
     }
 }
 
-/// 浅色主题的固定配色（保持 v1 观感）；深色主题在 draw 时由 palette 派生。
-const SELECTION_COLOR: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.25);
-const CARET_COLOR: Color = Color::from_rgb8(0x11, 0x11, 0x11);
-const GUTTER_BG: Color = Color::from_rgb8(0xF2, 0xF2, 0xF2);
-const GUTTER_TEXT: Color = Color::from_rgb8(0x99, 0x99, 0x99);
-/// P115：组字串视觉与正文同色（用户点单：不再蓝字）——浅/深主题统一
-/// 取 palette.text（见 EditorColors::resolve 两分支），下划线同色系
-/// 0.6 透明度，与深色主题既有口径一致。
-/// 书签圆点（第 60 轮）：琥珀色在浅灰行号栏与深色主题上都醒目，
-/// 深浅主题共用一值（与选区/光标不同，它不承担「正文可读性」职能）。
-const BOOKMARK_COLOR: Color = Color::from_rgb8(0xE0, 0x96, 0x2E);
-/// 滚动条命中刻度（P131）：橙色，与书签刻度（琥珀 = BOOKMARK_COLOR）
-/// 区分——命中随查找消失属临时态、书签常驻。深浅主题共用一值
-///（与书签圆点同款取舍：装饰性标注，不承担正文可读性职能）。
-const FIND_MARK_COLOR: Color = Color::from_rgb8(0xE0, 0x5A, 0x1E);
-/// 括号匹配下划线（第 61 轮）：浅色主题用与查找/预编辑同族的蓝，
-/// 深色主题从前景派生（EditorColors::resolve）。
-const BRACKET_LIGHT: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.85);
 
-/// 查找命中底色（P123）：两种主题都用琥珀黄系（主流编辑器惯例），
-/// 与选区（蓝系）、书签圆点（琥珀实心）错开——浅色饱和度更高、
-/// 深色降透明度防刺眼。
-const FIND_MATCH_LIGHT: Color = Color::from_rgba8(0xFF, 0xC9, 0x33, 0.45);
-const FIND_MATCH_DARK: Color = Color::from_rgba8(0xFF, 0xC9, 0x33, 0.28);
 
-/// 一次 draw 用到的全部颜色（按当前主题解析）。
-struct EditorColors {
-    selection: Color,
-    caret: Color,
-    gutter_bg: Color,
-    gutter_text: Color,
-    preedit_text: Color,
-    preedit_underline: Color,
-    scrollbar_track: Color,
-    scrollbar_thumb: Color,
-    bookmark: Color,
-    bracket: Color,
-    /// 查找命中底色（P123）：查找栏开态全部命中的视口内高亮。
-    find: Color,
-    /// 缩进参考线（P132）：制表位倍数处的淡竖线。
-    indent_guide: Color,
-    /// 右缘标尺线（P132）：固定显示列处的纵向辅助线。
-    edge_ruler: Color,
-    /// 链接悬停下划线（P133）：与括号匹配同族的蓝。
-    link_underline: Color,
-    /// 不可见字符标记（第 64 轮）：与选区同族的淡蓝（低透明度），
-    /// 深浅主题都足够「隐」又不至于在白/黑底上消失。
-    invisibles: Color,
-}
 
-impl EditorColors {
-    /// 浅色：沿用固定值；深色：从 palette 派生
-    /// （行号栏背景=背景提亮、行号/正文/光标/预编辑统一用 palette.text）。
-    fn resolve(theme: &Theme) -> Self {
-        let palette = theme.palette();
-        // 前景比背景亮 → 视为深色主题（不依赖具体主题枚举，Custom 也适用）
-        let dark = luminance(palette.text) > luminance(palette.background);
-        if !dark {
-            return Self {
-                selection: SELECTION_COLOR,
-                caret: CARET_COLOR,
-                gutter_bg: GUTTER_BG,
-                gutter_text: GUTTER_TEXT,
-                // P115：组字串与正文同色（正文恒用 palette.text）
-                preedit_text: palette.text,
-                preedit_underline: Color { a: 0.6, ..palette.text },
-                // 滚动条用前景色低透明度叠加，两种主题都自然成立
-                scrollbar_track: Color::from_rgba8(0x00, 0x00, 0x00, 0.05),
-                scrollbar_thumb: Color::from_rgba8(0x00, 0x00, 0x00, 0.30),
-                bookmark: BOOKMARK_COLOR,
-                bracket: BRACKET_LIGHT,
-                find: FIND_MATCH_LIGHT,
-                // P132：辅助线族——前景低透明度（参考线比标尺更淡），
-                // 两种主题都「隐而不失」
-                indent_guide: Color { a: 0.14, ..palette.text },
-                edge_ruler: Color { a: 0.22, ..palette.text },
-                link_underline: BRACKET_LIGHT,
-                // 与选区同族的淡蓝（更淡），像素对拍可复用蓝色判据
-                invisibles: Color::from_rgba8(0x33, 0x66, 0xCC, 0.30),
-            };
-        }
-        let text = palette.text;
-        Self {
-            selection: Color { a: 0.25, ..text },
-            caret: text,
-            gutter_bg: lighten(palette.background, 0.12),
-            gutter_text: Color { a: 0.55, ..text },
-            preedit_text: text,
-            preedit_underline: Color { a: 0.6, ..text },
-            scrollbar_track: Color { a: 0.06, ..palette.text },
-            scrollbar_thumb: Color { a: 0.38, ..palette.text },
-            bookmark: BOOKMARK_COLOR,
-            bracket: Color { a: 0.85, ..text },
-            find: FIND_MATCH_DARK,
-            indent_guide: Color { a: 0.14, ..text },
-            edge_ruler: Color { a: 0.22, ..text },
-            link_underline: Color { a: 0.85, ..text },
-            invisibles: Color { a: 0.32, ..text },
-        }
-    }
-}
 
 impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
     fn size(&self) -> Size<Length> {
@@ -2546,5 +2166,4 @@ fn iced_mods_alt_shift() -> iced::keyboard::Modifiers {
 
 
 #[cfg(test)]
-#[path = "view_tests.rs"]
 mod tests;
