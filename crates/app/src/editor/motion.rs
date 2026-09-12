@@ -1207,9 +1207,9 @@ impl EditorCore {
 
     /// 此刻是否应绘制光标：活动窗口期内常显，静止期按相位隐现。
     /// P167：组字进行中恒隐藏——组字串自带插入点指示（下划线 + 组字
-    /// 光标），应用光标叠画在组字尾且随闪烁相位忽隐忽现，主流编辑器
-    /// （记事本/VSCode/Word）组字期均不显示文本光标（用户对照截图
-    /// 复报「光标不对」）。IME 定位（request_input_method 的 caret
+    /// 光标），应用光标叠画在组字尾且随闪烁相位忽隐忽现，同类编辑器
+    /// 与字处理软件组字期均不显示文本光标（用户对照截图复报
+    /// 「光标不对」）。IME 定位（request_input_method 的 caret
     /// rect）不经本闸，候选窗跟随不受影响。
     pub fn caret_visible(&self) -> bool {
         if self.preedit.as_deref().is_some_and(|p| !p.is_empty()) {
