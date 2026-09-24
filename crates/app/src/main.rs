@@ -591,10 +591,10 @@ enum Message {
     /// 窗口重新获得焦点：巡检各命名页的 (mtime, size) 戳，外部已改的
     /// 干净活动页静默重载，其余弹提示条由用户裁决
     WindowFocused,
-    /// 提示条「重新加载」：放弃该页未保存内容并从磁盘重读
-    ConfirmExternalReload(usize),
-    /// 提示条「忽略」：以当前磁盘状态重记时间戳，直到下次再变不再提示
-    IgnoreExternalChange(usize),
+    /// 提示条「重新加载」：放弃该页未保存内容并从磁盘重读（P220：携带页 id）
+    ConfirmExternalReload(u64),
+    /// 提示条「忽略」：以当前磁盘状态重记时间戳，直到下次再变不再提示（页 id）
+    IgnoreExternalChange(u64),
     /// 提示条「全部忽略」（聚合态）：队列内所有页一律重记时间戳并收条
     IgnoreAllExternalChanges,
 }

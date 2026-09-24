@@ -501,8 +501,10 @@ impl Editpad {
                         };
                         if !own_save_superseded {
                             let queue = self.external_change.get_or_insert_with(Vec::new);
-                            if !queue.contains(&idx) {
-                                queue.push(idx);
+                            // P220：入队用消息带来的页 id（本臂的 idx 是
+                            // 派发时刻解析出来的位置，存它会随关页漂移）
+                            if !queue.contains(&tab_id) {
+                                queue.push(tab_id);
                             }
                             self.status = self.t(editpad_core::Key::StExternallyModifiedSkip).to_owned();
                         }
@@ -527,27 +529,34 @@ impl Editpad {
                 self.check_external_changes();
                 Task::none()
             }
-            Message::ConfirmExternalReload(idx) => {
-                // 出队后重载；Loaded 归页时重记戳（失败则下次聚焦再报）
+            Message::ConfirmExternalReload(tab_id) => {
+                // 出队后重载；Loaded 归页时重记戳（失败则下次聚焦再报）。
+                // P220：入参是页 id，出队按 id，动作按 id 现地解析下标——
+                // 解析不到 = 那一页已被关掉，什么都不该做（旧口径会把动作
+                // 落到「现在占着那个下标的页」上）。
                 if let Some(queue) = self.external_change.as_mut() {
-                    queue.retain(|i| *i != idx);
+                    queue.retain(|i| *i != tab_id);
                     if queue.is_empty() {
                         self.external_change = None;
                     }
                 }
-                match self.tabs.get(idx).and_then(|t| t.path.clone()) {
+                let idx = match self.tabs.iter().position(|t| t.id == tab_id) {
+                    Some(idx) => idx,
+                    None => return Task::none(),
+                };
+                match self.tabs[idx].path.clone() {
                     Some(path) => self.start_loading(path, idx),
                     None => Task::none(),
                 }
             }
-            Message::IgnoreExternalChange(idx) => {
+            Message::IgnoreExternalChange(tab_id) => {
                 // 以当前磁盘状态重记戳：此后直到文件再次变化都不再提示；
                 // 队列还有剩余则条上自动切到下一页（P52 聚合语义）
-                if let Some(tab) = self.tabs.get_mut(idx) {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                     tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
                 }
                 if let Some(queue) = self.external_change.as_mut() {
-                    queue.retain(|i| *i != idx);
+                    queue.retain(|i| *i != tab_id);
                     if queue.is_empty() {
                         self.external_change = None;
                     }
@@ -560,8 +569,8 @@ impl Editpad {
             Message::IgnoreAllExternalChanges => {
                 // P52 聚合态：队列内所有页一律按磁盘现状重记戳并收条
                 if let Some(queue) = self.external_change.take() {
-                    for idx in queue {
-                        if let Some(tab) = self.tabs.get_mut(idx) {
+                    for tab_id in queue {
+                        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
                             tab.file_stamp = tab.path.as_deref().and_then(file_stamp);
                         }
                     }
@@ -796,7 +805,7 @@ StTooLargeEolSuffix)
         if self.busy || self.active_load.is_some() {
             return;
         }
-        let mut queue: Vec<usize> = Vec::new();
+        let mut queue: Vec<u64> = Vec::new();
         for (idx, tab) in self.tabs.iter().enumerate() {
             let Some(path) = tab.path.as_deref() else {
                 continue;
@@ -824,7 +833,7 @@ StTooLargeEolSuffix)
                 let _ = self.start_loading(path, idx);
                 return;
             }
-            queue.push(idx);
+            queue.push(tab.id);
         }
         self.external_change = if queue.is_empty() { None } else { Some(queue) };
     }
@@ -946,9 +955,10 @@ StTooLargeEolSuffix)
         if let Some(recorded) = self.tab().file_stamp {
             if file_changed_externally(Some(recorded), file_stamp(&path)) {
                 let idx = self.active_tab;
+                let id = self.tabs[idx].id; // P220：入队用页 id
                 let queue = self.external_change.get_or_insert_with(Vec::new);
-                if !queue.contains(&idx) {
-                    queue.push(idx);
+                if !queue.contains(&id) {
+                    queue.push(id);
                 }
                 self.status =
                     self.t(editpad_core::Key::StExternalPaused).to_owned();

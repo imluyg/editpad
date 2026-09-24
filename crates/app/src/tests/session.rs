@@ -773,6 +773,100 @@ use super::*;
     /// 假 → 恢复链再没人驱动，队列永久停摆。后果不是「少恢复几页」而是：恢复
     /// 页全成空占位，而下一次正常退出会 `exit_via_snapshot` 把这份空清单写回
     /// 去 —— 崩溃会话的内容就此永久消失。
+    /// P220：外部改动提示条队列存页 id 后，「条子停留期间关掉其中一页」不得
+    /// 把裁决落到别的页上。
+    ///
+    /// 形状：`[A(置脏,外部改动), B(未动), C(置脏,外部改动)]` → 聚焦后队列
+    /// `[A,C]`（B 不在内）→ 关掉 A（A 置脏，走单页放弃）。旧实现队列里是
+    /// **下标** `[0,2]`，关掉 A 之后「0」指的是 B：条子改名成 B，〔忽略〕
+    /// 把 **B 的比对戳**推到磁盘现状——B 若还置脏，此后 Ctrl+S 的 P63 守卫
+    /// 看到「磁盘 == 记录戳」，于是无声覆盖外部改动、一次提示都不弹。
+    #[test]
+    fn external_change_prompt_ignores_survive_a_queued_tab_closing() {
+        let dir = scratch_dir("p220-extbar");
+        let (pa, pb, pc) = (dir.join("a.txt"), dir.join("b.txt"), dir.join("c.txt"));
+        for p in [&pa, &pb, &pc] {
+            std::fs::write(p, "orig\n").unwrap();
+        }
+        let mut app = Editpad::default();
+        for p in [&pa, &pb, &pc] {
+            dispatch(&mut app, Message::FileDropped(p.clone()));
+            let seq = app.job_seq;
+            dispatch(
+                &mut app,
+                Message::Loaded(
+                    seq,
+                    Ok((
+                        editpad_core::Document::from_str("orig\n"),
+                        String::new(),
+                        "UTF-8".to_owned(),
+                    )),
+                ),
+            );
+        }
+        // A 与 C 置脏并被外部改写；B 全程没动过
+        dispatch(&mut app, Message::SwitchTab(0));
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        dispatch(&mut app, Message::SwitchTab(2));
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("z".into())));
+        std::fs::write(&pa, "A on disk now longer").unwrap();
+        std::fs::write(&pc, "C on disk much longer").unwrap();
+
+        dispatch(&mut app, Message::WindowFocused);
+        let (id_a, id_b, id_c) = (app.tabs[0].id, app.tabs[1].id, app.tabs[2].id);
+        let queue_before = app.external_change.clone();
+        let stamp_b_before = app.tabs[1].file_stamp;
+        assert!(stamp_b_before.is_some(), "夹具：B 应已记戳");
+
+        // B 在那次巡检**之后**才被外部改写（长度必变，记录戳从此与磁盘不一致），
+        // 所以它不在队列里。这一步是让「裁决误落到 B」变得可观测——若 B 的磁盘
+        // 内容与记录戳本来就一致，「被误推戳」这件事谁也看不出来（本用例第一版
+        // 就是这样，注入旧实现后行为断言照样绿）。
+        std::fs::write(&pb, "B changed on disk after the sweep").unwrap();
+
+        // 条子停留期间放弃并关掉 A
+        dispatch(&mut app, Message::CloseTabAt(0));
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[0].id, id_b, "B 现在顶到了下标 0");
+
+        // 视图把〔忽略〕发给「队首那个值」，这里照做一遍。队首是已被关掉的 A：
+        // 指不到任何页就必须是彻底的空操作，绝不能落到顶上来的 B 身上——B 的戳
+        // 一旦被推前，此后它再被外部改动时 P63 守卫看到「磁盘 == 记录戳」会
+        // 直接落盘覆盖，连提示都不弹。
+        let head = queue_before.as_ref().expect("夹具：应有提示条")[0];
+        dispatch(&mut app, Message::IgnoreExternalChange(head));
+        assert_eq!(
+            app.tabs[0].file_stamp, stamp_b_before,
+            "B 的比对戳不得被一次陈旧裁决推前（旧实现队首存的是下标 0，即现在的 B）"
+        );
+        assert_eq!(head, id_a, "队列元素必须是页 id（旧实现存的是下标 0）");
+        assert_eq!(
+            queue_before,
+            Some(vec![id_a, id_c]),
+            "队列内容 = A 与 C（B 不在内）"
+        );
+
+        // 拿真正的页 id 裁决才动得到页：陈旧队首已被摘掉，C 收下磁盘戳
+        assert_eq!(
+            app.external_change,
+            Some(vec![id_c]),
+            "裁决一次应摘掉一个队首（哪怕它已指向不存在的页），剩下的继续待裁决"
+        );
+        dispatch(&mut app, Message::IgnoreExternalChange(id_c));
+        assert!(app.external_change.is_none(), "裁决完收条");
+        assert!(app.tabs[1].file_stamp.is_some(), "C 被忽略后应记下磁盘现状戳");
+
+        // 夹具自检：证明「B 被推戳」在这份数据上确实可观测，否则上面那条
+        // assert_eq 是空转（差分/守卫类用例的通用坑）
+        dispatch(&mut app, Message::IgnoreExternalChange(id_b));
+        assert_ne!(
+            app.tabs[0].file_stamp, stamp_b_before,
+            "自检失败：B 的戳推了也不变，说明这份夹具测不出误伤"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn restore_chain_resumes_after_an_unrelated_load_settles() {
         let dir = snapshot_scratch_dir("p218-park");
@@ -1149,7 +1243,7 @@ use super::*;
             &mut app,
             Message::TabAutosaved(tid, v2, path, AutosaveOutcome::SkippedExternalChange),
         );
-        assert_eq!(app.external_change, Some(vec![0]), "真外部改动必须入队裁决");
+        assert_eq!(app.external_change, prompt_ids(&app, &[0]), "真外部改动必须入队裁决");
     }
 
     // ---------- P21 内存护栏 ----------
@@ -1503,11 +1597,12 @@ use super::*;
 
         // 聚焦：置脏页绝不静默重载，弹提示条
         dispatch(&mut app, Message::WindowFocused);
-        assert_eq!(app.external_change, Some(vec![0]));
+        assert_eq!(app.external_change, prompt_ids(&app, &[0]));
         assert_external_change_bar(&app);
 
         // 忽略 → 以磁盘现状重记戳，再次聚焦不再提示
-        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        let id0 = app.tabs[0].id;
+        dispatch(&mut app, Message::IgnoreExternalChange(id0));
         assert!(app.external_change.is_none());
         dispatch(&mut app, Message::WindowFocused);
         assert!(app.external_change.is_none(), "忽略后同状态不再提示");
@@ -1515,8 +1610,9 @@ use super::*;
         // 文件再次变化 → 又提示；这次选重载 → 放弃本地编辑取磁盘内容
         std::fs::write(&path, "disk v3").unwrap();
         dispatch(&mut app, Message::WindowFocused);
-        assert_eq!(app.external_change, Some(vec![0]));
-        dispatch(&mut app, Message::ConfirmExternalReload(0));
+        assert_eq!(app.external_change, prompt_ids(&app, &[0]));
+        let id0 = app.tabs[0].id;
+        dispatch(&mut app, Message::ConfirmExternalReload(id0));
         let seq2 = app.job_seq;
         dispatch(
             &mut app,
@@ -1608,11 +1704,12 @@ use super::*;
 
         // 重载完成后再次聚焦：页1已重记戳不再命中，队列只剩页0
         dispatch(&mut app, Message::WindowFocused);
-        assert_eq!(app.external_change, Some(vec![0]));
+        assert_eq!(app.external_change, prompt_ids(&app, &[0]));
         assert_external_change_bar(&app);
 
         // 忽略页0 → 队列清空；再改两页且都置脏 → 聚合 [0,1]
-        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        let id0 = app.tabs[0].id;
+        dispatch(&mut app, Message::IgnoreExternalChange(id0));
         assert!(app.external_change.is_none());
 
         dispatch(&mut app, Message::Edit(EditOp::InsertText("more".into())));
@@ -1623,13 +1720,14 @@ use super::*;
         dispatch(&mut app, Message::WindowFocused);
         assert_eq!(
             app.external_change,
-            Some(vec![0, 1]),
+            prompt_ids(&app, &[0, 1]),
             "两页同变必须聚合成队列"
         );
 
         // 忽略首页 → 队列切到下一页（条不消失）
-        dispatch(&mut app, Message::IgnoreExternalChange(0));
-        assert_eq!(app.external_change, Some(vec![1]));
+        let id0 = app.tabs[0].id;
+        dispatch(&mut app, Message::IgnoreExternalChange(id0));
+        assert_eq!(app.external_change, prompt_ids(&app, &[1]));
         assert_external_change_bar(&app);
 
         // 全部忽略 → 清队且两页都重记戳（再次聚焦不再提示）

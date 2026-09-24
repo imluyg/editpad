@@ -77,10 +77,14 @@ pub(crate) struct Editpad {
     pub(crate) settings_page: SettingsPage,
     /// 设置弹窗侧栏搜索词（P47；纯 UI 态不落盘，关弹窗/点导航即清）。
     pub(crate) settings_search: String,
-    /// P50：外部修改提示条队列（P52 起聚合多页）：待用户裁决的页下标，
+    /// P50：外部修改提示条队列（P52 起聚合多页）：待用户裁决的页 **id**，
     /// 按标签顺序排列。None/空 = 提示条不可见。Esc（BarsDismissed）/
     /// 逐个裁决/全部忽略即清。
-    pub(crate) external_change: Option<Vec<usize>>,
+    /// P220：曾是裸下标——提示条是非模态的，期间关掉队列里或之前的任意一页，
+    /// 剩下的下标就指到别的页上：〔忽略〕把**别页**的比对戳推前（此后保存
+    /// 无声覆盖外部改动），〔重新加载〕把别页的未保存正文掏空。视图侧那句
+    /// 「下标失效时跳过」的注释在左移情形下根本不成立（越界才跳过）。
+    pub(crate) external_change: Option<Vec<u64>>,
     /// P55：就地重命名的目标页 **id**（Some = 标签条上该页显示为输入框）。
     /// P214：曾是裸下标——输入框停留期间关掉前面任意一页，一次回车就会把
     /// **另一个文件**改名（见 `commit_tab_rename`）。

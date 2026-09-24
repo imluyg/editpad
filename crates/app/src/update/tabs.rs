@@ -272,9 +272,10 @@ impl Editpad {
                 // 后台页要走得自己判）。
                 if let Some(recorded) = self.tabs[idx].file_stamp {
                     if file_changed_externally(Some(recorded), file_stamp(&path)) {
+                        let id = self.tabs[idx].id; // P220：入队用页 id
                         let queue = self.external_change.get_or_insert_with(Vec::new);
-                        if !queue.contains(&idx) {
-                            queue.push(idx);
+                        if !queue.contains(&id) {
+                            queue.push(id);
                         }
                         self.status =
                             self.t(editpad_core::Key::StExternalPaused).to_owned();

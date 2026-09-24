@@ -604,10 +604,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         }
 
         // P50/P52 外部修改提示条：队列首页展示，聚合时带总数与「全部忽略」。
-        // 下标失效（页已关）时跳过，等下次聚焦重算。
+        // P220：队列里是页 id，按 id 找页——关掉任意一页只会让**下标**左移，
+        // 按 id 才能继续指当初那一页；id 解析不到（页已关）才跳过。
         if let Some(queue) = self.external_change.as_ref() {
             if let Some(first) = queue.first().copied() {
-                if let Some(tab) = self.tabs.get(first) {
+                if let Some(tab) = self.tabs.iter().find(|t| t.id == first) {
                     if tab.path.is_some() {
                         let total = queue.len();
                         let mut bar = row![

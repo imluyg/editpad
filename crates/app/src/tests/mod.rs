@@ -13,6 +13,14 @@
         dir
     }
 
+    /// P220：外部改动提示条队列存的是**页 id**（下标会随关页漂移）。
+    /// 测试里仍按下标写「本该是哪几页」，由本函数换算成 id——换算发生在
+    /// 断言那一刻，所以调用点必须保证「那一页此刻还在该下标上」；不保证的
+    /// 地方改为在识别出该页时先把 id 存进局部变量。
+    fn prompt_ids(app: &Editpad, idxs: &[usize]) -> Option<Vec<u64>> {
+        Some(idxs.iter().map(|&i| app.tabs[i].id).collect())
+    }
+
     /// std::fs 的薄封装（避免测试里到处 use std::fs）。
     fn fs_create_dir_all(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();

@@ -356,13 +356,14 @@ use super::*;
             &mut app,
             Message::TabAutosaved(tid, version, path.clone(), AutosaveOutcome::SkippedExternalChange),
         );
-        assert_eq!(app.external_change, Some(vec![0]), "应交给提示条裁决");
+        assert_eq!(app.external_change, prompt_ids(&app, &[0]), "应交给提示条裁决");
         assert!(
             !app.tabs[0].autosave_inflight,
             "被拦下的一轮不该自我重排"
         );
 
-        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        let id0 = app.tabs[0].id;
+        dispatch(&mut app, Message::IgnoreExternalChange(id0));
         assert!(app.external_change.is_none());
         assert!(
             app.tabs[0].autosave_inflight,
@@ -497,7 +498,7 @@ use super::*;
         assert!(!app.tabs[0].autosave_inflight, "挂起照常解除，可重新排队");
         assert_eq!(
             app.external_change,
-            Some(vec![0]),
+            prompt_ids(&app, &[0]),
             "拒写应把页送进 P52 提示条队列"
         );
         assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
@@ -559,11 +560,12 @@ use super::*;
             "拦截期间原文件绝不能被覆盖"
         );
         assert!(!app.busy, "拦截不是进入保存流程");
-        assert_eq!(app.external_change, Some(vec![0]), "应弹 P52 提示条交裁决");
+        assert_eq!(app.external_change, prompt_ids(&app, &[0]), "应弹 P52 提示条交裁决");
         assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
 
         // 〔忽略〕= 按磁盘现状重记戳并收条；随后 Ctrl+S 守卫放行进入保存管线
-        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        let id0 = app.tabs[0].id;
+        dispatch(&mut app, Message::IgnoreExternalChange(id0));
         assert!(app.external_change.is_none());
         dispatch(&mut app, Message::SaveRequested);
         assert!(app.busy, "有意覆盖的第二步应正常走保存");
@@ -1493,7 +1495,7 @@ external
             "拦截期间原文件绝不能被覆盖"
         );
         assert!(!app.busy, "拦截不是进入保存流程");
-        assert_eq!(app.external_change, Some(vec![0]), "应交外部改动提示条裁决");
+        assert_eq!(app.external_change, prompt_ids(&app, &[0]), "应交外部改动提示条裁决");
         assert_eq!(app.pending_close_tab, None, "被拦下时不得登记待关页");
         assert_eq!(app.tabs.len(), 1, "内容没存就不该关页");
     }
@@ -1571,7 +1573,7 @@ external
         assert_eq!(app.active_tab, 1, "链切到了页 1");
         assert_eq!(
             app.external_change,
-            Some(vec![1]),
+            prompt_ids(&app, &[1]),
             "守卫应把覆写裁决交给外部改动提示条"
         );
         assert!(!app.busy, "拦截不是进入保存流程");
