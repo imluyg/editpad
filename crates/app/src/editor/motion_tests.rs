@@ -720,6 +720,58 @@ fn hit_test_falls_back_when_layout_stale() {
     assert_eq!(hit2, CursorPos { line: 0, col: 5 }, "布局新鲜走真实路径");
 }
 
+/// O-4 护栏：纯打字插入**不得**触发「全量重扫行宽」。
+///
+/// 改前 `insert_str` 每开一个新打字组都经 `snapshot()` 无条件置 `max_cols_stale`，
+/// 而纯插入只会让行变宽、`raise_max_line_cols` 已把新宽度并入高水位。⚠️ 成本
+/// 落点比体检报告原述更靠近打字现场：`insert_str` 尾部的 `ensure_visible` 会
+/// 当场走 `clamp_scroll_horizontal`，而首次插入时 `max_cols_checked` 为 None
+/// （视为已过冷却窗）→ **每组第一个字符就全扫一遍**，之后每 500ms 再撞一次。
+///
+/// 断言用**取串次数**而非耗时（同 O-1 的理由），且度量点必须包住整个
+/// `insert_str`——放在它之后清零就只会数到第二次扫描，用例会变成空的
+/// （本轮第一次尝试正是栽在这里，改前改后都通过）。
+#[test]
+fn pure_typing_insert_does_not_trigger_full_width_rescan() {
+    // 300 行文档：走了全量重扫就是 300 量级，与「只碰受影响行」的个位量级
+    // 差两个数量级，判据与机器负载无关。
+    let text: String = (0..300).map(|i| format!("row{i}\n")).collect();
+    let mut c = core_with(&text);
+    c.cursor = CursorPos { line: 1, col: 0 };
+    c.take_line_text_calls();
+    c.insert_str("a");
+    let n = c.take_line_text_calls();
+    assert!(n < 20, "纯插入一个字符却取串 {n} 次：全量重扫被武装了（O-4）");
+    assert_eq!(c.max_line_cols, 6, "复位标记不得牺牲水位正确性（row299 = 6 列）");
+}
+
+/// O-4 的反向半条：会**删内容**的两类插入（替换选区、覆写吃字）可能让行净
+/// 变窄，标记必须原样保留，惰性全扫照旧发生。
+#[test]
+fn narrowing_inserts_still_trigger_full_width_rescan() {
+    let text: String = (0..300).map(|i| format!("row{i}\n")).collect();
+    // ① 替换选区 = 删旧内容 + 插新内容
+    let mut c = core_with(&text);
+    c.cursor = CursorPos { line: 0, col: 1 };
+    c.anchor = Some(CursorPos { line: 0, col: 0 });
+    c.take_line_text_calls();
+    c.insert_str("x");
+    assert!(
+        c.take_line_text_calls() >= 200,
+        "选区替换后应仍走一次全量收敛（不能一并复位掉）"
+    );
+    // ② 覆写态把汉字/字母换掉：行字符数不变而显示列可能变窄
+    let mut o = core_with(&text);
+    o.overwrite = true;
+    o.cursor = CursorPos { line: 0, col: 0 };
+    o.take_line_text_calls();
+    o.insert_str("a");
+    assert!(
+        o.take_line_text_calls() >= 200,
+        "覆写插入后应仍走一次全量收敛"
+    );
+}
+
 /// P45 回归 4：缩短类编辑后 `max_line_cols` 过冷却窗收敛——水平滚动条
 /// 不会常驻不消（旧取舍：只升不降）。
 #[test]

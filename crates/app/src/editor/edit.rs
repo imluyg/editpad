@@ -56,6 +56,10 @@ impl EditorCore {
         // 本次插入是否合格为「组内一员」——决定下一字符能否继续并入
         let eligible = matches!(single, Some(c) if c != '\n' && c != '\r')
             && self.selection_offsets().is_none();
+        // O-4：本次是否为「纯插入」——既不替换选区、也不在覆写态吃字。
+        // 只有那两种情形会**删掉**内容让行净变窄，高水位才可能过估。
+        let pure_insert = !self.overwrite && self.selection_offsets().is_none();
+        let snapshot_taken = !merges;
         if !merges {
             self.snapshot();
         }
@@ -130,6 +134,19 @@ impl EditorCore {
         }
         // P13：受影响行（插入跨行时含沿途各行）宽度只上调高水位
         self.raise_max_line_cols(first_line..=self.cursor.line);
+        // O-4：纯插入只会让受影响行变宽，而上面那一步已经把新宽度并入高
+        // 水位，所以本轮 `snapshot()` 顺手置的 stale 标记是**纯浪费**。必须
+        // 在这里复位：本函数尾部的 `ensure_visible` 会当场走
+        // clamp_scroll_horizontal，标记还在就立刻全扫一遍（首次插入时
+        // `max_cols_checked` 为 None 视为已过冷却窗，所以是**每组第一个字符
+        // 就扫**，之后每过 500ms 冷却窗再扫一次；台账记 50MB 文档 50~100ms）。
+        // 只在「本轮确实由 snapshot 置起」时复位——组内合并插入不走快照，
+        // 那时若也复位，会把**上一轮**合法置起的待扫标记吞掉。
+        // 覆写可能把宽字形换成窄字形、带选区的插入是「删旧 + 插新」，两者都
+        // 可能让高水位过估 → 标记保留，惰性收敛照旧。
+        if snapshot_taken && pure_insert {
+            self.max_cols_stale = false;
+        }
         // 第 60 轮：书签再映射——被替换的跨行选区按精化规则搬迁（起点行
         // 前缀幸存才保留自身书签；终点行内容必有幸存 → 书签恒并入结果
         // 行；中间整行丢弃）；插入的换行再把变化点之后的行号下推
