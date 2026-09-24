@@ -106,45 +106,67 @@ pub fn save_document_encoded(
 }
 
 /// P127：CJK 传统编码的通用落盘路径（GBK 原实现泛化）：有状态编码器
-    /// 逐 rope 块流式转换，无法映射字符按数值实体写入（encoding_rs
-    /// encode 语义），原子性与 [`write_atomic_with`] 一致。GBK/Big5/
-    /// Shift_JIS/EUC 系均为无跨块状态编码器，分块喂入安全。
-    fn save_with_legacy_encoder(
-        path: &Path,
-        doc: &Document,
-        enc: &'static encoding_rs::Encoding,
-    ) -> Result<EncodeNotice, CoreError> {
-            let mut encoder = enc.new_encoder();
-            let mut buf: Vec<u8> = Vec::new();
-            let mut unmappable = false;
-            write_atomic_with(path, |file| {
-                for chunk in doc.chunks() {
-                    // ⚠️ encode_from_utf8_to_vec 把结果写进 dst 的**现有富余
-                    // 容量**（不自动扩容）——零容量 Vec 什么都编不出来。
-                    // 预留充足空间：GBK ≤2 字节/字符，数值实体最长 ~10
-                    // 字节/字符，按输入字节数 ×3 预留绰绰有余。
-                    buf.reserve(chunk.len() * 3 + 16);
-                    let (_, _, had_errors) =
-                        encoder.encode_from_utf8_to_vec(chunk, &mut buf, false);
-                    unmappable |= had_errors;
-                    file.write_all(&buf)?;
-                    buf.clear();
-                }
-                // 收尾：last=true 让编码器冲刷内部状态（GBK 无状态，但
-                // 统一口径；空串调用零输出）
-                buf.reserve(16);
-                let (_, _, had_errors) =
-                    encoder.encode_from_utf8_to_vec("", &mut buf, true);
-                unmappable |= had_errors;
-                file.write_all(&buf)?;
-                Ok(())
-            })
-            .map(|_| EncodeNotice { unmappable })
-            .map_err(|source| CoreError::Write {
-                path: path.to_path_buf(),
-                source,
-            })
+/// 逐 rope 块流式转换，无法映射字符按数值实体写入（encoding_rs
+/// encode 语义），原子性与 [`write_atomic_with`] 一致。GBK/Big5/
+/// Shift_JIS/EUC 系均为无跨块状态编码器，分块喂入安全。
+fn save_with_legacy_encoder(
+    path: &Path,
+    doc: &Document,
+    enc: &'static encoding_rs::Encoding,
+) -> Result<EncodeNotice, CoreError> {
+    let mut encoder = enc.new_encoder();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut unmappable = false;
+    let io = write_atomic_with(path, |file| {
+        for chunk in doc.chunks() {
+            feed_encoder(&mut encoder, chunk, false, &mut buf, file, &mut unmappable)?;
+        }
+        // 收尾：last=true 让编码器冲刷内部状态
+        feed_encoder(&mut encoder, "", true, &mut buf, file, &mut unmappable)
+    });
+    io.map(|_| EncodeNotice { unmappable })
+        .map_err(|source| CoreError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// 把 `src` 喂给编码器直到全部消费，产出的字节即时经 `file` 落盘。
+///
+/// ⚠️ `encode_from_utf8_to_vec` 只写 `dst` 的**现有富余容量**（它把 `len`
+/// 临时抬到 `capacity`、按实际写入长度还原，全程不 realloc），容量不足时
+/// 返回 `OutputFull` 且**只消费前 `read` 个输入字节**。因此必须按 `read`
+/// 前进游标、续喂剩余输入——丢弃返回值会让块尾静默蒸发。预留系数也不能
+/// 按「GBK ≤2 字节/字符」估：不可映射字符走 HTML 十进制实体，2 字节字符
+/// （希伯来/阿拉伯/亚美尼亚等）的 `&#NNNN;` 是 7 字节 = **3.5×输入字节**，
+/// ×3 的预留在输入 >32 字节时必然溢出。×4 + 16 可让绝大多数块一次通过。
+fn feed_encoder(
+    encoder: &mut encoding_rs::Encoder,
+    src: &str,
+    last: bool,
+    buf: &mut Vec<u8>,
+    file: &mut fs::File,
+    unmappable: &mut bool,
+) -> std::io::Result<()> {
+    let mut rest = src;
+    loop {
+        buf.reserve(rest.len() * 4 + 16);
+        let (result, read, had_errors) = encoder.encode_from_utf8_to_vec(rest, buf, last);
+        *unmappable |= had_errors;
+        file.write_all(buf)?;
+        buf.clear();
+        // `read` 恒落在字符边界上（编码器不会劈开多字节序列）
+        rest = &rest[read..];
+        if matches!(result, encoding_rs::CoderResult::InputEmpty) {
+            return Ok(());
+        }
+        if read == 0 {
+            // 一个输入单元都写不下（预留已覆盖 10 字节实体上界，正常到不了）：
+            // 强制扩容续喂，避免原地打转
+            buf.reserve(buf.capacity() + 64);
+        }
     }
+}
 
 /// 文档原子保存（P19 行动项 3）：按 rope 存储块逐块写临时文件，
 /// 全程不产生全文 String——50MB 文档的保存峰值从「rope + 全文拷贝」
@@ -390,6 +412,62 @@ mod tests {
         assert!(!had_errors, "数值实体本身是合法 GBK");
         assert!(decoded.contains("&#"), "emoji 应以 &#N; 实体形式存在：{decoded}");
         assert!(decoded.contains("中文 ok") && decoded.contains("tail"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 不可映射字符的数值实体上界是 **3.5 倍输入字节**（2 字节 UTF-8 字符
+    /// 的码位落在 1000..2047 时实体为 `&#NNNN;` 7 字节），而不是注释里写的 3 倍。
+    /// 原实现把 `encode_from_utf8_to_vec` 的 `OutputFull` 与已读长度一并丢弃，
+    /// 溢出部分静默蒸发。取样用希伯来文：Cyrillic/Greek 在 GB2312 里有映射位，
+    /// 只有希伯来/阿拉伯/亚美尼亚这一类 2 字节字符才既不可映射、又是 4 位数字。
+    #[test]
+    fn gbk_long_unmappable_run_is_not_truncated() {
+        let dir = scratch_dir("gbk-long-run");
+        let target = dir.join("hebrew.txt");
+        let text = "א".to_string().repeat(200); // U+05D0，2 字节 UTF-8
+
+        let notice = save_document_encoded(&target, &Document::from_str(&text), SaveEncoding::Gbk)
+            .expect("保存应成功");
+        assert!(notice.unmappable, "希伯来字母不在 GB2312 映射表内");
+
+        let expected = "&#1488;".repeat(200);
+        let bytes = fs::read(&target).unwrap();
+        assert_eq!(
+            bytes,
+            expected.as_bytes(),
+            "200 个希伯来字符必须逐个落成实体，尾部不得丢失"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 溢出发生在多块文档的中途：可映射的 CJK 与不可映射的亚美尼亚交错，
+    /// 逐块写入时每一块的尾巴都得续上（编码器有状态，`last=false` 贯穿全程）。
+    #[test]
+    fn gbk_mixed_multichunk_document_is_complete() {
+        let dir = scratch_dir("gbk-multichunk");
+        let target = dir.join("mixed.txt");
+        // 9KB CJK（每块都放得下）+ 亚美尼亚段（每块都需要 3.5× 预算）
+        let mut text = "中".to_string().repeat(3000);
+        text.push_str(&"Ա".to_string().repeat(2000)); // U+0531
+        let doc = Document::from_str(&text);
+        assert!(
+            doc.chunks().count() > 1,
+            "用例前提：文档必须跨多个 rope 块"
+        );
+
+        save_document_encoded(&target, &doc, SaveEncoding::Gbk).expect("保存应成功");
+
+        let bytes = fs::read(&target).unwrap();
+        let (decoded, _, had_errors) = encoding_rs::GBK.decode(&bytes);
+        assert!(!had_errors, "实体与 GBK 字节都是合法 GBK");
+        assert_eq!(decoded.matches("&#1329;").count(), 2000, "亚美尼亚段必须完整");
+        assert_eq!(
+            decoded.chars().filter(|&c| c == '中').count(),
+            3000,
+            "CJK 段必须完整"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
