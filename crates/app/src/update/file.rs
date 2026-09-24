@@ -291,6 +291,18 @@ impl Editpad {
                 Task::none()
             }
             Message::LinkClicked(editor::LinkTarget::File { path, line }) => {
+                // P215：busy（加载/对话框在途）时**先挡在门外**，不写跳转意图。
+                // 旧顺序是无条件 `pending_link_goto = line` 再 request_open，而
+                // request_open 在 busy 下直接静默返回——于是这次 Ctrl+点击既没
+                // 打开任何东西（用户看不到任何反馈），那个行号还留在状态里，
+                // 下一次**任意**文件装载结算时把它兑现到无关文档上（光标/滚动
+                // 凭空跳到第 N 行）。
+                // dirty 走确认条的分支照旧先写意图：确认「放弃并打开」后要让
+                // 跳行仍能兑现（取消分支由 N-07 的清账收口）。
+                if self.busy || self.active_load.is_some() {
+                    self.set_status(self.t(editpad_core::Key::StBusyRetry).to_owned());
+                    return Task::none();
+                }
                 // 行号暂存，装载结算（Loaded）后一次性消费跳行；打开
                 // 守卫（dirty 确认/busy）与普通打开同管线
                 self.pending_link_goto = line;
@@ -720,6 +732,11 @@ StTooLargeEolSuffix)
             .sum();
         if !mem_guard_allows(existing, incoming, MULTI_TAB_MEM_CAP_BYTES) {
             self.status = self.t(editpad_core::Key::StMemoryGuard).to_owned();
+            // P215：拒开即作废随本次打开登记的一次性意图——与「save() 的每个
+            // 拒绝出口都要顺手作废 pending_close」同一条规矩（本仓第三次应验），
+            // 否则行号/命中选中会等到下一次无关装载才被兑现。
+            self.pending_link_goto = None;
+            self.pending_fif_goto = None;
             return Task::none();
         }
         if tab >= self.tabs.len() {

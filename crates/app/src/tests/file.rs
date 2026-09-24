@@ -1687,6 +1687,61 @@ external
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// P215：busy 期间的 Ctrl+点击既不该静默失效，更不该把行号「存」给
+    /// 下一次装载。
+    ///
+    /// 旧顺序是无条件写 `pending_link_goto` 再 `request_open`，而后者在 busy
+    /// 下直接 `Task::none()` 返回：用户点完什么都没发生（无提示、无打开），
+    /// 那个行号却一直留在状态里，等**下一次任意一次装载**结算时被消费，把
+    /// 无关文档的光标/滚动打到第 N 行。
+    #[test]
+    fn link_click_while_busy_opens_nothing_and_banks_no_goto() {
+        let dir = scratch_dir("p215-link-busy");
+        let (inflight, target) = (dir.join("inflight.txt"), dir.join("target.txt"));
+        std::fs::write(&inflight, "1\n2\n3\n").unwrap();
+        std::fs::write(&target, "t\n").unwrap();
+
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(inflight.clone()));
+        let s1 = app.job_seq;
+        assert!(
+            app.busy && app.active_load.is_some(),
+            "夹具：应有一次在途加载未结算"
+        );
+
+        dispatch(
+            &mut app,
+            Message::LinkClicked(crate::editor::LinkTarget::File {
+                path: target.clone(),
+                line: Some(7),
+            }),
+        );
+        assert!(app.pending_link_goto.is_none(), "busy 时不得登记跳转意图");
+        assert_eq!(app.job_seq, s1, "busy 时不得再登记第二个加载任务");
+        assert!(
+            !app.status.is_empty(),
+            "点击被守卫挡下必须留一句提示，不能静默吞掉"
+        );
+
+        // 在途那次装载结算：不得顺手把 7 兑现到它自己的页上
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s1,
+                Ok((
+                    editpad_core::Document::from_str("1\n2\n3\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        let ed = app.tabs[app.active_tab].editor.borrow();
+        assert_eq!(
+            ed.cursor.line, 0,
+            "无关文档的光标不得被陈旧跳转意图打跑（旧实现在这里会跳到末行）"
+        );
+    }
+
     #[test]
     fn link_goto_applies_to_the_tab_that_received_the_file() {
         let dir = scratch_dir("link-goto-bg-tab");
