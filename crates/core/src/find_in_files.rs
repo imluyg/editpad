@@ -10,7 +10,7 @@
 //! 规则只作用于**目录**——`.` 开头的隐藏文件（如 `.gitignore`）参与
 //! 扫描，文件内容本身常是检索对象。
 
-use crate::search::{find_all, find_all_regex, whole_word_bounds_ok, MatchPos};
+use crate::search::{find_all, find_all_limited, find_all_regex, whole_word_bounds_ok, MatchPos};
 use std::path::{Path, PathBuf};
 
 /// 遍历时跳过的噪音目录名（「遵守忽略规则」的一期口径；.gitignore
@@ -36,6 +36,17 @@ pub struct WalkOutput {
     pub truncated: bool,
 }
 
+// 测试钩子（O-13 早退契约）：`walk_dir` 里 `std::fs::read_dir` 的**调用次数**。
+//
+// 「封顶后不再进剩余目录」在返回值上完全不可观测（收与不收结果同为前
+// `max_files` 个），而耗时断言在本仓库不被接受（忙机器既可能假红也可能假绿，
+// 台账 P69 已为此降级过一项）；syscall 次数是与机器性能无关的**次数**命题，
+// 与 app 层 `EditorCore::line_text_calls` 同形状，生产构建整块不参与编译。
+#[cfg(test)]
+thread_local! {
+    static READ_DIR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// 递归遍历 `root` 下的普通文件。跳过：`.` 开头的隐藏目录、
 /// [`IGNORED_DIRS`] 中的目录、一切符号链接（目录防环，文件防出界）。
 /// 无权限 / 已消失的子目录静默跳过（不中断整个扫描）。
@@ -50,15 +61,26 @@ pub fn walk_files(root: &Path, max_files: usize) -> WalkOutput {
 }
 
 fn walk_dir(dir: &Path, max_files: usize, depth: usize, out: &mut WalkOutput) {
+    // O-13：封顶已判 → 逐层立即收口。旧实现只在当前目录 return，父层的
+    // for 继续对**剩余每个目录** read_dir + 判文件——20k 上限之后面对百万
+    // 条目树全是白做的 syscall。收口点放在函数首与循环首，递归的每一层都受管。
+    if out.truncated {
+        return;
+    }
     // P148：深度封顶——超深处整棵子树跳过（递归下降无界曾可击穿栈）
     if depth >= MAX_WALK_DEPTH {
         return;
     }
+    #[cfg(test)]
+    READ_DIR_CALLS.with(|c| c.set(c.get() + 1));
     // read_dir 失败（无权限/已消失）：跳过该子树，不中断
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        if out.truncated {
+            return; // 同上：封顶后连剩余条目都不必再看
+        }
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
             let name = entry.file_name();
@@ -79,11 +101,14 @@ fn walk_dir(dir: &Path, max_files: usize, depth: usize, out: &mut WalkOutput) {
     }
 }
 
-/// 单文件命中组装（设计 §3.2）。字面走 [`find_all`]、正则走
-/// [`find_all_regex`]；整词只作用于字面模式（正则的边界语义由模式自
-/// 身表达，与编辑器查找栏同口径）；正则无效返回空表（UI 层启动扫描
-/// 前已预校验，此处兜底不 panic）。`max_hits` = 单文件命中封顶，
+/// 单文件命中组装（设计 §3.2）。字面走 [`crate::search::find_all_limited`]
+/// （封顶即早退）、正则走 [`find_all_regex`]；整词只作用于字面模式（正则的
+/// 边界语义由模式自身表达，与编辑器查找栏同口径）；正则无效返回空表（UI 层
+/// 启动扫描前已预校验，此处兜底不 panic）。`max_hits` = 单文件命中封顶，
 /// 超出截断（截断事实由调用方按总量口径统一明示）。
+///
+/// 结果恒等于「全量扫描 → 按同一顺序取前 `max_hits` 个」，见
+/// `tests/find_in_files.rs` 的对拍用例。
 pub fn find_in_file(
     text: &str,
     query: &str,
@@ -95,15 +120,34 @@ pub fn find_in_file(
     let mut hits = if regex {
         find_all_regex(text, query, case_sensitive).unwrap_or_default()
     } else {
-        let hits = find_all(text, query, case_sensitive);
-        if whole_word {
-            filter_whole_word_text(text, hits)
-        } else {
-            hits
-        }
+        literal_hits(text, query, case_sensitive, whole_word, max_hits)
     };
     hits.truncate(max_hits);
     hits
+}
+
+/// 字面模式的命中装配（[`find_in_file`] 与 [`find_in_file_with`] 共用）。
+///
+/// **O-13：封顶只在「字面 + 非整词」路径下推进扫描内核**——
+/// [`crate::search::find_all_limited`] 取满 `max_hits` 即早退，不再
+/// 「先全收再截断」（旧路径在 64MB 文件搜 `the` 要先收约 100 万个
+/// `MatchPos`、24B/个，然后丢弃尾部）。
+///
+/// 整词路径**不能**提前封顶：[`filter_whole_word_text`] 只会减少命中，
+/// 若先截断原始命中再过滤，`max_hits` 个原始命中过滤后可能只剩几个，
+/// 比「全量过滤再截断」少报（口径必须与编辑器查找栏的整词计数一致）。
+fn literal_hits(
+    text: &str,
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    max_hits: usize,
+) -> Vec<MatchPos> {
+    if whole_word {
+        filter_whole_word_text(text, find_all(text, query, case_sensitive))
+    } else {
+        find_all_limited(text, query, case_sensitive, max_hits)
+    }
 }
 
 /// P146：预编译查找器——FIF 扫描对至多 2 万文件逐个匹配，
@@ -145,12 +189,7 @@ pub fn find_in_file_with(
             crate::search::find_all_regex_compiled(text, re).unwrap_or_default()
         }
         FifMatcher::Literal { query, case_sensitive } => {
-            let hits = find_all(text, query, *case_sensitive);
-            if whole_word {
-                filter_whole_word_text(text, hits)
-            } else {
-                hits
-            }
+            literal_hits(text, query, *case_sensitive, whole_word, max_hits)
         }
     };
     hits.truncate(max_hits);
@@ -196,4 +235,92 @@ pub fn filter_whole_word_text(text: &str, hits: Vec<MatchPos>) -> Vec<MatchPos> 
     });
     // 行界之后仍有残留命中（行号越过末行）按防御口径丢弃
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 项目内落盘的 scratch（saver.rs 同款：系统 TEMP 在部分沙箱下不可写）。
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-scratch")
+            .join(format!("fif-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn walk_files_stops_reading_sibling_dirs_once_capped() {
+        // O-13 早退契约：封顶判定后**逐层收口**，剩余目录连 read_dir 都不发。
+        // 用 syscall 次数而非耗时作证据：旧实现在此处会对剩余 4 个目录继续
+        // read_dir（计数 7），新实现只读到触发截断的那个目录（计数 3）——
+        // 返回值两边完全相同，光看 WalkOutput 判不出差别。
+        let root = scratch("cap-early-exit");
+        for i in 0..6 {
+            let dir = root.join(format!("d{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("f.txt"), "x").unwrap();
+        }
+
+        // 未触顶：root + 6 个子目录 = 7 次 read_dir，收满 6 个文件、不判截断
+        READ_DIR_CALLS.with(|c| c.set(0));
+        let out = walk_files(&root, 100);
+        let full = READ_DIR_CALLS.with(|c| c.get());
+        assert_eq!(out.files.len(), 6);
+        assert!(!out.truncated);
+        assert_eq!(full, 7, "对照项：整棵树都要读到");
+
+        // 触顶：只走进「收满的那一个」与「判截断的那一个」子目录
+        READ_DIR_CALLS.with(|c| c.set(0));
+        let out = walk_files(&root, 1);
+        let capped = READ_DIR_CALLS.with(|c| c.get());
+        assert_eq!(out.files.len(), 1, "封顶 1 只留 1 个");
+        assert!(out.truncated, "封顶后仍遇真实文件 → 截断明示");
+        assert_eq!(
+            capped, 3,
+            "read_dir 次数应为 root+2 个子目录（改前为 7：剩余 4 个目录白读）"
+        );
+
+        // 封顶 0：走进第一个子目录即判截断，其余 5 个目录不再 read_dir
+        READ_DIR_CALLS.with(|c| c.set(0));
+        let out = walk_files(&root, 0);
+        let zero = READ_DIR_CALLS.with(|c| c.get());
+        assert!(out.files.is_empty() && out.truncated);
+        assert_eq!(zero, 2, "root + 第一个子目录即收口（改前为 7）");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn find_all_limited_is_exactly_the_find_all_prefix() {
+        // 封顶不得改变命中序列：与 find_all 的前缀逐点相等（含 0、超量、
+        // 跨行查询走全量分支、CRLF/孤立 CR、多字节列号）
+        let long_line = "x ".repeat(500);
+        let texts = [
+            "",
+            "x x x x x",
+            "the cat\nthe bat the\n",
+            "a\r\nb\r\na\r\na",
+            "中文中文\n🚀中🚀\n",
+            &long_line,
+        ];
+        for text in texts {
+            for query in ["x", "the", "中", "🚀", "a", "\n", "a\na", ""] {
+                for cs in [true, false] {
+                    let all = find_all(text, query, cs);
+                    for limit in [0usize, 1, 2, 7, 999, usize::MAX] {
+                        let mut want = all.clone();
+                        want.truncate(limit);
+                        assert_eq!(
+                            find_all_limited(text, query, cs, limit),
+                            want,
+                            "text={text:?} query={query:?} cs={cs} limit={limit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

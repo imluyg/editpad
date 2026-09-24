@@ -71,7 +71,22 @@ fn line_break_byte_len(c: char, next: Option<char>) -> usize {
 }
 
 /// 按 ropey 行界全集把 `text` 切成行并逐行回调（行内容不含行界）。
+///
+/// 公开形态不变（app 层在用）。需要在命中数封顶时早退的调用方走
+/// [`for_each_line_until`]——切行逻辑仅此一份，两者不可能口径漂移。
 pub fn for_each_line(text: &str, mut f: impl FnMut(usize, &str)) {
+    let _ = for_each_line_until(text, |line_idx, line| {
+        f(line_idx, line);
+        std::ops::ControlFlow::Continue(())
+    });
+}
+
+/// [`for_each_line`] 的可早退版：回调返回 [`std::ops::ControlFlow::Break`]
+/// 时立刻停止切行与后续字符扫描（O-13「命中取满即收口」的基础设施）。
+fn for_each_line_until(
+    text: &str,
+    mut f: impl FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
     let mut line_start = 0usize;
     let mut line_idx = 0usize;
     let mut chars = text.char_indices().peekable();
@@ -81,14 +96,14 @@ pub fn for_each_line(text: &str, mut f: impl FnMut(usize, &str)) {
         if blen == 0 {
             continue;
         }
-        f(line_idx, &text[line_start..i]);
+        f(line_idx, &text[line_start..i])?;
         line_idx += 1;
         line_start = i + blen;
         if blen == 2 {
             chars.next(); // 消费 CRLF 配对的 \n
         }
     }
-    f(line_idx, &text[line_start..]);
+    f(line_idx, &text[line_start..])
 }
 
 /// 在片段内找第一个「完整落在片段内」的行界，返回 (起始字节偏移, 字节数)。
@@ -130,7 +145,44 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
     // 会产生等量小堆分配（第 39 轮实测占查找耗时可观份额）
     let mut lc: Vec<char> = Vec::new();
     for_each_line(text, |line_idx, line| {
-        scan_line(line, &q, case_sensitive, line_idx, &mut lc, &mut out);
+        scan_line(line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
+    });
+    out
+}
+
+/// 字面查找的**封顶**版：取满 `limit` 个命中即刻早退（O-13）。
+///
+/// 结果恒等于 `find_all(text, query, case_sensitive)` 的前 `limit` 个——
+/// 旧做法「全收进 Vec 再 truncate」在 64MB 文件搜 `the` 要先收约 100 万
+/// 个 `MatchPos`（24B/个）再丢弃，且剩余文本继续白扫。
+///
+/// 仅覆盖**不含换行的字面查询**：跨行查询走 [`find_all`] 的
+/// [`MultiLineScanner`] 分支（该内核不接封顶参数，保持全量后截断），
+/// 结果仍与 `find_all(..).take(limit)` 相等。`limit == 0` 直接空表。
+pub(crate) fn find_all_limited(
+    text: &str,
+    query: &str,
+    case_sensitive: bool,
+    limit: usize,
+) -> Vec<MatchPos> {
+    let mut out = Vec::new();
+    if query.is_empty() || limit == 0 {
+        return out;
+    }
+    let q: Vec<char> = query.chars().collect();
+    if q.contains(&'\n') {
+        let mut all = find_all(text, query, case_sensitive);
+        all.truncate(limit);
+        return all;
+    }
+    let mut lc: Vec<char> = Vec::new();
+    let _ = for_each_line_until(text, |line_idx, line| {
+        scan_line(line, &q, case_sensitive, line_idx, &mut lc, &mut out, limit);
+        if out.len() >= limit {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
     });
     out
 }
@@ -172,7 +224,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
         // 遇到完整行界才结算一行——保证与全文单遍切分逐字节等价
         while let Some((pos, blen)) = next_line_break(rest) {
             line.push_str(&rest[..pos]);
-            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
+            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
             line.clear();
             line_idx += 1;
             rest = &rest[pos + blen..];
@@ -181,7 +233,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
             // 悬置 \r 必是行界（孤立或 CRLF 均然）：行内容到此结算，
             // 是否吞掉下块开头的 \n 交 pending_cr 裁决
             line.push_str(&rest[..rest.len() - '\r'.len_utf8()]);
-            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
+            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
             line.clear();
             line_idx += 1;
             pending_cr = true;
@@ -189,7 +241,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
             line.push_str(rest);
         }
     }
-    scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out);
+    scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
     out
 }
 
@@ -272,6 +324,9 @@ pub fn filter_whole_word(doc: &Document, hits: Vec<MatchPos>) -> Vec<MatchPos> {
 ///
 /// `lc` 为跨行复用的字符缓冲（clear+extend 重用分配；第 39 轮优化），
 /// 语义与每行新建 `Vec<char>` 完全一致。
+///
+/// `limit` 是 `out` 的**容量上限**（O-13）：写满即返回，故 `out` 长度恒
+/// 不超过 limit（不是「先写满再截断」）。不限的调用方传 `usize::MAX`。
 fn scan_line(
     line: &str,
     q: &[char],
@@ -279,6 +334,7 @@ fn scan_line(
     line_idx: usize,
     lc: &mut Vec<char>,
     out: &mut Vec<MatchPos>,
+    limit: usize,
 ) {
     lc.clear();
     lc.extend(line.chars());
@@ -295,6 +351,9 @@ fn scan_line(
             if !char_eq(qc, lc[start + offset], case_sensitive) {
                 continue 'window;
             }
+        }
+        if out.len() >= limit {
+            return;
         }
         out.push(MatchPos {
             line: line_idx,

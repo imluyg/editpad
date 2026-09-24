@@ -180,6 +180,58 @@ fn find_in_file_max_hits_truncates() {
     assert!(find_in_file(text, "", true, false, false, 100).is_empty());
 }
 
+#[test]
+fn find_in_file_cap_returns_and_allocates_only_the_limit() {
+    // O-13 ②：字面非整词路径的封顶已下推进扫描内核——命中取满即早退，
+    // 不再「先全收进 Vec 再 truncate」。
+    // 前提：命中数远超上限（10 万个 `the`，全在同一个长行上）。
+    let text = "the ".repeat(100_000);
+    let all = find_all(&text, "the", true);
+    assert_eq!(all.len(), 100_000, "用例前提：命中数 ≫ 上限");
+
+    let hits = find_in_file(&text, "the", true, false, false, 3);
+    assert_eq!(
+        hits,
+        all.into_iter().take(3).collect::<Vec<_>>(),
+        "封顶结果 == 全量扫描的前 3 个（序列与坐标一字不差）"
+    );
+    // 分配形状：`Vec::truncate` 不缩容，改前 capacity 跟着 10 万个命中走；
+    // 现在内核写满即停，capacity 只到上限量级。用分配量而非耗时作证据。
+    assert!(
+        hits.capacity() <= 3 * 2 + 8,
+        "只允许上限量级的分配，实际 capacity={}",
+        hits.capacity()
+    );
+
+    // 「恰好等于命中数」与「上限大于命中数」都不该丢命中、不该判截断
+    assert_eq!(find_in_file(&text, "the", true, false, false, 100_000).len(), 100_000);
+    assert_eq!(find_in_file(&text, "the", true, false, false, 100_001).len(), 100_000);
+    assert!(find_in_file(&text, "the", true, false, false, 0).is_empty());
+
+    // app 层在用的预编译入口走同一个 `literal_hits`，同口径
+    let matcher = editpad_core::FifMatcher::build("the", true, false).unwrap();
+    assert_eq!(
+        editpad_core::find_in_file_with(&text, &matcher, false, 3),
+        find_in_file(&text, "the", true, false, false, 3),
+        "find_in_file 与 find_in_file_with 的封顶结果必须一致"
+    );
+}
+
+#[test]
+fn whole_word_cap_counts_filtered_hits_not_raw_hits() {
+    // 整词路径**故意不**提前封顶的理由所在：过滤只减不增，若先截原始命中
+    // 再过滤就会少报。这里前 2 个原始命中（concat/concatenation 里的 cat）
+    // 都不成立整词，只有后 3 个成立——上限 2 必须拿到第 3、4 个成立的命中。
+    let text = "concat concatenation cat cat cat";
+    let hits = find_in_file(text, "cat", true, false, true, 2);
+    assert_eq!(hits.len(), 2, "封顶按**过滤后**的命中数计");
+    assert_eq!(
+        hits.iter().map(|h| h.col).collect::<Vec<_>>(),
+        vec![21, 25],
+        "若误把封顶下推到原始命中，这里会返回 0 个"
+    );
+}
+
 // ---------- filter_whole_word_text ----------
 
 #[test]
