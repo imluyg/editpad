@@ -177,6 +177,34 @@ fn move_line_clamps_caret_column_to_the_landing_line() {
     assert!(c.doc.to_text().contains("xZ"), "钳列后打字应正常落在落点行");
 }
 
+#[test]
+fn reset_document_clears_block_selection() {
+    // 列块坐标属于**旧文档的坐标系**。`reset_document`（打开文件/静默重载/
+    // 会话恢复都走它）复位了光标、附加光标、撤销栈、书签、查找命中、覆写与
+    // 组字，却漏了 block_sel —— 块留在原地，指向新文档里不存在或无关的行。
+    let mut c = core_with("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    c.begin_block_select(CursorPos { line: 0, col: 0 });
+    c.update_block_select(CursorPos { line: 9, col: 1 });
+    c.finish_block_select();
+    assert!(c.has_block(), "用例前提：跨 10 行的列块已建立");
+
+    c.reset_document(editpad_core::Document::from_str("short"));
+
+    assert!(!c.has_block(), "换文档必须作废旧坐标系的列块");
+    assert!(
+        !c.delete_block_content(),
+        "块已作废：块删除必须是 no-op（旧代码在此按旧行号索引新文档 → ropey 越界）"
+    );
+
+    // 同款出口的第二个入口：全部替换 / JSON 格式化走 replace_whole_document
+    let mut d = core_with("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+    d.begin_block_select(CursorPos { line: 0, col: 0 });
+    d.update_block_select(CursorPos { line: 9, col: 1 });
+    d.finish_block_select();
+    d.replace_whole_document(editpad_core::Document::from_str("short"));
+    assert!(!d.has_block(), "整体替换同样作废列块");
+}
+
 // ---------- 大小写转换与行首尾清理（第 58 轮） ----------
 
 #[test]

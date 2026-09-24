@@ -1006,6 +1006,17 @@ impl EditorCore {
         self.ensure_visible();
     }
 
+    /// 「文档整体换血」时随旧坐标系一起作废的状态——`reset_document`（打开
+    /// 文件 / 外部改动静默重载 / 会话恢复回填）与 `replace_whole_document`
+    /// （全部替换 / JSON 格式化）共用的**唯一维护点**：少清一项，旧行号旧列
+    /// 就会作用在新文档上（列块尤其危险：块内编辑按 `r0..=r1` 逐行取
+    /// `line_to_char`，行号越界即 ropey 越界）。
+    pub(crate) fn drop_stale_coordinate_state(&mut self) {
+        self.clear_block();
+        self.goal_px = None;
+        self.dnd = None;
+    }
+
     /// 用新文档整体替换（加载文件时用），清空历史。
     pub fn reset_document(&mut self, doc: Document) {
         // P38：新文档即新的落盘基线（加载完成 = 磁盘内容已就位）
@@ -1015,6 +1026,8 @@ impl EditorCore {
         self.anchor = None;
         // B10：整体换文档 = 旧坐标系作废，附加光标一并折叠
         self.extra_cursors.clear();
+        // 第 73 轮 ⑮/⑯：列块与竖向目标同属旧坐标系，一并作废
+        self.drop_stale_coordinate_state();
         self.scroll_top = 0.0;
         self.scroll_left = 0.0;
         self.undo_stack.clear();
