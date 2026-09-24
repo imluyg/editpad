@@ -33,26 +33,22 @@ where
         + Send
         + 'static,
 {
-    let (notify_tx, notify_rx) = std_mpsc::channel::<Vec<editpad_core::MatchPos>>();
-    std::thread::spawn(move || {
+    let matches = await_on_thread(move || {
         // 防抖：真正的取消由 cancelled 标志完成——新输入排队时置位上一代，
         // 这里睡满窗口后检查，被作废的任务直接退出、不浪费一次全文扫描
         std::thread::sleep(std::time::Duration::from_millis(payload.debounce_ms));
-        let matches = if payload.cancelled.load(Ordering::Relaxed) {
-            Vec::new()
-        } else {
-            // P5 同款兜底：扫描崩溃也要回消息（空表），不能让 UI 永久等待
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                scan(&payload.doc, &payload.query, payload.case_sensitive, payload.regex)
-            }))
-            .unwrap_or_default()
-        };
-        let _ = notify_tx.send(matches);
-    });
-
-    // 阻塞 recv 与 drive_load 的取舍相同：OS 线程结果桥接到异步端，
-    // iced 线程池可承受短暂阻塞
-    let matches = notify_rx.recv().unwrap_or_default();
+        if payload.cancelled.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        // P5 同款兜底：扫描崩溃也要回消息（空表），不能让 UI 永久等待
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scan(&payload.doc, &payload.query, payload.case_sensitive, payload.regex)
+        }))
+        .unwrap_or_default()
+    })
+    .await
+    // 线程没送回结果（panic 到断链）同样按空表收尾，保证「必回一条」
+    .unwrap_or_default();
     Message::FindScanDone(payload.seq, matches)
 }
 
@@ -225,19 +221,16 @@ fn collect_excerpts(
 }
 
 /// 「在文件中查找」任务的事件驱动（与 [`drive_find_scan`] 同骨架：
-/// OS 线程 + mpsc + catch_unwind 兜底）。无论成功、取消还是 panic 都
+/// [`await_on_thread`] + catch_unwind 兜底）。无论成功、取消还是 panic 都
 /// 恰好回一条 `FifScanDone`，UI 永不永久等待；过期结果由 update 按
 /// seq 二次过滤。
 pub(crate) async fn drive_find_in_files(payload: FifScanPayload) -> Message {
     let seq = payload.seq;
-    let (notify_tx, notify_rx) = std_mpsc::channel::<(Vec<FileHits>, bool)>();
-    std::thread::spawn(move || {
-        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            fif_scan_dir(&payload)
-        }))
-        .unwrap_or((Vec::new(), false));
-        let _ = notify_tx.send(out);
-    });
-    let (results, truncated) = notify_rx.recv().unwrap_or((Vec::new(), false));
+    let (results, truncated) = await_on_thread(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fif_scan_dir(&payload)))
+            .unwrap_or((Vec::new(), false))
+    })
+    .await
+    .unwrap_or((Vec::new(), false));
     Message::FifScanDone(seq, results, truncated)
 }

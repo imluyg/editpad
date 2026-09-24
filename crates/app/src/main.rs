@@ -650,23 +650,44 @@ fn eol_label(ending: editpad_core::LineEnding) -> &'static str {
 
 // ---------- 周期快照心跳（P31） ----------
 
-/// 心跳提交的后台驱动：OS 线程执行 write-ahead 写序（P5/P18 同款桥接，
-/// 执行器仅阻塞等待结果）。线程意外终止也必须回报失败——账目作废后
-/// 下一拍全量重试，「内容不丢失」不允许静默断链。
-async fn drive_heartbeat(payload: HeartbeatPayload) -> Message {
-    let (tx, rx) =
-        std_mpsc::channel::<Result<editpad_core::snapshot::SessionManifest, String>>();
+/// 把「OS 线程干活 → 结果桥回异步端」收成一处（P211，体检项 O-8）。
+///
+/// 关键是**等待端 `await` 而不是 `std::sync::mpsc::Receiver::recv()`**：
+/// `Task::perform` 的 future 跑在 futures 线程池（规模 ≈ 逻辑核数）上，阻塞
+/// recv 会把一个 worker 整段占住。查找框每敲一键就排一条链，12 键/秒足以把
+/// worker 占满——同一个池还承载着加载流、心跳与自动保存，表现出来就是「大
+/// 文件加载和心跳提交被排队」（第 149 轮记过同病根）。工作线程照旧起：防抖
+/// 期内被作废的任务醒来即退出，线程本身不是这一项的成本重点。
+///
+/// `Err` 当且仅当工作线程没能送出结果（panic 到断链，或接收端已随 future
+/// 一起 drop）——与各调用点此前 `recv()` 报错分支同口径，兜底值由调用方定。
+pub(crate) async fn await_on_thread<T, F>(work: F) -> Result<T, &'static str>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
     std::thread::spawn(move || {
-        let result = editpad_core::snapshot::write_heartbeat_session(
+        let _ = tx.send(work());
+    });
+    rx.await.map_err(|_| "工作线程未送回结果")
+}
+
+/// 心跳提交的后台驱动：OS 线程执行 write-ahead 写序（经 [`await_on_thread`]
+/// 桥接，等待端不再占住执行器 worker）。线程意外终止也必须回报失败——账目
+/// 作废后下一拍全量重试，「内容不丢失」不允许静默断链。
+async fn drive_heartbeat(payload: HeartbeatPayload) -> Message {
+    let result = await_on_thread(move || {
+        editpad_core::snapshot::write_heartbeat_session(
             &payload.dir,
             &payload.pages,
             payload.active,
             payload.next_untitled,
         )
-        .map_err(|e| e.to_string());
-        let _ = tx.send(result);
-    });
-    let result = rx.recv().unwrap_or_else(|e| {
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|e| {
         // P155 取舍：心跳线程 panic 到断了 channel 才走到这里；与自动保存
         // 同口径固定取默认语言文案（不值得为不可达分支把 lang 透传下去）
         Err(format!(

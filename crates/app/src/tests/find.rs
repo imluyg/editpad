@@ -354,6 +354,61 @@ use super::*;
         }
     }
 
+    /// P211（O-8）：等待扫描结果**不得占住调用线程**。
+    ///
+    /// `Task::perform` 的 future 跑在 futures 线程池（规模 ≈ 逻辑核数）上，
+    /// 旧实现用 `std::sync::mpsc::Receiver::recv()` 阻塞等待：查找框每敲一键
+    /// 排一条链，12 键/秒就能把 worker 占满，而同一个池还承载加载流/心跳/
+    /// 自动保存——表现是大文件加载与心跳提交被排队（第 149 轮记过同病根）。
+    ///
+    /// 判据不测耗时、只测结构：单次 poll 即返回 `Pending`，且**此刻 scan 还
+    /// 没被调用**。旧的阻塞实现给不出这个形状——它的 poll 只能等工作线程跑完
+    /// （scan 已执行、结果已到手）才返回，那时已经是 `Ready`。
+    #[test]
+    fn find_scan_future_parks_instead_of_blocking_the_worker() {
+        use iced::futures::task::{noop_waker, Context};
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::Poll;
+        let started = Arc::new(AtomicBool::new(false));
+        let payload = FindScanPayload {
+            seq: 11,
+            doc: editpad_core::Document::new(),
+            query: "x".to_owned(),
+            case_sensitive: false,
+            regex: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            debounce_ms: 150,
+        };
+        let probe = started.clone();
+        let mut fut = Box::pin(drive_find_scan(payload, move |_doc, _q, _cs, _rx| {
+            probe.store(true, Ordering::Relaxed);
+            vec![editpad_core::MatchPos { line: 0, col: 0, len_chars: 1 }]
+        }));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let first = fut.as_mut().poll(&mut cx);
+        assert!(
+            matches!(first, Poll::Pending),
+            "首 poll 必须立刻让出线程，实际 {first:?}"
+        );
+        assert!(
+            !started.load(Ordering::Relaxed),
+            "等待期间不得在本线程上跑扫描（旧实现的 recv 会一直堵到扫描结束）"
+        );
+
+        // 结果落地后仍须能收尾（waker 是 no-op，故这里手动续 poll）
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let second = fut.as_mut().poll(&mut cx);
+        match second {
+            Poll::Ready(Message::FindScanDone(seq, hits)) => {
+                assert_eq!(seq, 11);
+                assert_eq!(hits.len(), 1, "扫描结果应原样带回");
+            }
+            other => panic!("防抖窗过后应产出 FindScanDone，实际 {other:?}"),
+        }
+    }
+
     #[test]
     fn find_scan_results_are_filtered_by_sequence_number() {
         let mut app = Editpad::default();

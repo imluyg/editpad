@@ -24,8 +24,9 @@ pub(crate) struct AutosaveTask {
 }
 
 /// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 代次校验 → 写前校验
-/// → 分块原子落盘」，结果经 std mpsc 桥接回异步端（P5/P10 同款；执行器
-/// 仅阻塞等待结果，且按页 inflight 去重保证同一页至多一个这样的线程）。
+/// → 分块原子落盘」，结果经 [`await_on_thread`] 桥接回异步端（P5/P10 同款
+/// 桥接，等待端不占执行器 worker；按页 inflight 去重保证同一页至多一个这样
+/// 的线程）。
 ///
 /// P63 写前校验：防抖睡眠期间磁盘可能被外部修改（焦点巡检只在窗口
 /// 重聚焦时跑，救不了后台线程）。期望戳不一致即拒写并回报
@@ -47,30 +48,29 @@ pub(crate) async fn drive_autosave_once(
     task: AutosaveTask,
 ) -> Message {
     use std::sync::atomic::Ordering;
-    let (tx, rx) = std_mpsc::channel::<AutosaveOutcome>();
     let thread_path = path.clone();
-    std::thread::spawn(move || {
+    let outcome = await_on_thread(move || {
         std::thread::sleep(task.delay);
-        let outcome = if gen.load(Ordering::Relaxed) != my_gen {
+        if gen.load(Ordering::Relaxed) != my_gen {
             AutosaveOutcome::Superseded
         } else if autosave_must_skip(task.expected_stamp, file_stamp(&path)) {
             AutosaveOutcome::SkippedExternalChange
         } else {
             write_to_disk(&path, &doc, task.encoding)
-        };
-        let _ = tx.send(outcome);
-    });
-    let outcome = rx
-        .recv()
-        // P155 取舍披露：这条只在「写盘线程 panic 到连 channel 都断了」时
-        // 出现，且 AutosaveOutcome::Failed 收的是 String（IO 错误本就是
-        // 系统 locale 文本，无法可靠翻译）。故此处固定取默认语言的文案，
-        // 不为一个近乎不可达的分支把 lang 一路透传到后台任务。
-        .unwrap_or_else(|_| AutosaveOutcome::Failed(
+        }
+    })
+    .await
+    // P155 取舍披露：这条只在「写盘线程 panic 到连 channel 都断了」时
+    // 出现，且 AutosaveOutcome::Failed 收的是 String（IO 错误本就是
+    // 系统 locale 文本，无法可靠翻译）。故此处固定取默认语言的文案，
+    // 不为一个近乎不可达的分支把 lang 一路透传到后台任务。
+    .unwrap_or_else(|_| {
+        AutosaveOutcome::Failed(
             editpad_core::Key::StAutosaveThreadGone
                 .text(editpad_core::Lang::default())
                 .to_owned(),
-        ));
+        )
+    });
     // 路径本体已随闭包移入写盘线程；回报携带同内容的克隆
     Message::TabAutosaved(tab_id, version, thread_path, outcome)
 }
