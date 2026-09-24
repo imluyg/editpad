@@ -94,7 +94,7 @@ pub struct EncodeNotice {
 /// 按指定编码落盘文档（P67）：UTF-8 走原 [`save_document_atomic`] 快路径；
 /// BOM 变体先写前缀再原样分块；GBK 用 encoding_rs 编码器流式转换——
 /// rope 块不劈字符（ropey 保证），逐块喂给有状态编码器，全程不产生
-/// 整文档编码副本。原子性（临时文件 + rename + sync）与 [`write_atomic_with`]
+/// 整文档编码副本。原子性（临时文件 + rename + sync）与 `write_atomic_with`
 /// 完全一致。
 pub fn save_document_encoded(
     path: &Path,

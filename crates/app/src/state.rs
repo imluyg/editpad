@@ -115,7 +115,7 @@ pub(crate) struct Editpad {
     /// 配置值与生效值的分离让「卸载了所选字体」只回退本次渲染，不抹掉
     /// 用户配置（重装后自动恢复）。**P154 起只作用于正文与预览**。
     pub(crate) active_font_family: Option<&'static str>,
-    /// P154：UI 字形族名（按 [`Settings::language`] 从候选表解析、已
+    /// P154：UI 字形族名（按 `Settings::language` 从候选表解析、已
     /// `'static` 化）。None = 候选全未命中 → 回落 `Font::DEFAULT`。
     /// 与正文族完全解耦：只影响除正文/预览之外的界面文字；行号栏另有
     /// [`Self::gutter_font_family`]。
@@ -300,7 +300,7 @@ pub(crate) struct Editpad {
     /// 环境不发窗口事件 = 永不触碰真实配置目录）。
     pub(crate) last_geometry_persist: Option<std::time::Instant>,
 
-    /// 「恢复上次关闭的文件」记忆栈（第 64 轮）：会话内 Vec<PathBuf>，
+    /// 「恢复上次关闭的文件」记忆栈（第 64 轮）：会话内 `Vec<PathBuf>`，
     /// 最近期在前；close_tabs_now 统一入栈、ReopenLastClosedFile 出栈
     pub(crate) closed_stack: Vec<PathBuf>,
     /// 第 69 轮：顶部菜单栏当前展开的菜单（None = 全收起）

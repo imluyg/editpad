@@ -4,7 +4,7 @@
 //! 行段搬运 + 行数守恒核对，无任何文本解码回写。）
 //!
 //! 设计要点：
-//! * [`EditorCore`]（core.rs）持有 ropey [`Document`](editpad_core::Document)，
+//! * [`EditorCore`]（core.rs）持有 ropey [`editpad_core::Document`]，
 //!   是唯一数据源；光标/选区/滚动/撤销全在这层。
 //! * 渲染只处理**可见行**（视口虚拟化）：50MB 与 5KB 的每帧排版成本相同。
 //! * 状态放在 `Rc<RefCell<_>>`（[`EditorHandle`]）里跨帧共享——iced 每帧

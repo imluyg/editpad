@@ -530,7 +530,7 @@ enum Message {
     /// 深浅主题切换（写回设置）
     ThemeToggled,
     /// P155：下拉框选中项（`pick_list` 按选项类型发消息，故单列一档，
-    /// 由 update 解包转 [`Message::apply_language`] 并带上完整语言信息）。
+    /// 由 update 解包转 `Message::apply_language` 并带上完整语言信息）。
     LanguageOptionSelected(editpad_core::LangOption),
     /// P154 兼容入口：界面语言循环切换（中文简体 → English → …）。
     /// 下拉框上线后设置页不再用它；保留给键盘/测试路径（故生产构建里

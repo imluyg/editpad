@@ -6,7 +6,7 @@ use super::*;
 
 /// 正文与 UI 共用的字形族。
 ///
-/// 现状 = `Font::MONOSPACE`，其 CJK 缺口由 [`apply_default_cjk_mono_pin`]
+/// 现状 = `Font::MONOSPACE`，其 CJK 缺口由 `apply_default_cjk_mono_pin`
 /// 在启动期把 `Family::Monospace` 的解析目标钉到系统里的 CJK 等宽字体来补齐
 /// （方案 c：零体积治本，不捆绑字体文件）。
 pub const BODY_FONT: Font = Font::MONOSPACE;

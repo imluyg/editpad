@@ -246,7 +246,7 @@ impl LazyHighlighter {
         self.generation
     }
 
-    /// 已保存的检查点数（含初始态 [0]）。
+    /// 已保存的检查点数（含初始态 `[0]`）。
     pub fn checkpoints_len(&self) -> usize {
         self.checkpoints.len()
     }
@@ -555,7 +555,7 @@ impl LazyHighlighter {
     ///
     /// 只用**真实存在**的行、只建**完整**的档位——起点越过文档末尾或
     /// 剩余不足一个整档位时停止（返回已建数量），因此本方法永远不会
-    /// 产生垫付空行、不触碰 [`phantom_from`](Self::phantom_from) 语义；
+    /// 产生垫付空行、不触碰 `Self::phantom_from` 语义；
     /// 文档尾部不足一档的部分留给同步路径按需处理（≤1 档，成本与
     /// 日常随机访问相同）。
     ///

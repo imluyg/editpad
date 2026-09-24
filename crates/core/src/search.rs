@@ -73,7 +73,7 @@ fn line_break_byte_len(c: char, next: Option<char>) -> usize {
 /// 按 ropey 行界全集把 `text` 切成行并逐行回调（行内容不含行界）。
 ///
 /// 公开形态不变（app 层在用）。需要在命中数封顶时早退的调用方走
-/// [`for_each_line_until`]——切行逻辑仅此一份，两者不可能口径漂移。
+/// `for_each_line_until`——切行逻辑仅此一份，两者不可能口径漂移。
 pub fn for_each_line(text: &str, mut f: impl FnMut(usize, &str)) {
     let _ = for_each_line_until(text, |line_idx, line| {
         f(line_idx, line);
@@ -128,7 +128,7 @@ fn next_line_break(s: &str) -> Option<(usize, usize)> {
 
 /// 找出全部匹配（按文档顺序）。查询串为空时返回空表。
 ///
-/// P26：查询含 `\n` 时走 [`MultiLineScanner`] 跨行归一分支——
+/// P26：查询含 `\n` 时走 `MultiLineScanner` 跨行归一分支——
 /// 文本侧 `\r\n` / 孤立 `\r` / `\n` 都算一个换行单元与查询的 `\n`
 /// 判等；不含 `\n` 的查询维持原有单行路径，行为零变化。
 pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> {

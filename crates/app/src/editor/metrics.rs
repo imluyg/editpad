@@ -84,7 +84,7 @@ pub(crate) fn leading_indent_cols(text: &str) -> usize {
     col
 }
 
-/// 文本的显示列数（1 列 = [`EditorCore::char_width`] 像素）。
+/// 文本的显示列数（1 列 = `EditorCore::char_width` 像素）。
     pub(crate) fn display_cols(text: &str) -> f32 {
     let mut col = 0usize;
     for c in text.chars() {

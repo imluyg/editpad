@@ -521,7 +521,7 @@ impl EditorCore {
     }
 
     /// 输入法上屏事件：仅持有焦点时消费。文本的真正插入由应用层
-    /// [`Message::Edit`] 统一分发（获得加载期守卫与撤销/置脏语义）。
+    /// `Message::Edit` 统一分发（获得加载期守卫与撤销/置脏语义）。
     pub fn ime_commit(&mut self, text: &str) -> ImeCommit {
         if !self.focused {
             return ImeCommit::Ignored;

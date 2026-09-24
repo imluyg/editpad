@@ -13,7 +13,7 @@ pub(crate) const CTX_MENU_H: f32 = 280.0;
 // ---------- 第 70 轮：菜单栏槽位几何 ----------
 
 /// 菜单栏按钮槽宽与左缘（与菜单栏布局耦合：各按钮同宽 2 字
-/// 文本 + padding [3,12] + 1px 边框 + spacing 2；布局改动需同步）。
+/// 文本 + padding `[3,12]` + 1px 边框 + spacing 2；布局改动需同步）。
 pub(crate) const MENU_SLOT_W: f32 = 54.0;
 pub(crate) const MENU_BAR_LEFT: f32 = 6.0;
 /// 菜单栏条带高度（浮层背板据此判定「点击落在菜单栏上=切换菜单」）。
@@ -94,7 +94,7 @@ pub(crate) fn popup_card_style(theme: &Theme) -> container::Style {
 ///
 /// 半透明是**逐 quad 的 alpha 合成**（tiny-skia 后端直接按 alpha 混合）。
 /// 卡片内**每个自带底色的控件都能单独盖住下层**：输入框用主题
-/// `background.base` 实底色、按钮/复选框用 [`settings_colors`] 的
+/// `background.base` 实底色、按钮/复选框用 `settings_colors` 的
 /// `control_bg`（浅色是纯白）——只压卡片背板，这些控件仍是不透明的白块
 /// 浮在半透明卡片上（用户复报「输入框/替换框/按钮没有半透明」）。
 /// 故淡出是**整框统一口径**：背板 + 输入框 + 按钮 + 复选框 + 纯文本标签的

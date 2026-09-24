@@ -101,7 +101,7 @@ fn walk_dir(dir: &Path, max_files: usize, depth: usize, out: &mut WalkOutput) {
     }
 }
 
-/// 单文件命中组装（设计 §3.2）。字面走 [`crate::search::find_all_limited`]
+/// 单文件命中组装（设计 §3.2）。字面走 `crate::search::find_all_limited`
 /// （封顶即早退）、正则走 [`find_all_regex`]；整词只作用于字面模式（正则的
 /// 边界语义由模式自身表达，与编辑器查找栏同口径）；正则无效返回空表（UI 层
 /// 启动扫描前已预校验，此处兜底不 panic）。`max_hits` = 单文件命中封顶，

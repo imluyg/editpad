@@ -729,7 +729,7 @@ impl EditorCore {
 
     /// 软换行可用显示列预算 = 折行预算 ÷ 列宽，≥1。
     /// P96 起仅作**列模型回退**用（真实字形布局未注入时，见
-    /// [`Self::wrap_line_breaks`]）；有真实布局时按
+    /// `Self::wrap_line_breaks`）；有真实布局时按
     /// [`Self::wrap_max_px`] 像素断行。
     pub(crate) fn wrap_max_cols(&self) -> usize {
         let cw = self.char_width().max(0.1);
