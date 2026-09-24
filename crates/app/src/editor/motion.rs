@@ -1076,7 +1076,8 @@ impl EditorCore {
         // 与列模型的「左半/右半」选位语义一致）；布局滞后（注入的是
         // 上一帧旧文本，长度覆盖不到当前文本）整体回退列模型实时计算
         if let Some(xs) = self.row_layouts.get(&line) {
-            if xs.len().saturating_sub(1) >= text.chars().count() {
+            let lens = text.chars().count();
+            if xs.len().saturating_sub(1) >= lens {
                 let mut col = xs.len() - 1;
                 for (k, pair) in xs.windows(2).enumerate() {
                     let mid = (pair[0] + pair[1]) * 0.5;
@@ -1086,7 +1087,13 @@ impl EditorCore {
                     }
                     col = k + 1;
                 }
-                return CursorPos { line, col };
+                // 反向守卫：布局比**当前**文本长（行刚被改短、本帧还没重注入）
+                // 时，上面的循环可以把 col 推到旧行长度上去——钳回当前行长，
+                // 越界列喂给 insert_str/backspace 就是 ropey 越界
+                return CursorPos {
+                    line,
+                    col: col.min(lens),
+                };
             }
         }
 

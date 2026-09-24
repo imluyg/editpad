@@ -487,6 +487,33 @@ fn row_layout_drives_caret_selection_and_hit_test() {
     assert!((caret.x - expect).abs() < 1e-3, "清空后应回退列模型");
 }
 
+#[test]
+fn hit_test_with_stale_layout_never_returns_column_beyond_line_length() {
+    // 陈旧布局：行刚被改短，`row_layouts` 里还是旧长行的 xs。P45 的守卫只防
+    // 「布局比文本短」（那种回退列模型），不防反向——文本比布局短时返回的列
+    // 按旧长度算出，越出行长，再喂给不夹紧的编辑入口就落到别的字符/别的位置。
+    let mut c = core_with("abc\ndefg\nhij");
+    let stale_long_row: Vec<f32> = (0..=10).map(|k| k as f32 * 8.0).collect();
+    c.row_layouts.insert(0, stale_long_row);
+
+    let hit = c.hit_test(9_000.0, 0.0);
+    assert_eq!(hit.line, 0, "y=0 应命中首行");
+    assert!(
+        hit.col <= c.line_display_len(0),
+        "hit_test 不得返回超出行显示长的列：col {} > {}",
+        hit.col,
+        c.line_display_len(0)
+    );
+    // 点击行尾之外 = 落到该行末尾
+    c.cursor = hit;
+    c.insert_str("X");
+    assert_eq!(
+        c.doc.line_str(0).trim_end_matches(['\r', '\n']),
+        "abcX",
+        "陈旧布局下的点击应归到行尾，不得越界"
+    );
+}
+
 /// 第 40 轮诊断：列模型分类（[`is_wide`]）与等宽 CJK 字体真实字形宽度
 /// 逐字符对拍——光标压字/漂移的候选根因 = 分类与实际 advance 不符
 /// （如制表绘图/块元素/箭头/数学符号在中文字体内多为全宽，却被判 1 列）。
