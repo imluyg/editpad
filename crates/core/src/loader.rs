@@ -4,7 +4,7 @@
 //! 届时 UI 线程任何时刻的阻塞都不超过一帧。
 
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use std::str;
 
@@ -143,10 +143,13 @@ where
         if n == 0 {
             break;
         }
+        bump_read(n); // 首块的真实读入量在这里，后续消费者不得重复记账
         first_len += n;
     }
-    report(&mut on_progress, first_len as u64, total_bytes);
-
+    // O-9：进度首报**移进各分派支**。若在分派之前按原始字节数无条件报一次
+    // 首块（64KB），而 ScanThenBuild 之后把读量折算到 [0, 3/4] 程，两者就会
+    // 构成**进度倒退**（65536 → 49152），破坏 `load_document_streaming` 的
+    // 单调契约——既有 streaming_reports_monotonic_progress_and_decodes 挡着。
     enum Plan {
         /// 单趟：增量解码即装载（进度线性）
         Direct(&'static Encoding, &'static str, usize),
@@ -166,6 +169,8 @@ where
 
     match plan {
         Plan::Direct(encoding, label, bom_len) => {
+            // BOM / UTF-16 单趟直达：进度线性，首报仍是原始字节数（与改前一致）
+            report(&mut on_progress, first_len as u64, total_bytes);
             let mut head = HeadSample::default();
             let doc = build_pass(
                 &mut reader, path, &chunk[..first_len], bom_len, encoding,
@@ -178,67 +183,161 @@ where
             })
         }
         Plan::ScanThenBuild => {
-            // ---- 第一遍：全文扫描（NUL 短路 + 严格 UTF-8 增量校验）----
-            let mut scan = Utf8Scan::default();
-            let mut scanned = first_len as u64;
-            scan.feed(&chunk[..first_len]);
-            loop {
-                let n = reader.read(&mut chunk).map_err(io_err(path))?;
-                if n == 0 {
-                    break;
-                }
-                scanned += n as u64;
-                scan.feed(&chunk[..n]);
-                // 校验遍进度映射到前半程（装载遍走后半程，整体单调）
-                report(&mut on_progress, scanned.min(total_bytes) / 2, total_bytes);
-            }
-            if scan.saw_nul {
-                return Err(CoreError::BinaryDetected {
-                    path: path.to_path_buf(),
-                });
-            }
-            // P147：含 EOF 截断判定的完整严格口径（对齐 decode()）
-            let utf8_valid = scan.utf8_valid();
-
-            // ---- 第二遍：按结论装载（进度走后半程）----
-            // 重新打开文件回到起点（第一遍没有保留字节——这正是省内存的关键）
-            drop(reader);
-            let file = fs::File::open(path).map_err(|source| CoreError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
-            let first_len = fill_chunk(&mut reader, &mut chunk).map_err(io_err(path))?;
-            let base = total_bytes / 2;
-
-            let (encoding, label, check_ratio) = if utf8_valid {
-                (UTF_8, "UTF-8", false)
-            } else {
-                (GBK, "GBK", true)
-            };
-            let mut stats = BuildStats::default();
-            let mut head = HeadSample::default();
-            let doc = build_pass(
-                &mut reader, path, &chunk[..first_len], 0, encoding,
-                total_bytes, base, total_bytes - base, &mut on_progress,
-                Some(&mut stats), &mut head,
+            // O-9：校验遍与装载遍**融成一趟**——同一遍读取里既喂 Utf8Scan
+            // （NUL 短路 + 严格 UTF-8 增量校验），又把字节喂进 UTF-8 解码器
+            // 推进 rope。校验通过即装载完成：读字节数 = 文件大小（旧写法是
+            // 2 倍），也不再需要「第二趟重开文件」。
+            // 只有真不是 UTF-8 时才丢弃这段乐观 rope、在**同一 fd** 上 seek
+            // 回起点走 GBK 兜底——GBK 文本通常在头几 KB 就破格，被丢弃的部分
+            // 占比可忽略；而重开文件曾是 TOCTOU：两趟之间被构建脚本/云盘同步
+            // 改写，第一趟得出的「UTF-8 合法」结论会落到第二趟的新字节上。
+            let utf8_span = total_bytes - total_bytes / 4; // 单趟映射到 [0, 3/4]
+            let scanned = scan_and_build_utf8(
+                &mut reader, path, &chunk[..first_len], total_bytes, utf8_span,
+                &mut on_progress,
             )?;
-            if check_ratio
-                && stats.replacements as f32 / stats.chars.max(1) as f32
-                    > BINARY_REPLACEMENT_RATIO
-            {
-                return Err(CoreError::BinaryDetected {
-                    path: path.to_path_buf(),
-                });
+            match scanned {
+                Some(loaded) => Ok(loaded),
+                None => {
+                    // 回卷重读：用同一个已打开的 fd，不重新 open
+                    let mut file = reader.into_inner();
+                    file.seek(std::io::SeekFrom::Start(0)).map_err(|source| CoreError::Read {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+                    let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
+                    let first_len = fill_chunk(&mut reader, &mut chunk).map_err(io_err(path))?;
+                    let mut stats = BuildStats::default();
+                    let mut head = HeadSample::default();
+                    let doc = build_pass(
+                        &mut reader, path, &chunk[..first_len], 0, GBK,
+                        total_bytes, utf8_span, total_bytes - utf8_span, &mut on_progress,
+                        Some(&mut stats), &mut head,
+                    )?;
+                    if stats.replacements as f32 / stats.chars.max(1) as f32
+                        > BINARY_REPLACEMENT_RATIO
+                    {
+                        return Err(CoreError::BinaryDetected {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    Ok(LoadedDocument { doc, encoding: "GBK", sample: head.buf })
+                }
             }
-            Ok(LoadedDocument {
-                doc,
-                encoding: label,
-                sample: head.buf,
-            })
         }
     }
 }
+
+/// 单趟「边扫边装」：字节流同时喂 [`Utf8Scan`] 与 UTF-8 增量解码器。
+///
+/// 返回 `Some(loaded)` 表示全文严格 UTF-8 合法、rope 已就地建成；返回 `None`
+/// 表示**不是** UTF-8（调用方回卷走 GBK 兜底）——此时本函数内部构造的 rope
+/// 被直接丢弃，不产生任何副作用。NUL 一律 [`CoreError::BinaryDetected`]。
+///
+/// 解码器与 [`build_pass`] 用同一个构造（`encoding.new_decoder()`）、收尾同
+/// 一个 `absorb(.., last=true, stats=None, ..)`，故与「先扫一遍再 build_pass
+/// (UTF_8)」的旧两趟写法**逐字节等价**（`load_document_streaming` 与 `decode`
+/// 的对拍用例即钉这一点）。分块边界不影响结论：两者都是跨块增量的状态机。
+#[allow(clippy::too_many_arguments)]
+fn scan_and_build_utf8<F>(
+    reader: &mut BufReader<fs::File>,
+    path: &Path,
+    first_chunk: &[u8],
+    total_bytes: u64,
+    progress_span: u64,
+    on_progress: &mut F,
+) -> Result<Option<LoadedDocument>, CoreError>
+where
+    F: FnMut(LoadProgress),
+{
+    let mut scan = Utf8Scan::default();
+    let mut builder = RopeBuilder::new();
+    let mut eol = EolCounter::new();
+    let mut decoder = UTF_8.new_decoder();
+    let mut out = String::with_capacity(CHUNK_SIZE * 4);
+    let mut head = HeadSample::default();
+    let mut stats: Option<&mut BuildStats> = None; // UTF-8 路径不统计占比
+
+    scan.feed(first_chunk);
+    // 首块的读入量已由调用点记账，这里不重复计
+    absorb(&mut decoder, first_chunk, false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), &mut head);
+    let mut done = first_chunk.len() as u64;
+    // 乐观装载被放弃的标志：置位后**只读不装**（不解码、不再分配）
+    let mut dropped = false;
+    report(on_progress, scaled_done(done, total_bytes, progress_span), total_bytes);
+
+    let mut chunk = vec![0u8; CHUNK_SIZE];
+    loop {
+        let n = fill_chunk(reader, &mut chunk).map_err(io_err(path))?;
+        if n == 0 {
+            break;
+        }
+        let bytes = &chunk[..n];
+        scan.feed(bytes);
+        // 首个非法序列一出现就就地丢弃已攒的 rope（换成新 builder 即释放旧块）
+        // ——否则非 UTF-8 文件会「乐观攒完整篇再丢」，峰值变成两份 rope，
+        // 直接顶破 P19 的内存预算（流式装载把峰值从 ×2.24 压到 ×1.22 就是它）。
+        // ⚠️ 但**不能提前 break 回卷**：NUL 可能出现在破格点之后，今天的行为
+        // 是「全文扫完再裁决」，短路会让含 NUL 的伪文本从「拒绝打开」变成
+        // 「按 GBK 打开」——那是 P1 二进制防护的倒退（打开后保存即毁原文件）。
+        if !dropped && scan.invalid {
+            builder = RopeBuilder::new();
+            head = HeadSample::default();
+            dropped = true;
+        }
+        if !dropped {
+            absorb(&mut decoder, bytes, false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), &mut head);
+        }
+        done += n as u64;
+        report(on_progress, scaled_done(done, total_bytes, progress_span), total_bytes);
+    }
+
+    // 与旧写法同：扫完才裁决（不在 NUL 处提前 break，保持进度序列与结果一致）
+    if scan.saw_nul {
+        return Err(CoreError::BinaryDetected { path: path.to_path_buf() });
+    }
+    if dropped || !scan.utf8_valid() {
+        return Ok(None); // 丢弃乐观 rope，交调用方回卷走 GBK
+    }
+    // 冲刷解码器尾部（未完的多字节序列）——合法 UTF-8 下应为空操作，
+    // 但与 build_pass 保持一致地执行，确保两条形形状完全相同
+    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, None, &mut head);
+    report(on_progress, total_bytes, total_bytes);
+    Ok(Some(LoadedDocument {
+        doc: Document::from_parts(builder.finish(), eol.finish()),
+        encoding: "UTF-8",
+        sample: head.buf,
+    }))
+}
+
+/// 把已读字节数映射进 `[0, progress_span]`（O-9：单趟只走到 3/4，留给可能的
+/// GBK 回卷重读走到满程，保证进度**单调不减**——`load_document_streaming`
+/// 的既定契约）。
+fn scaled_done(done: u64, total_bytes: u64, progress_span: u64) -> u64 {
+    if total_bytes == 0 {
+        return 0;
+    }
+    (done.min(total_bytes) * progress_span) / total_bytes
+}
+
+// 测试钩子（O-9 趟数契约）：实际读到的字节总数。
+// 「打开一个 UTF-8 文件只读一遍」在返回值与落盘结果上都不可观测（两趟读法
+// 给出同一份内容），耗时断言在本仓又不被接受 → 记字节数，形状同 app 层
+// `EditorCore::line_text_calls`，生产构建整块不参与编译。
+#[cfg(test)]
+thread_local! {
+    static READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 记账一次真实读入量。非测试构建里是空函数（编译器内联掉，零成本）。
+#[cfg(test)]
+fn bump_read(n: usize) {
+    READ_BYTES.with(|c| c.set(c.get() + n as u64));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn bump_read(_n: usize) {}
 
 fn io_err(path: &Path) -> impl Fn(std::io::Error) -> CoreError + '_ {
     move |source| CoreError::Read {
@@ -264,6 +363,7 @@ fn fill_chunk(reader: &mut BufReader<fs::File>, chunk: &mut [u8]) -> std::io::Re
         }
         filled += n;
     }
+    bump_read(filled);
     Ok(filled)
 }
 
@@ -582,6 +682,72 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/test-scratch")
             .join(format!("{tag}-{}", std::process::id()))
+    }
+
+    /// O-9 主护栏：非 BOM 的 UTF-8 文件**只读一遍**。
+    ///
+    /// 改前是无条件两趟（校验遍 + 装载遍），读入字节数 = 2 × 文件大小。这个
+    /// 事实**无法**从返回值或落盘结果观测（两趟给出同一份内容），重开文件的
+    /// TOCTOU 也只有并发写者才暴露，耗时断言本仓又不接受 → 记 `READ_BYTES`。
+    /// 顺带钉住进度契约仍是「单调不减、末值到 total」（旧写法的两半程映射改成
+    /// 单趟 [0, 3/4] + 终值 total，仍然单调）。
+    #[test]
+    fn document_streaming_reads_a_utf8_file_exactly_once() {
+        let dir = scratch_dir("o9-onepass");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("u8.txt");
+        let content = "行 1 Editpad\nhello world\n中文 🚀\n".repeat(6_000);
+        fs::write(&target, &content).unwrap();
+        let size = fs::metadata(&target).unwrap().len();
+        assert!(size > 3 * CHUNK_SIZE as u64, "样本须跨多块，实际 {size}");
+
+        let mut events = Vec::new();
+        READ_BYTES.with(|c| c.set(0));
+        let loaded =
+            load_document_streaming(&target, |p| events.push(p)).expect("UTF-8 应加载成功");
+        let reads = READ_BYTES.with(|c| c.take());
+
+        assert_eq!(loaded.encoding, "UTF-8");
+        assert_eq!(loaded.doc.to_text(), content, "单趟装载的正文必须与源文件逐字一致");
+        assert_eq!(reads, size, "读入字节数应恰等于文件大小（改前是 2×）");
+        assert!(events.len() >= 3, "进度回调次数过少：{}", events.len());
+        for pair in events.windows(2) {
+            assert!(pair[0].bytes_read <= pair[1].bytes_read, "进度必须单调不减");
+        }
+        let last = *events.last().expect("至少一次回调");
+        assert_eq!(last.bytes_read, last.total_bytes, "末值必须到 total");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// O-9 的另一半：真不是 UTF-8 时**仍然**要回卷走 GBK 兜底，且回卷用同一
+    /// fd 的 seek 而非重开文件——所以第二趟读到的字节必须与第一趟同量（说明
+    /// 回到起点了），正文还须与 `decode` 逐字相等。
+    #[test]
+    fn document_streaming_falls_back_to_gbk_by_rewinding_the_same_fd() {
+        let dir = scratch_dir("o9-gbk");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("gbk.txt");
+        // GBK 编码的中文在严格 UTF-8 下必然破格（首块即可判非 UTF-8）
+        let (chunk, _, _) = encoding_rs::GBK.encode("编辑器的中文测试内容，重复若干遍。\r\n");
+        let mut body: Vec<u8> = Vec::new();
+        while (body.len() as u64) < 3 * CHUNK_SIZE as u64 {
+            body.extend_from_slice(&chunk);
+        }
+        fs::write(&target, &body).unwrap();
+        let size = fs::metadata(&target).unwrap().len();
+
+        READ_BYTES.with(|c| c.set(0));
+        let loaded = load_document_streaming(&target, |_| {}).expect("GBK 应加载成功");
+        let reads = READ_BYTES.with(|c| c.take());
+
+        assert_eq!(loaded.encoding, "GBK", "非 UTF-8 必须落到 GBK 兜底");
+        assert_eq!(
+            loaded.doc.to_text(),
+            crate::loader::decode(&body).text,
+            "回卷重读的兜底结果必须与 decode() 一致"
+        );
+        assert_eq!(reads, size * 2, "兜底路径应恰好读两趟（同 fd 回卷，非重开）");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
