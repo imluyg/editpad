@@ -109,6 +109,12 @@ impl Editpad {
                 // 后台页装载把光标打到无关文档上。
                 let link_goto = self.pending_link_goto.take();
                 let fif_goto = self.pending_fif_goto.take();
+                // P221：监视重载的归页意图同样在入口处摘走——曾只在成功臂 take()，
+                // 于是加载失败或结果被丢弃时它一直挂着，下一次**任意**装载都会
+                // 把「跟随到文末 / 还原旧视图」用到无关文档上。这里同时记下目标
+                // 页 id（本臂稍后在 RefMut 作用域内不方便再读 self.tabs）。
+                let monitor_intent = self.monitor_pending.take();
+                let target_id = target.and_then(|i| self.tabs.get(i).map(|t| t.id));
                 match (result, target) {
                     (Ok((doc, sample, encoding)), Some(target)) => {
                         // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
@@ -165,11 +171,11 @@ impl Editpad {
                                     log_appended = true;
                                 }
                                 // P130：监视重载归页——曾在底部则 tail 跟随
-                                // （滚到文末+光标落尾），否则还原重载前视图
-                                if let Some((tab_idx, follow, pre_view)) =
-                                    self.monitor_pending.take()
-                                {
-                                    if tab_idx == target {
+                                // （滚到文末+光标落尾），否则还原重载前视图。
+                                // P221：按页 id 认领（旧代码比的是下标，关页左移
+                                // 后会归到别的页上），且意图已在入口摘走。
+                                if let Some((want_id, follow, pre_view)) = monitor_intent {
+                                    if Some(want_id) == target_id {
                                         if follow {
                                             let last = ed.doc.line_count() - 1;
                                             ed.cursor = crate::editor::CursorPos {
@@ -825,7 +831,7 @@ StTooLargeEolSuffix)
                     let follow = ed.scroll_top >= max_scroll - ed.line_height() * 1.5;
                     let pre_view =
                         (ed.cursor.line, ed.cursor.col, ed.scroll_top, ed.scroll_left);
-                    self.monitor_pending = Some((idx, follow, Some(pre_view)));
+                    self.monitor_pending = Some((tab.id, follow, Some(pre_view)));
                 }
                 let path = tab.path.clone().expect("上方已判 Some");
                 // 加载流由 subscription 依据 active_load 重建接管，返回的

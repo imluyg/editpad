@@ -1286,6 +1286,75 @@ line4
         let _ = std::fs::remove_file(&path);
     }
 
+    /// P221：tail 跟随是**一次性**意图，加载失败/结果被丢弃时必须作废，
+    /// 不得留给下一份文档。
+    #[test]
+    fn monitor_tail_follow_does_not_leak_into_the_next_load() {
+        let dir = std::env::temp_dir().join("editpad-p221-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let watched = dir.join("watch.log");
+        let other = dir.join("other.txt");
+        std::fs::write(&watched, "line1\nline2\n").unwrap();
+        std::fs::write(&other, "a\nb\nc\nd\n").unwrap();
+
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(watched.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("line1\nline2\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::ToggleMonitorFile);
+        std::fs::write(&watched, "line1\nline2\nline3\nline4\n").unwrap();
+        dispatch(&mut app, Message::MonitorTick);
+        let job = app.active_load.clone().expect("巡检应发起监视重载");
+        assert!(
+            app.monitor_pending.is_some(),
+            "夹具：应已记下待归页的 tail 跟随"
+        );
+
+        // 重载失败：日志被轮转/删除正是 tail 跟随场景的日常
+        dispatch(&mut app, Message::Loaded(job.id, Err("文件不存在".to_owned())));
+        assert!(
+            app.monitor_pending.is_none(),
+            "失败出口必须作废这份一次性意图（旧实现留着它）"
+        );
+
+        // 关掉那一页 → 空净无名页补回同一槽位 → 再打开另一个文件
+        dispatch(&mut app, Message::CloseTabAt(0));
+        assert_eq!(app.tabs.len(), 1, "关最后一页会补一个空页（不变式）");
+        dispatch(&mut app, Message::FileDropped(other.clone()));
+        let s2 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s2,
+                Ok((
+                    editpad_core::Document::from_str("a\nb\nc\nd\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        {
+            let ed = app.cur_handle.borrow();
+            assert_eq!(ed.doc.to_text(), "a\nb\nc\nd\n", "夹具：新文件落在同一槽位");
+            assert_eq!(
+                ed.cursor.line, 0,
+                "陈旧的 tail 跟随不得把刚打开文档的光标打到文末（旧实现在这里是 4）"
+            );
+            assert_eq!(ed.scroll_top, 0.0, "同理不得顺手滚动这份无关文档");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn monitor_skips_dirty_page() {
         let dir = std::env::temp_dir().join("editpad-p130-test");

@@ -236,11 +236,13 @@ pub(crate) struct Editpad {
     pub(crate) column_editor_visible: bool,
     /// 对话框草稿（跨开合保留）
     pub(crate) column_editor: ColumnEditorDraft,
-    /// P130：待归页的监视重载（tab 下标, 是否 tail 跟随, 重载前视图）——
+    /// P130：待归页的监视重载（**页 id**, 是否 tail 跟随, 重载前视图）——
     /// check_external_changes 发起监视重载时捕获，Loaded 归页时消费
-    ///（元组即重载前视图快照，一次性搬运不设类型别名）
+    ///（元组即重载前视图快照，一次性搬运不设类型别名）。
+    /// P221：曾是 tab 下标，且只在成功臂被取走——失败/丢弃出口留着它，
+    /// 下一次任意装载就会把「跟随到文末」用到无关文档上。
     #[allow(clippy::type_complexity)]
-    pub(crate) monitor_pending: Option<(usize, bool, Option<(usize, usize, f32, f32)>)>,
+    pub(crate) monitor_pending: Option<(u64, bool, Option<(usize, usize, f32, f32)>)>,
     /// P133：链接点击的待跳行号（1 起）——Ctrl+点击 `file.c:42` 时暂存，
     /// 下一次 Loaded 装载结算后一次性消费（jump_to_line）
     pub(crate) pending_link_goto: Option<u32>,
