@@ -141,11 +141,10 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
         scan_multiline_str(text, &q, case_sensitive, &mut out);
         return out;
     }
-    // 行字符缓冲跨行复用：50MB 级文档约 50 万行，逐行新建 Vec<char>
-    // 会产生等量小堆分配（第 39 轮实测占查找耗时可观份额）
-    let mut lc: Vec<char> = Vec::new();
+    // O-11：查询备好一次，逐行只碰字节（旧版此处是跨行复用的 Vec<char>）
+    let lq = LiteralQuery::new(query, case_sensitive);
     for_each_line(text, |line_idx, line| {
-        scan_line(line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
+        scan_line(line, &lq, line_idx, &mut out, usize::MAX);
     });
     out
 }
@@ -175,9 +174,9 @@ pub(crate) fn find_all_limited(
         all.truncate(limit);
         return all;
     }
-    let mut lc: Vec<char> = Vec::new();
+    let lq = LiteralQuery::new(query, case_sensitive);
     let _ = for_each_line_until(text, |line_idx, line| {
-        scan_line(line, &q, case_sensitive, line_idx, &mut lc, &mut out, limit);
+        scan_line(line, &lq, line_idx, &mut out, limit);
         if out.len() >= limit {
             std::ops::ControlFlow::Break(())
         } else {
@@ -209,7 +208,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
 
     let mut line = String::new();
     let mut line_idx = 0usize;
-    let mut lc: Vec<char> = Vec::new(); // 同 find_all：跨行复用字符缓冲
+    let lq = LiteralQuery::new(query, case_sensitive); // O-11：备好一次
     // 上块以 \r 结尾：下块若以 \n 开头则并入同一 CRLF 单元（不另起一行）
     let mut pending_cr = false;
     for chunk in doc.chunks() {
@@ -224,7 +223,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
         // 遇到完整行界才结算一行——保证与全文单遍切分逐字节等价
         while let Some((pos, blen)) = next_line_break(rest) {
             line.push_str(&rest[..pos]);
-            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
+            scan_line(&line, &lq, line_idx, &mut out, usize::MAX);
             line.clear();
             line_idx += 1;
             rest = &rest[pos + blen..];
@@ -233,7 +232,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
             // 悬置 \r 必是行界（孤立或 CRLF 均然）：行内容到此结算，
             // 是否吞掉下块开头的 \n 交 pending_cr 裁决
             line.push_str(&rest[..rest.len() - '\r'.len_utf8()]);
-            scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
+            scan_line(&line, &lq, line_idx, &mut out, usize::MAX);
             line.clear();
             line_idx += 1;
             pending_cr = true;
@@ -241,7 +240,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
             line.push_str(rest);
         }
     }
-    scan_line(&line, &q, case_sensitive, line_idx, &mut lc, &mut out, usize::MAX);
+    scan_line(&line, &lq, line_idx, &mut out, usize::MAX);
     out
 }
 
@@ -322,45 +321,66 @@ pub fn filter_whole_word(doc: &Document, hits: Vec<MatchPos>) -> Vec<MatchPos> {
 
 /// 单行窗口扫描：在 `line` 的字符序列上滑动长度 `q.len()` 的窗口逐一比较。
 ///
-/// `lc` 为跨行复用的字符缓冲（clear+extend 重用分配；第 39 轮优化），
-/// 语义与每行新建 `Vec<char>` 完全一致。
+/// 字面查询的预处理产物（O-11）：一次备好，逐行复用。
+///
+/// `folded` 是**按大小写口径折叠后的查询字节**，直接喂 [`find_next`]；
+/// `chars` 是查询字符数（= 命中的 `len_chars`，单行命中无换行跨越，显示跨度
+/// 就等于它）。旧实现逐行把整行 `extend` 进 `Vec<char>`，一次查找等于把全文
+/// 按 4 字节/字符搬一遍；本结构让扫描全程只碰字节。
+struct LiteralQuery {
+    /// 折叠后的查询字节（大小写敏感时即原始字节）
+    folded: Vec<u8>,
+    /// 查询字符数
+    chars: usize,
+    /// 大小写口径（透传给 [`find_next`] 的首字节过滤与逐字节比较）
+    case_sensitive: bool,
+}
+
+impl LiteralQuery {
+    fn new(query: &str, case_sensitive: bool) -> Self {
+        Self {
+            folded: query.as_bytes().iter().map(|&b| fold_byte(b, case_sensitive)).collect(),
+            chars: query.chars().count(),
+            case_sensitive,
+        }
+    }
+}
+
+/// 单行字面扫描：在 UTF-8 **字节**上滑动窗口，只在真正命中时才折算字符列号。
+///
+/// 正确性依据同 [`find_next`]：UTF-8 自同步性保证命中起点必落在字符边界
+/// （续字节一律在 `0x80..0xC0`，等不上任何 ASCII 或前导字节的查询首字节），
+/// 所以字节级匹配与逐字符匹配的命中集合完全相同。字符列号靠**游标推进**：
+/// 命中按字节序递增，每次只把「上次结算点到本次命中点」的缺口折成字符数
+/// （非续字节计数），故一行的折算总量 = 该行字节数，与命中数无关。
+///
+/// 命中后起点前进 **1 字节**而非查询长度：保留重叠命中语义（旧实现的
+/// `for start in 0..=(len-q.len())` 天然重叠，`"aaa"` 搜 `"aa"` 得两处）。
 ///
 /// `limit` 是 `out` 的**容量上限**（O-13）：写满即返回，故 `out` 长度恒
 /// 不超过 limit（不是「先写满再截断」）。不限的调用方传 `usize::MAX`。
 fn scan_line(
     line: &str,
-    q: &[char],
-    case_sensitive: bool,
+    lq: &LiteralQuery,
     line_idx: usize,
-    lc: &mut Vec<char>,
     out: &mut Vec<MatchPos>,
     limit: usize,
 ) {
-    lc.clear();
-    lc.extend(line.chars());
-    if lc.len() < q.len() {
-        return;
-    }
-    let first = q[0];
-    'window: for start in 0..=(lc.len() - q.len()) {
-        // 首字符快速过滤：绝大多数位置在此被跳过，省掉内层循环开销
-        if !char_eq(first, lc[start], case_sensitive) {
-            continue;
+    let hay = line.as_bytes();
+    let mut from = 0usize;
+    let mut settled = 0usize; // 已折进 col 的字节前缀
+    let mut col = 0usize;
+    while let Some(i) = find_next(hay, &lq.folded, lq.case_sensitive, from) {
+        for &b in &hay[settled..i] {
+            // 续字节 (10xx_xxxx) 不起始新字符 ⇒ 非续字节数即字符数
+            col += (b & 0xC0 != 0x80) as usize;
         }
-        for (offset, &qc) in q.iter().enumerate().skip(1) {
-            if !char_eq(qc, lc[start + offset], case_sensitive) {
-                continue 'window;
-            }
-        }
+        settled = i;
         if out.len() >= limit {
             return;
         }
-        out.push(MatchPos {
-            line: line_idx,
-            col: start,
-            // 单行命中无换行跨越，显示跨度 == 查询字符数
-            len_chars: q.len(),
-        });
+        out.push(MatchPos { line: line_idx, col, len_chars: lq.chars });
+        from = i + 1;
     }
 }
 
@@ -1138,10 +1158,10 @@ mod tests {
     }
 
     #[test]
-    fn find_all_reuses_line_char_buffer_across_lines() {
-        // 回归第 39 轮缓冲复用优化：跨行长短交替 + 空行 + 多字节行，
-        // 若复用缓冲残留上一行状态（clear 缺失/顺序错乱）会当场断言失败；
-        // 两条路径共享同一 scan_line，钉住精确语义即可双向覆盖
+    fn find_all_pins_line_and_multibyte_columns() {
+        // 钉住精确坐标：跨行长短交替 + 空行 + 多字节行（O-11 之前这条回归的是
+        // 「跨行复用 Vec<char> 是否残留上一行状态」；内核改字节扫描后缓冲已不
+        // 存在，但坐标断言本身仍是想要的不变量——列号按**字符**而非字节）
         let text = "the quick brown fox jumps over the lazy dog\n短行 the\n\nthe end 🚀\nno match here\nthe";
         let want = vec![
             MatchPos { line: 0, col: 0, len_chars: 3 },
@@ -1153,6 +1173,146 @@ mod tests {
         assert_eq!(find_all(text, "the", true), want);
         let doc = Document::from_str(text);
         assert_eq!(find_all_document(&doc, "the", true), want);
+    }
+
+    /// O-11 参照实现：字面查找的**旧逐字符算法**原样留档（P11 / 第 39 轮的
+    /// 形状），只当差分对拍的 oracle。
+    ///
+    /// 为什么非要留一份旧代码：重构后 `find_all` 与 `find_all_document` 共用
+    /// **同一个**新内核，它俩互相相等已经不构成证据（同一段代码自己等于自己）。
+    /// 真正的论点是「字节窗口匹配 ≡ 逐字符窗口匹配」，那只靠 UTF-8 自同步性
+    /// 推演不够，必须有独立参照。跨行查询走另一个内核（本次未触碰），直接委托
+    /// 生产实现跳过对拍。
+    fn find_all_char_ref(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> {
+        let mut out = Vec::new();
+        if query.is_empty() {
+            return out;
+        }
+        let q: Vec<char> = query.chars().collect();
+        if q.contains(&'\n') {
+            return find_all(text, query, case_sensitive);
+        }
+        let mut lc: Vec<char> = Vec::new();
+        for_each_line(text, |line_idx, line| {
+            lc.clear();
+            lc.extend(line.chars());
+            if lc.len() < q.len() {
+                return;
+            }
+            let first = q[0];
+            'window: for start in 0..=(lc.len() - q.len()) {
+                if !char_eq(first, lc[start], case_sensitive) {
+                    continue;
+                }
+                for (offset, &qc) in q.iter().enumerate().skip(1) {
+                    if !char_eq(qc, lc[start + offset], case_sensitive) {
+                        continue 'window;
+                    }
+                }
+                out.push(MatchPos { line: line_idx, col: start, len_chars: q.len() });
+            }
+        });
+        out
+    }
+
+    /// O-11 主护栏：字节扫描与旧的逐字符扫描**逐点相等**（行号/列号/跨度），
+    /// 并顺带交叉钉住 O-13 的「封顶 == 全量前缀」在新内核上仍成立。
+    #[test]
+    fn find_all_byte_scan_equals_char_scan_on_random_texts() {
+        let queries = [
+            "a", "aa", "中", "🚀", "ab", "a中", "\r", "x", " ", "行", "the", "THe",
+        ];
+        for seed in [101u64, 202, 30303, 0xC0FFEE] {
+            let text = pseudo_random_text(seed, 20_000);
+            let doc = Document::from_str(&text);
+            // 加载度自检：随机样本字母表是 a b c \n \r 中 🚀 x，若哪天生成器
+            // 变了导致这些查询全部空对空，本用例就成了假绿——先钉住它真的忙。
+            let load = find_all(&text, "a", true).len();
+            assert!(load > 1000, "seed={seed} 样本里 'a' 命中仅 {load}，对拍已失去判别力");
+            assert!(
+                text.contains('中') && text.contains('🚀') && text.contains('\r'),
+                "seed={seed} 样本必须含多字节与 \\r 行界"
+            );
+            for q in queries {
+                for cs in [true, false] {
+                    let got = find_all(&text, q, cs);
+                    assert_eq!(
+                        got,
+                        find_all_char_ref(&text, q, cs),
+                        "字节扫描与逐字符参照不等: seed={seed} query={q:?} cs={cs}"
+                    );
+                    assert_eq!(
+                        find_all_document(&doc, q, cs),
+                        got,
+                        "rope 路径须与全文路径同结果: seed={seed} query={q:?} cs={cs}"
+                    );
+                    for limit in [0usize, 1, 7, 500] {
+                        let want: Vec<MatchPos> = got.iter().take(limit).cloned().collect();
+                        assert_eq!(
+                            find_all_limited(&text, q, cs, limit),
+                            want,
+                            "封顶版不再是全量前缀: seed={seed} query={q:?} limit={limit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// O-11 的行界口径定例：`pseudo_random_text` 的字母表里没有 VT/FF/NEL/LS/PS
+    /// 这四个「也算行界」的字符，而字面查找按行切分（`for_each_line`）——查询
+    /// 若含这些字符，命中集合取决于**切行口径**，正是新旧实现最容易分叉的地方。
+    /// 逐字符参照与字节扫描必须在每一种形态上给出同一张表。
+    #[test]
+    fn find_all_byte_scan_agrees_with_char_scan_on_exotic_line_breaks() {
+        let fixtures = [
+            "a\u{b}a\u{c}a",                 // VT / FF 也是行界
+            "\u{85}ab\u{85}cd",              // NEL
+            "行\u{2028}前\u{2029}后",         // LS / PS
+            "x\r\ny\rz\nw",                  // CRLF / 孤立 CR / LF 混排
+            "\u{1F600}\u{b}\u{1F600}",        // 4 字节字符夹一个行界
+            "a\u{b}",                        // 行界收尾
+        ];
+        let queries = [
+            "a", "\u{b}", "\u{c}", "\u{85}", "\u{2028}", "\u{2029}", "\u{1F600}", "ab",
+            "x\r", "\r", "行", "前", "后",
+            // 定例 4（x\r\ny\rz\nw）只有拉丁短串可命中——「x\r」按下面的行界口径
+            // 永不命中，故必须补 x / y / cd，否则该定例是空对空的假绿
+            "x", "y", "cd", "z",
+        ];
+        for text in fixtures {
+            let doc = Document::from_str(text);
+            let mut any_hit = 0usize;
+            for q in queries {
+                for cs in [true, false] {
+                    let got = find_all(text, q, cs);
+                    assert_eq!(
+                        got,
+                        find_all_char_ref(text, q, cs),
+                        "行界定例不等: text={text:?} query={q:?} cs={cs}"
+                    );
+                    assert_eq!(find_all_document(&doc, q, cs), got, "rope 路径 text={text:?} query={q:?}");
+                    any_hit += got.len();
+                }
+            }
+            assert!(any_hit > 0, "定例 {text:?} 一条都没命中，对拍失去判别力");
+        }
+        // 显式钉住一条**既有口径**（本次重构原样保留，不是新决策）：VT/FF/NEL/
+        // LS/PS 属于行界全集 ⇒ 它们不进入行内容 ⇒ 查询里含这些字符时**永不命中**，
+        // 即便文本里确有该字符。与「查询含 \r 也永不命中」同族。改这条要先过
+        // N-09 那张分叉矩阵（半修行界口径会把「找不到」变成「找得到换不掉」）。
+        assert!(find_all("a\u{b}b", "\u{b}", true).is_empty(), "VT 是行界：不得作为行内命中");
+        assert!(find_all("行\u{2028}前", "\u{2028}", true).is_empty(), "LS 是行界：同上");
+        assert_eq!(
+            find_all("a\u{b}b", "a", true),
+            vec![MatchPos { line: 0, col: 0, len_chars: 1 }],
+            "VT 前的一段就是一条独立行"
+        );
+        assert_eq!(
+            find_all("a\u{b}b", "b", true),
+            vec![MatchPos { line: 1, col: 0, len_chars: 1 }],
+            "VT 之后的内容算下一行"
+        );
     }
 
     // ---------- P26：跨行查询 ----------
