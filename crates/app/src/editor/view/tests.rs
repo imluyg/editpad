@@ -1699,12 +1699,17 @@ fn o1_find_hit_draw_cost_scales_with_viewport_not_document() {
     );
 }
 
-/// O-1 的反证护栏：视口剔除必须是**纯成本收敛**。两份文档在视口内逐字符
-/// 相同、只有视口外的行数与内容不同（选区都超出可见区），成帧应逐像素相等。
-/// 一旦哪天把可见行也剔掉了，这里立刻炸。比较区刻意避开滚动条覆盖带——
-/// 两份文档行程不同，那是剔除之外的既有差异。
+/// O-1 的反证护栏：**单帧判据**——剔除只许砍掉视口外的行，可见行一行都不许漏。
+///
+/// 一帧之内直接问「每一可视行的选区带在不在」，与渲染次数无关。
+/// ⚠️ 这条原先写成「两份文档（视口内逐字符相同、视口外行数不同）成帧逐像素
+/// 相等」，实测**被否证**：跨帧比较把字体测量的不确定性当成了被测对象——两次
+/// 独立渲染的 `char_w` 可以不同（cosmic-text 走全局 font_system，冷热不一、
+/// 缓存受压淘汰），整版平移几像素就让断言随机失败（同一份代码先后报 6048、
+/// 11963 个差异像素，且加预热帧也压不住）。像素级判据只能用**同帧内**的颜色
+/// 事实，不能跨帧比。
 #[test]
-fn o1_viewport_culling_leaves_pixels_untouched() {
+fn o1_every_visible_line_keeps_its_selection_band() {
     let render = |total: usize| -> tiny_skia::Pixmap {
         let core = EditorHandle::default();
         {
@@ -1747,23 +1752,43 @@ fn o1_viewport_culling_leaves_pixels_untouched() {
         );
         pixels
     };
-    // 预热帧：cosmic-text 走**全局 font_system**，冷启动时 `measure_text_width`
-    // 可能返回 None，而 `ensure_measured_char_width` 刻意「先记键再量、本帧不
-    // 重试」（view/mod.rs:114）→ 一冷一热两帧的 char_w 不同、整版平移。对照
-    // 两侧都必须是热帧，否则测到的是字体缓存温度而不是剔除语义。
-    let _ = render(100);
-    let _ = render(500);
-    let a = render(100);
-    let b = render(500);
-    let mut diff = 0u32;
-    for y in 0..270u32 {
-        for x in 0..570u32 {
-            if a.pixel(x, y) != b.pixel(x, y) {
-                diff += 1;
+    let px = render(500);
+    // 行高是纯字号派生量（不经字体测量），在一份裸 handle 上取即可
+    let handle = EditorHandle::default();
+    let lh = handle.borrow().line_height();
+    let rows = (300.0 / lh).floor() as usize;
+    let mid = (lh / 2.0) as u32;
+    // 逐可视行的选区带墨迹量。⚠️ 本编辑器只把选区带画到**行内容宽**（记事本
+    // 同款，不是整幅视口宽），所以一条带的墨迹只有几十字像素，且会被带上的
+    // 灰阶字形挖掉一部分——绝对阈值没有意义，判据用「行与行相当且都非零」。
+    let mut inks: Vec<u32> = Vec::new();
+    for row in 0..rows {
+        // scroll_top 恰为整数 50 → 屏幕第 row 行即逻辑行 50+row，占据
+        // y ∈ [row·lh, (row+1)·lh)，取行心扫描线
+        let y = row as u32 * lh as u32 + mid;
+        let mut ink = 0u32;
+        for x in 0..560u32 {
+            if let Some(p) = px.pixel(x, y) {
+                // 选区带 = SELECTION_COLOR(0x33,0x66,0xCC,0.25) 叠白底，是画面里
+                // 唯一带蓝调的东西（正文/行号/底纹全是灰阶）。按 R 与 B 的通道
+                // 张量判定，与 Pixmap 的通道序无关（第 60 轮实测其为 BGRA）。
+                if ((p.red() as i32) - (p.blue() as i32)).abs() >= 25 {
+                    ink += 1;
+                }
             }
         }
+        inks.push(ink);
     }
-    assert_eq!(diff, 0, "视口外文档规模变化改变了可见像素——剔除不再是纯成本收敛");
+    let max_ink = *inks.iter().max().expect("至少一行");
+    assert!(max_ink > 20, "整帧找不到任何选区带（最大 {max_ink} px）");
+    for (row, ink) in inks.iter().enumerate() {
+        assert!(
+            *ink >= max_ink / 2,
+            "第 {row} 可视行选区带墨迹 {ink} px，远低于同帧最宽行 {max_ink} px：\
+             该行被视口剔除吃掉了"
+        );
+    }
+    assert!(rows >= 8, "可视行数过少（{rows}），护栏形同虚设");
 }
 
 
