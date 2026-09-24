@@ -34,6 +34,9 @@ mod settings;
 
 /// 节拍种类：既描述间隔与产出消息，也充当订阅身份（`run_with` 的 data，
 /// 内容变化即重键 → 旧流撤销、新流按新参数启动）。
+///
+/// 只收录**每拍必出声**的周期节拍；单实例转发轮询（P210）不属于这里——它
+/// 空拍不出声，见 [`pending_open_stream`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TickKind {
     /// 光标闪烁 / 滚动条淡出快拍（间隔随淡出态切换）
@@ -42,8 +45,6 @@ pub(crate) enum TickKind {
     Heartbeat { interval_secs: u32 },
     /// 文件监视巡检（固定 2s）
     Monitor,
-    /// 单实例转发握手轮询（固定 400ms）
-    PendingOpen,
 }
 
 type TickStream = std::pin::Pin<Box<dyn iced::futures::Stream<Item = Message> + Send>>;
@@ -72,10 +73,6 @@ pub(crate) fn tick_stream(kind: &TickKind) -> TickStream {
             std::time::Duration::from_secs(2),
             (|| Message::MonitorTick) as fn() -> Message,
         ),
-        TickKind::PendingOpen => (
-            std::time::Duration::from_millis(400),
-            (|| Message::PendingOpenTick) as fn() -> Message,
-        ),
     };
     Box::pin(stream::channel(
         4,
@@ -88,6 +85,50 @@ pub(crate) fn tick_stream(kind: &TickKind) -> TickStream {
                     Err(e) if e.is_full() => {}
                     // 订阅已撤销：线程自然收敛
                     Err(_) => break,
+                }
+            });
+            std::future::pending::<()>().await
+        },
+    ))
+}
+
+/// 订阅身份：单实例转发轮询流（无参数，故永不重键）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PendingOpenPoll;
+
+/// 单实例转发轮询流（P210，体检项 O-7②）。
+///
+/// 与 [`tick_stream`] 的区别是这条流**自己决定要不要出声**：
+/// - 旧口径每 400ms 无条件投一条 `PendingOpenTick`，而握手目录绝大多数
+///   时候是空的——空拍照样触发一次全窗 tiny-skia 重绘（≈2.5 次/秒的常驻
+///   开销，纯白给）；
+/// - 且「读目录 → rename 抢占 → 读 → 删」四步跑在 **UI 线程**上，
+///   `%APPDATA` 落在漫游盘或 OneDrive 占位符上时会直接卡手。
+///
+/// 现在四步都在桥接线程里做，只有真取到路径才投一条消息。缓冲写满时**退避
+/// 重试而不是丢拍**（与周期节拍相反）：路径已经从磁盘抢走，丢了就等于把用户
+/// 双击的文件静默吞掉——那正是 P148 花两轮修过的一族症状。订阅撤除只发生在
+/// 退出时，故重试不会与重键交错。
+pub(crate) fn pending_open_stream(_: &PendingOpenPoll) -> TickStream {
+    Box::pin(stream::channel(
+        1,
+        move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let paths = crate::single_instance::take_pending_open();
+                if paths.is_empty() {
+                    continue; // 空拍：一条消息都不发
+                }
+                let msg = Message::PendingOpenPaths(paths);
+                loop {
+                    match output.try_send(msg.clone()) {
+                        Ok(()) => break,
+                        Err(e) if e.is_full() => {
+                            std::thread::sleep(std::time::Duration::from_millis(20))
+                        }
+                        // 订阅已撤销（退出）：随进程一起结束即可
+                        Err(_) => return,
+                    }
                 }
             });
             std::future::pending::<()>().await
@@ -482,7 +523,7 @@ impl Editpad {
             | Message::FileChosen(..)
             | Message::FileDropped(..)
             | Message::OpenNextCliFile
-            | Message::PendingOpenTick
+            | Message::PendingOpenPaths(..)
             | Message::LoadProgress(..)
             | Message::Loaded(..)
             | Message::LinkClicked(..)
@@ -862,7 +903,9 @@ impl Editpad {
         } else {
             Subscription::none()
         };
-        let pending_open = Subscription::run_with(TickKind::PendingOpen, tick_stream);
+        // P210：转发轮询不再走 TickKind 表——它是唯一「空拍不出声」的流，
+        // 与周期节拍共用一张表会让「每拍必出声」这个前提变得含糊。
+        let pending_open = Subscription::run_with(PendingOpenPoll, pending_open_stream);
         // P10 的查找扫描走 Task::perform（见 schedule_find_scan），不经订阅
         // 0.14 没有 keyboard::on_key_press 了，用 listen_with 手动过滤按键；
         // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）。

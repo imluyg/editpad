@@ -136,6 +136,10 @@ pub(crate) struct Editpad {
     /// P103：命令行传入的待打开文件队列（双击/「打开方式」）。boot 注入，
     /// [`Message::OpenNextCliFile`] 逐个弹出；加载管线单任务承接，故串行。
     pub(crate) pending_cli: VecDeque<PathBuf>,
+    /// P210：busy 期间到达的单实例转发路径暂存。轮询线程已把批次文件从磁盘
+    /// 抢走，此时不能塞进 [`Self::pending_cli`]——取消分支会连带作废整条队列
+    /// （N-07 口径），那等于把用户双击的文件吞掉。下一拍（400ms）不忙时并入。
+    pub(crate) pending_open_stash: Vec<PathBuf>,
 
     // ---------- 查找 / 替换 ----------
     pub(crate) find_visible: bool,
@@ -377,6 +381,7 @@ impl Default for Editpad {
             active_load: None,
             progress: None,
             pending_cli: VecDeque::new(),
+            pending_open_stash: Vec::new(),
             find_visible: false,
             find_query: String::new(),
             replace_query: String::new(),

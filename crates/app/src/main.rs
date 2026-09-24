@@ -520,8 +520,9 @@ enum Message {
     /// 每次 Loaded 结算后续排——加载管线同一时刻只承接一个任务，多个
     /// 命令行文件必须串行；队列见 [`Editpad::pending_cli`]）
     OpenNextCliFile,
-    /// 单实例转发轮询拍：读实例目录握手文件里的待开路径（无则空转续期）
-    PendingOpenTick,
+    /// 单实例转发轮询取到的待开路径（P210：轮询在桥接线程做，**只有真取到
+    /// 路径才发这一条**，不再有每 400ms 一次的空拍消息；见 `tick_stream`）
+    PendingOpenPaths(Vec<PathBuf>),
     /// 打开确认条「放弃更改并打开」：丢弃未保存修改并加载暂存路径
     ConfirmOpenDiscard,
     /// 打开确认条「取消」：留在当前文档

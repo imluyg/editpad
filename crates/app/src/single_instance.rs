@@ -127,6 +127,14 @@ pub(crate) fn take_pending_open() -> Vec<std::path::PathBuf> {
     let Some(dir) = base.parent() else {
         return Vec::new();
     };
+    take_pending_open_in(dir)
+}
+
+/// `take_pending_open` 的目录参数化内核，拆出纯粹是为了可测：下面这段
+/// 「rename 原子抢占」的并发契约此前**一条用例都没有**，而它守着的是「用户
+/// 双击的文件会不会被静默吞掉」（P148）。测试据此在临时目录里跑，绝不碰
+/// 真实实例目录。
+pub(crate) fn take_pending_open_in(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;

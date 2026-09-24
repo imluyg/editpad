@@ -55,19 +55,24 @@ impl Editpad {
                 };
                 self.request_open(path)
             }
-            Message::PendingOpenTick => {
-                // 单实例转发轮询：读实例目录批次文件里第二实例递来的待开
-                // 路径，走既有 CLI 队列在新标签页逐个打开。busy（加载/
-                // 对话框在途）时跳过本拍，下一拍自然重试。
-                // P149：节拍已改订阅时钟驱动，本臂只做轮询。
-                if !self.busy {
-                    let paths = single_instance::take_pending_open();
-                    if !paths.is_empty() {
-                        self.pending_cli.extend(paths);
-                        return self.update(Message::OpenNextCliFile);
-                    }
+            Message::PendingOpenPaths(paths) => {
+                // 单实例转发的**到货通知**（P210：轮询与 rename 抢占都在桥接
+                // 线程里做，空拍一条消息都不发，故本臂只在真有活时到达）。
+                // busy（加载/对话框在途）时不进 pending_cli——取消分支会连带
+                // 作废整条队列（N-07 的口径），而路径已经从磁盘抢走了，塞进去
+                // 等于让用户双击的文件被一次「取消」吞掉。改存
+                // Editpad::pending_open_stash，等下一拍到货且已不忙时并入，
+                // 节拍每 400ms 再来一次，自愈合。
+                if self.busy {
+                    self.pending_open_stash.extend(paths);
+                    return Task::none();
                 }
-                Task::none()
+                if !self.pending_open_stash.is_empty() {
+                    self.pending_cli
+                        .extend(std::mem::take(&mut self.pending_open_stash));
+                }
+                self.pending_cli.extend(paths);
+                self.update(Message::OpenNextCliFile)
             }
             Message::LoadProgress(job_id, bytes_read, total_bytes) => {
                 if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {

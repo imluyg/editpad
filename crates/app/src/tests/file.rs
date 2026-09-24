@@ -1793,10 +1793,134 @@ external
         // P149：节拍订阅桥接语义——桥接线程睡满间隔后经 async channel
         // 投递，首拍按间隔到达（此前 Task 睡眠链占用执行器 worker 整段
         // 睡眠时长，四条链常驻占死 2~3 个 worker）。
-        let mut stream = Box::pin(crate::update::tick_stream(&crate::update::TickKind::PendingOpen));
+        // P210 起改用 Monitor 作探针：转发轮询那条流现在刻意**不产空拍**
+        // （见下方 pending_open_stream_* 两条用例），已经不是「周期性出声」
+        // 的代表样本了。
+        let mut stream = Box::pin(crate::update::tick_stream(&crate::update::TickKind::Monitor));
         let first = block_on(stream.as_mut().next());
         assert!(
-            matches!(first, Some(Message::PendingOpenTick)),
-            "首拍应产出节拍消息"
+            matches!(first, Some(Message::MonitorTick)),
+            "首拍应产出节拍消息，实际 {first:?}"
         );
+    }
+
+    /// P210（O-7②）：转发轮询的空拍**不得产出消息**。
+    ///
+    /// 修前每 400ms 无条件一条 `PendingOpenTick`，每条消息 = 一次全窗
+    /// tiny-skia 重绘 ≈ 2.5 次/秒的常驻开销（而握手目录绝大多数时候是空的），
+    /// 且「读目录 → rename 抢占 → 读 → 删」四步跑在 UI 线程上。
+    /// 判据不用耗时：先起流、再跨过 ≥2 拍，然后单趟抽缓冲——空拍若发过消息，
+    /// 此刻必然已在缓冲里（容量 1）。
+    #[test]
+    fn pending_open_stream_stays_silent_while_nothing_arrived() {
+        use iced::futures::task::{noop_waker, Context};
+        use std::time::{Duration, Instant};
+        let mut stream =
+            Box::pin(crate::update::pending_open_stream(&crate::update::PendingOpenPoll));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // ⚠️ 必须先 poll 一次：`stream::channel` 的建流闭包（含拉起桥接线程）
+        // 到**首次 poll** 才执行。漏了这一步，下面睡的是「还没开始的线程」，
+        // 用例空转恒绿——本条第一次就写成那样，靠「拆掉守卫看会不会转红」
+        // 才抓出来。
+        let started = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
+        assert!(started.is_pending(), "刚建流时不该有产出");
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(1100) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let polled = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
+        assert!(
+            polled.is_pending(),
+            "目录里没有转发批次时，轮询流跑满 1.1 秒（≥2 拍）也不该发一条消息，实际 {polled:?}"
+        );
+    }
+
+    /// P210：busy 期间到货的转发路径改存暂存位，不混进 `pending_cli`。
+    /// 依据是 N-07 的既有口径——`ConfirmOpenCancel` / `BarsDismissed` 会整条
+    /// 清空 `pending_cli`（那批本就是用户主动取消的对象），而转发路径此刻已经
+    /// 从磁盘抢走、无处重试：混进去就是「取消一次确认条，第二实例双击的文件
+    /// 全丢」。旧实现靠「busy 时干脆不读盘」回避，读盘挪到桥接线程后改暂存，
+    /// 下一拍（400ms）自愈合。
+    #[test]
+    fn pending_open_paths_stash_while_busy_and_merge_in_order_when_idle() {
+        let mut app = Editpad::default();
+        app.busy = true;
+        dispatch(
+            &mut app,
+            Message::PendingOpenPaths(vec![PathBuf::from("C:/pf/a.txt")]),
+        );
+        assert!(
+            app.pending_cli.is_empty(),
+            "busy 时不得混进 CLI 队列（会被取消分支连带作废）"
+        );
+        assert_eq!(app.pending_open_stash, vec![PathBuf::from("C:/pf/a.txt")]);
+
+        // 不忙后的下一拍：暂存按原顺序并入，再走既有的串行续排
+        app.busy = false;
+        dispatch(
+            &mut app,
+            Message::PendingOpenPaths(vec![PathBuf::from("C:/pf/b.txt")]),
+        );
+        assert!(app.pending_open_stash.is_empty(), "暂存应已并入并清空");
+        assert_eq!(
+            app.active_load.as_ref().map(|j| j.path.clone()),
+            Some(PathBuf::from("C:/pf/a.txt")),
+            "先到的路径先加载"
+        );
+        assert_eq!(
+            app.pending_cli,
+            VecDeque::from(vec![PathBuf::from("C:/pf/b.txt")]),
+            "余下按原顺序排队"
+        );
+    }
+
+    /// P210：抢占读取内核的首批用例。P148 那段「rename 原子抢占 + 读后即删」
+    /// 守着的是「用户双击的文件会不会被静默吞掉」，此前**一条用例都没有**。
+    #[test]
+    fn pending_open_claim_reads_and_removes_each_batch() {
+        let dir = scratch_dir("p210-claim");
+        // 两批（pid 命名，P148 的并发口径）+ 一堆非批次名
+        std::fs::write(dir.join("pending_open.111.txt"), "C:/a.txt\n  C:/b.txt  \n\n").unwrap();
+        std::fs::write(dir.join("pending_open.222.txt"), "C:/c.txt").unwrap();
+        std::fs::write(dir.join("session.toml"), "C:/noise.txt").unwrap();
+        std::fs::write(dir.join("pending_open.333.bak"), "C:/noise2.txt").unwrap();
+
+        let mut got = crate::single_instance::take_pending_open_in(&dir);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("C:/a.txt"),
+                PathBuf::from("C:/b.txt"),
+                PathBuf::from("C:/c.txt")
+            ],
+            "批次路径应逐行取出（两端空白与空行剔除），非批次名不得认领"
+        );
+        // 取后即删：同目录再取必须是空表——这正是「空拍不发消息」的判据源
+        assert!(
+            crate::single_instance::take_pending_open_in(&dir).is_empty(),
+            "批次文件应已被认领并删除，且噪音文件不得被吞"
+        );
+        assert!(dir.join("session.toml").exists(), "非批次文件一律不碰");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P210：上一轮认领后崩溃留下的 `.taking-` 半途文件，下一轮照常读（P148
+    /// 注释里承诺的自愈路径）。它同样匹配 `pending_open.*.txt`，靠的是命名
+    /// 前缀而非运气——本用例把这条承诺钉住。
+    #[test]
+    fn pending_open_claim_recovers_leftover_taking_file() {
+        let dir = scratch_dir("p210-taking");
+        std::fs::write(dir.join("pending_open.taking-999.txt"), "C:/x.txt").unwrap();
+        assert_eq!(
+            crate::single_instance::take_pending_open_in(&dir),
+            vec![PathBuf::from("C:/x.txt")],
+            "半途文件应被下一轮认领"
+        );
+        assert!(
+            crate::single_instance::take_pending_open_in(&dir).is_empty(),
+            "认领后不留残骸"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
