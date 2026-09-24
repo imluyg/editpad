@@ -1809,14 +1809,21 @@ external
     /// 修前每 400ms 无条件一条 `PendingOpenTick`，每条消息 = 一次全窗
     /// tiny-skia 重绘 ≈ 2.5 次/秒的常驻开销（而握手目录绝大多数时候是空的），
     /// 且「读目录 → rename 抢占 → 读 → 删」四步跑在 UI 线程上。
-    /// 判据不用耗时：先起流、再跨过 ≥2 拍，然后单趟抽缓冲——空拍若发过消息，
-    /// 此刻必然已在缓冲里（容量 1）。
+    ///
+    /// P212 起取货函数由订阅身份注入，故本用例**一次都不碰真实实例目录**
+    /// （真机若开着另一个 Editpad 实例，往 %APPDATA 写批次文件会被它抢走，
+    /// 既脏了用户会话也让用例互斥不掉）。判据不用耗时：先起流、跨过 ≥7 拍，
+    /// 再单趟抽缓冲——空拍若发过消息，此刻必然已在缓冲里（容量 1）。
     #[test]
     fn pending_open_stream_stays_silent_while_nothing_arrived() {
         use iced::futures::task::{noop_waker, Context};
+        use std::task::Poll;
         use std::time::{Duration, Instant};
-        let mut stream =
-            Box::pin(crate::update::pending_open_stream(&crate::update::PendingOpenPoll));
+        let key = crate::update::PendingOpenPoll {
+            interval_ms: 20,
+            poll: || Vec::new(),
+        };
+        let mut stream = Box::pin(crate::update::pending_open_stream(&key));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         // ⚠️ 必须先 poll 一次：`stream::channel` 的建流闭包（含拉起桥接线程）
@@ -1824,16 +1831,54 @@ external
         // 用例空转恒绿——本条第一次就写成那样，靠「拆掉守卫看会不会转红」
         // 才抓出来。
         let started = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
-        assert!(started.is_pending(), "刚建流时不该有产出");
+        assert!(matches!(started, Poll::Pending), "刚建流时不该有产出");
         let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(1100) {
-            std::thread::sleep(Duration::from_millis(50));
+        while start.elapsed() < Duration::from_millis(150) {
+            std::thread::sleep(Duration::from_millis(10));
         }
         let polled = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
         assert!(
-            polled.is_pending(),
-            "目录里没有转发批次时，轮询流跑满 1.1 秒（≥2 拍）也不该发一条消息，实际 {polled:?}"
+            matches!(polled, Poll::Pending),
+            "取货函数一直空时，跑满 150ms（≥7 拍）也不该发一条消息，实际 {polled:?}"
         );
+    }
+
+    /// P212：与上一条对偶——**到货必须发声**。只测「空拍不发声」不够，
+    /// 「整条流永不产出」的错误实现能同时骗过那一条。
+    #[test]
+    fn pending_open_stream_delivers_arrived_paths() {
+        use iced::futures::task::{noop_waker, Context};
+        use std::task::Poll;
+        use std::time::{Duration, Instant};
+        let key = crate::update::PendingOpenPoll {
+            interval_ms: 20,
+            poll: || vec![PathBuf::from("C:/p212/a.txt")],
+        };
+        let mut stream = Box::pin(crate::update::pending_open_stream(&key));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx); // 起线程
+        let start = Instant::now();
+        loop {
+            if let Poll::Ready(Some(msg)) =
+                iced::futures::Stream::poll_next(stream.as_mut(), &mut cx)
+            {
+                match msg {
+                    Message::PendingOpenPaths(p) => assert_eq!(
+                        p,
+                        vec![PathBuf::from("C:/p212/a.txt")],
+                        "取到的路径必须原样带在消息里"
+                    ),
+                    other => panic!("应产出 PendingOpenPaths，实际 {other:?}"),
+                }
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_millis(3000),
+                "取货函数一直有货，3 秒内必须出声"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// P210：busy 期间到货的转发路径改存暂存位，不混进 `pending_cli`。

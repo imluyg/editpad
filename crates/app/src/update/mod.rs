@@ -92,9 +92,29 @@ pub(crate) fn tick_stream(kind: &TickKind) -> TickStream {
     ))
 }
 
-/// 订阅身份：单实例转发轮询流（无参数，故永不重键）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct PendingOpenPoll;
+/// 订阅身份：单实例转发轮询。
+///
+/// 载荷带「间隔 + 取货函数」有两个理由（P212）：① 测试能在自己的临时目录里
+/// 跑完整周期，既验「空拍不发声」也验「到货必发声」，且**绝不碰真实实例目录**
+/// （真机若开着另一个 Editpad 实例，往 %APPDATA 写批次文件会被它抢走）；
+/// ② 生产口径下两者恒为 [`PENDING_OPEN_POLL`]，`run_with` 按内容哈希去重 →
+/// 永不重键。
+///
+/// ⚠️ 只派生 `Hash`（订阅键的唯一用途），**不派生 `PartialEq`**：函数指针的
+/// 地址比较没有可靠语义（clippy `unpredictable_function_pointer_comparisons`），
+/// 一旦允许 `==` 就会有人拿它判等。
+#[derive(Debug, Clone, Copy, Hash)]
+pub(crate) struct PendingOpenPoll {
+    pub(crate) interval_ms: u64,
+    /// 一次取货：返回空表 = 本拍无事可做（不发任何消息）
+    pub(crate) poll: fn() -> Vec<std::path::PathBuf>,
+}
+
+/// 生产用轮询参数（间隔沿用 P149 之前的 400ms 手感）。
+pub(crate) const PENDING_OPEN_POLL: PendingOpenPoll = PendingOpenPoll {
+    interval_ms: 400,
+    poll: crate::single_instance::take_pending_open,
+};
 
 /// 单实例转发轮询流（P210，体检项 O-7②）。
 ///
@@ -109,13 +129,15 @@ pub(crate) struct PendingOpenPoll;
 /// 重试而不是丢拍**（与周期节拍相反）：路径已经从磁盘抢走，丢了就等于把用户
 /// 双击的文件静默吞掉——那正是 P148 花两轮修过的一族症状。订阅撤除只发生在
 /// 退出时，故重试不会与重键交错。
-pub(crate) fn pending_open_stream(_: &PendingOpenPoll) -> TickStream {
+pub(crate) fn pending_open_stream(key: &PendingOpenPoll) -> TickStream {
+    let interval = std::time::Duration::from_millis(key.interval_ms);
+    let poll = key.poll;
     Box::pin(stream::channel(
         1,
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                let paths = crate::single_instance::take_pending_open();
+                std::thread::sleep(interval);
+                let paths = poll();
                 if paths.is_empty() {
                     continue; // 空拍：一条消息都不发
                 }
@@ -905,7 +927,7 @@ impl Editpad {
         };
         // P210：转发轮询不再走 TickKind 表——它是唯一「空拍不出声」的流，
         // 与周期节拍共用一张表会让「每拍必出声」这个前提变得含糊。
-        let pending_open = Subscription::run_with(PendingOpenPoll, pending_open_stream);
+        let pending_open = Subscription::run_with(PENDING_OPEN_POLL, pending_open_stream);
         // P10 的查找扫描走 Task::perform（见 schedule_find_scan），不经订阅
         // 0.14 没有 keyboard::on_key_press 了，用 listen_with 手动过滤按键；
         // 同一条流顺带捕获拖拽文件（FileDropped；FileHovered 忽略）。

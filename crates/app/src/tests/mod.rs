@@ -2,7 +2,9 @@
     use super::settings_ui::*;
     use iced::futures::{executor::block_on, StreamExt};
 
-    /// 项目内落盘目录：系统 TEMP 在部分沙箱下不可写。
+    /// 落盘夹具目录：`%TEMP%\editpad-app-tests\<tag>-<pid>`（P212 纠注释——
+    /// 原文写「项目内落盘目录：系统 TEMP 在部分沙箱下不可写」，与代码相反；
+    /// autosave.rs 的同款假注释已随体检项 E-7 改过，这处是它的出处）。
     fn scratch_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir()
             .join("editpad-app-tests")
