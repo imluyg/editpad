@@ -378,7 +378,14 @@ impl Editpad {
                         if let Some(next) = self.tabs.iter().position(|t| t.dirty) {
                             self.pending_close = true;
                             self.set_active_tab(next);
-                            return self.save();
+                            // 未命名置脏页要交给另存为对话框——`save()` 对它直接
+                            // 返回，链会停摆（曾表现为确认条消失、窗口不关、无提示，
+                            // 且 pending_close 留着让下一次 Ctrl+S 突然关窗）。
+                            // 取消另存为即放弃关窗（见 SaveTargetChosen(None)）。
+                            return match self.tab().path.clone() {
+                                Some(_) => self.save(),
+                                None => self.save_as_dialog(),
+                            };
                         }
                     }
                     // P146：仅当保存的仍是当前活动页才延续关窗——保存期间
@@ -853,7 +860,11 @@ StTooLargeEolSuffix)
     }
 
     pub(super) fn save(&mut self) -> Task<Message> {
+        // 落盘未启动 = 「保存并关闭」链无法推进。关窗标记必须在**每一个**
+        // 拒绝出口作废（收在本函数一处，不靠调用方各自补条件）：留着它，用户
+        // 随后任意一次成功的 Ctrl+S 都会走到 Saved 分支把窗口突然关掉。
         if self.busy || self.tab().path.is_none() {
+            self.pending_close = false;
             return Task::none();
         }
         // P63 外部修改守卫：磁盘现状 ≠ 记录戳 → 不落盘。场景是页置脏且
@@ -871,6 +882,7 @@ StTooLargeEolSuffix)
                 }
                 self.status =
                     self.t(editpad_core::Key::StExternalPaused).to_owned();
+                self.pending_close = false; // 同上：本拒绝出口也要作废关窗标记
                 return Task::none();
             }
         }

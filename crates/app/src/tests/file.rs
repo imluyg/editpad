@@ -1360,6 +1360,89 @@ external
         assert_eq!(app.tabs.len(), 1, "内容没存就不该关页");
     }
 
+    /// 逐页关窗链的两个停摆出口：未命名置脏页要交给另存为对话框接管；
+    /// 被 P63 守卫拦下的页必须作废关窗标记——留着的后果是用户随后任何一次
+    /// 成功的 Ctrl+S 都会把窗口突然关掉。
+    #[test]
+    fn save_and_close_chain_routes_unnamed_dirty_page_to_save_as() {
+        let mut app = Editpad::default();
+        app.settings.enable_snapshots = false; // 走逐页链而非快照直退
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
+        app.tabs[0].path = Some(PathBuf::from("C:/w/a.txt"));
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
+        assert!(app.tabs[1].path.is_none(), "用例前提：页 1 未命名且置脏");
+        let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
+
+        app.pending_close = true;
+        dispatch(&mut app, Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())));
+
+        assert_eq!(app.active_tab, 1, "链应切到下一个置脏页");
+        assert!(app.pending_close, "关窗意图尚未完成，标记该保留");
+        assert!(
+            app.busy,
+            "未命名页必须弹另存为对话框接管本链，不能既不推进也不留提示"
+        );
+    }
+
+    #[test]
+    fn save_and_close_chain_voids_pending_flag_when_guard_blocks() {
+        let dir = scratch_dir("close-chain-guard");
+        let (pa, pb) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&pa, "a").unwrap();
+        std::fs::write(&pb, "b").unwrap();
+        let mut app = Editpad::default();
+        app.settings.enable_snapshots = false;
+        dispatch(&mut app, Message::FileDropped(pa.clone()));
+        let s1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s1,
+                Ok((
+                    editpad_core::Document::from_str("a"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::FileDropped(pb.clone()));
+        let s2 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s2,
+                Ok((
+                    editpad_core::Document::from_str("b"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        // 页 0 置脏（它的落盘回报由下面手工构造），页 1 真敲一个字
+        app.tabs[0].dirty = true;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+        // 页 1 的磁盘被外部改写 → P63 守卫必须拦下这一页的落盘
+        std::fs::write(&pb, "externally replaced").unwrap();
+        let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
+
+        app.pending_close = true;
+        dispatch(&mut app, Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())));
+
+        assert_eq!(app.active_tab, 1, "链切到了页 1");
+        assert_eq!(
+            app.external_change,
+            Some(vec![1]),
+            "守卫应把覆写裁决交给外部改动提示条"
+        );
+        assert!(!app.busy, "拦截不是进入保存流程");
+        assert!(
+            !app.pending_close,
+            "守卫拦下时关窗标记必须作废——否则下一次 Ctrl+S 成功即突然关窗"
+        );
+    }
+
     #[test]
     fn confirm_save_and_close_chains_through_all_dirty_pages() {
         // P147 回归：ASK（非快照直退）模式「保存并关闭」曾只存活动页即
