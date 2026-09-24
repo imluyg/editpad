@@ -29,15 +29,14 @@ type JsonResult<T> = Result<T, JsonError>;
 const MAX_NEST_DEPTH: usize = 512;
 
 /// 校验整段 JSON 文本；合法返回 Ok(())。
+///
+/// **O-14：纯校验零产出**——`formatted=false` 下扫描器一次都不调用输出汇
+/// （见 `run` 与 `Scanner::out`），也不再物化 `Vec<char>` 全文拷贝。
+/// 旧实现虽名为「只校验」，实际把整份规范化结果照旧推进一个临时 `String`，
+/// 加上 `text.chars().collect::<Vec<char>>()`（4 字节/字符），64MB JSON
+/// 校验一次的峰值约 320MB；而校验在格式化前与状态栏提示里被反复触发。
 pub fn validate_json(text: &str) -> Result<(), JsonError> {
-    let mut s = Scanner::new(text);
-    let mut sink = String::new();
-    s.value(&mut sink, 0, false)?;
-    s.skip_ws();
-    if let Some(c) = s.peek() {
-        return Err(s.error_here(format!("JSON 结束后有多余内容（{c:?}）")));
-    }
-    Ok(())
+    run(text, false, |_| {})
 }
 
 /// 校验并输出 2 空格缩进的规范化 JSON。
@@ -46,33 +45,47 @@ pub fn validate_json(text: &str) -> Result<(), JsonError> {
 /// 与空白；空对象/空数组保持单行 `{}` / `[]`。
 pub fn format_json(text: &str) -> JsonResult<String> {
     let mut out = String::with_capacity(text.len() * 2);
-    let mut s = Scanner::new(text);
-    s.skip_ws();
-    s.value(&mut out, 0, true)?;
+    run(text, true, |s| out.push_str(s))?;
+    Ok(out)
+}
+
+/// 两种模式共用的扫描收口：解析一个顶层值 + 尾部多余内容检查。
+///
+/// `formatted` 决定「是否产出」，`emit` 是输出汇（格式化模式由
+/// [`format_json`] 接进 `String`；校验模式传空动作）。错误行列由同一条
+/// 游标推进，两种模式逐字段一致（用例
+/// `error_positions_are_char_based_and_identical_across_both_modes` 钉住）。
+fn run<W: FnMut(&str)>(text: &str, formatted: bool, emit: W) -> Result<(), JsonError> {
+    let mut s = Scanner::new(text, formatted, emit);
+    s.value(0)?;
     s.skip_ws();
     if let Some(c) = s.peek() {
         return Err(s.error_here(format!("JSON 结束后有多余内容（{c:?}）")));
     }
-    Ok(out)
+    Ok(())
 }
 
 // ---------- 扫描器 ----------
 
-struct Scanner {
-    chars: Vec<char>,
+/// 手写递归下降扫描器。
+///
+/// **游标形态（O-14）**：`text` + 字节偏移 `pos`（恒落在字符边界），
+/// 不再是 `Vec<char>` 全文拷贝；行/列仍按 **Unicode 字符**推进（`bump`
+/// 每吃一个字符 col +1，`\n` 换行），错误定位与改前逐字段一致。
+/// 输出只能经 [`Scanner::out`] / [`Scanner::out_char`]，它们在
+/// `formatted=false` 时直接返回——校验模式因此零写入、零分配。
+struct Scanner<'a, W: FnMut(&str)> {
+    text: &'a str,
     pos: usize,
     line: usize,
     col: usize,
+    formatted: bool,
+    emit: W,
 }
 
-impl Scanner {
-    fn new(text: &str) -> Self {
-        Self {
-            chars: text.chars().collect(),
-            pos: 0,
-            line: 1,
-            col: 1,
-        }
+impl<'a, W: FnMut(&str)> Scanner<'a, W> {
+    fn new(text: &'a str, formatted: bool, emit: W) -> Self {
+        Self { text, pos: 0, line: 1, col: 1, formatted, emit }
     }
 
     /// 以「当前待读字符」的位置报错（即指向问题字符本身）。
@@ -84,17 +97,32 @@ impl Scanner {
         }
     }
 
+    /// 输出汇：只有格式化模式写入（校验模式连一次调用都不发生）。
+    fn out(&mut self, s: &str) {
+        if self.formatted {
+            (self.emit)(s);
+        }
+    }
+
+    /// 单字符输出（字符边界由 `pos` 保证，取原始片段零拷贝）。
+    fn out_char(&mut self, c: char) {
+        if self.formatted {
+            let len = c.len_utf8();
+            (self.emit)(&self.text[self.pos - len..self.pos]);
+        }
+    }
+
     fn peek(&self) -> Option<char> {
-        self.chars.get(self.pos).copied()
+        self.text[self.pos..].chars().next()
     }
 
     fn peek_at(&self, ahead: usize) -> Option<char> {
-        self.chars.get(self.pos + ahead).copied()
+        self.text[self.pos..].chars().nth(ahead)
     }
 
     fn bump(&mut self) -> Option<char> {
-        let c = self.chars.get(self.pos).copied()?;
-        self.pos += 1;
+        let c = self.peek()?;
+        self.pos += c.len_utf8();
         if c == '\n' {
             self.line += 1;
             self.col = 1;
@@ -124,18 +152,17 @@ impl Scanner {
         }
     }
 
-    fn newline_indent(&self, depth: usize, out: &mut String) {
-        out.push('\n');
+    fn newline_indent(&mut self, depth: usize) {
+        self.out("\n");
         for _ in 0..depth {
-            out.push_str("  ");
+            self.out("  ");
         }
     }
 
-    /// 解析一个 JSON 值：校验语法并把规范化形式写入 `out`。
+    /// 解析一个 JSON 值：校验语法并把规范化形式写入输出汇。
     ///
-    /// * `depth`：当前嵌套深度（缩进级数）；
-    /// * `formatted`：是否处于格式化模式（纯校验传 false，不产出）。
-    fn value(&mut self, out: &mut String, depth: usize, formatted: bool) -> JsonResult<()> {
+    /// 是否产出由 `self.formatted` 决定（纯校验传 false，不产出）。
+    fn value(&mut self, depth: usize) -> JsonResult<()> {
         // 深度封顶（见 MAX_NEST_DEPTH）：递归进入下一层容器前拦截
         if depth >= MAX_NEST_DEPTH {
             return Err(self.error_here(format!("嵌套过深（超过 {MAX_NEST_DEPTH} 层）")));
@@ -143,32 +170,30 @@ impl Scanner {
         self.skip_ws();
         match self.peek() {
             None => Err(self.error_here("意外结束：缺少 JSON 值")),
-            Some('{') => self.object(out, depth, formatted),
-            Some('[') => self.array(out, depth, formatted),
-            Some('"') => self.string_verbatim(out),
-            Some('t') => self.literal("true", out),
-            Some('f') => self.literal("false", out),
-            Some('n') => self.literal("null", out),
-            Some(c) if c == '-' || c.is_ascii_digit() => self.number(out),
+            Some('{') => self.object(depth),
+            Some('[') => self.array(depth),
+            Some('"') => self.string_verbatim(),
+            Some('t') => self.literal("true"),
+            Some('f') => self.literal("false"),
+            Some('n') => self.literal("null"),
+            Some(c) if c == '-' || c.is_ascii_digit() => self.number(),
             Some(other) => Err(self.error_here(format!("意外的字符 {other:?}"))),
         }
     }
 
-    fn object(&mut self, out: &mut String, depth: usize, formatted: bool) -> JsonResult<()> {
+    fn object(&mut self, depth: usize) -> JsonResult<()> {
         self.expect('{')?;
-        out.push('{');
+        self.out("{");
         let inner = depth + 1;
 
         self.skip_ws();
         if self.peek() == Some('}') {
             self.bump();
-            out.push('}');
+            self.out("}");
             return Ok(());
         }
         // 非空对象：首个成员换行到内层缩进
-        if formatted {
-            self.newline_indent(inner, out);
-        }
+        self.newline_indent(inner);
         loop {
             self.skip_ws();
             if self.peek() != Some('"') {
@@ -177,31 +202,23 @@ impl Scanner {
                     None => self.error_here("意外结束：对象缺少结尾 '}'"),
                 });
             }
-            self.string_verbatim(out)?;
+            self.string_verbatim()?;
             self.skip_ws();
             self.expect(':')?;
-            if formatted {
-                out.push_str(": ");
-            } else {
-                out.push(':');
-            }
-            self.value(out, inner, formatted)?;
+            self.out(": ");
+            self.value(inner)?;
 
             self.skip_ws();
             match self.peek() {
                 Some(',') => {
                     self.bump();
-                    if formatted {
-                        out.push(',');
-                        self.newline_indent(inner, out);
-                    }
+                    self.out(",");
+                    self.newline_indent(inner);
                 }
                 Some('}') => {
                     self.bump();
-                    if formatted {
-                        self.newline_indent(depth, out);
-                    }
-                    out.push('}');
+                    self.newline_indent(depth);
+                    self.out("}");
                     return Ok(());
                 }
                 Some(c) => {
@@ -214,39 +231,33 @@ impl Scanner {
         }
     }
 
-    fn array(&mut self, out: &mut String, depth: usize, formatted: bool) -> JsonResult<()> {
+    fn array(&mut self, depth: usize) -> JsonResult<()> {
         self.expect('[')?;
-        out.push('[');
+        self.out("[");
         let inner = depth + 1;
 
         self.skip_ws();
         if self.peek() == Some(']') {
             self.bump();
-            out.push(']');
+            self.out("]");
             return Ok(());
         }
         // 非空数组：首个元素换行到内层缩进
-        if formatted {
-            self.newline_indent(inner, out);
-        }
+        self.newline_indent(inner);
         loop {
-            self.value(out, inner, formatted)?;
+            self.value(inner)?;
 
             self.skip_ws();
             match self.peek() {
                 Some(',') => {
                     self.bump();
-                    if formatted {
-                        out.push(',');
-                        self.newline_indent(inner, out);
-                    }
+                    self.out(",");
+                    self.newline_indent(inner);
                 }
                 Some(']') => {
                     self.bump();
-                    if formatted {
-                        self.newline_indent(depth, out);
-                    }
-                    out.push(']');
+                    self.newline_indent(depth);
+                    self.out("]");
                     return Ok(());
                 }
                 Some(c) => {
@@ -260,9 +271,9 @@ impl Scanner {
     }
 
     /// 字符串：转义序列严格校验（含代理对配对），原文整体搬运。
-    fn string_verbatim(&mut self, out: &mut String) -> JsonResult<()> {
+    fn string_verbatim(&mut self) -> JsonResult<()> {
         self.expect('"')?;
-        out.push('"');
+        self.out("\"");
         loop {
             // 先看后吃：错误定位指向问题字符本身
             let start = (self.line, self.col);
@@ -278,11 +289,11 @@ impl Scanner {
             };
             match c {
                 '"' => {
-                    out.push('"');
+                    self.out("\"");
                     return Ok(());
                 }
                 '\\' => {
-                    out.push('\\');
+                    self.out("\\");
                     let esc_start = (self.line, self.col);
                     let esc = match self.bump() {
                         Some(e) => e,
@@ -295,17 +306,17 @@ impl Scanner {
                         }
                     };
                     match esc {
-                        '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => out.push(esc),
+                        '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => self.out_char(esc),
                         'u' => {
-                            out.push('u');
-                            let hi = self.hex4(out)?;
+                            self.out("u");
+                            let hi = self.hex4()?;
                             if (0xD800..=0xDBFF).contains(&hi) {
                                 // 高代理必须紧跟 \uDC00..\uDFFF 低代理
                                 if self.peek() == Some('\\') && self.peek_at(1) == Some('u') {
                                     self.bump();
                                     self.bump();
-                                    out.push_str("\\u");
-                                    let lo = self.hex4(out)?;
+                                    self.out("\\u");
+                                    let lo = self.hex4()?;
                                     if !(0xDC00..=0xDFFF).contains(&lo) {
                                         return Err(JsonError {
                                             line: esc_start.0,
@@ -347,13 +358,13 @@ impl Scanner {
                         message: format!("字符串内含未转义的控制字符 U+{:04X}", c as u32),
                     })
                 }
-                other => out.push(other),
+                other => self.out_char(other),
             }
         }
     }
 
     /// 读 4 位十六进制（\uXXXX），字符回写进输出。
-    fn hex4(&mut self, out: &mut String) -> JsonResult<u32> {
+    fn hex4(&mut self) -> JsonResult<u32> {
         let mut value = 0u32;
         for _ in 0..4 {
             let start = (self.line, self.col);
@@ -370,7 +381,7 @@ impl Scanner {
             match c.to_digit(16) {
                 Some(digit) => {
                     value = value * 16 + digit;
-                    out.push(c);
+                    self.out_char(c);
                 }
                 None => {
                     return Err(JsonError {
@@ -385,15 +396,15 @@ impl Scanner {
     }
 
     /// 数字：RFC 8259 文法（禁前导零，小数/指数可选但一旦出现须完整）。
-    fn number(&mut self, out: &mut String) -> JsonResult<()> {
+    fn number(&mut self) -> JsonResult<()> {
         if self.peek() == Some('-') {
             self.bump();
-            out.push('-');
+            self.out("-");
         }
         match self.peek() {
             Some('0') => {
                 self.bump();
-                out.push('0');
+                self.out("0");
                 if matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
                     return Err(self.error_here("数字不得有前导零"));
                 }
@@ -401,7 +412,7 @@ impl Scanner {
             Some(c) if c.is_ascii_digit() => {
                 while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
                     if let Some(d) = self.bump() {
-                        out.push(d);
+                        self.out_char(d);
                     }
                 }
             }
@@ -413,22 +424,22 @@ impl Scanner {
         }
         if self.peek() == Some('.') {
             self.bump();
-            out.push('.');
+            self.out(".");
             if !matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
                 return Err(self.error_here("小数点后缺少数字"));
             }
             while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
                 if let Some(d) = self.bump() {
-                    out.push(d);
+                    self.out_char(d);
                 }
             }
         }
         if matches!(self.peek(), Some('e') | Some('E')) {
             self.bump();
-            out.push('e');
+            self.out("e");
             if matches!(self.peek(), Some('+') | Some('-')) {
                 if let Some(sign) = self.bump() {
-                    out.push(sign);
+                    self.out_char(sign);
                 }
             }
             if !matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
@@ -436,7 +447,7 @@ impl Scanner {
             }
             while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
                 if let Some(d) = self.bump() {
-                    out.push(d);
+                    self.out_char(d);
                 }
             }
         }
@@ -444,10 +455,10 @@ impl Scanner {
     }
 
     /// true/false/null 字面量。
-    fn literal(&mut self, word: &str, out: &mut String) -> JsonResult<()> {
+    fn literal(&mut self, word: &str) -> JsonResult<()> {
         for expected in word.chars() {
             match self.bump() {
-                Some(c) if c == expected => out.push(c),
+                Some(c) if c == expected => self.out_char(c),
                 Some(c) => {
                     let _ = (self.line, self.col);
                     return Err(self.error_here(format!(
@@ -578,5 +589,111 @@ mod tests {
         let e = err_of("{\"k\": \"abcde\\q\"}");
         assert_eq!(e.line, 1);
         assert_eq!(e.col, 14, "列按 Unicode 字符计，指向非法转义的 q");
+    }
+
+    /// O-14 的行列口径穷尽表：`formatted=false`（validate_json）与
+    /// `formatted=true`（format_json）必须报出**完全相同**的 JsonError
+    /// （行、列、消息三者），且列一律按 Unicode 字符计——CJK 每字 3 字节、
+    /// emoji 每字 4 字节，都不许把列号顶到字节刻度上。
+    /// 表内期望值取自**改前实现实测**（先对旧实现跑通本用例，再动扫描器）。
+    #[test]
+    fn error_positions_are_char_based_and_identical_across_both_modes() {
+        let cases: &[(&str, &str, usize, usize)] = &[
+            // 纯 ASCII：q 前 13 个字符
+            (r#"{"k": "abcde\q"}"#, "非法转义", 1, 14),
+            // 中文（3 字节/字符）在错误之前：字符刻度 12，字节刻度会是 20
+            (r#"{"k": "中文中\q"}"#, "非法转义", 1, 12),
+            // 代理对**转义**（源码全是 ASCII）：整对吃掉 12 个字符后
+            // 才到 `\q`，列 21——钉住「转义序列按字面字符计数、不折叠」
+            (r#"{"k": "\ud83d\ude80\q"}"#, "非法转义", 1, 21),
+            // 正文里的真 emoji：一个字符只推一列
+            ("{\"k\": \"🚀🚀\\q\"}", "非法转义", 1, 11),
+            // 第二行、含 CJK 与缩进：列从行首重算
+            ("{\n  \"中文键\": \"值\\q\"\n}", "非法转义", 2, 13),
+            // 尾随逗号：'}' 落在第 3 行第 1 列（此处按「期望键」报错）
+            ("{\n  \"a\": 1,\n}", "对象键必须是字符串", 3, 1),
+            // 缺冒号：指向其后的数字
+            ("{\"a\" 1}", "期望 ':'", 1, 6),
+            // 数字前导零
+            ("[01]", "前导零", 1, 3),
+            // 中文字符串未闭合
+            ("{\"k\": \"未闭合}", "缺少结尾", 1, 12),
+            // 顶层之后的多余内容：CJK 字符串之后的 `1`，字符列 5（字节刻度会是 7）
+            ("\"中\" 123", "多余内容", 1, 5),
+            // 意外的字符：错误指向 CJK 字符本身（第 2 个字符）
+            ("[中, 試]", "意外的字符", 1, 2),
+        ];
+        for (text, note, line, col) in cases {
+            let e_v = validate_json(text).expect_err("用例前提：非法输入");
+            let e_f = format_json(text).expect_err("两种模式同判非法");
+            assert_eq!(
+                e_v, e_f,
+                "{note}: 校验与格式化两种模式报出的错误必须逐字段相等"
+            );
+            assert!(
+                e_v.message.contains(note),
+                "{note}: 消息不符，实际 {}",
+                e_v.message
+            );
+            assert_eq!((e_v.line, e_v.col), (*line, *col), "{note} @ {text:?}");
+        }
+
+        // 嵌套过深：512 层开括号后、第 513 个 `[` 处报错（列 = 已消费字符数 + 1）
+        let deep = "[".repeat(600);
+        let e_v = validate_json(&deep).expect_err("用例前提：超深非法");
+        let e_f = format_json(&deep).expect_err("两种模式同判非法");
+        assert_eq!(e_v, e_f, "深度错误的两种模式逐字段相等");
+        assert!(e_v.message.contains("嵌套过深"), "{}", e_v.message);
+        assert_eq!((e_v.line, e_v.col), (1, 513), "深度错误定位在第 513 个 '['");
+    }
+
+    #[test]
+    fn validate_mode_emits_nothing_and_format_mode_emits_the_document() {
+        // O-14 的内存主张用**可观测行为**钉：校验模式一次输出汇都不调用
+        // （改前即使 formatted=false，object()/string_verbatim() 也照旧往
+        // 一个临时 String 里 push 整份规范化结果）。不用耗时/内存采样断言。
+        let samples = [
+            "null",
+            "-1.5E-3",
+            r#""字符串 \u4e2d \n 转义""#,
+            r#"{"a":[1,2,{"b":null},"x"],"c":{"d":true}}"#,
+            "{\n  \"k\": [],\n  \"空\": {}\n}",
+            // 前导空白：改前 format_json 先 skip_ws 再 value，改后 value 自己
+            // skip_ws（两条路径同一函数），产物必须一字不变
+            "  \n\t{\"a\": 1}",
+        ];
+        for text in samples {
+            // 校验模式：sink 零调用、零字节
+            let mut v_calls = 0usize;
+            let mut v_bytes = 0usize;
+            {
+                let mut sink = |s: &str| {
+                    v_calls += 1;
+                    v_bytes += s.len();
+                };
+                run(text, false, &mut sink).unwrap_or_else(|e| panic!("{text}: {e}"));
+            }
+            assert_eq!(
+                (v_calls, v_bytes),
+                (0, 0),
+                "formatted=false 不得产生任何输出：{text:?}"
+            );
+
+            // 格式化模式：sink 收到的字节拼接 == format_json 的返回值
+            // （证明「输出汇抽象」没有改写产物字节序列）
+            let mut got = String::new();
+            let mut calls = 0usize;
+            {
+                let mut sink = |s: &str| {
+                    calls += 1;
+                    got.push_str(s);
+                };
+                run(text, true, &mut sink).unwrap_or_else(|e| panic!("{text}: {e}"));
+            }
+            assert!(calls > 0, "formatted=true 必须有输出");
+            assert_eq!(got, format_json(text).unwrap(), "sink 拼接 == format_json：{text:?}");
+        }
+        // 绝对值钉（防「两种模式一起漂」）：前导空白吃掉、缩进仍按 2 空格
+        assert_eq!(format_json("  \n\t{\"a\": 1}").unwrap(), "{\n  \"a\": 1\n}");
     }
 }
