@@ -193,30 +193,79 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
     out
 }
 
+/// 整词边界判定的**唯一实现**（[`filter_whole_word`] 与其 `&str` 孪生
+/// [`crate::find_in_files::filter_whole_word_text`] 共用，O-12 起结构上
+/// 不可能再漂移）：命中起点前一字符与终点后一字符均非词字符才保留。
+///
+/// 三条边界口径由本函数钉住，两侧传入的 `content` 必须是**行内容字符**：
+/// * `hit.col == 0` → 行首即边界；
+/// * `end == content.len()` → 行尾即边界；
+/// * `end > content.len()` → 跨行命中（`len_chars` 含行界单元，行内边界
+///   语义不成立），一律保留。
+pub(crate) fn whole_word_bounds_ok(content: &[char], hit: MatchPos) -> bool {
+    let end = hit.col + hit.len_chars;
+    if end > content.len() {
+        return true; // 跨行命中：保留
+    }
+    let before_ok = hit.col == 0 || !is_word_char(content[hit.col - 1]);
+    let after_ok = end == content.len() || !is_word_char(content[end]);
+    before_ok && after_ok
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 测试钩子（O-12 成本形状契约）：[`filter_whole_word`] **物化行内容缓冲的
+    /// 次数**。耗时断言在本仓库不被接受（忙机器上既可能假绿也可能假红），而
+    /// 「同一行只物化一次」本质是**次数**命题，与机器性能无关。
+    /// 生产构建整字段不参与编译（与 app 层 `EditorCore::line_text_calls` 同形状）。
+    static WHOLE_WORD_LINE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 物化第 `line` 行的「行内容字符」到 `buf`（行尾换行单元按原口径截断）。
+///
+/// 零拷贝读法：`line_to_char` + `chars_from` 走 rope 叶片迭代，
+/// `take(line_len_chars)` 把范围钉回本行——不产生整行 `String`。
+/// `take_while` 的判据与历史实现逐字相同（只截 `\n`/`\r`），故行内容为
+/// VT/FF/NEL/LS/PS 结尾时这些字符**留在** `content` 里；两者都在
+/// [`whole_word_bounds_ok`] 里得出同一结论（这些字符非词字符，
+/// 「窥到它」与「视作行尾」判定一致），口径与孪生函数无分叉。
+fn fill_line_chars(doc: &Document, line: usize, buf: &mut Vec<char>) {
+    buf.clear();
+    buf.extend(
+        doc
+            .chars_from(doc.line_to_char(line))
+            .take(doc.line_len_chars(line))
+            .take_while(|&c| c != '\n' && c != '\r'),
+    );
+    #[cfg(test)]
+    WHOLE_WORD_LINE_BUILDS.with(|c| c.set(c.get() + 1));
+}
+
 /// 整词过滤：只保留命中起点前一字符与终点后一字符**均非词字符**的
 /// 命中（行首/文档首与行尾/文档尾视为边界）。
 ///
 /// 跨行命中的 `len_chars` 含行界单元，行内边界语义不成立，一律保留；
 /// 正则模式不适用整词（边界语义由正则自身表达），调用方自行判定。
+///
+/// **成本口径（O-12）**：行内容缓冲**只在行号变化时物化一次**（缓冲复用），
+/// 故成本是 O(命中所在行数 × 行长) 而非旧的 O(命中数 × 行长)——旧实现每个
+/// 命中都 `line_str().chars().collect::<Vec<char>>()` 把整行物化两遍，
+/// 20MB 单行里搜 `name` 即上万次整行拷贝。命中不要求有序：行号一变就重建，
+/// 乱序输入结果与有序输入同口径（只是退化回逐命中成本）。
 pub fn filter_whole_word(doc: &Document, hits: Vec<MatchPos>) -> Vec<MatchPos> {
-    hits.into_iter()
-        .filter(|hit| {
-            // 行内容不含行尾换行单元；行内显示列与字符索引一一对应
-            //（行界后行内不再有 \r/\n，显示列与原始列同源）
-            let content: Vec<char> = doc
-                .line_str(hit.line)
-                .chars()
-                .take_while(|&c| c != '\n' && c != '\r')
-                .collect();
-            let end = hit.col + hit.len_chars;
-            if end > content.len() {
-                return true; // 跨行命中：保留
-            }
-            let before_ok = hit.col == 0 || !is_word_char(content[hit.col - 1]);
-            let after_ok = end == content.len() || !is_word_char(content[end]);
-            before_ok && after_ok
-        })
-        .collect()
+    let mut out = Vec::with_capacity(hits.len());
+    let mut cur_line = usize::MAX;
+    let mut content: Vec<char> = Vec::new();
+    for hit in hits {
+        if hit.line != cur_line {
+            cur_line = hit.line;
+            fill_line_chars(doc, hit.line, &mut content);
+        }
+        if whole_word_bounds_ok(&content, hit) {
+            out.push(hit);
+        }
+    }
+    out
 }
 
 /// 单行窗口扫描：在 `line` 的字符序列上滑动长度 `q.len()` 的窗口逐一比较。
@@ -1447,6 +1496,149 @@ mod tests {
             filter_whole_word(&doc, find_all_document(&doc, "cat", true)),
             vec![MatchPos { line: 0, col: 2, len_chars: 3 }]
         );
+    }
+
+    /// **改前实现原样留档**（O-12 等价性对拍的基准）：每个命中都把整行物化
+    /// 成 `Vec<char>`，成本 O(命中数 × 行长)。语义即旧契约，一条不改。
+    fn filter_whole_word_naive(doc: &Document, hits: Vec<MatchPos>) -> Vec<MatchPos> {
+        hits.into_iter()
+            .filter(|hit| {
+                let content: Vec<char> = doc
+                    .line_str(hit.line)
+                    .chars()
+                    .take_while(|&c| c != '\n' && c != '\r')
+                    .collect();
+                let end = hit.col + hit.len_chars;
+                if end > content.len() {
+                    return true; // 跨行命中：保留
+                }
+                let before_ok = hit.col == 0 || !is_word_char(content[hit.col - 1]);
+                let after_ok = end == content.len() || !is_word_char(content[end]);
+                before_ok && after_ok
+            })
+            .collect()
+    }
+
+    /// O-12 的语义钉：穷尽边界表上，「按行游标复用的新实现」「改前的朴素
+    /// 实现」「`&str` 孪生 `filter_whole_word_text`」三方逐点相等。
+    #[test]
+    fn filter_whole_word_agrees_with_naive_reference_and_str_twin() {
+        use crate::find_in_files::filter_whole_word_text;
+        // 每条形如 (文本, 查询)：行界形态 × 邻字符形态 的笛卡尔覆盖
+        let cases: &[(&str, &str)] = &[
+            // 行首 / 行尾 / 行中间
+            ("cat", "cat"),
+            ("cat dog", "cat"),
+            ("dog cat", "cat"),
+            ("dog cat dog", "cat"),
+            ("concat catalog", "cat"),
+            ("cat concat scat cat_\ncat", "cat"),
+            // 行尾形态：LF / CRLF / 孤立 CR / 无行尾 / 末行为空
+            ("cat\r\ncat dog\r\n", "cat"),
+            ("cat\rcat dog\r", "cat"),
+            ("cat\ncat\n", "cat"),
+            // VT/FF/NEL/LS/PS 结尾：Document 版把该行界字符留在 content 里，
+            // &str 孪生的 content 不含它——两种形状必须得出同一结论
+            ("cat\u{000B}xcat", "cat"),
+            ("cat\u{000C}cat", "cat"),
+            ("cat\u{0085}cat", "cat"),
+            ("cat\u{2028}cat", "cat"),
+            ("cat\u{2029}cat", "cat"),
+            // 邻字符类别：标点 / 空白 / 下划线 / CJK（词字符）/ emoji（非词字符）
+            ("(cat)-cat.", "cat"),
+            ("_cat cat_", "cat"),
+            ("中cat cat中", "cat"),
+            ("\u{1F680}cat cat\u{1F680}", "cat"),
+            ("  cat  ", "cat"),
+            // 大小写折叠命中本体（边界判定与大小写无关）
+            ("Cat CAT cat", "cat"),
+            // 重叠命中窗口
+            ("aaaa aa\naa", "aa"),
+            // 跨行命中（查询含 \n → len_chars 含行界单元，end 越过行内容）
+            ("cat\ncat", "t\nc"),
+            ("cat\r\ndog", "t\nd"),
+            ("cat\rcat", "t\nc"),
+            // 空行 / 空文档
+            ("\n\ncat", "cat"),
+            ("", "cat"),
+        ];
+        for (text, query) in cases {
+            let doc = Document::from_str(text);
+            for cs in [true, false] {
+                let hits = find_all_document(&doc, query, cs);
+                assert_eq!(hits, find_all(text, query, cs), "命中表 {text:?}");
+                let fast = filter_whole_word(&doc, hits.clone());
+                assert_eq!(
+                    fast,
+                    filter_whole_word_naive(&doc, hits.clone()),
+                    "新实现偏离改前语义: text={text:?} query={query:?} cs={cs}"
+                );
+                assert_eq!(
+                    fast,
+                    filter_whole_word_text(text, hits),
+                    "与 &str 孪生口径分叉: text={text:?} query={query:?} cs={cs}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn filter_whole_word_keeps_cross_line_hits_and_ignores_hit_order() {
+        // 跨行命中（end > 行内容长度）一律保留：真实命中（查询含 \n）…
+        let doc = Document::from_str("cat\ncat");
+        let hits = find_all_document(&doc, "t\nc", true);
+        assert_eq!(hits, vec![MatchPos { line: 0, col: 2, len_chars: 3 }]);
+        assert_eq!(filter_whole_word(&doc, hits.clone()), hits);
+        // …与手工构造的越界命中同口径（end 恰等于行内容是「行尾」，不是越界）
+        assert_eq!(
+            filter_whole_word(
+                &doc,
+                vec![
+                    MatchPos { line: 0, col: 1, len_chars: 3 }, // end=4 > 3：跨行
+                    MatchPos { line: 0, col: 0, len_chars: 3 }, // end=3 = 行尾：保留
+                    MatchPos { line: 0, col: 0, len_chars: 2 }, // end=2 < 3：后邻 't' 为词字符 → 剔除
+                ]
+            ),
+            vec![
+                MatchPos { line: 0, col: 1, len_chars: 3 },
+                MatchPos { line: 0, col: 0, len_chars: 3 },
+            ],
+            "越界命中保留、行尾命中保留、词内命中剔除"
+        );
+
+        // 乱序命中表：行号一变就重建缓冲，结果与有序输入同集合（口径不依赖顺序）
+        let doc = Document::from_str("cat concat\ncat\ndog cat");
+        let hits = find_all_document(&doc, "cat", true);
+        let kept_asc = filter_whole_word(&doc, hits.clone());
+        let mut rev = hits.clone();
+        rev.reverse();
+        let mut kept_rev = filter_whole_word(&doc, rev);
+        kept_rev.sort_by_key(|h| (h.line, h.col));
+        assert_eq!(kept_asc, vec![
+            MatchPos { line: 0, col: 0, len_chars: 3 },
+            MatchPos { line: 1, col: 0, len_chars: 3 },
+            MatchPos { line: 2, col: 4, len_chars: 3 },
+        ]);
+        assert_eq!(kept_asc, kept_rev, "乱序输入不得改变过滤结果");
+    }
+
+    #[test]
+    fn filter_whole_word_materializes_each_hit_line_once() {
+        // 成本形状契约（非耗时）：命中数 ≫ 命中行数时，行内容缓冲只按
+        // **行**物化。改前每个命中物化整行两遍（整行 String + Vec<char>），
+        // 本用例的计数会是 202 而非 2——断言与机器性能无关。
+        let text = format!("{}cat dog\ncat\n", "cat ".repeat(200));
+        let doc = Document::from_str(&text);
+        let hits = find_all_document(&doc, "cat", true);
+        assert_eq!(hits.len(), 202, "前提：201 个命中挤在同一个长行上");
+
+        WHOLE_WORD_LINE_BUILDS.with(|c| c.set(0));
+        let kept = filter_whole_word(&doc, hits.clone());
+        let builds = WHOLE_WORD_LINE_BUILDS.with(|c| c.get());
+
+        assert_eq!(builds, 2, "命中只分布在 2 行 → 只物化 2 次（改前为 202 次）");
+        assert_eq!(kept.len(), 202, "全部命中各自独立成词，都应保留");
+        assert_eq!(kept, filter_whole_word_naive(&doc, hits), "省钱不改语义");
     }
 
     #[test]

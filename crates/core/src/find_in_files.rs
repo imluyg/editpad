@@ -10,7 +10,7 @@
 //! 规则只作用于**目录**——`.` 开头的隐藏文件（如 `.gitignore`）参与
 //! 扫描，文件内容本身常是检索对象。
 
-use crate::search::{find_all, find_all_regex, is_word_char, MatchPos};
+use crate::search::{find_all, find_all_regex, whole_word_bounds_ok, MatchPos};
 use std::path::{Path, PathBuf};
 
 /// 遍历时跳过的噪音目录名（「遵守忽略规则」的一期口径；.gitignore
@@ -161,6 +161,9 @@ pub fn find_in_file_with(
 /// 一字符与终点后一字符**均非词字符**的命中（行首/行尾视为边界）；
 /// 跨行命中（`len_chars` 含行界单元，行内边界语义不成立）一律保留。
 ///
+/// 边界判定与 Document 版共用同一个 `whole_word_bounds_ok`（O-12 起
+/// 单实现，杜绝两份逻辑各改一处）。
+///
 /// 行界口径与 [`crate::search::find_all`] 对齐（P147）：切行复用同一
 /// [`for_each_line`](crate::search::for_each_line)——行界全集为
 /// `\r\n` / 孤立 `\r` / `\n` / VT / FF / NEL / LS / PS。曾自写
@@ -186,14 +189,7 @@ pub fn filter_whole_word_text(text: &str, hits: Vec<MatchPos>) -> Vec<MatchPos> 
                 break; // 本行无命中，交由后续行处理
             }
             pending.next();
-            let end = hit.col + hit.len_chars;
-            if end > content.len() {
-                out.push(hit); // 跨行命中：保留
-                continue;
-            }
-            let before_ok = hit.col == 0 || !is_word_char(content[hit.col - 1]);
-            let after_ok = end == content.len() || !is_word_char(content[end]);
-            if before_ok && after_ok {
+            if whole_word_bounds_ok(&content, hit) {
                 out.push(hit);
             }
         }
