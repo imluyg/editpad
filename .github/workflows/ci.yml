@@ -45,6 +45,20 @@ jobs:
       # 锁断言是唯一能提前发现的机制。本机 `cargo metadata --locked` 已验证
       # 锁与清单同步，加上它不会把 CI 弄红。
       - run: cargo test --locked --workspace
+      # E-6：断言 vendor 补丁真的被命中。[patch.crates-io] 指向
+      # vendor/iced_tiny_skia，命中时 Cargo.lock 里该包**没有** source 行；
+      # 一旦解析走到上游（版本线前进 / 锁丢失后重解析），cargo 只输出一条
+      # "patch not used" warning、作业照样绿——P117/P119/P120 修的选区残线与
+      # 层栈只进不出会静默回归。正负两侧本机实测过：当前 lock 无 source 行
+      # （断言放行），人为塞一行 source 即被检出（断言拦下）。
+      - name: assert vendor patch is in effect
+        shell: bash
+        run: |
+          if grep -A3 'name = "iced_tiny_skia"' Cargo.lock | grep -q '^source = '; then
+            echo "::error::iced_tiny_skia 解析到了上游而非 vendor/ 补丁——渲染层修复会静默回归，请检查 Cargo.lock 与 [patch.crates-io]"
+            exit 1
+          fi
+          echo "vendor iced_tiny_skia 补丁命中（lock 中无 source 行）"
 
   release-build:
     name: release build
