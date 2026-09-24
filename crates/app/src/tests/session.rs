@@ -1501,15 +1501,15 @@ use super::*;
         // 两页同被外部修改 → 聚焦后队列 [0, 1]（活动页1干净本可静默重载，
         // 但页0置脏在先——巡检按序扫描，页0先命中进队列；页1是干净活动页
         // 走静默重载分支并提前返回，队列只收页0。此处钉住该优先级语义。）
-        // ⚠️ 第 71 轮隔离：写盘后跨过 mtime 粒度/缓存窗口（~15-25ms），
-        // 否则全量并发下外部写入可能与加载戳同窗，巡检漏检致偶发失败。
-        // 第 74 轮（P95）加宽 25→50ms：软换行像素批等新增测试加重并发
-        // 调度抖动后 25ms 仍在全量下偶发（隔离单跑恒绿），50ms 留足余量。
-        // 第 75 轮（P96）再宽 50→150ms：P96 像素断行测试引入更多行布局
-        // 注入与并发压力，50ms 连续三轮全量偶发（隔离单跑恒绿）。
-        std::fs::write(&p0, "a2").unwrap();
-        std::fs::write(&p1, "b2").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        //
+        // 确定性构造（取代历轮一路加宽的 sleep：25→50→150ms）：外部修改
+        // 判定是 (mtime, size) **任一**分量变化即算改过（见
+        // `file_changed_externally`，size 分量本就是为 mtime 粒度不足兜底的）。
+        // 旧写法用等长内容覆写（"a1"→"a2"），把 size 分量废了，只能赌 mtime
+        // 已跨过粒度/缓存窗口——全量并发下就偶发漏检。改成**每次写入长度都
+        // 不同**，size 分量必然变化，计时依赖归零。
+        std::fs::write(&p0, "a2 longer").unwrap();
+        std::fs::write(&p1, "b2 much longer").unwrap();
         dispatch(&mut app, Message::WindowFocused);
         assert!(
             app.active_load.is_some(),
@@ -1521,7 +1521,7 @@ use super::*;
             Message::Loaded(
                 s3,
                 Ok((
-                    editpad_core::Document::from_str("b2"),
+                    editpad_core::Document::from_str("b2 much longer"),
                     String::new(),
                     "UTF-8".to_owned(),
                 )),
@@ -1538,8 +1538,10 @@ use super::*;
         assert!(app.external_change.is_none());
 
         dispatch(&mut app, Message::Edit(EditOp::InsertText("more".into())));
-        std::fs::write(&p0, "a3").unwrap();
-        std::fs::write(&p1, "b3").unwrap();
+        // 同样靠「长度必变」拿确定性：上一轮 p0 记的是 9 字节、p1 记的是
+        // 14 字节，这里各写一个不同长度的内容
+        std::fs::write(&p0, "a3 even longer").unwrap();
+        std::fs::write(&p1, "b3 third distinct size").unwrap();
         dispatch(&mut app, Message::WindowFocused);
         assert_eq!(
             app.external_change,
