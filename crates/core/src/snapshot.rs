@@ -241,6 +241,17 @@ pub(crate) fn write_session_at(
     let mut tabs = Vec::with_capacity(pages.len());
     for (index, page) in pages.iter().enumerate() {
         let mut tab = page.tab.clone();
+        // 防御性消毒：滚动值理论上恒有限（clamp 层已保证）。这里求的是
+        // **两条分支产出一致**——坏值不该因为走哪条分支而时有时无。
+        // ⚠️ 更正旧注释：「混入 NaN 会让整个清单序列化失败」不成立，实测
+        // toml 0.8 会把 nan 原样写出读回（见 heartbeat_reuse_branch_sanitizes_
+        // geometry_too 那条用例的 left: NaN），所以消毒不是防失败而是防脏值。
+        if !tab.scroll_top.is_finite() {
+            tab.scroll_top = 0.0;
+        }
+        if !tab.scroll_left.is_finite() {
+            tab.scroll_left = 0.0;
+        }
         if tab.dirty {
             // 心跳模式按逐页意图分流；普通模式一律写新文件
             let skip_rewrite = match mode {
@@ -261,14 +272,6 @@ pub(crate) fn write_session_at(
             }
         } else {
             tab.file = None;
-        }
-        // 防御性消毒：滚动值理论上恒有限（clamp 层已保证），
-        // 一旦混入 NaN 会让整个清单序列化失败，这里就地归零。
-        if !tab.scroll_top.is_finite() {
-            tab.scroll_top = 0.0;
-        }
-        if !tab.scroll_left.is_finite() {
-            tab.scroll_left = 0.0;
         }
         tabs.push(tab);
     }
@@ -339,8 +342,15 @@ pub fn read_manifest(dir: &Path) -> Option<SessionManifest> {
 
 /// 读一页的内容快照；缺失/损坏/非 UTF-8 返回 None——
 /// 单页失败不得阻断整体恢复（§3 P30 第 6 条的读侧前提）。
+///
+/// 清单是明文可编辑文件，故文件名必须先过生成侧的同一判据：`file =
+/// "../x.txt"` 或绝对路径会让 `dir.join(name)` 跳出快照目录，把别处的
+/// UTF-8 文件当成「上次未保存的页（置脏）」呈现，用户一按保存（落点由同一
+/// 条目的 `path` 决定）就把那份文件覆写了。判据不过按「内容缺失」处理，
+/// 交给既有的读侧容忍路径。
 pub fn read_page(dir: &Path, tab: &SessionTab) -> Option<Document> {
     let name = tab.file.as_deref()?;
+    parse_page_generation(name)?;
     let text = fs::read_to_string(dir.join(name)).ok()?;
     Some(Document::from_str(&text))
 }
@@ -423,6 +433,78 @@ mod tests {
             tab,
             doc: Document::from_str(text),
         }
+    }
+
+    /// 「内容未变 → 复用旧文件」这条分支曾 `continue` 掉了循环尾的滚动值
+    /// 消毒，于是同一份清单里两条分支产出的字段不对称（复用页原样带着坏值）。
+    #[test]
+    fn heartbeat_reuse_branch_sanitizes_geometry_too() {
+        let dir = scratch_dir("hb-sanitize");
+        let mut reuse = named_tab("C:/w/a.txt", true);
+        reuse.file = Some("s9-t0.snap".to_owned());
+        reuse.scroll_top = f32::NAN;
+        let mut fresh = named_tab("C:/w/b.txt", true);
+        fresh.scroll_left = f32::NAN;
+
+        let manifest = write_heartbeat_session(
+            &dir,
+            &[
+                HeartbeatPage {
+                    page: page(reuse, "a"),
+                    rewrite: false,
+                },
+                HeartbeatPage {
+                    page: page(fresh, "b"),
+                    rewrite: true,
+                },
+            ],
+            0,
+            1,
+        )
+        .expect("心跳提交应成功");
+        assert_eq!(
+            manifest.tabs[0].scroll_top, 0.0,
+            "复用分支必须与重写分支共用同一套消毒"
+        );
+        assert_eq!(manifest.tabs[1].scroll_left, 0.0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 清单里的文件名不可信：越出快照目录的名字必须按「内容缺失」处理，
+    /// 而合法命名不能被误伤。
+    #[test]
+    fn read_page_rejects_names_outside_the_snapshot_dir() {
+        let dir = scratch_dir("read-page-escape");
+        fs::create_dir_all(&dir).unwrap();
+        let outside = dir.parent().unwrap().join("p169-outside.txt");
+        fs::write(&outside, "不该被读到").unwrap();
+
+        let mut tab = named_tab("C:/w/a.txt", true);
+        for bad in [
+            "../p169-outside.txt".to_owned(),
+            outside.display().to_string(),
+            "sub/p169-outside.txt".to_owned(),
+        ] {
+            tab.file = Some(bad.clone());
+            assert_eq!(
+                read_page(&dir, &tab).map(|d| d.to_text()),
+                None,
+                "越界命名必须拒读，实际 {bad:?}"
+            );
+        }
+
+        // 判据不误伤本项目命名
+        let good = "s7-t0.snap";
+        fs::write(dir.join(good), b"page content").unwrap();
+        tab.file = Some(good.to_owned());
+        assert_eq!(
+            read_page(&dir, &tab).map(|d| d.to_text()),
+            Some("page content".to_owned())
+        );
+
+        fs::remove_file(&outside).ok();
+        fs::remove_dir_all(&dir).ok();
     }
 
     fn named_tab(path: &str, dirty: bool) -> SessionTab {
