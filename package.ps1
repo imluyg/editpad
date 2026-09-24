@@ -38,7 +38,19 @@ $cargo = Resolve-Cargo
 function Resolve-Git {
     $found = Get-Command git -ErrorAction SilentlyContinue
     if ($found) { return $found.Source }
-    foreach ($p in @("$env:ProgramFiles\Git\cmd\git.exe", 'E:\software\Git\cmd\git.exe')) {
+    if ($env:EDITPAD_GIT) {
+        if (Test-Path -LiteralPath $env:EDITPAD_GIT) { return $env:EDITPAD_GIT }
+    }
+    # 注册表按机器实况给出安装目录（与 crates/app/build.rs 读 KitsRoot10 同一
+    # 手法）。此前这里写死过一个个人盘符路径，等于把一个人的环境塞进仓库脚本。
+    foreach ($hive in 'HKLM:\SOFTWARE\GitForWindows', 'HKCU:\SOFTWARE\GitForWindows') {
+        $ip = (Get-ItemProperty -LiteralPath $hive -ErrorAction SilentlyContinue).InstallPath
+        if ($ip) {
+            $exe = Join-Path $ip 'cmd\git.exe'
+            if (Test-Path -LiteralPath $exe) { return $exe }
+        }
+    }
+    foreach ($p in @("$env:ProgramFiles\Git\cmd\git.exe", "${env:ProgramFiles(x86)}\Git\cmd\git.exe")) {
         if (Test-Path -LiteralPath $p) { return $p }
     }
     return $null
@@ -56,7 +68,15 @@ if (-not $SkipCheck) {
     if ($git) {
         $dirty = & $git -C $root status --porcelain
         if ($dirty) { throw 'working tree is dirty - commit before packaging (or pass -SkipCheck)' }
+        # ⚠️ 本机实测：$ErrorActionPreference='Stop' 下，未打 tag 的 HEAD 上跑
+        # `git describe --tags --exact-match` 会抛 RemoteException（原生 stderr 被
+        # 转成 ErrorRecord，`2>$null` 也拦不住），把下面那句人话提示顶成难懂报错
+        # ——而这恰是最常见的路径。取码期间临时放宽，按 $LASTEXITCODE 判定。
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         $tag = & $git -C $root describe --tags --exact-match HEAD 2>$null
+        if ($LASTEXITCODE -ne 0) { $tag = $null }
+        $ErrorActionPreference = $prevEAP
         if (-not $tag) { throw 'HEAD is not tagged - tag the release commit before packaging (or pass -SkipCheck)' }
         Write-Host ("== release: {0} @ {1} ==" -f $tag, $rev)
     } else {
@@ -113,6 +133,14 @@ Copy-Item -LiteralPath $exe -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'README.zh.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE-APACHE') -Destination $stage
+# 两份 README 首屏都是相对路径引用的截图（README.md:13 的
+# docs/assets/screenshot-dark.png——那张真实截图本身就是卖点）。只拷 README
+# 不拷资源，离线用户解开 zip 看到的就是碎图标。
+$assets = Join-Path $root 'docs\assets'
+if (Test-Path -LiteralPath $assets) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage 'docs') | Out-Null
+    Copy-Item -LiteralPath $assets -Destination (Join-Path $stage 'docs\assets') -Recurse -Force
+}
 
 # 3. Zip (top-level folder keeps the archive self-contained on extraction).
 $zip = Join-Path $root "dist\$stageName-win64.zip"
@@ -135,7 +163,9 @@ Get-ChildItem -LiteralPath $stage | ForEach-Object { Write-Host ("  {0,-20} {1,1
 #    notes. Copying them by hand off the console is how typos get shipped.
 $shaFile = Join-Path $root "dist\$stageName-sha256.txt"
 $revLabel = if ($rev) { $rev } else { 'unknown' }
-$tagLabel = if ($tag) { " (tag $tag)" } else { '' }
+# 走 -SkipCheck 时清单行过去只是「少了 (tag …) 后缀」——隐式痕迹，事后无法与
+# 「忘了打 tag」区分（已发生过：产物名/版本串/tag 三者互不对应）。显式落字。
+$tagLabel = if ($tag) { " (tag $tag)" } else { ' [UNTAGGED]' }
 $shaLines = @(
     ("Editpad {0} @ {1}{2}" -f $version, $revLabel, $tagLabel),
     ("zip  {0}  sha256={1}" -f (Split-Path $zip -Leaf), $zipSha),
