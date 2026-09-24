@@ -21,8 +21,6 @@ pub(crate) struct AutosaveTask {
     pub(crate) expected_stamp: Option<(std::time::SystemTime, u64)>,
     /// 防抖窗时长
     pub(crate) delay: std::time::Duration,
-    /// 写前备份模式（自动保存静默口径）
-    pub(crate) backup_mode: String,
 }
 
 /// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 代次校验 → 写前校验
@@ -58,7 +56,7 @@ pub(crate) async fn drive_autosave_once(
         } else if autosave_must_skip(task.expected_stamp, file_stamp(&path)) {
             AutosaveOutcome::SkippedExternalChange
         } else {
-            write_to_disk(&path, &doc, task.encoding, &task.backup_mode)
+            write_to_disk(&path, &doc, task.encoding)
         };
         let _ = tx.send(outcome);
     });
@@ -78,15 +76,18 @@ pub(crate) async fn drive_autosave_once(
 }
 
 /// 防抖窗睡满后的实际落盘动作（线程体调用；同步函数便于测试直击磁盘
-/// 字节）。写前备份维持第 64 轮 ⑭ 的静默口径；按传入编码落盘（与手动
-/// 保存同参），编码附带的不可映射告警同样不上浮打扰。
+/// 字节）。按传入编码落盘（与手动保存同参），编码附带的不可映射告警
+/// 不上浮打扰。
+///
+/// **不做写前备份**（与手动保存的唯一差异）：自动保存是 2 秒节拍的重复
+/// 覆写，备份到的只是「上一秒的自己」——没有保留价值，却带来持续的整文件
+/// IO 放大，timestamped 模式下还是无界增长。备份语义属「用户显式覆写磁盘」，
+/// 留在 `save()` 那条路径上。
 pub(crate) fn write_to_disk(
     path: &Path,
     doc: &editpad_core::Document,
     encoding: editpad_core::SaveEncoding,
-    backup_mode: &str,
 ) -> AutosaveOutcome {
-    let _ = perform_backup_before_overwrite(path, backup_mode);
     match editpad_core::save_document_encoded(path, doc, encoding) {
         Ok(_) => AutosaveOutcome::Written,
         Err(e) => AutosaveOutcome::Failed(e.to_string()),
@@ -110,6 +111,39 @@ pub(crate) fn autosave_must_skip(
 /// 且 64MB+ 的日志类文件通常有专门的轮转手段）。取值对齐性能基准
 /// 几十 MB 日志量级再留余量。
 pub(crate) const MAX_BACKUP_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// timestamped 目录的留存上限。时间戳粒度为秒，显式保存连点、或长时间编辑
+/// 一个大文件都能轻松攒出成百上千份整文件副本（「逐次留存」不该等于无限
+/// 增长：既吃磁盘，也让目录里再也找不到有用的那一份）。
+pub(crate) const MAX_TIMESTAMPED_BACKUPS: usize = 20;
+
+/// 回收 timestamped 目录里超出上限的历史档，**留最新的 N 份**。
+///
+/// 档名是 `{name}.YYYYMMDD-HHMMSS[-序号].bak`，日期段时间戳的字典序即时间
+/// 序（同秒档的 `-N` 后缀让它在同秒内排在无后缀档之后，仍是「越新越靠后」），
+/// 所以「排序后从头多出来的部分删掉」就等价于「留最新」。只处理本项目命名
+/// 的文件，删不掉则忽略（回收是收尾动作，不该让备份本身失败）。
+fn prune_timestamped_backups(dir: &Path, name: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!("{name}.");
+    let mut archive: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .filter_map(|e| {
+            let file = e.path();
+            let stem = file.file_name()?.to_string_lossy().into_owned();
+            (stem.starts_with(&prefix) && stem.ends_with(".bak")).then_some(file)
+        })
+        .collect();
+    if archive.len() <= MAX_TIMESTAMPED_BACKUPS {
+        return;
+    }
+    archive.sort();
+    for stale in archive.into_iter().rev().skip(MAX_TIMESTAMPED_BACKUPS) {
+        let _ = std::fs::remove_file(stale);
+    }
+}
 
 /// 写前备份磁盘旧版（⑭）。返回状态栏提示文本；None = 无事发生。
 ///
@@ -189,7 +223,12 @@ pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option
                 target = dir.join(format!("{name}.{stamp}-{seq}.bak"));
                 seq += 1;
             }
-            report(std::fs::copy(path, &target).map(|_| target))
+            let note = report(std::fs::copy(path, &target).map(|_| target));
+            // 本轮确实留了档才回收：失败时目录内容没变，不必动它
+            if matches!(note, Some(BackupNote::Backed(_))) {
+                prune_timestamped_backups(&dir, &name);
+            }
+            note
         }
         _ => None,
     }
@@ -204,6 +243,82 @@ mod tests {
         std::env::temp_dir()
             .join("editpad-app-tests")
             .join(format!("{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn timestamped_backups_are_pruned_to_the_newest_cap() {
+        // 「逐次留存」不等于无限增长：目录里堆几百份整文件副本既吃穿磁盘，
+        // 也让人再也找不到有用的那一份。
+        let dir = scratch_dir("p-backup-cap");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("note.txt");
+        std::fs::write(&target, "current").unwrap();
+        let bak_dir = dir.join("note.txt.bak.d");
+        std::fs::create_dir_all(&bak_dir).unwrap();
+        // 40 份历史档，字典序即时间序（100000 最旧 → 100039 最新）
+        for i in 0..40 {
+            std::fs::write(
+                bak_dir.join(format!("note.txt.20260101-{:06}.bak", 100_000 + i)),
+                b"old",
+            )
+            .unwrap();
+        }
+
+        perform_backup_before_overwrite(&target, editpad_core::settings::BACKUP_MODE_TIMESTAMPED)
+            .expect("timestamped 备份应成功");
+
+        let names: Vec<String> = std::fs::read_dir(&bak_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.len(),
+            MAX_TIMESTAMPED_BACKUPS,
+            "总数（含本轮新档）必须封顶在 {MAX_TIMESTAMPED_BACKUPS}，实际 {names:?}"
+        );
+        let has = |stamp: &str| names.iter().any(|n| n.ends_with(&format!("-{stamp}.bak")));
+        assert!(has("100039"), "最新的历史档不能被删：{names:?}");
+        assert!(has("100021"), "留存窗口内的档不能被删：{names:?}");
+        assert!(!has("100020"), "超出上限的最旧档必须被回收：{names:?}");
+        assert!(!has("100000"), "最旧档必须最先被回收：{names:?}");
+        // 本轮新写的备份（时间戳非 20260101-1xxxxx）也在留存内 → 19 旧 + 1 新
+        assert_eq!(
+            names.iter().filter(|n| n.contains("20260101-")).count(),
+            MAX_TIMESTAMPED_BACKUPS - 1,
+            "留存的 19 份历史档 + 本轮新档 = 上限：{names:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 自动保存的 2 秒节拍不该驱动「写前备份」：那只是把上一秒的自己复制一
+    /// 份，既无保留价值，又是持续的整文件 IO 放大（timestamped 模式下更是
+    /// 无界增长）。备份语义属「用户显式覆写磁盘」，即手动保存那条路径。
+    #[test]
+    fn autosave_write_does_not_produce_backup_copies() {
+        let dir = scratch_dir("p-autosave-no-backup");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("note.txt");
+        std::fs::write(&target, "disk v1").unwrap();
+
+        let outcome = write_to_disk(
+            &target,
+            &editpad_core::Document::from_str("disk v2"),
+            editpad_core::SaveEncoding::Utf8,
+        );
+        assert!(matches!(outcome, AutosaveOutcome::Written), "实际 {outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "disk v2",
+            "内容照常落盘"
+        );
+        assert!(
+            !dir.join("note.txt.bak.d").exists() && !dir.join("note.txt.bak").exists(),
+            "自动保存不得做写前备份"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

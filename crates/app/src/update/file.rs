@@ -985,15 +985,15 @@ StTooLargeEolSuffix)
             let doc = self.tabs[idx].editor.borrow().doc.clone();
             let version = self.tabs[idx].version;
             // 落盘配置随任务快照下发：保存编码（与手动保存同参，防静默
-            // 转码）、外部修改比对戳、防抖窗、备份模式（后台线程无
-            // &Settings/&Tab 可用）
+            // 转码）、外部修改比对戳、防抖窗（后台线程无 &Settings/&Tab
+            // 可用）。**不含备份模式**——自动保存不做写前备份，见
+            // `autosave::write_to_disk`
             let task = AutosaveTask {
                 encoding: self.tabs[idx]
                     .save_encoding
                     .unwrap_or(editpad_core::SaveEncoding::Utf8),
                 expected_stamp: self.tabs[idx].file_stamp,
                 delay: std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs)),
-                backup_mode: self.settings.backup_mode.clone(),
             };
             self.tabs[idx].autosave_inflight = true;
             // P146：带走发起页 id 与调度时刻的代次——回报按 id 归页；

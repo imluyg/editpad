@@ -301,7 +301,7 @@ use super::*;
         let path = dir.join("gbk.txt");
         let text = "中文内容";
         let doc = editpad_core::Document::from_str(text);
-        let outcome = write_to_disk(&path, &doc, editpad_core::SaveEncoding::Gbk, "off");
+        let outcome = write_to_disk(&path, &doc, editpad_core::SaveEncoding::Gbk);
         assert!(
             matches!(outcome, AutosaveOutcome::Written),
             "落盘应成功，实际 {outcome:?}"
@@ -1315,7 +1315,6 @@ external
             encoding: editpad_core::SaveEncoding::Utf8,
             expected_stamp: None,
             delay: std::time::Duration::from_millis(50),
-            backup_mode: "off".to_owned(),
         };
         let fut = drive_autosave_once(
             1,
@@ -1338,7 +1337,6 @@ external
             encoding: editpad_core::SaveEncoding::Utf8,
             expected_stamp: None,
             delay: std::time::Duration::from_millis(50),
-            backup_mode: "off".to_owned(),
         };
         let fut = drive_autosave_once(
             1,
