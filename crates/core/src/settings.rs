@@ -487,6 +487,11 @@ impl Settings {
         } else {
             DEFAULT_FONT_SIZE
         };
+        // P102 窗口尺寸同上一条：非有限或非正一律丢弃为「未记录」（启动
+        // 回默认 1024×768）。留着 NaN 不只是几何错位——TOML 不支持非有限
+        // 浮点，它会让之后任意一次 save() 的**整份清单**序列化失败。
+        self.window_width = self.window_width.filter(|w| w.is_finite() && *w > 0.0);
+        self.window_height = self.window_height.filter(|h| h.is_finite() && *h > 0.0);
         // P20：关闭「记住最近文件」时，存量列表一并清空——
         // 只关开关不清数据等于没关（config.toml 里仍躺着完整路径）。
         // P32：光标记忆的键同样是完整路径，必须一起清。
@@ -578,7 +583,17 @@ impl Settings {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let serialized = toml::to_string_pretty(self).unwrap_or_default();
+        // 序列化失败必须上抛，**不能**退化成「写一份空配置出去」：
+        // toml 不接受非有限浮点（`window_width = nan` 是合法 TOML 字面量，
+        // 加载后随任意一次 save() 让整个清单序列化失败），旧实现的
+        // `unwrap_or_default()` 会把这条失败变成一次静默的原子覆盖，
+        // 最近文件/主题/热键全没。失败时目标文件原封不动才是正确语义。
+        let serialized = toml::to_string_pretty(self).map_err(|source| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("设置序列化失败，已放弃写入以保护现有配置：{source}"),
+            )
+        })?;
         crate::saver::write_atomic(path, serialized.as_bytes())
     }
 
@@ -731,6 +746,61 @@ mod tests {
         assert_eq!(loaded.recent_files, vec!["C:/old.txt".to_string()]);
         assert_eq!(loaded.theme, "light");
         assert_eq!(loaded.font_size, 16.0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ⚠️ 诚实记账：体检报告里「NaN 让整份设置序列化失败 → 被
+    /// `unwrap_or_default()` 空覆盖」这条链**实测不成立**——toml 0.8 会把
+    /// `f32::NAN` 原样序列化成 `nan` 而不报错（下面那条 round-trip 用例即
+    /// 证据：默认设置里塞 NaN 宽度照样保存成功）。所以 `save_to` 的改法修的是
+    /// **错误处理形状**（真失败时不得清空用户配置），**不配「先红后绿」的敏感
+    /// 测试**——造不出失败输入，硬写一个两头都绿的断言只会冒充覆盖。有实际
+    /// 效果的是几何值归一，见 `non_finite_window_geometry_is_dropped_on_load_
+    /// not_carried_into_save`。
+    #[test]
+    fn nan_geometry_serializes_so_load_side_must_sanitize_it() {
+        // 反证报告假设：nan 不会让保存失败——正因如此，毒值会在配置里长期
+        // 往返，消毒只能发生在加载侧（见下一条用例）。
+        let dir = scratch_dir("nan-serializes");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut s = Settings::default();
+        s.window_width = Some(f32::NAN);
+        s.save_to(&path).expect("当前 toml 版本不拒绝 nan");
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("window_width = nan"),
+            "实测：nan 被原样序列化写出，实际内容 {:?}",
+            raw.lines().find(|l| l.contains("window_width"))
+        );
+        // 而读回后经归一必须丢掉它（app 侧拿到的是「未记录」而非 NaN）
+        assert_eq!(Settings::load_from(&path).window_width, None);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn non_finite_window_geometry_is_dropped_on_load_not_carried_into_save() {
+        // TOML 里 `window_width = nan` 是合法字面量 → 反序列化得到 Some(NaN)。
+        // 归一化必须就地丢弃，否则它随任意一次 save() 触发上一条失败路径。
+        let dir = scratch_dir("geo-nan");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "theme = \"dark\"\nwindow_width = nan\nwindow_height = inf\n",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.theme, "dark", "其余字段不受牵连");
+        assert_eq!(loaded.window_width, None, "NaN 宽度应丢弃（回未记录）");
+        assert_eq!(loaded.window_height, None, "inf 高度同理");
+        // 归一之后配置必须能正常回写（不再有毒值）
+        assert!(loaded.save_to(&path).is_ok(), "归一后 save_to 应成功");
+        assert!(fs::read_to_string(&path).unwrap().contains("theme"));
 
         fs::remove_dir_all(&dir).ok();
     }
