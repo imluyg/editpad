@@ -535,7 +535,13 @@ impl Editpad {
                 self.start_loading(path, tab)
             }
             Message::ConfirmOpenCancel => {
-                self.open_confirm = None;
+                // 取消的正是「打开确认」时才作废命令行/转发批次：活动页仍是脏的，
+                // 续排后面的文件只会逐个再撞同一面确认墙；留着队列更糟——它会在
+                // 之后任意一次无关装载的收尾续排里，把用户已明确放弃的文件突然
+                // 开出来。无确认在飞时不动队列（不打断正常批量打开）。
+                if self.open_confirm.take().is_some() {
+                    self.pending_cli.clear();
+                }
                 Task::none()
             }
             // ---------- 编码与行尾（P67） ----------

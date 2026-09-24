@@ -1443,6 +1443,46 @@ external
         );
     }
 
+    /// 多选文件转发给已运行实例 → 首个进「放弃更改并打开」确认、其余留在
+    /// `pending_cli`。用户点「取消」只收走了确认条，队列悬挂 → 之后任意一次
+    /// 无关的 Loaded 收尾续排会把被放弃的文件接二连三开出来。
+    #[test]
+    fn cancelling_open_confirm_voids_remaining_cli_queue() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
+        app.pending_cli =
+            VecDeque::from(vec![PathBuf::from("C:/cli/b.txt"), PathBuf::from("C:/cli/c.txt")]);
+        app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
+
+        dispatch(&mut app, Message::ConfirmOpenCancel);
+
+        assert!(app.open_confirm.is_none(), "确认条应收起");
+        assert!(
+            app.pending_cli.is_empty(),
+            "放弃打开 = 整批作废，不得留下悬挂队列：实际 {:?}",
+            app.pending_cli
+        );
+    }
+
+    #[test]
+    fn esc_on_open_confirm_also_voids_cli_queue() {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
+        app.pending_cli = VecDeque::from(vec![PathBuf::from("C:/cli/b.txt")]);
+        app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
+
+        // Esc 在 BarsDismissed 里本就等价于「放弃打开确认」
+        dispatch(&mut app, Message::BarsDismissed);
+
+        assert!(app.open_confirm.is_none());
+        assert!(!app.pending_close);
+        assert!(
+            app.pending_cli.is_empty(),
+            "Esc 既然视作取消，队列也要一并作废：实际 {:?}",
+            app.pending_cli
+        );
+    }
+
     #[test]
     fn confirm_save_and_close_chains_through_all_dirty_pages() {
         // P147 回归：ASK（非快照直退）模式「保存并关闭」曾只存活动页即

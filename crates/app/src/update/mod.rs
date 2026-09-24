@@ -647,7 +647,12 @@ impl Editpad {
                 // Esc 同时视作放弃关闭/打开确认
                 self.confirm_visible = false;
                 self.pending_close = false;
-                self.open_confirm = None;
+                // 收起的确实是一次「打开确认」时，命令行/转发批次一并作废
+                // （与 ConfirmOpenCancel 同一口径；无确认在飞时按 Esc 不该
+                // 打断一次正常的批量打开）
+                if self.open_confirm.take().is_some() {
+                    self.pending_cli.clear();
+                }
                 // P21：Esc 也取消标签页关闭确认
                 self.close_tab_confirm = None;
                 // P28：Esc 同时收起右键菜单与批量关闭确认
