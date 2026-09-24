@@ -604,7 +604,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
         // 双击：同页在双击窗内再点一次（测试两次派发间隔远小于 500ms）
         dispatch(&mut app, Message::SwitchTab(0));
-        assert_eq!(app.renaming_tab, Some(0), "双击应进入就地重命名");
+        assert_eq!(app.renaming_tab, Some(app.tabs[0].id), "双击应进入就地重命名");
         assert_eq!(app.rename_input, "note.txt", "预填当前文件名");
         assert!(!app.busy, "双击重命名不进对话框阶段");
     }
@@ -725,7 +725,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
         // 菜单「重命名」：命名页 → 就地输入框（不进对话框、不置 busy）
         dispatch(&mut app, Message::RenameOrSaveAsTab(0));
-        assert_eq!(app.renaming_tab, Some(0));
+        assert_eq!(app.renaming_tab, Some(app.tabs[0].id), "存的是页 id");
         assert_eq!(app.rename_input, "origin.txt", "预填当前文件名");
         assert!(!app.busy, "就地重命名不进对话框阶段");
         // 输入框真的渲染在标签条内（P64 自动聚焦 + 全选的载体）
@@ -759,7 +759,7 @@ fn ctx_menu_card_h_adapts_to_viewport() {
 
         // 取消：一切保持原状
         dispatch(&mut app, Message::RenameOrSaveAsTab(0));
-        assert_eq!(app.renaming_tab, Some(0));
+        assert_eq!(app.renaming_tab, Some(app.tabs[0].id), "存的是页 id");
         dispatch(&mut app, Message::TabRenameInputChanged("whatever.txt".into()));
         dispatch(&mut app, Message::TabRenameCancelled);
         assert!(app.renaming_tab.is_none());
@@ -767,6 +767,85 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         assert!(new_path.exists() && !dir.join("whatever.txt").exists());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P214：重命名输入框停留期间发生关页 → 提交必须仍落在**当初那一页**上。
+    ///
+    /// 旧实现把下标存进 `renaming_tab`。序列：`[a.txt, b.txt]` → 在 b 上起头
+    /// 重命名（存下标 1）→ 关掉 a（干净，直接移除）→ b 左移到 0 → 再打开
+    /// c.txt（当前页是命名页，不享「就地打开」优惠 → 追加成第 1 页）→ 回车
+    /// 提交。旧代码照下标 1 取到的是 **c.txt**：一次 `fs::rename` 把用户从没
+    /// 选过的文件改了名，页路径、写盘比对戳、最近文件与光标记忆全部跟着迁移；
+    /// 更糟的是标签条上那台输入框此刻就长在 c 的页签上（看着像在改 c）。
+    #[test]
+    fn rename_commit_targets_the_page_it_started_on_not_the_index() {
+        let dir = scratch_dir("p214-rename");
+        let (pa, pb, pc) = (dir.join("a.txt"), dir.join("b.txt"), dir.join("c.txt"));
+        std::fs::write(&pa, "A").unwrap();
+        std::fs::write(&pb, "B").unwrap();
+        std::fs::write(&pc, "C").unwrap();
+
+        let mut app = Editpad::default();
+        // 提交链路含 persist_settings：必须注入，绝不碰真实 %APPDATA%
+        app.settings_path_override = Some(dir.join("config.toml"));
+        for p in [&pa, &pb] {
+            dispatch(&mut app, Message::FileDropped(p.clone()));
+            let seq = app.job_seq;
+            let text = std::fs::read_to_string(p).unwrap();
+            dispatch(
+                &mut app,
+                Message::Loaded(
+                    seq,
+                    Ok((
+                        editpad_core::Document::from_str(&text),
+                        String::new(),
+                        "UTF-8".to_owned(),
+                    )),
+                ),
+            );
+        }
+        assert_eq!(app.tabs.len(), 2);
+        let id_b = app.tabs[1].id;
+
+        // 在 b 上起头就地重命名，改名还没提交
+        dispatch(&mut app, Message::RenameOrSaveAsTab(1));
+        assert_eq!(app.renaming_tab, Some(id_b));
+        dispatch(&mut app, Message::TabRenameInputChanged("renamed-b.txt".into()));
+
+        // 输入框停留期间：关掉前面的 a，再打开 c（c 正好补进空出来的下标 1）
+        dispatch(&mut app, Message::CloseTabAt(0));
+        dispatch(&mut app, Message::FileDropped(pc.clone()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("C"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].path.as_deref(), Some(pc.as_path()), "c 落在下标 1");
+
+        dispatch(&mut app, Message::TabRenameCommitted);
+
+        let renamed = dir.join("renamed-b.txt");
+        assert!(renamed.exists(), "改名应落在 b 上");
+        assert_eq!(
+            std::fs::read_to_string(&renamed).unwrap(),
+            "B",
+            "被改名的必须当初那一页的文件（旧实现改到了 c：内容会是 C）"
+        );
+        assert!(pc.exists(), "c.txt 不得被改名");
+        assert_eq!(
+            app.tabs[0].path.as_deref(),
+            Some(renamed.as_path()),
+            "改名后当初那一页的路径应迁到新名（b 现在在下标 0）"
+        );
+        assert_eq!(app.tabs[1].path.as_deref(), Some(pc.as_path()), "c 页原样不动");
     }
 
     #[test]
@@ -798,14 +877,14 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::RenameOrSaveAsTab(0));
         dispatch(&mut app, Message::TabRenameInputChanged("bad:name".into()));
         dispatch(&mut app, Message::TabRenameCommitted);
-        assert_eq!(app.renaming_tab, Some(0), "非法名保持输入态");
+        assert_eq!(app.renaming_tab, Some(app.tabs[0].id), "非法名保持输入态");
         assert!(!app.status.is_empty());
         assert!(origin.exists(), "非法名不得动磁盘");
 
         // 目标已存在：报错并保持输入态，两文件都原样
         dispatch(&mut app, Message::TabRenameInputChanged("b.txt".into()));
         dispatch(&mut app, Message::TabRenameCommitted);
-        assert_eq!(app.renaming_tab, Some(0));
+        assert_eq!(app.renaming_tab, Some(app.tabs[0].id), "存的是页 id");
         assert!(app.status.contains("已存在"));
         assert!(origin.exists() && collide.exists());
 

@@ -356,7 +356,7 @@ impl Editpad {
                     // P55：命名页 → 就地重命名输入框（预填当前文件名）；
                     // 未命名页保留「另存为」对话框兜底（§3 P28 第 2 条）
                     if let Some(path) = self.tabs[i].path.clone() {
-                        self.renaming_tab = Some(i);
+                        self.renaming_tab = Some(self.tabs[i].id);
                         self.rename_input = path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())

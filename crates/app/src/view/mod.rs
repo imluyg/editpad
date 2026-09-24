@@ -216,7 +216,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             for (i, tab) in self.tabs.iter().enumerate() {
                 // P55：就地重命名——该页的标签按钮替换为输入框 + ✓/× 微型按钮
                 // （Enter 等价 ✓；Esc 走 BarsDismissed 取消）
-                if self.renaming_tab == Some(i) {
+                if self.renaming_tab == Some(tab.id) {
                     strip = strip.push(
                         row![
                             text_input(self.t(editpad_core::Key::RenamePlaceholder), &self.rename_input)

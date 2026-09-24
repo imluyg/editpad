@@ -807,7 +807,16 @@ StTooLargeEolSuffix)
     /// 最近文件与光标记忆随路径迁移。失败保持输入态让用户改（状态栏
     /// 留原因）；busy/加载中拒绝提交（在途 Loaded 会用旧路径覆写页路径）。
     pub(super) fn commit_tab_rename(&mut self) -> Task<Message> {
-        let Some(idx) = self.renaming_tab else {
+        let Some(id) = self.renaming_tab else {
+            return Task::none();
+        };
+        // P214：按 id 现地解析下标。曾把下标存着——输入框停留期间关掉前面
+        // 任意一页，整条标签线左移，随后一次回车就把**另一个文件**改了名
+        // （页路径、比对戳、最近文件与光标记忆全跟着迁移）。解析不到 = 该页
+        // 已被关掉，输入态就地作废。
+        let Some(idx) = self.tabs.iter().position(|t| t.id == id) else {
+            self.renaming_tab = None;
+            self.rename_input.clear();
             return Task::none();
         };
         let Some(old) = self.tabs.get(idx).and_then(|t| t.path.clone()) else {

@@ -81,8 +81,10 @@ pub(crate) struct Editpad {
     /// 按标签顺序排列。None/空 = 提示条不可见。Esc（BarsDismissed）/
     /// 逐个裁决/全部忽略即清。
     pub(crate) external_change: Option<Vec<usize>>,
-    /// P55：就地重命名的目标页下标；Some = 标签条上该页显示为输入框。
-    pub(crate) renaming_tab: Option<usize>,
+    /// P55：就地重命名的目标页 **id**（Some = 标签条上该页显示为输入框）。
+    /// P214：曾是裸下标——输入框停留期间关掉前面任意一页，一次回车就会把
+    /// **另一个文件**改名（见 `commit_tab_rename`）。
+    pub(crate) renaming_tab: Option<u64>,
     /// P55：就地重命名的输入内容（预填当前文件名，纯 UI 态）。
     pub(crate) rename_input: String,
     /// P67：状态栏「编码」弹出菜单可见。
