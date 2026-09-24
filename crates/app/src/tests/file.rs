@@ -225,8 +225,70 @@ use super::*;
         );
 
         assert!(
-            app.tab().dirty && !app.tabs[0].autosave_inflight,
-            "版本不符应保持置脏并解除挂起"
+            app.tab().dirty,
+            "版本不符应保持置脏（迟到的成功不得清脏标记）"
+        );
+        // 契约更新（P183）：账目未清时必须重排一轮防抖，所以这里是
+        // `inflight == true` 而不是旧的「解除挂起」——停在未挂起就等于
+        // 「用户不再敲字就永远差最后一笔」。见
+        // autosave_written_with_stale_version_rearms_debounce。
+        assert!(
+            app.tabs[0].autosave_inflight,
+            "保持置脏的同时必须重新排队，不是停摆"
+        );
+    }
+
+    /// 迟到的「写成功」+ 版本不符 = 磁盘上少最后一次编辑。旧实现在这里
+    /// 只是「保持置脏」就结束，**不再重排**：用户停手后没有新的触发点，
+    /// 自动保存静默停摆（同一函数里 `Superseded` 分支早就有重排先例）。
+    #[test]
+    fn autosave_written_with_stale_version_rearms_debounce() {
+        let (mut app, path) = loaded_real_file_app("autosave-rearm");
+        app.settings.autosave_enabled = true;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let stale = app.tabs[0].version;
+        let tid = app.tabs[0].id;
+        // 写盘窗口内又敲一个字（代次作废在途快照，但内容版本继续推进）
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+        app.tabs[0].autosave_inflight = true;
+
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(tid, stale, path, AutosaveOutcome::Written),
+        );
+
+        assert!(app.tabs[0].dirty, "版本不符应保持置脏");
+        assert!(
+            app.tabs[0].autosave_inflight,
+            "账目未清必须重新排上防抖，否则最后一笔永不落盘"
+        );
+    }
+
+    /// 守卫拦下时**不得**自我重排（否则每 2s 撞同一面墙）；但用户〔忽略〕
+    /// 表态之后，仍置脏的页必须重新排上防抖。
+    #[test]
+    fn acknowledging_external_change_rearms_autosave() {
+        let (mut app, path) = loaded_real_file_app("autosave-ack-rearm");
+        app.settings.autosave_enabled = true;
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        let (tid, version) = (app.tabs[0].id, app.tabs[0].version);
+        std::fs::write(&path, "externally replaced").unwrap();
+
+        dispatch(
+            &mut app,
+            Message::TabAutosaved(tid, version, path.clone(), AutosaveOutcome::SkippedExternalChange),
+        );
+        assert_eq!(app.external_change, Some(vec![0]), "应交给提示条裁决");
+        assert!(
+            !app.tabs[0].autosave_inflight,
+            "被拦下的一轮不该自我重排"
+        );
+
+        dispatch(&mut app, Message::IgnoreExternalChange(0));
+        assert!(app.external_change.is_none());
+        assert!(
+            app.tabs[0].autosave_inflight,
+            "裁决之后自动保存要重新生效，否则磁盘永远差这一笔"
         );
     }
 

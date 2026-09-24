@@ -454,6 +454,12 @@ impl Editpad {
                             // P31：auto-save 成功清脏 = 内存比清单干净，
                             // 下一拍重写清单（§3 P31 第 3 条的顺带刷新）
                             self.touch_manifest_stale();
+                        } else {
+                            // 版本不符 = 磁盘上少最后一次编辑，账目未清：
+                            // 必须重新排一轮防抖（`Superseded` 同例）。停在
+                            // 「保持置脏」就等于「用户不再敲字 → 再没有触发点
+                            // → 最后一笔永不落盘」，与自动保存承诺的最终一致不符
+                            return self.maybe_schedule_autosave();
                         }
                     }
                     AutosaveOutcome::SkippedExternalChange => {
@@ -520,7 +526,10 @@ impl Editpad {
                         self.external_change = None;
                     }
                 }
-                Task::none()
+                // 裁决完成后重新排上防抖：这一页多半还置脏，而被守卫拦下的
+                // 那一轮**不该自我重排**（否则每 2s 撞同一面墙）——用户表态
+                // 之后才是合法的再触发点。未开自动保存时本调用即空转。
+                self.maybe_schedule_autosave()
             }
             Message::IgnoreAllExternalChanges => {
                 // P52 聚合态：队列内所有页一律按磁盘现状重记戳并收条
@@ -531,7 +540,8 @@ impl Editpad {
                         }
                     }
                 }
-                Task::none()
+                // 同上：批量裁决后补排一轮防抖
+                self.maybe_schedule_autosave()
             }
             // ---------- 打开确认 ----------
             Message::ConfirmOpenDiscard => {
