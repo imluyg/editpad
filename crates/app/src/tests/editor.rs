@@ -700,11 +700,38 @@ fn menubar_toggle_and_hover_flow() {
 
 #[test]
 fn menubar_slot_idx_math() {
-    // 槽位反推：左缘/中部/越左越右钳制
-    assert_eq!(menubar_slot_idx(MENU_BAR_LEFT), 0);
-    assert_eq!(menubar_slot_idx(MENU_BAR_LEFT + MENU_SLOT_W * 2.5), 2);
-    assert_eq!(menubar_slot_idx(0.0), 0, "越左钳到槽 0");
-    assert_eq!(menubar_slot_idx(9999.0), 4, "越右钳到槽 4");
+    // 槽位反推：命中区间内给序号，条带内越界给 None（收起菜单）
+    assert_eq!(menubar_slot_idx(MENU_BAR_LEFT), Some(0));
+    assert_eq!(menubar_slot_idx(MENU_BAR_LEFT + MENU_SLOT_W * 2.5), Some(2));
+    assert_eq!(
+        menubar_slot_idx(MENU_BAR_LEFT + MENU_SLOT_W * 3.9),
+        Some(3),
+        "最后一个按钮仍在界内"
+    );
+    assert_eq!(menubar_slot_idx(0.0), None, "越左：不在任何菜单上");
+    assert_eq!(
+        menubar_slot_idx(MENU_BAR_LEFT + MENU_SLOT_W * 4.0),
+        None,
+        "第四个按钮右侧空白：不得钳到最后一个槽位（旧行为会弹出没有高亮项的菜单）"
+    );
+    assert_eq!(menubar_slot_idx(9_999.0), None, "越右同理");
+}
+
+#[test]
+fn menubar_blank_strip_press_closes_menu() {
+    // 菜单只有 4 个（0..=3），而旧槽位函数把 x 越右一律钳到 4 —— 点在四个按钮
+    // 右侧的空白条带上会弹出「设置」菜单，且没有任何按钮呈高亮态（窗口越宽越
+    // 容易点中）。正确语义：条带内越界 = 收起菜单。
+    let mut app = Editpad::default();
+    app.menu_bar_open = Some(0);
+    app.menubar_pos = (9_999.0, 5.0); // y < MENU_BAR_H：确在条带内
+
+    dispatch(&mut app, Message::MenubarPressed);
+
+    assert_eq!(
+        app.menu_bar_open, None,
+        "越界的条带点击应收起菜单，不得弹出一个没有高亮项的面板"
+    );
 }
 
 #[test]

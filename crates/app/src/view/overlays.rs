@@ -57,7 +57,10 @@ impl Editpad {
     pub(super) fn menubar_overlay(&self, idx: usize) -> Element<'_, Message> {
         const W: f32 = 240.0;
         let card_h = ctx_menu_card_h(self.viewport_size.1).min(380.0);
-        let slot_x = MENU_BAR_LEFT + menubar_slot_idx(self.menubar_anchor.0) as f32 * MENU_SLOT_W;
+        // 锚点 x 对齐到按钮槽位左缘；反推越界（正常不会发生：展开的 idx 就
+        // 来自同一个锚点）时退回本菜单自身的槽位
+        let slot = menubar_slot_idx(self.menubar_anchor.0).unwrap_or(idx);
+        let slot_x = MENU_BAR_LEFT + slot as f32 * MENU_SLOT_W;
         let (ax, ay) = clamp_menu_anchor(
             (slot_x, MENU_BAR_H),
             self.viewport_size,

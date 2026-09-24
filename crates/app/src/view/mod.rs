@@ -160,13 +160,15 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
         let uifont = self.ui_font();
 
-        // 第 69 轮：顶部菜单栏（文件/编辑/查看/视图/设置）——整条包
-        // mouse_area 跟踪指针作浮层锚点（仿标签条 P39 模式）；展开的
-        // 菜单以高亮态标示。功能项自工具栏收编迁移（见各 menubar_panel）。
+        // 第 69 轮：顶部菜单栏——整条包 mouse_area 跟踪指针作浮层锚点（仿标签条
+        // P39 模式）；展开的菜单以高亮态标示。功能项自工具栏收编迁移（见各
+        // menubar_panel）。
         // 第 76 轮（用户点单）：按钮改纯文字扁平（menubar_text_style，
         // 无背景无边框无凸起），行高压缩（按钮 padding [1,8] + 行内
         // padding [0,4]）——看起来不像按钮、更紧凑。
-        let menu_names = [
+        // 数组长度即 `MENU_BAR_SLOTS`：合并/新增菜单必须同步改那处常量，
+        // 否则这里编译不过（曾出现条带越界点击弹出错位菜单）。
+        let menu_names: [editpad_core::Key; crate::chrome::MENU_BAR_SLOTS] = [
             editpad_core::Key::MenuFile,
             editpad_core::Key::MenuEdit,
             editpad_core::Key::MenuView,

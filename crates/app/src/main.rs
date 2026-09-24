@@ -390,8 +390,9 @@ enum Message {
     /// 进列块插入管线（撤销/书签/失效汇点/busy/只读全继承）
     ColumnEditorConfirmed,
     // ---------- 第 69 轮：顶部菜单栏 ----------
-    /// 菜单栏第 `idx` 个菜单开/关（0 文件 1 编辑 2 查看 3 视图 4 设置；
-    /// 再次点击同项关闭，点背板/Esc 走 BarsDismissed）
+    /// 菜单栏第 `idx` 个菜单开/关（槽位序号见 `chrome::MENU_BAR_SLOTS`，
+    /// 名称数组在 `view::menubar`；再次点击同项关闭，点背板/Esc 走
+    /// BarsDismissed）
     MenuToggled(usize),
     /// 指针在菜单栏条上移动（浮层菜单锚点数据源，仿标签条 P39 模式）
     MenubarHovered(Point),

@@ -596,19 +596,22 @@ impl Editpad {
                 self.menubar_pos = (pos.x, pos.y);
                 Task::none()
             }
-            // 背板点击：菜单栏条带内 = 横移切换到目标菜单；条带外 = 收起
+            // 背板点击：条带内且落在某个按钮槽位 = 横移切换到该菜单；条带
+            // 外**或槽位越界**（四个按钮右侧的空白条带）= 收起——旧实现把
+            // 越界钳到最后一个槽位，点空白会弹出没有高亮项的「设置」菜单
             Message::MenubarPressed => {
-                if self.menubar_pos.1 < MENU_BAR_H {
-                    let idx = menubar_slot_idx(self.menubar_pos.0);
-                    self.menubar_anchor = self.menubar_pos;
-                    self.menu_bar_open = if self.menu_bar_open == Some(idx) {
-                        None
-                    } else {
-                        Some(idx)
-                    };
+                let slot = if self.menubar_pos.1 < MENU_BAR_H {
+                    menubar_slot_idx(self.menubar_pos.0)
                 } else {
-                    self.menu_bar_open = None;
-                }
+                    None
+                };
+                self.menu_bar_open = match slot {
+                    Some(idx) if self.menu_bar_open != Some(idx) => {
+                        self.menubar_anchor = self.menubar_pos;
+                        Some(idx)
+                    }
+                    _ => None,
+                };
                 Task::none()
             }
             // ---------- 最近文件 ----------

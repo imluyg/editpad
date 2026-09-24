@@ -12,16 +12,28 @@ pub(crate) const CTX_MENU_H: f32 = 280.0;
 
 // ---------- 第 70 轮：菜单栏槽位几何 ----------
 
-/// 菜单栏按钮槽宽与左缘（与 view.rs 菜单栏布局耦合：五按钮同宽 2 字
+/// 菜单栏按钮槽宽与左缘（与菜单栏布局耦合：各按钮同宽 2 字
 /// 文本 + padding [3,12] + 1px 边框 + spacing 2；布局改动需同步）。
 pub(crate) const MENU_SLOT_W: f32 = 54.0;
 pub(crate) const MENU_BAR_LEFT: f32 = 6.0;
 /// 菜单栏条带高度（浮层背板据此判定「点击落在菜单栏上=切换菜单」）。
 pub(crate) const MENU_BAR_H: f32 = 36.0;
+/// 菜单栏按钮**个数**。视图侧的菜单名数组按本常量声明长度定型
+/// （`[Key; MENU_BAR_SLOTS]`），合并/新增菜单时只改这一处即被编译期盯住。
+pub(crate) const MENU_BAR_SLOTS: usize = 4;
 
-/// 悬停 x → 所属菜单槽位序号（0..=4，纯函数可单测）。
-pub(crate) fn menubar_slot_idx(x: f32) -> usize {
-    (((x - MENU_BAR_LEFT) / MENU_SLOT_W).floor().max(0.0) as usize).min(4)
+/// 悬停/点击 x → 所属菜单槽位（不在任何菜单上返回 `None`，纯函数可单测）。
+///
+/// 早先版本把越界一律 `min(4)` 钳到最后一个槽位，于是点在四个按钮右侧的
+/// 空白条带上会弹出「设置」菜单——且没有任何按钮呈高亮态（`open == Some(idx)`
+/// 恒不等），窗口越宽越容易点中。
+pub(crate) fn menubar_slot_idx(x: f32) -> Option<usize> {
+    let slot = ((x - MENU_BAR_LEFT) / MENU_SLOT_W).floor();
+    if slot < 0.0 {
+        return None;
+    }
+    let slot = slot as usize;
+    (slot < MENU_BAR_SLOTS).then_some(slot)
 }
 
 /// P43：右键菜单卡片高度适配——窗口高度已知且足够时最高占
