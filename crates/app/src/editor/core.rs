@@ -589,6 +589,13 @@ pub struct EditorCore {
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
     pub(crate) show_line_endings: bool,
+    /// 测试钩子（O-1 虚拟化契约）：`line_text()` 的**实际取串次数**。
+    /// 帧成本断言在忙机器上既可能假绿也可能假红（台账 P69 自己就为此把
+    /// 光栅一项降级为「只打印不设限」），而「绘制循环按视口规模跑、不按
+    /// 文档规模跑」这条契约本质是**次数**命题，与机器性能无关。
+    /// 生产构建整字段不参与编译。
+    #[cfg(test)]
+    pub(crate) line_text_calls: std::cell::Cell<usize>,
     /// P133：悬停链接的字符区间 `(line, c0, c1)`（下划线绘制数据源）。
     /// 鼠标移动探测写入；编辑后经失效汇点清空（跨度可能失配）。
     pub(crate) link_hover: Option<(usize, usize, usize)>,
@@ -716,6 +723,8 @@ impl Default for EditorCore {
             sel_span_cache: RefCell::new(None),
             show_whitespace: false,
             show_line_endings: false,
+            #[cfg(test)]
+            line_text_calls: std::cell::Cell::new(0),
             // P132：绘制开关默认关（Settings 默认 true 在应用层下发时生效；
             // 无头测试构造的裸 core 不画参考线）
             indent_guides: false,

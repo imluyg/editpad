@@ -429,6 +429,16 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
+        // 绘制成本按视口规模结算（O-1）：书签/参考线/不可见字符/正文四个
+        // 循环一开始就吃 `visible_range()`，唯有下面两处按「选区规模 /
+        // 命中总数」跑——整行取串、`chars().count()`、BIT 前缀都发生在剔除
+        // **之前**，于是 Ctrl+A 或大量命中时帧成本随文档线性增长。
+        // 这里把循环界与 visible_range 求交，**循环内原有的逐行 row 精筛
+        // 一律保留**：visible_range 按 `ceil(视口行数) + 1` 外扩，是精筛通过
+        // 集合的超集（`lh` 与本行高同源，见 :194），故剔除是纯成本收敛、
+        // 绘制结果逐像素不变。
+        let (vis_first, vis_last) = core.visible_range();
+
         // 查找命中高亮（P123）：查找栏开态的全部命中在视口内上底色。
         // 画在选区**之前**——当前命中的选区带覆盖其底色，当前/非当前
         // 命中自然区分（主流编辑器同款层次）。几何与选区绘制同款：
@@ -437,9 +447,18 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 主流同口径），绘制时对超界行列做钳制防御。
         if !core.find_hl.is_empty() {
             for hit in &core.find_hl {
+                // 命中片段一律从 `hit.line` 起向**后**展开（`match_line_pieces`
+                // 每步至少吃掉 1 字符，故末片行号 ≤ hit.line + len_chars）。
+                // 据此可在拆片之前先否掉整个不在视口内的命中。
+                if hit.line > vis_last || hit.line + hit.len_chars < vis_first {
+                    continue;
+                }
                 for (line, c0, c1) in core.match_line_pieces(hit) {
                     if c1 <= c0 {
                         continue; // 零宽命中画不出底色
+                    }
+                    if line < vis_first || line > vis_last {
+                        continue; // 视口外的整行片段：不必取串即可否掉
                     }
                     let text = core.line_text(line);
                     let lens = text.chars().count();
@@ -533,7 +552,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         }
         let mut paint_selection = |sel_start: CursorPos, sel_end: CursorPos| {
             let last_line = core.doc.line_count().saturating_sub(1);
-            for line in sel_start.line..=sel_end.line.min(last_line) {
+            // O-1：循环界先与视口求交（同上——超集求交 + 保留逐行精筛，绘制
+            // 结果不变）。改前 `sel_start.line..=sel_end.line` 在 Ctrl+A 上是
+            // 「全文档行数 × 整行取串」，改后与视口行数同阶。
+            let lo = sel_start.line.max(vis_first);
+            let hi = sel_end.line.min(last_line).min(vis_last);
+            for line in lo..=hi {
                 let text = core.line_text(line);
                 let lens = text.chars().count();
                 let start_col = if line == sel_start.line { sel_start.col } else { 0 };

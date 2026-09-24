@@ -1164,10 +1164,19 @@ impl EditorCore {
         if line >= self.doc.line_count() {
             return String::new();
         }
+        #[cfg(test)]
+        self.line_text_calls.set(self.line_text_calls.get() + 1);
         self.doc
             .line_str(line)
             .trim_end_matches(['\n', '\r'])
             .to_owned()
+    }
+
+    /// 测试钩子（O-1）：读取并清零 `line_text` 取串计数。用法 = 绘制前清零、
+    /// 绘制后取值，断言的是**次数上界**而非耗时，故与机器负载无关。
+    #[cfg(test)]
+    pub(crate) fn take_line_text_calls(&self) -> usize {
+        self.line_text_calls.take()
     }
 
     /// 行号栏宽度。

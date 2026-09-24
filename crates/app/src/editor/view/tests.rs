@@ -1597,6 +1597,176 @@ fn render_frame_cost_is_bounded_on_large_document() {
     );
 }
 
+// ---------- O-1 绘制循环的视口剔除（次数护栏 + 逐像素护栏） ----------
+//
+// 上方 P69 的 `<5ms` 护栏测的是**无选区、无命中**的帧，所以选区循环与命中
+// 循环各自「按文档规模」跑的那条路径它一次都没挡到（体检报告 §6 原话：
+// 恒绿是因为那个用例没有选区）。这里改用**次数**结算同一契约——耗时断言在
+// 忙机器上假红、缓存温热时假绿，而「成本按视口规模而非文档规模」本质是与
+// 机器负载无关的次数命题。
+
+/// 与真实渲染循环同构的最小无头管线：画一帧，返回该帧 `line_text()` 的
+/// 实际取串次数。视口固定在文档中部，`select_all` 后选区向两端各伸出
+/// 半个文档——改前即每帧「全文档行数 × 整行取串」。
+fn draw_once_and_count_line_text(lines: usize, select_all: bool, hits: usize) -> usize {
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        let doc: String = (0..lines).map(|i| format!("row-{i:03} abc\n")).collect();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        if select_all {
+            c.select_all();
+        }
+        // 命中表按行均匀铺满全文档（后台扫描快照的形状，也是改前最贵的分布）
+        c.find_hl = (0..hits)
+            .map(|k| editpad_core::MatchPos {
+                line: (k * lines / hits.max(1)).min(lines.saturating_sub(1)),
+                col: 0,
+                len_chars: 3,
+            })
+            .collect();
+        // select_all 会把滚动推到文末，视口位置必须在它之后设定
+        c.scroll_top = (lines / 2) as f32;
+        c.take_line_text_calls();
+    }
+    let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let (w, h) = (700u32, 500u32);
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &[viewport_rect],
+        Color::WHITE,
+    );
+    let n = core.borrow().take_line_text_calls();
+    assert!(n > 0, "探针失效：整帧一次整行取串都没有");
+    n
+}
+
+/// O-1 主护栏：Ctrl+A 大选区下，一帧的整行取串次数只随**视口行数**变，
+/// 不随文档行数变（文档翻 10 倍，次数不得跟着翻）。
+#[test]
+fn o1_selection_draw_cost_scales_with_viewport_not_document() {
+    let small = draw_once_and_count_line_text(2_000, true, 0);
+    let large = draw_once_and_count_line_text(20_000, true, 0);
+    eprintln!("[O-1] Ctrl+A 单帧取串次数：2 万行 {large} / 2 千行 {small}");
+    // 绝对上界：视口 ~15 行，正文 + 选区 + 行号各项合计应为百次量级。
+    // 改前该值是 20_000 以上（选区循环一行一次取串）。
+    assert!(
+        large < 500,
+        "2 万行文档单帧取串 {large} 次：绘制成本仍按文档规模结算"
+    );
+    assert!(
+        large <= small * 3 + 50,
+        "文档 ×10 使单帧取串次数 ×{large} vs ×{small}：剔除未与视口挂钩"
+    );
+}
+
+/// O-1 次护栏：查找命中开态同款——命中表长度不应进入帧成本。
+#[test]
+fn o1_find_hit_draw_cost_scales_with_viewport_not_document() {
+    let small = draw_once_and_count_line_text(2_000, false, 2_000);
+    let large = draw_once_and_count_line_text(20_000, false, 20_000);
+    eprintln!("[O-1] 满屏命中单帧取串次数：2 万命中 {large} / 2 千命中 {small}");
+    assert!(
+        large < 500,
+        "2 万条命中单帧取串 {large} 次：命中循环仍按命中总数结算"
+    );
+    assert!(
+        large <= small * 3 + 50,
+        "命中表 ×10 使单帧取串次数 {small} → {large}：未按视口粗筛"
+    );
+}
+
+/// O-1 的反证护栏：视口剔除必须是**纯成本收敛**。两份文档在视口内逐字符
+/// 相同、只有视口外的行数与内容不同（选区都超出可见区），成帧应逐像素相等。
+/// 一旦哪天把可见行也剔掉了，这里立刻炸。比较区刻意避开滚动条覆盖带——
+/// 两份文档行程不同，那是剔除之外的既有差异。
+#[test]
+fn o1_viewport_culling_leaves_pixels_untouched() {
+    let render = |total: usize| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            // 前 100 行两份完全一致；多出来的行也在视口之外（视口中部 15 行）
+            let doc: String = (0..total).map(|i| format!("row-{i:03} abc\n")).collect();
+            c.reset_document(editpad_core::Document::from_str(&doc));
+            c.set_viewport_width(600.0);
+            c.set_viewport_height(300.0);
+            c.select_all();
+            c.scroll_top = 50.0;
+        }
+        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let (w, h) = (700u32, 500u32);
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[viewport_rect],
+            Color::WHITE,
+        );
+        pixels
+    };
+    // 预热帧：cosmic-text 走**全局 font_system**，冷启动时 `measure_text_width`
+    // 可能返回 None，而 `ensure_measured_char_width` 刻意「先记键再量、本帧不
+    // 重试」（view/mod.rs:114）→ 一冷一热两帧的 char_w 不同、整版平移。对照
+    // 两侧都必须是热帧，否则测到的是字体缓存温度而不是剔除语义。
+    let _ = render(100);
+    let _ = render(500);
+    let a = render(100);
+    let b = render(500);
+    let mut diff = 0u32;
+    for y in 0..270u32 {
+        for x in 0..570u32 {
+            if a.pixel(x, y) != b.pixel(x, y) {
+                diff += 1;
+            }
+        }
+    }
+    assert_eq!(diff, 0, "视口外文档规模变化改变了可见像素——剔除不再是纯成本收敛");
+}
+
+
 /// 第 60 轮（headless 像素级）：书签圆点必须画在行号栏左侧条带内——
 /// 标记行在条带采样区出现琥珀墨迹，摘除后同区归零；且圆点不得污染
 /// 条带右侧的行号数字区（越界即条带几何漂移）。
