@@ -302,7 +302,10 @@ impl Utf8Scan {
             self.saw_nul |= data.contains(&0);
             return;
         }
-        for &b in data {
+        // 带下标遍历：判定非法的那一刻，**本块剩余字节仍要扫一遍 NUL**——
+        // 否则「非法序列在前、NUL 在后」的输入（无 BOM 的 UTF-16LE 中文最
+        // 典型）会漏掉最多一个块长的 NUL，与 decode() 的整块检测分叉。
+        for (i, &b) in data.iter().enumerate() {
             if b == 0 {
                 self.saw_nul = true;
                 self.invalid = true; // NUL 之后无需再校验 UTF-8
@@ -317,6 +320,7 @@ impl Utf8Scan {
                 } else {
                     self.expect = 0;
                     self.invalid = true;
+                    self.saw_nul |= data[i + 1..].contains(&0);
                     return;
                 }
             } else if b >= 0x80 {
@@ -343,6 +347,7 @@ impl Utf8Scan {
                     // 孤立续字节 / 过长 lead（C0/C1）/ 非法 lead（F5..FF）
                     _ => {
                         self.invalid = true;
+                        self.saw_nul |= data[i + 1..].contains(&0);
                         return;
                     }
                 }
@@ -714,6 +719,36 @@ mod tests {
         fs::write(&target, bytes).unwrap();
         let loaded = load_document_streaming(&target, |_| {}).expect("加载应成功");
         (loaded.doc.to_text(), loaded.encoding.to_string())
+    }
+
+    /// 无 BOM 的 UTF-16LE 中文文本里，「非法 lead」可能先于 NUL 出现
+    /// （`文` = `87 65` 的 0x87 就是孤立续字节）。旧实现在判非法的那一刻
+    /// 直接 return，同一块剩下的字节没人扫 NUL 了 —— 与 [`decode`] 的
+    /// 「整块 contains(0)」口径分叉，二进制/宽编码文件被当成 GBK 文本打开。
+    #[test]
+    fn streaming_scans_nul_after_an_invalid_sequence_in_the_same_block() {
+        // UTF-16LE("文一") = 65 87? 逐字节写实：文=U+6587→[87,65]，一=U+4E00→[00,4E]
+        let unit: Vec<u8> = vec![0x87, 0x65, 0x00, 0x4E];
+        let mut bytes = Vec::new();
+        for _ in 0..8 {
+            bytes.extend_from_slice(&unit);
+        }
+        assert!(bytes.len() < CHUNK_SIZE, "用例前提：整个文件落在同一块内");
+        assert!(bytes.contains(&0) && !bytes.starts_with(&[0xFF, 0xFE]));
+
+        let dir = scratch_dir("nul-tail");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("u16le.txt");
+        fs::write(&target, &bytes).unwrap();
+
+        let verdict = load_document_streaming(&target, |_| {}).err();
+        assert!(
+            matches!(verdict, Some(CoreError::BinaryDetected { .. })),
+            "含 NUL 必须按二进制拒绝（与 decode 同口径），实际 {verdict:?}"
+        );
+        assert!(decode(&bytes).is_binary, "对照实现本来就判二进制");
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
