@@ -586,7 +586,10 @@ fn build_pass(
         report(on_progress, progress_base + done.min(progress_span), total_bytes);
     }
     // 冲刷解码器尾部（未完的多字节序列 / 未配对代理）
-    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, None, head);
+    // P216：stats 必须一并喂进去——悬在半路的尾字节的 U+FFFD **只**出现在这
+    // 一次输出里。此前传 None，占比统计系统性少算，二进制防护（P1）在流式
+    // 路径上形同虚设（详见 `load_document_streaming` 的判定处）。
+    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, stats, head);
     report(on_progress, total_bytes, total_bytes);
 
     Ok(Document::from_parts(builder.finish(), eol.finish()))
@@ -722,6 +725,51 @@ mod tests {
     /// O-9 的另一半：真不是 UTF-8 时**仍然**要回卷走 GBK 兜底，且回卷用同一
     /// fd 的 seek 而非重开文件——所以第二趟读到的字节必须与第一趟同量（说明
     /// 回到起点了），正文还须与 `decode` 逐字相等。
+    /// P216 回归：**同一条二进制判据**必须给两条装载路径同一个结论。
+    ///
+    /// 截断的 GBK 文件（尾部悬着半个多字节字符；真实来源：下载被截断、tail
+    /// 跟到半行、写盘被杀）的 U+FFFD **只**出自解码器的末次 flush。流式路径
+    /// 此前把 stats 传成 `None`，占比统计系统性少算，于是：
+    /// - `decode()`（`load_file`，FIF 用的就是它）→ 判二进制、拒开；
+    /// - `load_document_streaming()`（编辑器打开文件用的就是它）→ 放行，
+    ///   正文里带 U+FFFD；用户改一笔再保存，原字节就被改写成文本 —— 这正是
+    ///   P1 防护要拦的那件事。
+    #[test]
+    fn streaming_gbk_binary_verdict_matches_strict_decode() {
+        let dir = scratch_dir("p216-gbk-tail");
+        fs::create_dir_all(&dir).unwrap();
+        let mut tail_one = vec![0xB5, 0xC4]; // 合法 GBK「的」
+        tail_one.push(0x81); // 悬着的尾字节 → 坏输出全在 flush 里
+        let mut ratio_edge = Vec::new();
+        for _ in 0..1040 {
+            ratio_edge.extend_from_slice(&[0xB5, 0xC4]);
+        }
+        ratio_edge.extend_from_slice(&[0xFF; 10]); // 中段坏字节：10/1050 < 1%
+        ratio_edge.push(0x81); // 再加一个悬尾字节 → 计入 flush 才越过 1%
+        let cases = vec![("tail-one.bin", tail_one), ("ratio-edge.bin", ratio_edge)];
+
+        for (name, bytes) in cases {
+            let target = dir.join(name);
+            fs::write(&target, &bytes).unwrap();
+            let reference = decode(&bytes);
+            let streamed = load_document_streaming(&target, |_| {});
+            match (&streamed, reference.is_binary) {
+                (Ok(loaded), true) => panic!(
+                    "{name}: decode 判二进制拒开，流式却放行（encoding {}，text {:?}）",
+                    loaded.encoding,
+                    loaded.doc.to_text()
+                ),
+                (Err(CoreError::BinaryDetected { .. }), false) => panic!(
+                    "{name}: decode 放行，流式却拒开（text {:?}）",
+                    reference.text
+                ),
+                (Err(CoreError::BinaryDetected { .. }), true) | (Ok(_), false) => {}
+                (Err(e), _) => panic!("{name}: 非预期错误 {e}"),
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn document_streaming_falls_back_to_gbk_by_rewinding_the_same_fd() {
         let dir = scratch_dir("o9-gbk");
