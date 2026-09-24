@@ -705,7 +705,7 @@ pub fn replace_all_document(
     case_sensitive: bool,
 ) -> (String, usize) {
     if query.is_empty() {
-        let mut whole = String::new();
+        let mut whole = String::with_capacity(doc.text_len_bytes());
         for chunk in doc.chunks() {
             whole.push_str(chunk);
         }
@@ -715,7 +715,18 @@ pub fn replace_all_document(
     let query = eol.normalize(query);
     let replacement = eol.normalize(replacement);
     let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
-    let mut out = String::new();
+    // 输出容量提示（O-15b）：原状 `String::new()` 从 0 翻倍长到全文大小，
+    // 50MB 即 20+ 次 realloc、等量 memcpy，峰值还多一倍。
+    // ⚠️ 只在**替换不短于查询**时预容量——那时输出长度 ≥ 输入长度，按文档
+    // 字节数预置恰好是下界；替换更短（尤其整篇删空）时输出可能远小于输入，
+    // 照抄全文预容量会凭空多占一个全文大小的缓冲，比翻倍增长更糟 → 交给
+    // String 自身的增长策略。`with_capacity(0)` 不分配，等价于 new()。
+    let cap_hint = if replacement.len() >= query.len() {
+        doc.text_len_bytes()
+    } else {
+        0
+    };
+    let mut out = String::with_capacity(cap_hint);
     // 跨块残段：块边界可能落在任意位置，末尾不足一个查询长度的尾巴
     // 先攒着，与下一块拼接后再扫（复用分配，峰值 ≈ 存储块 + 查询长度）
     let mut carry = String::new();
@@ -1407,6 +1418,34 @@ mod tests {
         // 空查询 no-op：返回全文与 0 次
         let doc = Document::from_str("hello\nworld");
         assert_eq!(replace_all_document(&doc, "", "X", true), (doc.to_text(), 0));
+    }
+
+    /// O-15b：输出**容量提示**不得改变结果，且两个分支都要走到。
+    ///
+    /// 既有对拍用例的替换串一律不短于查询（`"X"` / `"<R>"`），只走「预容量」
+    /// 那一支；「替换更短甚至删空 → 不预容量」这一支此前从未与 `replace_all`
+    /// 对拍过。本条把两个方向一起钉住（结果必须与朴素实现逐字节相同）。
+    #[test]
+    fn replace_all_document_capacity_branches_match_plain_replace() {
+        let fixtures = ["", "aaaa aa\naa", "中文中文\n🚀🚀中\n", "x\r\ny\nz\rw"];
+        for text in fixtures {
+            let doc = Document::from_str(text);
+            let eol = doc.line_ending();
+            for (query, repl) in [
+                ("a", "aaaaaa"), // 变长 → 预容量支
+                ("aa", "X"),     // 变短 → 不预容量支
+                ("中文", ""),    // 整篇删空 → 不预容量支（预置会白占全文大小）
+                ("\r\n", "|"),   // 行界相关 + 变短
+            ] {
+                for cs in [true, false] {
+                    assert_eq!(
+                        replace_all_document(&doc, query, repl, cs),
+                        replace_all(text, &eol.normalize(query), repl, cs),
+                        "不一致: text={text:?} query={query:?} repl={repl:?} cs={cs}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
