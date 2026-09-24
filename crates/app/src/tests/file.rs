@@ -1483,6 +1483,138 @@ external
         );
     }
 
+    /// 一次性跳转意图只能由**它所属的那次装载**兑现。旧实现把消费写在
+    /// `match (result, target)` 之外、且作用在「当时的活动页」上，于是取消一次
+    /// 打开确认后意图悬挂，下一次无关装载的收尾替它跳了行。
+    #[test]
+    fn cancelled_open_voids_link_goto_and_later_loads_do_not_honor_it() {
+        let dir = scratch_dir("link-goto-cancel");
+        let (cur, target) = (dir.join("cur.txt"), dir.join("t.txt"));
+        std::fs::write(&cur, "c1\nc2\nc3\n").unwrap();
+        std::fs::write(&target, "a\nb\nc\nd\ne\n").unwrap();
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(cur.clone()));
+        let s0 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s0,
+                Ok((
+                    editpad_core::Document::from_str("c1\nc2\nc3\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        // 当前页置脏 → 链接打开要先过「放弃更改并打开」确认
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+        dispatch(
+            &mut app,
+            Message::LinkClicked(crate::editor::LinkTarget::File {
+                path: target,
+                line: Some(5),
+            }),
+        );
+        assert!(app.open_confirm.is_some(), "用例前提：确认条已弹出");
+        assert_eq!(app.pending_link_goto, Some(5), "行号暂存等待裁决");
+
+        dispatch(&mut app, Message::ConfirmOpenCancel);
+        assert!(
+            app.pending_link_goto.is_none(),
+            "用户取消打开 = 该跳转意图一并作废，不得悬挂"
+        );
+
+        // 之后用户自己正常打开另一个文件并结算：被取消的那次跳行不得借这次
+        // 收尾续排复活（旧实现正是如此——当前文档光标被凭空打跑到第 5 行）
+        let later = dir.join("later.txt");
+        std::fs::write(&later, "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
+        dispatch(&mut app, Message::FileDropped(later));
+        let s1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s1,
+                Ok((
+                    editpad_core::Document::from_str("l1\nl2\nl3\nl4\nl5\nl6\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(
+            app.cur_handle.borrow().cursor.line,
+            0,
+            "无关装载不得替被取消的点击跳行"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn link_goto_applies_to_the_tab_that_received_the_file() {
+        let dir = scratch_dir("link-goto-bg-tab");
+        let (first, target) = (dir.join("first.txt"), dir.join("t.txt"));
+        std::fs::write(&first, "x\n").unwrap();
+        std::fs::write(&target, "a\nb\nc\nd\ne\n").unwrap();
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(first));
+        let s0 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s0,
+                Ok((
+                    editpad_core::Document::from_str("x\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        dispatch(
+            &mut app,
+            Message::LinkClicked(crate::editor::LinkTarget::File {
+                path: target.clone(),
+                line: Some(4),
+            }),
+        );
+        let landing = app
+            .active_load
+            .as_ref()
+            .map(|j| j.tab_id)
+            .expect("链接目标应已登记加载任务");
+        // 加载在途期间用户切回页 0：结算时活动页 ≠ 接收文件的那一页
+        dispatch(&mut app, Message::SwitchTab(0));
+        let s1 = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                s1,
+                Ok((
+                    editpad_core::Document::from_str("a\nb\nc\nd\ne\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+
+        assert!(app.pending_link_goto.is_none(), "一次性消费");
+        let landed_tab = app
+            .tabs
+            .iter()
+            .position(|t| t.id == landing)
+            .expect("目标页应仍在");
+        assert_eq!(
+            app.tabs[landed_tab].editor.borrow().cursor.line,
+            3,
+            "跳行必须落在接收该文件的页上"
+        );
+        assert_eq!(
+            app.tabs[0].editor.borrow().cursor.line, 0,
+            "活动页不是接收页时不得被误跳"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn confirm_save_and_close_chains_through_all_dirty_pages() {
         // P147 回归：ASK（非快照直退）模式「保存并关闭」曾只存活动页即

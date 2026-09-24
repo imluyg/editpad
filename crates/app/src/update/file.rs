@@ -98,6 +98,12 @@ impl Editpad {
                 let mut tasks: Vec<Task<Message>> = Vec::new();
                 // P126：.LOG 首行时间戳是否已追加（Ok 臂内置位，装载尾部重新置脏）
                 let mut log_appended = false;
+                // P133/A8：一次性跳转意图先摘走，只在「本次装载真的落进了某个页」
+                // 时兑现给**接收文件的那一页**；其余出口（结果丢弃/加载失败）自然
+                // 作废。写在 match 之外并作用于「当时的活动页」曾让一次取消或一次
+                // 后台页装载把光标打到无关文档上。
+                let link_goto = self.pending_link_goto.take();
+                let fif_goto = self.pending_fif_goto.take();
                 match (result, target) {
                     (Ok((doc, sample, encoding)), Some(target)) => {
                         // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
@@ -208,6 +214,18 @@ impl Editpad {
                         if self.find_visible && target == self.active_tab {
                             tasks.push(self.schedule_find_scan());
                         }
+                        // P133：链接点击的「打开后跳行」（1 起行号，越界由
+                        // jump_to_line 钳制）；A8：FIF 命中的「打开后选中」——
+                        // 一律落在**接收该文件的页**上，不是「当时的活动页」
+                        if let Some(line) = link_goto {
+                            self.tabs[target]
+                                .editor
+                                .borrow_mut()
+                                .jump_to_line(line as usize);
+                        }
+                        if let Some((line, col, len)) = fif_goto {
+                            self.tabs[target].editor.borrow_mut().select_span(line, col, len);
+                        }
                     }
                     (Ok(_), _) => {
                         // P30/P145：占位页已被用户动过（关页/新页导致下标
@@ -251,15 +269,8 @@ impl Editpad {
                 if !self.pending_cli.is_empty() && !self.busy {
                     let _ = self.update(Message::OpenNextCliFile);
                 }
-                // P133：链接点击的「打开后跳行」——装载结算后一次性消费
-                //（1 起行号；行号越界由 jump_to_line 钳制兜底）
-                if let Some(line) = self.pending_link_goto.take() {
-                    self.cur_handle.borrow_mut().jump_to_line(line as usize);
-                }
-                // A8：FIF 命中点击的「打开后选中命中」——同上一次性消费
-                if let Some((line, col, len)) = self.pending_fif_goto.take() {
-                    self.cur_handle.borrow_mut().select_span(line, col, len);
-                }
+                // （跳转意图已在 match 前摘走、Ok 臂内按接收页兑现；到这里
+                //  只剩任务收尾——失败/丢弃出口的意图自然作废）
                 if tasks.is_empty() {
                     Task::none()
                 } else {
@@ -541,6 +552,9 @@ impl Editpad {
                 // 开出来。无确认在飞时不动队列（不打断正常批量打开）。
                 if self.open_confirm.take().is_some() {
                     self.pending_cli.clear();
+                    // 链接/FIF 点击的「打开后跳行」同属这次被放弃的打开，一并作废
+                    self.pending_link_goto = None;
+                    self.pending_fif_goto = None;
                 }
                 Task::none()
             }

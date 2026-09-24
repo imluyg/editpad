@@ -652,6 +652,9 @@ impl Editpad {
                 // 打断一次正常的批量打开）
                 if self.open_confirm.take().is_some() {
                     self.pending_cli.clear();
+                    // 同 ConfirmOpenCancel：这次打开携带的跳行意图一并作废
+                    self.pending_link_goto = None;
+                    self.pending_fif_goto = None;
                 }
                 // P21：Esc 也取消标签页关闭确认
                 self.close_tab_confirm = None;
