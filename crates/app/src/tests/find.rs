@@ -1072,9 +1072,14 @@ fn find_overlay_drags_and_clears_its_status_on_close() {
     assert!(app.find_pos.is_none(), "未拖动时应走默认位置");
     let default = app.default_find_pos();
 
-    // 按下拖动条（锚点 = 最近一次 on_move 位置）→ 逐帧增量平移
-    dispatch(&mut app, Message::FindCursorMoved(Point::new(600.0, 300.0)));
+    // 按下拖动条 → 第一个移动事件只定锚、不平移，此后按逐帧增量平移
     dispatch(&mut app, Message::FindDragStart);
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(600.0, 300.0)));
+    assert!(
+        app.find_pos.is_none(),
+        "定锚那一拍不该平移浮层（P209 惰性锚定）：{:?}",
+        app.find_pos
+    );
     dispatch(&mut app, Message::FindCursorMoved(Point::new(700.0, 350.0)));
     let moved = app.find_pos.expect("拖动后应持有显式位置");
     assert!((moved.x - (default.x + 100.0)).abs() < 0.01, "x 未按增量平移：{moved:?}");
@@ -1082,8 +1087,8 @@ fn find_overlay_drags_and_clears_its_status_on_close() {
     dispatch(&mut app, Message::FindDragEnd);
 
     // 拖出视野 → 钳制在窗口内；双击拖动条 → 复位默认
-    dispatch(&mut app, Message::FindCursorMoved(Point::new(5000.0, 5000.0)));
     dispatch(&mut app, Message::FindDragStart);
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(5000.0, 5000.0)));
     dispatch(&mut app, Message::FindCursorMoved(Point::new(9000.0, 9000.0)));
     assert_eq!(
         app.find_pos,
@@ -1095,8 +1100,8 @@ fn find_overlay_drags_and_clears_its_status_on_close() {
     assert!(app.find_pos.is_none(), "双击拖动条应复位到默认位置");
 
     // 结构核对：卡片左上角 ≡ find_pos（拖到左上角区域）
-    dispatch(&mut app, Message::FindCursorMoved(Point::new(600.0, 300.0)));
     dispatch(&mut app, Message::FindDragStart);
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(600.0, 300.0)));
     dispatch(&mut app, Message::FindCursorMoved(Point::new(200.0, 120.0)));
     dispatch(&mut app, Message::FindDragEnd);
     let pos = app.find_pos.expect("应持有位置");
@@ -1215,5 +1220,79 @@ fn p153_returning_to_find_box_surrenders_editor_ime_focus() {
     assert!(
         app.find_dimmed,
         "点正文照旧淡出（View 层的淡出与焦点让出互不影响）"
+    );
+}
+
+/// P209（O-7①）：查找浮层**开着**不等于**每帧追鼠标**。整窗 `Fill×Fill`
+/// 的 `mouse_area` 每产出一条 `FindCursorMoved` 就是一次全窗 tiny-skia
+/// 栅格化，而查找栏通常开几十秒、期间指针在正文里来回移动是常态——这条
+/// 是空闲 CPU 的头号来源。改法：`on_move` 只在拖动态挂载。
+///
+/// `on_release` 反向保持常挂（本用例同时钉住）：按下与松开可能落在同一次
+/// 事件批里（此时视图还没重建、监听位还没挂上），漏掉松开 = 浮层永久粘在
+/// 光标上。一次点击一条消息的代价远小于那个症状。
+#[test]
+fn find_overlay_listens_to_mouse_moves_only_while_dragging() {
+    let mut app = app_with_lines(3);
+    app.viewport_size = (1024.0, 768.0);
+    dispatch(&mut app, Message::FindToggled);
+    let card = ViewTree::layout_default(&app).find_layer_card();
+    // 卡片右下角内侧：确定落在整窗拖动层范围内，又不落在菜单/标签条上
+    let p = Point::new(card.x + card.width - 20.0, card.y + card.height - 10.0);
+    let moved = || iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: p });
+
+    // 未拖动：移动事件不该出声
+    let msgs = ViewTree::layout_default(&app).send(moved(), p);
+    assert!(
+        !msgs.iter().any(|m| matches!(m, Message::FindCursorMoved(..))),
+        "未拖动却收到 FindCursorMoved（整窗 on_move 没被门控）：{msgs:?}"
+    );
+
+    // 拖动中：同一条事件必须出声（否则门控变成了「拖不动」）
+    dispatch(&mut app, Message::FindDragStart);
+    let msgs = ViewTree::layout_default(&app).send(moved(), p);
+    assert!(
+        msgs.iter().any(|m| matches!(m, Message::FindCursorMoved(..))),
+        "拖动中却收不到 FindCursorMoved：{msgs:?}"
+    );
+
+    // 松开：监听位常挂，任何时刻都能收尾
+    let msgs = ViewTree::layout_default(&app).send(
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)),
+        p,
+    );
+    assert!(
+        msgs.iter().any(|m| matches!(m, Message::FindDragEnd)),
+        "松开必须产出 FindDragEnd：{msgs:?}"
+    );
+}
+
+/// P209 顺带修掉的用户可见缺陷：指针「没动过就按下」→ 浮层瞬跳。
+///
+/// 修前锚点取自 `find_cursor`（初值 `(0,0)`，只有整窗 `on_move` 会刷新）。
+/// 用 Ctrl+F 开栏后把指针挪到拖动条上——若那期间没有任何一次移动事件
+/// 落到 app 层（面板刚开、指针恰在条上），按下时锚点仍是 `(0,0)`，下一个
+/// 移动事件便按「与原点之差」平移 = 数百像素跳位（P152 复报族同一片区域）。
+/// 现在改惰性锚定：按下后的第一个移动事件只定锚、不平移。
+#[test]
+fn find_drag_start_without_prior_move_does_not_jump_the_overlay() {
+    let mut app = app_with_lines(3);
+    app.viewport_size = (1024.0, 768.0);
+    dispatch(&mut app, Message::FindToggled);
+    let default = app.default_find_pos();
+
+    dispatch(&mut app, Message::FindDragStart);
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(700.0, 300.0)));
+    assert_eq!(
+        app.find_pos,
+        None,
+        "定锚那一拍不得平移（修前这里会跳到 default+(700,300) 并被钳到窗口角）"
+    );
+
+    dispatch(&mut app, Message::FindCursorMoved(Point::new(710.0, 305.0)));
+    let p = app.find_pos.expect("定锚之后的移动应当跟手平移");
+    assert!(
+        (p.x - (default.x + 10.0)).abs() < 0.01 && (p.y - (default.y + 5.0)).abs() < 0.01,
+        "跟手平移不对：{p:?}，default {default:?}"
     );
 }

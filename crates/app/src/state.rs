@@ -155,12 +155,10 @@ pub(crate) struct Editpad {
     /// 查找浮层左上角位置（窗口坐标）。None = 用默认位置（窗口中间偏上）；
     /// 用户点单：浮层遮住正文目标行时必须能拖开，故位置由应用层持有。
     pub(crate) find_pos: Option<Point>,
-    /// 拖动中的上一帧光标位置（按住拖动条时按逐帧增量平移浮层）；
-    /// None = 未在拖动。按下时用 [`Self::find_cursor`] 作锚点（on_press
-    /// 不带坐标，锚点取最近一次 on_move 的位置）。
-    pub(crate) find_drag: Option<Point>,
-    /// 最近一次已知光标位置（窗口坐标；`on_move` 层每帧更新）
-    pub(crate) find_cursor: Point,
+    /// 拖动态（按住卡片顶部拖动条）；None = 未在拖动。视图层的整窗
+    /// `on_move` **只在本字段为 `Some` 时挂载**（P209：面板开着而鼠标
+    /// 移动 = 每帧一次全窗重绘，是空闲 CPU 的主要来源）。
+    pub(crate) find_drag: Option<FindDrag>,
     /// 状态栏当前显示的是查找进度（「第 N/M 处匹配」）——关闭查找栏时
     /// 据此清理，避免关栏后左下角残留（用户复报）
     pub(crate) find_status: bool,
@@ -391,7 +389,6 @@ impl Default for Editpad {
             find_all_visible: false,
             find_pos: None,
             find_drag: None,
-            find_cursor: Point::ORIGIN,
             find_status: false,
             find_dimmed: false,
             fif_visible: false,
@@ -492,4 +489,20 @@ pub(crate) enum PaletteMode {
     Commands,
     /// 当前会话标签页间跳转（Ctrl+P）
     Tabs,
+}
+
+/// P209：查找浮层的拖动态（[`Editpad::find_drag`]）。
+///
+/// 为什么不是 `Option<Point>`（旧写法）：本工程 iced 0.14 的 `mouse_area`
+/// 只有 `on_press(Message)`，**按下回调不带坐标**，旧实现只能把锚点存放在
+/// `find_cursor`（由整窗 `on_move` 每帧刷新）。于是「指针落到拖动条上但
+/// 一次都没移动过」时锚点是初值 `(0,0)`，一按下浮层就瞬跳。改成惰性锚定
+/// 后，按下与第一个移动事件之间不平移，整窗 `on_move` 也就能只在拖动期间
+/// 挂载了。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FindDrag {
+    /// 已按下、尚未收到移动事件：锚点未知，本拍不平移
+    Pending,
+    /// 已锚定：`Point` = 上一帧光标位置（窗口坐标，与 `on_move` 同空间）
+    At(Point),
 }

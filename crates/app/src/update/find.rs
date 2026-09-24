@@ -56,20 +56,30 @@ impl Editpad {
                 Task::none()
             }
             // ---------- 查找浮层拖动（用户点单：浮层挡住正文时必须能拖开） ----------
+            // P209：整窗 `on_move` 只在 `find_drag` 为 `Some` 时才挂载（见
+            // `view::find_panel`），故本臂在正常路径下只会在拖动期间到达。
             Message::FindCursorMoved(point) => {
-                self.find_cursor = point;
-                if let Some(last) = self.find_drag {
-                    // 逐帧增量平移：位置由应用层持有，无需知道卡片布局尺寸
-                    let delta = point - last;
-                    let cur = self.find_pos.unwrap_or_else(|| self.default_find_pos());
-                    self.find_pos = Some(self.clamp_find_pos(cur + delta));
-                    self.find_drag = Some(point);
+                match self.find_drag {
+                    // 惰性锚定：按下后的第一个移动事件只定锚、不平移。
+                    // 修前锚点取「最近一次 on_move 的位置」，指针没动过就
+                    // 按下时锚点是 (0,0) → 浮层瞬跳到别处再跟手。
+                    Some(FindDrag::Pending) => self.find_drag = Some(FindDrag::At(point)),
+                    Some(FindDrag::At(last)) => {
+                        // 逐帧增量平移：位置由应用层持有，无需知道卡片布局尺寸
+                        let delta = point - last;
+                        let cur = self.find_pos.unwrap_or_else(|| self.default_find_pos());
+                        self.find_pos = Some(self.clamp_find_pos(cur + delta));
+                        self.find_drag = Some(FindDrag::At(point));
+                    }
+                    // 未拖动时的移动（在途消息）：直接丢弃，不再有需维护的锚点
+                    None => {}
                 }
                 Task::none()
             }
             Message::FindDragStart => {
-                // on_press 不带坐标：锚点取最近一次 on_move 的位置
-                self.find_drag = Some(self.find_cursor);
+                // 按下不带坐标（本工程 iced 的 `on_press` 只收 Message）：
+                // 先置 Pending，锚点交给第一个移动事件
+                self.find_drag = Some(FindDrag::Pending);
                 Task::none()
             }
             Message::FindDragEnd => {

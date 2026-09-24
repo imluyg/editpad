@@ -207,8 +207,8 @@ impl Editpad {
         let label_color = find_label_color(&self.theme(), dim);
 
         // 拖动条（用户点单）：按住卡片顶部这条即可拖走浮层，双击复位到
-        // 默认位置。`on_move`/`on_release` 挂在整层（见函数尾部）——按下
-        // 只有这里捕获，其它位置点击照旧穿透到正文。
+        // 默认位置。`on_move`/`on_release` 挂在整层（见函数尾部，且**只在
+        // 拖动期间挂**）——按下只有这里捕获，其它位置点击照旧穿透到正文。
         let grip_text = text(self.t(editpad_core::Key::FindGrip))
             .size(uipx * 0.8)
             .font(uifont)
@@ -424,8 +424,14 @@ impl Editpad {
         // 整层挂 `on_move`/`on_release` 追踪拖动：该层**不设 on_press**，
         // 点击照旧穿透到正文；`ButtonReleased` 上游不捕获（只发消息），
         // 所以正文拖拽/滚动条拖动不受影响。
+        // P209：`on_move` **只在拖动期间挂**——整窗 Fill×Fill 的移动事件
+        // 每来一条就是一次全窗 tiny-skia 栅格化，而面板开着时鼠标在正文
+        // 里扫来扫是常态（空闲 CPU 的头号来源）。`on_release` 保持常挂：
+        // 按下与松开可能落在同一次事件批里（视图重建还没发生），此时若
+        // 监听位还没挂上就再也收不到松开，浮层会粘在光标上——宁可每拍
+        // 一次点击的开销，也不赌那个窗口。
         let pos = self.find_pos.unwrap_or_else(|| self.default_find_pos());
-        mouse_area(
+        let area = mouse_area(
             container(card)
                 .width(Fill)
                 .height(Fill)
@@ -433,9 +439,12 @@ impl Editpad {
                 .align_y(iced::alignment::Vertical::Top)
                 .padding(Padding { top: pos.y, right: 0.0, bottom: 0.0, left: pos.x }),
         )
-        .on_move(Message::FindCursorMoved)
-        .on_release(Message::FindDragEnd)
-        .into()
+        .on_release(Message::FindDragEnd);
+        if self.find_drag.is_some() {
+            area.on_move(Message::FindCursorMoved).into()
+        } else {
+            area.into()
+        }
     }
     /// 查找浮层默认位置（窗口中间偏上；卡片高度按名义值 [`FIND_CARD_NOMINAL_H`]
     /// 参与居中——真实高度随结果面板开合变化，取名义值即可，且便于拖动钳制）。
