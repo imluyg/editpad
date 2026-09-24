@@ -17,6 +17,13 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
+# D-2：app 壳直连的两个渲染层依赖也走 workspace 口径。tiny-skia 由 vendor 的
+# iced_tiny_skia 补丁要求（"0.11"），此前在 crates/app/Cargo.toml 里写死
+# "0.11.4" 绕过了统一声明——同族 iced_widget 已解析到 0.14.2 而补丁钉的是
+# 0.14.0，一旦上游版本线前进，这里可能静默编出**两份** tiny-skia/iced_graphics
+# （补丁针对的那份与 app 直连的那份不是同一个 crate）。
+tiny-skia = "0.11.4"
+iced_graphics = "0.14"
 # P70 正则查找/替换：fancy-regex（已在依赖树：syntect default-fancy）。
 # 相比 regex 门面额外支持环视/反向引用（主流编辑器级能力）。
 # 取舍：回溯引擎，病态模式可能慢（UI 有后台扫描+防抖兜底）。
