@@ -684,6 +684,13 @@ pub fn replace_all_word(
         return (text.to_owned(), 0);
     }
     let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
+    // 整词边界规则的行内口径由 [`whole_word_bounds_ok`] 钉住：**跨行命中一律
+    // 保留**（行内边界语义不成立）。字面查询是否跨行只取决于查询自身含不含
+    // 行界字符，故在此提前判定——P222 之前这里无条件按「命中两侧字符」判界，
+    // 于是含换行的查询出现「条上显示 N 处命中、按全部替换报 0 处」的单向分叉。
+    let crosses_line = query
+        .chars()
+        .any(|c| line_break_byte_len(c, None) > 0);
     let mut out = String::with_capacity(text.len());
     let mut count = 0usize;
     let mut pos = 0usize; // 已确认写出的原文边界
@@ -696,7 +703,7 @@ pub fn replace_all_word(
             .chars()
             .next()
             .is_some_and(is_word_char);
-        if before_ok && after_ok {
+        if crosses_line || (before_ok && after_ok) {
             out.push_str(&text[pos..hit]);
             out.push_str(replacement);
             pos = hit + fq.len();
@@ -1958,6 +1965,74 @@ mod tests {
             let (_, n) = replace_all_word(text, "cat", "X", true);
             assert_eq!(n, expected, "text={text:?}");
         }
+    }
+
+    /// P222：整词替换的数量必须等于「整词过滤器保留的命中里，贪心取出的
+    /// 非重叠子集」——条上看到几处（能同时换的）就换几处。用小字母表
+    /// {a, ., 空格, \n} 穷举文本（长度 0..=4）× 查询（长度 1..=2）跑一遍：
+    /// 当初正是这条没测，1306 例单向分叉（全部含换行的查询：显示 N 处命中、
+    /// 替换 0 处）才能活到审计那天。
+    ///
+    /// 为什么要先做「非重叠」折算而不是直接比命中数：`find_all` 有意保留
+    /// 重叠命中（起点前进 1，O-11 钉过的契约），而一次替换会吃掉后一个重叠
+    /// 命中的立足点——`"..."` 查 `".."` 保留 2 处却只能换 1 处，这是正确的。
+    /// 既有 `replace_all_word_respects_boundaries` 的对拍只喂单行、不重叠的
+    /// 查询，两类岔路都测不到。
+    #[test]
+    fn whole_word_replace_all_matches_the_filter_on_every_small_case() {
+        const ALPHA: [char; 4] = ['a', '.', ' ', '\n'];
+        let enumerate = |len: usize| -> Vec<String> {
+            (0..4u32.pow(len as u32))
+                .map(|code| {
+                    let mut rest = code;
+                    let mut s = String::new();
+                    for _ in 0..len {
+                        s.push(ALPHA[(rest % 4) as usize]);
+                        rest /= 4;
+                    }
+                    s
+                })
+                .collect()
+        };
+        let texts: Vec<String> = (0..=4).flat_map(enumerate).collect();
+        let queries: Vec<String> = (1..=2).flat_map(enumerate).collect();
+        let mut loaded = 0usize;
+        for text in &texts {
+            let doc = Document::from_str(text);
+            for query in &queries {
+                let kept = filter_whole_word(&doc, find_all(text, query, true));
+                // 贪心折算成非重叠子集（本字母表全为 1 字节字符，故
+                // line_to_char + col 就是字符偏移）
+                let mut expected = 0usize;
+                let mut free_from = 0usize;
+                for h in &kept {
+                    let start = doc.line_to_char(h.line) + h.col;
+                    if start >= free_from {
+                        expected += 1;
+                        free_from = start + h.len_chars;
+                    }
+                }
+                let (out, n) = replace_all_word(text, query, "X", true);
+                assert_eq!(
+                    n,
+                    expected,
+                    "文本 {text:?} 查询 {query:?}：过滤器保留 {} 处（非重叠 {expected} 处），替换了 {n} 处",
+                    kept.len()
+                );
+                if n > 0 {
+                    // 数量对了还得真的换了东西（防空转）
+                    assert!(
+                        out.contains('X'),
+                        "文本 {text:?} 查询 {query:?}：n={n} 却没写入替换串"
+                    );
+                    loaded += 1;
+                }
+            }
+        }
+        assert!(
+            loaded > 500,
+            "自检：这批组合里必须有足够多真的发生替换，否则整条用例是空转（实际 {loaded}）"
+        );
     }
 
     #[test]
