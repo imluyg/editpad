@@ -154,6 +154,29 @@ fn move_line_rebuilds_with_dominant_crlf_and_keeps_col() {
     assert_eq!(c.cursor, CursorPos { line: 1, col: 3 }, "光标列尽量保持");
 }
 
+#[test]
+fn move_line_clamps_caret_column_to_the_landing_line() {
+    // 多行选区且光标停在块首行时，落点行换进来的是**别的内容**（下移落 b+1
+    // = 原块尾行内容），旧实现把列钳到「光标自己那一行」的长度（还含行尾），
+    // 列就悬空了——下一次编辑喂给 ropey 的偏移直接越出文本长度。
+    let mut c = core_with("1234567890\nx\ny");
+    c.cursor = CursorPos { line: 0, col: 10 };
+    c.anchor = Some(CursorPos { line: 1, col: 1 });
+    assert!(c.move_current_lines(false));
+    let landing = c.cursor.line;
+    assert_eq!(c.doc.line_str(landing).trim_end_matches(['\r', '\n']), "x");
+    assert!(
+        c.cursor.col <= c.line_display_len(landing),
+        "移动行后光标列必须钳到落点行：col {} > 行 {} 的显示长 {}",
+        c.cursor.col,
+        landing,
+        c.line_display_len(landing)
+    );
+    // 越界列的现实后果：下一次打字即 ropey 越界
+    c.insert_str("Z");
+    assert!(c.doc.to_text().contains("xZ"), "钳列后打字应正常落在落点行");
+}
+
 // ---------- 大小写转换与行首尾清理（第 58 轮） ----------
 
 #[test]

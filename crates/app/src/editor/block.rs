@@ -124,7 +124,8 @@ impl EditorCore {
             }
             (a, b + 1)
         };
-        // 光标列尽量保持（钳到原行长度；换位后行长可能不同，仅取近似）
+        // 先按当前行的长度兜一次底（真正的落点钳制在文档重建之后，见下方
+        // `landing_line`——落点行换进来的是别的内容，此刻还无从知道它的长度）
         let keep_col = self
             .cursor
             .col
@@ -178,9 +179,13 @@ impl EditorCore {
             })
             .collect();
         self.anchor = None;
+        // 落点行换进来的是**另一行**的内容，列必须钳到它（换位后）的显示长度：
+        // 只钳「光标原行」的长度会让列悬空（多行选区且光标在块首行时必然发生），
+        // 下一次编辑喂给 ropey 的偏移就越出文本长度
+        let landing_line = if up { a - 1 } else { b + 1 };
         self.cursor = CursorPos {
-            line: if up { a - 1 } else { b + 1 },
-            col: keep_col,
+            line: landing_line,
+            col: keep_col.min(self.line_display_len(landing_line)),
         };
         self.ensure_visible();
         true
