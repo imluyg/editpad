@@ -60,6 +60,10 @@ pub(super) fn paint_text_slice(
             clip,
         );
     } else {
+        // O-2：本行字符数提到 run 循环外——`px_of` 内部每次调用都要 O(行长)
+        // 数一遍字符，而这里每个高亮 run 要取两次列像素（5MB 单行上即每帧
+        // 百万次字符扫描）。
+        let lens = text.chars().count();
         for run in runs {
             let s = run.start_col.max(lo);
             let e = run.end_col.min(hi);
@@ -70,7 +74,9 @@ pub(super) fn paint_text_slice(
             if segment.is_empty() {
                 continue;
             }
-            let offset_px = core.px_of(line, text, s) - core.px_of(line, text, seg_start) + dx;
+            let offset_px = core.px_of_len(line, text, s, lens)
+                - core.px_of_len(line, text, seg_start, lens)
+                + dx;
             let [r, g, b, a] = run.color;
             renderer.fill_text(
                 core_text::Text {

@@ -909,7 +909,24 @@ impl EditorCore {
     /// P116：字号失配（缩放帧旧布局）一律回退列模型——旧 xs 长度对齐
     /// 但字宽过期，直接用即光标/选区/断行按旧字号错位。
     pub(crate) fn px_of(&self, line: usize, text: &str, col: usize) -> f32 {
-        let col = col.min(text.chars().count());
+        self.px_of_len(line, text, col, text.chars().count())
+    }
+
+    /// [`Self::px_of`] 的「调用方已知本行字符数」入口（O-2）。
+    ///
+    /// `px_of` 每次调用都要 `text.chars().count()` 夹紧列号，而它是 O(行长)：
+    /// 一次绘制里 `paint_text_slice` 每个高亮 run 调 2 次、选区/命中每段
+    /// 2~4 次。5MB 单行 + 数十个 run 即每帧百万次字符扫描——而**绝大多数
+    /// 调用点在手上已经有 `lens`**。逐分支语义与 `px_of` 完全一致，只是把
+    /// 那次计数搬给调用方。
+    pub(crate) fn px_of_len(
+        &self,
+        line: usize,
+        text: &str,
+        col: usize,
+        lens: usize,
+    ) -> f32 {
+        let col = col.min(lens);
         let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
         match self.row_layouts.get(&line) {
             Some(xs) if size_ok && xs.len().saturating_sub(1) >= col => xs[col],

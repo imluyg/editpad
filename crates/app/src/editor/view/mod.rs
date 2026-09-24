@@ -483,9 +483,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             {
                                 continue;
                             }
-                            let seg_base = core.px_of(line, &text, seg_start);
-                            let x0 = core.px_of(line, &text, cs) - seg_base;
-                            let x1 = core.px_of(line, &text, ce) - seg_base;
+                            let seg_base = core.px_of_len(line, &text, seg_start, lens);
+                            let x0 = core.px_of_len(line, &text, cs, lens) - seg_base;
+                            let x1 = core.px_of_len(line, &text, ce, lens) - seg_base;
                             let Some(rect) = Rectangle {
                                 x: bounds.x + gutter_w + x0 - scroll_left,
                                 y: bounds.y + (row - core.scroll_top) * lh
@@ -509,8 +509,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         {
                             continue;
                         }
-                        let x0 = core.px_of(line, &text, c0);
-                        let x1 = core.px_of(line, &text, c1);
+                        let x0 = core.px_of_len(line, &text, c0, lens);
+                        let x1 = core.px_of_len(line, &text, c1, lens);
                         let Some(rect) = Rectangle {
                             x: bounds.x + gutter_w + x0 - scroll_left,
                             y: bounds.y + (row - core.scroll_top) * lh
@@ -582,9 +582,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             continue;
                         }
                         // 段相对：续行从文本区左缘起排
-                        let seg_base = core.px_of(line, &text, seg_start);
-                        let x0 = core.px_of(line, &text, cs.min(lens)) - seg_base;
-                        let x1 = core.px_of(line, &text, ce.min(lens)) - seg_base;
+                        let seg_base = core.px_of_len(line, &text, seg_start, lens);
+                        let x0 = core.px_of_len(line, &text, cs.min(lens), lens) - seg_base;
+                        let x1 = core.px_of_len(line, &text, ce.min(lens), lens) - seg_base;
                         // P59：选区矩形与控件边界求交（quad 无任何裁剪）
                         // P88：y 下移字形墨迹上边距——行盒顶对齐会让选区
                         // 带顶悬在首行上方空带（用户截图「色带残影」）
@@ -616,9 +616,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     continue;
                 }
                 let x0 = core
-                    .px_of(line, &text, start_col.min(lens));
+                    .px_of_len(line, &text, start_col.min(lens), lens);
                 let x1 = core
-                    .px_of(line, &text, end_col.min(lens));
+                    .px_of_len(line, &text, end_col.min(lens), lens);
                 // P59：选区矩形与控件边界求交——部分可见行的高亮不再越界
                 // （quad 无任何裁剪，越界部分会压标签条/状态栏）
                 // P88/P89：与折行分支同款——y 从墨迹上边距改为按墨迹
@@ -1121,8 +1121,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         let hit = seg_start <= col_p
                             && (col_p < seg_end || (col_p == seg_end && seg_end == lens));
                         if hit {
-                            let rel = core.px_of(line, &text, col_p)
-                                - core.px_of(line, &text, seg_start);
+                            let rel = core.px_of_len(line, &text, col_p, lens)
+                                - core.px_of_len(line, &text, seg_start, lens);
                             // 段尾可用 = 折行预算 − 段内起点（段末字符右缘
                             // ≤ 预算不贴满，P96；空行/段尾整宽按预算计）
                             let remain = (display_right_edge - text_x0 - rel).max(0.0);

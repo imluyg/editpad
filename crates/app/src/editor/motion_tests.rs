@@ -676,6 +676,30 @@ fn px_of_prefers_fresh_layout_and_falls_back_when_stale() {
     );
 }
 
+/// O-2 护栏：`px_of` 与「调用方自带 lens」的 `px_of_len` 必须逐点相等——
+/// 绘制热路径把整行字符计数搬到了调用方，语义不能随之下移。两轴都要走到：
+/// 越界列（靠 lens 夹紧）与滞后布局（回退列模型实时文本）。
+#[test]
+fn px_of_len_matches_px_of_across_clamp_and_stale_cases() {
+    let mut c = core_with("短行abcX");
+    c.set_row_layout(0, vec![0.0, 16.0, 24.0, 32.0, 40.0, 48.0, 56.0]);
+    for col in 0..12 {
+        assert_eq!(
+            c.px_of(0, "短行abcX", col),
+            c.px_of_len(0, "短行abcX", col, 6),
+            "新鲜布局 col {col} 两入口必须一致"
+        );
+    }
+    // 布局比文本短（行刚变长、布局未刷新）：越界列回退列模型实时文本
+    for col in 0..12 {
+        assert_eq!(
+            c.px_of(0, "短行abcXXXX", col),
+            c.px_of_len(0, "短行abcXXXX", col, 10),
+            "滞后布局 col {col} 两入口必须一致"
+        );
+    }
+}
+
 /// P45 回归 3：点击命中在布局滞后时回退列模型（点新字符不落旧行尾）。
 #[test]
 fn hit_test_falls_back_when_layout_stale() {
