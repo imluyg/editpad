@@ -765,6 +765,75 @@ use super::*;
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// P218：恢复链的续排点必须也覆盖「**非**恢复任务结算」那一路。
+    ///
+    /// 崩溃恢复提示条挂着期间用户自己打开一个文件（〔恢复〕按钮没有 busy
+    /// 守卫，这条可达）：`begin_restore_load` 见通道被占，把队首原样塞回并
+    /// 返回；随后那次 Loaded 结算的是用户的普通打开，旧口径 `is_restore` 为
+    /// 假 → 恢复链再没人驱动，队列永久停摆。后果不是「少恢复几页」而是：恢复
+    /// 页全成空占位，而下一次正常退出会 `exit_via_snapshot` 把这份空清单写回
+    /// 去 —— 崩溃会话的内容就此永久消失。
+    #[test]
+    fn restore_chain_resumes_after_an_unrelated_load_settles() {
+        let dir = snapshot_scratch_dir("p218-park");
+        let manifest = editpad_core::snapshot::write_session(
+            &dir,
+            &[
+                editpad_core::snapshot::SessionPage {
+                    tab: clean_named_tab("C:/w/one.txt"),
+                    doc: editpad_core::Document::new(),
+                },
+                editpad_core::snapshot::SessionPage {
+                    tab: clean_named_tab("C:/w/two.txt"),
+                    doc: editpad_core::Document::new(),
+                },
+            ],
+            0,
+            2,
+        )
+        .unwrap();
+
+        let mut app = Editpad::default();
+        // 提示条先挂着，用户自己拖进来一个文件（通道被他那次打开占住）
+        app.recover_prompt = Some(manifest);
+        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/w/user.txt")));
+        let user_job = app.active_load.as_ref().expect("用户打开应登记任务").id;
+        assert!(app.busy, "夹具：用户那次加载应在途");
+
+        // 此刻点〔恢复〕：链建起来，但队首被塞回（通道被占）
+        let _ = app.accept_session_recover(Some(dir.clone()));
+        assert_eq!(app.restore_pending, 2, "恢复链应已建起来");
+        assert_eq!(app.restore_queue.len(), 2, "通道被占 → 整条队列停在队首");
+        assert_eq!(
+            app.active_load.as_ref().unwrap().id,
+            user_job,
+            "用户那次加载不得被恢复链顶掉"
+        );
+
+        // 用户的加载结算：恢复链必须从这里接手
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                user_job,
+                Ok((
+                    editpad_core::Document::from_str("u\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(
+            app.restore_queue.len(),
+            1,
+            "恢复链必须续排第一页（旧口径在这里永久停摆）"
+        );
+        assert!(
+            app.active_load.is_some() && app.active_load.unwrap().id != user_job,
+            "续排后应有一次恢复任务在途"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn restore_skips_unloadable_page_and_keeps_chain_going() {
         let dir = snapshot_scratch_dir("p30-fail");

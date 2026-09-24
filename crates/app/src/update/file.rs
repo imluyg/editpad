@@ -264,7 +264,16 @@ impl Editpad {
                 // 本身就完成「弹出下一页 + 登记任务」的全部状态变更，
                 // 加载流由 subscription 依据 active_load 重建自然接管；
                 // 返回的 Task 恒为 none，无需借道批处理。
-                if is_restore && self.settle_restore_step() {
+                // P218：续排点**不能只挂在自己那条恢复任务的 Loaded 上**。
+                // 恢复提示条挂着的时候用户完全可以自己打开一个文件
+                // （〔恢复〕按钮没有 busy 守卫）：那次 `begin_restore_load`
+                // 发现通道被占，会把队首原样塞回然后返回；而这次结算的是
+                // **非恢复**任务，旧口径下再没有第二个人来驱动恢复链——
+                // 队列永久停摆，恢复页全成空占位，且下一次退出会把这份
+                // 空清单写回去（崩溃会话的内容就此消失）。
+                if (is_restore && self.settle_restore_step())
+                    || (!self.busy && !self.restore_queue.is_empty())
+                {
                     let _ = self.begin_restore_load();
                 }
                 // P103：CLI 排队续排——同上的同步调用语义：每个命令行文件
