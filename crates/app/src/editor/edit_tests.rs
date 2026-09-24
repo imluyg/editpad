@@ -405,6 +405,29 @@ fn current_line_copy_text_includes_line_ending() {
         assert_eq!(c.doc.to_text(), "abcdef");
     }
 
+    /// 回归：`Document::remove_range` 收的是**字符**下标，旧实现传的
+    /// `char::len_utf8()`（字节数）——压在 3 字节汉字上打一个字母会连带吃掉
+    /// 后面两个字符（本例把下一行都吸进来了）。
+    #[test]
+    fn overwrite_replaces_exactly_one_wide_char() {
+        let mut c = core_with("中心\nnext");
+        c.overwrite = true;
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.insert_str("A");
+        assert_eq!(c.doc.to_text(), "A心\nnext", "只吃掉光标下的那一个字符");
+        assert_eq!(c.cursor, CursorPos { line: 0, col: 1 });
+    }
+
+    #[test]
+    fn overwrite_on_final_char_of_document_does_not_overrun() {
+        // 文档只剩一个 3 字节字符：旧实现按 0..3 删，右端点越出文本长度
+        let mut c = core_with("中");
+        c.overwrite = true;
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.insert_str("A");
+        assert_eq!(c.doc.to_text(), "A", "覆写最后一个字符不得越界、不得多吃");
+    }
+
     #[test]
     fn apply_tool_transforms_selection_and_reselects() {
         let mut c = core_with("foo bar");

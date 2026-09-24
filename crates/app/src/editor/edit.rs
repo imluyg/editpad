@@ -78,8 +78,11 @@ impl EditorCore {
         } else {
             None
         };
-        if let Some(rc) = overwrite_char {
-            self.doc.remove_range(at, at + rc.len_utf8());
+        if overwrite_char.is_some() {
+            // remove_range 收**字符**下标（Document 的索引口径恒为字符），
+            // 传 len_utf8() 会在非 ASCII 字符上多吃 1~3 个字符，且文档结尾处
+            // 直接越界（ropey 内部 unwrap，release 也 panic）
+            self.doc.remove_range(at, at + 1);
         }
 
 
