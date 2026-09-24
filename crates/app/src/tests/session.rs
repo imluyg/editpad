@@ -160,8 +160,16 @@ use super::*;
     }
 
     /// std::fs::remove_dir_all 的薄封装（测试尾部清理）。
+    ///
+    /// ⚠️ 目录删失败时退化为删文件：`snapshot_failure_...` 那条用例**故意**
+    /// 在 scratch 路径上放一个普通文件（冒充快照目录好让 create_dir_all 必
+    /// 败），而 `remove_dir_all` 对文件恒返回 Err → 原写法每次都把该文件留
+    /// 在现场。按 PID 命名 ⇒ 每跑一次新增一个，实测 target/test-scratch 已
+    /// 堆 289 个 0 字节 `app-p29-fail-<pid>`。
     fn fs_remove_dir_all(dir: &Path) {
-        std::fs::remove_dir_all(dir).ok();
+        if std::fs::remove_dir_all(dir).is_err() {
+            std::fs::remove_file(dir).ok();
+        }
     }
 
     // ---------- P29 会话快照直退（关窗状态机） ----------
@@ -293,7 +301,8 @@ use super::*;
             editpad_core::snapshot::read_manifest(&dir).is_none(),
             "失败的提交不得产生清单"
         );
-        fs::remove_dir_all(&dir).ok();
+        // dir 是**文件**（见 fs_remove_dir_all 注释），必须走能删文件的收尾
+        fs_remove_dir_all(&dir);
     }
 
     #[test]

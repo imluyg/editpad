@@ -238,7 +238,13 @@ pub(crate) fn perform_backup_before_overwrite(path: &Path, mode: &str) -> Option
 mod tests {
     use super::*;
 
-    /// 项目内落盘目录（同 tests/mod.rs 口径：TEMP 在部分沙箱不可写）。
+    /// 落在**系统 TEMP**下的 `editpad-app-tests/<tag>-<pid>`（与
+    /// `tests/mod.rs::scratch_dir` 同口径）。
+    /// ⚠️ 原注释写的是「项目内落盘目录……TEMP 在部分沙箱不可写」，与本函数
+    /// 实现正好相反，且那半句理由在这里并不成立——本 crate 里两套口径并存：
+    /// 会话/保存类测试（`tests/session.rs`、core 的 `saver.rs`）挂
+    /// `target/test-scratch`，本文件与 `tests/mod.rs` 挂 TEMP。二者各自的用例
+    /// 别混用。
     fn scratch_dir(tag: &str) -> PathBuf {
         std::env::temp_dir()
             .join("editpad-app-tests")
