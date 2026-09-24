@@ -50,8 +50,6 @@ pub(crate) struct Tab {
     /// （曾只认磁盘戳：撤销回基线/「放弃更改并关闭」后已作废的快照
     /// 照样落盘，磁盘内容与 UI 置脏态双向失真）。
     pub(crate) autosave_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// 本页最后一次内容改动的时刻（防抖窗口计时起点）
-    pub(crate) last_edit_at: Option<std::time::Instant>,
     /// 未命名页的递增序号（P25）：显示为「未命名N」，
     /// 取未被打开页占用的最小值（P168 起最小空闲复用，关页腾出的号码
     /// 立即可用——杜绝两个打开页同名即无保存歧义）；
@@ -96,7 +94,6 @@ impl Tab {
             version: 0,
             autosave_inflight: false,
             autosave_gen: std::default::Default::default(),
-            last_edit_at: None,
             untitled_num: None,
             monitor: false,
             heartbeat_snap: None,
@@ -137,10 +134,9 @@ impl Tab {
         }
     }
 
-    /// 记一次真实改动（版本推进 + 防抖起点刷新）。
+    /// 记一次真实改动（版本推进）。
     pub(crate) fn note_mutation(&mut self) {
         self.version += 1;
-        self.last_edit_at = Some(std::time::Instant::now());
         // P146：任何真实改动都使在途自动保存快照过期（含撤销回基线：
         // 调度时刻快照可能含已撤销内容，照写会让磁盘与 UI 双向失真）
         self.invalidate_autosave();
