@@ -2,3 +2,7 @@
 # 版本号——rustup 会触发联网下载导致构建失败）。
 [toolchain]
 channel = "stable"
+# D-3：显式声明构建/校验要用的组件，新克隆机器一条 rustup 就装齐（CI 三个
+# 作业分别要 clippy 与 rustfmt）。刻意**不**钉具体版本号——离线环境未装即触发
+# 联网下载、构建直接失败（见 HANDOFF §0 环境事实）。
+components = ["clippy", "rustfmt"]
