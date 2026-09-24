@@ -26,6 +26,28 @@ pub(crate) const SCROLLBAR_ZONE_W: f32 = SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET 
 pub(crate) const VERTICAL_SCROLLBAR_RESERVE: f32 =
     SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET;
 
+/// 软换行「为垂直滚动条让位」的滞回判定（P116 续，自 `EditorView::draw`
+/// 抽出为纯函数便于穷尽测试）。内容高度压在视口边界上时直判会让滚动条与
+/// 折行预算逐帧互翻（滚动条忽现忽隐、折行段落不停出现消失——用户复报），
+/// 故在「放得下 / 放不下」两侧各留 `hysteresis` 行死区。
+pub(crate) fn wrap_sb_reserve_needed(
+    content_lines: f32,
+    vis_lines: f32,
+    currently_reserving: bool,
+    hysteresis: f32,
+) -> bool {
+    // 视口比死区还窄时按视口收窄，否则「明显放下」一侧永无解 → 让位一旦
+    // 进入就再也退不出来（滚动条空轨道常驻 + 折行预算永久少一截）
+    let band = hysteresis.min(vis_lines * 0.5);
+    if currently_reserving {
+        // 让位中：内容明显放得下（< 视口 − 死区）才退出，否则维持
+        content_lines >= vis_lines - band
+    } else {
+        // 未让位：内容明显超出（> 视口 + 死区）才进入
+        content_lines > vis_lines + band
+    }
+}
+
 /// 垂直滚动条几何。全部为**相对控件**的像素坐标；由
 /// [`VScrollbar::measure`] 从当前状态推导——窗口缩放、字号调整、
 /// 文档变化都会在下一帧自然反映，无需额外同步。
@@ -257,6 +279,65 @@ impl HScrollbar {
             width: self.thumb_w,
             height: SCROLLBAR_THUMB_THICKNESS,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VIS: f32 = 18.0;
+    const H: f32 = 2.0;
+
+    /// 滞回的两条腿必须镜像：未让位要「明显超出」才进入，已让位要「明显放下」
+    /// 才退出。只写对一条腿就会自锁——一旦让位再也出不来。
+    #[test]
+    fn wrap_sb_reserve_hysteresis_is_symmetric_and_never_latches() {
+        // 进入侧：死区内不进，明显超出才进
+        assert!(
+            !wrap_sb_reserve_needed(VIS + 1.0, VIS, false, H),
+            "视口 + 死区内不该进"
+        );
+        assert!(
+            wrap_sb_reserve_needed(VIS + 3.0, VIS, false, H),
+            "明显超出才进"
+        );
+
+        // 退出侧：死区内维持让位，明显放下才退
+        assert!(
+            wrap_sb_reserve_needed(VIS - 1.0, VIS, true, H),
+            "死区内必须维持让位（否则边界逐帧互翻）"
+        );
+        assert!(
+            !wrap_sb_reserve_needed(VIS - 3.0, VIS, true, H),
+            "内容明显放得下时必须退出让位"
+        );
+
+        // 同侧稳定：不随帧数翻转
+        let mut reserve = true;
+        for _ in 0..3 {
+            reserve = wrap_sb_reserve_needed(VIS + 100.0, VIS, reserve, H);
+        }
+        assert!(reserve, "内容远超视口应恒让位");
+        let mut none = false;
+        for _ in 0..3 {
+            none = wrap_sb_reserve_needed(VIS + 100.0, VIS, none, H);
+        }
+        assert!(none, "远超视口应从「未让位」进入让位");
+
+        // 收敛性：从「让位中」出发持续喂明显放得下的内容，必须收敛到不让位
+        let mut latched = true;
+        for _ in 0..3 {
+            latched = wrap_sb_reserve_needed(1.0, VIS, latched, H);
+        }
+        assert!(!latched, "反复喂「放得下」的内容必须退出让位，不得自锁");
+
+        // 退化窗口护栏：视口比死区还窄时「明显放下」若无解就会永久锁死，
+        // 故死区按视口比例收窄
+        assert!(
+            !wrap_sb_reserve_needed(0.0, 1.0, true, H),
+            "1 行视口下的空文档必须能退出让位"
+        );
     }
 }
 

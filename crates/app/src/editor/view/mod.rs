@@ -31,8 +31,9 @@ use super::metrics::{
     shape_row_xs, TAB_STOP_COLS,
 };
 use super::scrollbars::{
-    mark_y_for_row, resolve_mark_click, HScrollbar, MarkTarget, MARK_HEIGHT, MARK_WIDTH,
-    SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH, VScrollbar,
+    mark_y_for_row, resolve_mark_click, wrap_sb_reserve_needed, HScrollbar, MarkTarget,
+    MARK_HEIGHT, MARK_WIDTH, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
+    VScrollbar,
 };
 use super::wrap::segment_index as wrap_segment_index;
 use super::wrap::pixel_breaks;
@@ -211,18 +212,14 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             core.scroll_top,
         );
         if core.wrap_enabled() {
-            let vis_lines = core.viewport_h / lh.max(1e-3);
-            let cur = core.wrap_sb_reserve;
-            let raw_needed = core.scroll_content_lines() as f32 > vis_lines;
-            sb.needed = if raw_needed == cur {
-                raw_needed
-            } else if cur {
-                // 让位中：内容必须明显放下（< 视口 − 死区）才退出
-                (core.scroll_content_lines() as f32) < (vis_lines - WRAP_SB_RESERVE_HYSTERESIS_LINES)
-            } else {
-                // 未让位：内容必须明显超出（> 视口 + 死区）才进入
-                (core.scroll_content_lines() as f32) > (vis_lines + WRAP_SB_RESERVE_HYSTERESIS_LINES)
-            };
+            // 滞回判定抽成纯函数（穷尽测试见 scrollbars 侧用例），此处只负责
+            // 「绘制与折行预算共用同一个 needed」
+            sb.needed = wrap_sb_reserve_needed(
+                core.scroll_content_lines() as f32,
+                core.viewport_h / lh.max(1e-3),
+                core.wrap_sb_reserve,
+                WRAP_SB_RESERVE_HYSTERESIS_LINES,
+            );
         }
         let (hcontent_px, hview_px) = if core.wrap_enabled() {
             (0.0, (bounds.width - gutter_w).max(0.0))
