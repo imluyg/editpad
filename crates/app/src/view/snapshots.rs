@@ -28,10 +28,10 @@ impl Editpad {
         }
     }
 
-    /// 心跳选页：返回需要**重写内容**的 (下标, 派发时刻版本) 列表。
-    /// 判定核心在 core 的 [`editpad_core::snapshot::heartbeat_page_selected`]：
+    /// 心跳选页：返回需要**重写内容**的 (派发时刻下标, 页 id, 派发时刻版本)
+    /// 列表。判定核心在 core 的 [`editpad_core::snapshot::heartbeat_page_selected`]：
     /// 置脏 + 未超大小上限（按 rope 真实字节数）+ 版本自上次快照有推进。
-    pub(super) fn heartbeat_plan(&self) -> Vec<(usize, u64)> {
+    pub(super) fn heartbeat_plan(&self) -> Vec<(usize, u64, u64)> {
         self.tabs
             .iter()
             .enumerate()
@@ -44,7 +44,7 @@ impl Editpad {
                     t.version,
                 )
             })
-            .map(|(i, t)| (i, t.version))
+            .map(|(i, t)| (i, t.id, t.version))
             .collect()
     }
 
@@ -55,13 +55,13 @@ impl Editpad {
     /// * 干净页只记元数据。文档一律 rope 结构共享克隆（O(1)）。
     pub(super) fn build_heartbeat_pages(
         &self,
-        plan: &[(usize, u64)],
+        plan: &[(usize, u64, u64)],
     ) -> Vec<editpad_core::snapshot::HeartbeatPage> {
         self.tabs
             .iter()
             .enumerate()
             .map(|(idx, t)| {
-                let rewrite = plan.iter().any(|(i, _)| *i == idx);
+                let rewrite = plan.iter().any(|(i, _, _)| *i == idx);
                 let reuse = t
                     .heartbeat_snap
                     .as_ref()
@@ -109,15 +109,17 @@ impl Editpad {
                 if outcome.rev == self.manifest_rev {
                     self.session_manifest_stale = false;
                 }
-                for (idx, version) in outcome.plan {
-                    let Some(tab) = self.tabs.get_mut(idx) else {
-                        continue; // 期间被关闭/下标漂移：放弃这条账目
+                for (man_idx, tab_id, version) in outcome.plan {
+                    // 页按 id 定位（在途关页只让下标左移，id 不会错位）；
+                    // 清单项仍按派发时刻下标取——那份清单就是那一刻写的
+                    let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                        continue; // 期间被关闭：放弃这条账目
                     };
                     if !(tab.dirty && tab.version == version) {
                         continue;
                     }
                     if let Some(name) =
-                        manifest.tabs.get(idx).and_then(|t| t.file.clone())
+                        manifest.tabs.get(man_idx).and_then(|t| t.file.clone())
                     {
                         tab.heartbeat_snap = Some((version, name));
                     }

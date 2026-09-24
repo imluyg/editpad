@@ -1166,7 +1166,7 @@ use super::*;
         );
         assert_eq!(
             first.plan,
-            vec![(0usize, app.tabs[0].version)],
+            vec![(0usize, app.tabs[0].id, app.tabs[0].version)],
             "计划只含变化页"
         );
 
@@ -1296,7 +1296,7 @@ use super::*;
         dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
 
         let outcome = HeartbeatOutcome {
-            plan: vec![(0, planned_version)],
+            plan: vec![(0, app.tabs[0].id, planned_version)],
             rev: app.manifest_rev,
             result: Ok(editpad_core::snapshot::SessionManifest {
                 generation: 1,
@@ -1608,6 +1608,68 @@ use super::*;
         // 对照：无在途变化的正常提交照常清除标记
         app.run_heartbeat_cycle(&dir).unwrap();
         assert!(!app.session_manifest_stale);
+        editpad_core::snapshot::clear_session(&dir);
+    }
+
+    #[test]
+    fn heartbeat_backfill_follows_the_page_not_the_slot() {
+        // 回归：plan 曾按「派发时刻下标」回填账目。两页版本相同（每页独立
+        // 计数，各敲一个字即同为 1）时，在途关页让下标左移 → 幸存页被记上
+        // **别页的内容文件名**，此后它version 未变就不再重写内容，崩溃恢复
+        // 会把别页内容装进本页，用户一保存就覆盖真实文件。
+        let dir = scratch_dir("hb-backfill-by-id");
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("AAA".into())));
+        dispatch(&mut app, Message::NewTab);
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("BBB".into())));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(
+            app.tabs[0].version, app.tabs[1].version,
+            "用例前提：两页版本必须相同（这正是下标+版本双键失效的场景）"
+        );
+
+        let payload = app.prepare_heartbeat_commit(&dir).expect("两页都应入选");
+        assert_eq!(payload.plan.len(), 2);
+        app.heartbeat_inflight = true;
+        // 在途期间关掉页 0：页 1 左移到下标 0
+        dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+        let survivor = app.tabs[0].id;
+        assert_ne!(app.tabs.len(), 2, "关页后下标已漂移");
+
+        let result = editpad_core::snapshot::write_heartbeat_session(
+            &payload.dir,
+            &payload.pages,
+            payload.active,
+            payload.next_untitled,
+        )
+        .map_err(|e| e.to_string());
+        let manifest = result.clone().expect("写盘应成功");
+        app.heartbeat_apply(HeartbeatOutcome {
+            plan: payload.plan,
+            rev: payload.rev,
+            result,
+        });
+
+        // 不变量：任何页记下的文件名，打开后必须就是该页当前的内容
+        for tab in &app.tabs {
+            let Some((_, name)) = tab.heartbeat_snap.clone() else {
+                continue;
+            };
+            let text = std::fs::read_to_string(dir.join(&name))
+                .unwrap_or_else(|e| panic!("页 {:?} 的快照 {} 读不出：{}", tab.id, name, e));
+            assert_eq!(
+                text,
+                tab.editor.borrow().doc.to_text(),
+                "页 id {:?} 的账目指向了别页的内容文件（下标漂移未防护）",
+                tab.id
+            );
+        }
+        assert_eq!(
+            app.tabs[0].heartbeat_snap.as_ref().map(|(_, f)| f),
+            manifest.tabs.get(1).and_then(|t| t.file.as_ref()),
+            "幸存页应认领派发时刻它自己那一项写出的文件，而非左移后的页 0"
+        );
+        assert_eq!(app.tabs[0].id, survivor);
         editpad_core::snapshot::clear_session(&dir);
     }
 
