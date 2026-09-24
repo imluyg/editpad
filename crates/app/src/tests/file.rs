@@ -84,6 +84,84 @@ use super::*;
         assert!(app.status.contains("仅支持 Markdown"), "{:?}", app.status);
     }
 
+    /// O-6：预览的**解析结果**必须按内容签名缓存。
+    ///
+    /// 两条断言各挡一头：
+    /// - 签名不变 → 复用同一份块表。用 `Rc::ptr_eq` 观测「确实没有重解析」，
+    ///   而不是靠耗时断言去猜（耗时在忙机器假红、温热假绿，本仓已两次因此
+    ///   把成本契约改成可观测的计数/同一性）。
+    /// - 内容一变 → 立即重建，且新块表就是新文档的解析结果（预览陈本是用户
+    ///   看得见的错误）。
+    ///
+    /// ⚠️ 未覆盖的岔路（据代码推定，非实测）：**等长**改动靠键里的
+    /// `Tab::version` 分量兜住——真实编辑路径都经 `Tab::note_mutation` 推进
+    /// 版本（`tab.rs:142` 是该字段唯一写入点）。本用例只改文档长度，没有
+    /// 构造「等长且版本未动」的场景。
+    #[test]
+    fn markdown_preview_cache_is_reused_until_content_changes() {
+        fn md_app(text: &str) -> Editpad {
+            let mut app = Editpad::default();
+            dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/x/notes.md")));
+            let seq = app.job_seq;
+            let doc = editpad_core::Document::from_str(text);
+            dispatch(
+                &mut app,
+                Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+            );
+            dispatch(&mut app, Message::PreviewToggled);
+            assert!(app.preview_visible, ".md 页应能开预览");
+            app
+        }
+        let cached = |app: &Editpad| -> std::rc::Rc<Vec<editpad_core::markdown::MdBlock>> {
+            app.md_preview_cache
+                .borrow()
+                .as_ref()
+                .expect("预览开态走过一次 view() 后应建立解析缓存")
+                .1
+                .clone()
+        };
+
+        let src = "# 标题\n\n正文 alpha\n";
+        let app = md_app(src);
+        let _ = app.view();
+        let first = cached(&app);
+        assert_eq!(
+            &first[..],
+            &editpad_core::markdown::parse_markdown(src)[..],
+            "缓存内容必须就是本页文档的解析结果"
+        );
+
+        // 内容未变：再画 10 帧也不得重解析
+        for _ in 0..10 {
+            let _ = app.view();
+        }
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &cached(&app)),
+            "签名未变却重建了块表：预览缓存在逐帧重解析"
+        );
+
+        // 内容变了：必须换新块表，且换的是新文档的结果
+        app.cur_handle
+            .borrow_mut()
+            .insert_str("\n## 追加章节\n\n尾部内容 beta\n");
+        let _ = app.view();
+        let second = cached(&app);
+        assert!(!std::rc::Rc::ptr_eq(&first, &second), "内容已变仍复用旧块表：预览会陈旧");
+        let now = app.cur_handle.borrow().doc.to_text();
+        assert_eq!(
+            &second[..],
+            &editpad_core::markdown::parse_markdown(&now)[..],
+            "重建后的块表必须对应改动后的正文"
+        );
+        assert!(
+            second.iter().any(|b| matches!(
+                b,
+                editpad_core::markdown::MdBlock::Heading { level: 2, .. }
+            )),
+            "追加的二级标题应出现在新块表里"
+        );
+    }
+
     // ---------- P22 第二批：格式化 JSON ----------
 
     /// 构造一个已按 .json 加载完成的应用。

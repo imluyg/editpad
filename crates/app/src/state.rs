@@ -315,6 +315,22 @@ pub(crate) struct Editpad {
     pub(crate) dark_mode: bool,
     /// Markdown 预览面板可见（P22 第三批；仅 Markdown 语法页渲染）
     pub(crate) preview_visible: bool,
+    /// O-6：Markdown 预览的**解析结果**缓存 `(页 id, 内容版本, 字节数, 行数) → 块表`。
+    /// 签名一致就跳过 `doc.to_text()`（全文拷贝）与 `parse_markdown`（全量重解析），
+    /// 只重建 widget 树（即时模式每帧本就要重建）。预览开态下 `view()` 每条消息
+    /// 后重跑，空闲还有 530ms 光标节拍与 400ms 打开节拍（≈5 次/秒），滚动/打字
+    /// 时逐帧——原状等于每秒把整篇文档拷两遍并重新解析。
+    /// 版本单独不足以作键：`Tab::version` 只在 `note_mutation` 里 +1、装载不回卷，
+    /// 故再带两个 O(1) 的文档指纹（字节数 / 行数），把「同一未编辑页被换成等长
+    /// 文件」这类岔路也挡掉。
+    /// 块表套 `Rc` 是为了让「签名未变 → 确实没有重解析」在测试里**可观测**
+    /// （`Rc::ptr_eq` 判同一性），否则缓存是否生效只能靠耗时断言去猜。
+    pub(crate) md_preview_cache: std::cell::RefCell<
+        Option<(
+            (u64, u64, usize, usize),
+            std::rc::Rc<Vec<editpad_core::markdown::MdBlock>>,
+        )>,
+    >,
 }
 
 impl Default for Editpad {
@@ -416,6 +432,7 @@ impl Default for Editpad {
             menubar_anchor: (12.0, 8.0),
             dark_mode: false,
             preview_visible: false,
+            md_preview_cache: std::cell::RefCell::new(None),
             // P25：初始页即「未命名1」，下一个新页为「未命名2」
             untitled_next: 2,
             // P30：启动会话恢复状态（boot_restore 按清单填充）

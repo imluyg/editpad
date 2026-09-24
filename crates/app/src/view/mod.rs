@@ -322,12 +322,37 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // 画布经 view_with_font 每帧传参，无跨帧同步状态）
         let content_font = self.body_font();
         if self.preview_visible && is_markdown {
-            let text = self.cur_handle.borrow().doc.to_text();
-            body = body.push(markdown_preview_element(
-                &text,
-                self.display_font_size(),
-                content_font,
-            ));
+            // O-6：解析结果按「页 id + 内容版本 + 字节数 + 行数」缓存。签名
+            // 一致时不再 `doc.to_text()` 拷全文、不再 `parse_markdown` 全量
+            // 重解析，只重建 widget 树（即时模式每帧本就要重建）。
+            // 版本不足以单独作键：`Tab::version` 只在真实改动时 +1、装载不
+            // 回卷，故再带两个 O(1) 文档指纹，挡住「同一未编辑页被换成等长
+            // 文件」这类岔路。键含页 id：切页不得沿用别页的块表。
+            // 整个构建在缓存的可变借用内完成——`markdown_preview_element`
+            // 返回 `Element<'static>`（逐 span 克隆文本），引用不带出借用期。
+            let tab = &self.tabs[self.active_tab];
+            let key = {
+                let core = tab.editor.borrow();
+                (
+                    tab.id,
+                    tab.version,
+                    core.doc.text_len_bytes(),
+                    core.doc.line_count(),
+                )
+            };
+            let preview = {
+                let mut cache = self.md_preview_cache.borrow_mut();
+                if !cache.as_ref().is_some_and(|(k, _)| *k == key) {
+                    let text = tab.editor.borrow().doc.to_text();
+                    *cache = Some((
+                        key,
+                        std::rc::Rc::new(editpad_core::markdown::parse_markdown(&text)),
+                    ));
+                }
+                let (_, blocks) = cache.as_ref().expect("上一步刚确保证非空");
+                markdown_preview_element(blocks, self.display_font_size(), content_font)
+            };
+            body = body.push(preview);
         } else {
             body = body.push(self.cur_handle.view(content_font));
         }

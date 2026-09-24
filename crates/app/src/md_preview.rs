@@ -5,12 +5,18 @@ use iced::widget::column;
 
 /// 把解析出的块级元素排成只读预览列（滚动容器包裹）。
 ///
+/// O-6：**收已解析的块表而非源文本**——解析结果的缓存归调用方（见
+/// `App::md_preview_cache`），本函数只负责每帧重建 widget 树（即时模式本就
+/// 每帧重建）。此前它自己 `parse_markdown(source)`，而 `view()` 空闲时每秒
+/// 约跑 5 次、滚动/打字时逐帧，每次连带 `doc.to_text()` 的全文拷贝一起把
+/// 整篇文档重解析一遍。
+///
 /// `font_size` = 当前正文字号：预览排版随 Ctrl+滚轮缩放（P36 口径：
 /// 预览属文件内容渲染故跟随；工具栏等 UI 控件不跟随），各级基准值与
 /// 旧硬编码一致（正文默认 16px 时逐项像素相等）。
 /// `base` = 正文字形族（P34：预览属内容渲染，随设置切换）。
 pub(crate) fn markdown_preview_element(
-    source: &str,
+    blocks: &[editpad_core::markdown::MdBlock],
     font_size: f32,
     base: Font,
 ) -> Element<'static, Message> {
@@ -19,7 +25,6 @@ pub(crate) fn markdown_preview_element(
     // 预览各级字号相对正文默认 16px 的既有比例
     let scaled = |px: f32| px * (font_size / 16.0);
 
-    let blocks = editpad_core::markdown::parse_markdown(source);
     let mut col = column![].spacing(10).padding(14);
     for block in blocks {
         match block {
@@ -91,7 +96,7 @@ pub(crate) fn markdown_preview_element(
 
 /// 按行内样式构造文本片段行。
 pub(crate) fn md_spans_row(
-    spans: Vec<editpad_core::markdown::MdSpan>,
+    spans: &[editpad_core::markdown::MdSpan],
     px: f32,
     bold: bool,
     base: Font,
