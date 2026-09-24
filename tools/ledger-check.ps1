@@ -22,6 +22,8 @@
 param(
     # Path to the working ledger, relative to the repo root.
     [string] $Ledger = 'HANDOFF.md',
+    # Dated round-log periods (one immutable file per day).
+    [string] $Periods = 'docs/handoff',
     # Machine fields live in an HTML comment so this script can stay ASCII:
     #   <!-- LEDGER-SNAPSHOT date=2026-09-25 head=eef98a9 tests=777 pushed=yes -->
     [string] $Marker = 'LEDGER-SNAPSHOT',
@@ -149,6 +151,47 @@ if ($rounds -gt $MaxRoundSummaries) {
     Warn ([string] $rounds + ' round summaries in this file (budget ' + [string] $MaxRoundSummaries + ') - older ones belong in the archive')
 }
 else { Pass ('round summaries within budget: ' + [string] $rounds) }
+
+# ---------- 5. dated period files ----------
+# Round logs live in docs/handoff/YYYY-MM-DD.md (one immutable file per day),
+# so "read the newest one" must stay reliable: a stray file in that folder would
+# break `ls docs/handoff | tail -1`, and a period older than the last commit
+# means a round was committed but never written up (that is how round 149 got
+# lost from the archive).
+if (Test-Path -LiteralPath $Periods) {
+    # NB: every local below is named apart from the param `$Periods`. PowerShell
+    # variable names are case-INsensitive, and a param's type constraint stays on
+    # the variable for its whole life, so `$periods = @(<2 FileInfo>)` did not
+    # create a new array: it coerced into `[string] $Periods` and stored
+    # "2026-09-24.md 2026-09-25.md". Measured fallout, all silent: .Count was 1,
+    # [0] was the char '2', and its .Name was the empty string.
+    $mdFiles = @(Get-ChildItem -LiteralPath $Periods -Filter '*.md')
+    $periodFiles = @($mdFiles | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}\.md$' } | Sort-Object Name)
+    if ($periodFiles.Count -eq 0) {
+        Fail ('no YYYY-MM-DD.md period file under ' + $Periods)
+    }
+    else {
+        $newestPeriod = $periodFiles[($periodFiles.Count - 1)]
+        Pass ('latest period: ' + $newestPeriod.Name + ' (of ' + [string] $periodFiles.Count + ')')
+        $strays = @($mdFiles | Where-Object { $_.Name -notmatch '^\d{4}-\d{2}-\d{2}\.md$' })
+        if ($strays.Count -gt 0) {
+            Warn (([string] $strays.Count) + ' non-period file(s) in ' + $Periods + ': ' + (($strays | ForEach-Object { $_.Name }) -join ', '))
+        }
+        if ($null -ne $git) {
+            $committed = (& git log -1 --format=%cd --date=short)
+            if ($LASTEXITCODE -eq 0 -and $committed) {
+                $committed = ($committed | Select-Object -Last 1).Trim()
+                if ($committed -gt $newestPeriod.BaseName) {
+                    Warn ('last commit is ' + $committed + ' but the newest period is ' + $newestPeriod.BaseName + ' - a round may be unwritten')
+                }
+                else { Pass ('newest period covers the last commit (' + $committed + ')') }
+            }
+        }
+    }
+}
+else {
+    Warn ('period folder not found: ' + $Periods)
+}
 
 Write-Host ('--- ' + $(if ($script:fail) { 'FAIL ' + $script:fail } else { 'PASS' }) + ' ---')
 if ($script:fail) { exit 1 } else { exit 0 }
