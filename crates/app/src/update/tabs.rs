@@ -102,7 +102,9 @@ impl Editpad {
         }
         if targets.iter().any(|&i| self.tabs[i].dirty) {
             self.close_tab_confirm = None;
-            self.batch_close_confirm = Some(targets);
+            // P213：落存为页 id（下标只在本次 dispatch 内使用）
+            self.batch_close_confirm =
+                Some(targets.iter().map(|&i| self.tabs[i].id).collect());
         } else if self.close_tabs_now(&targets) > 0 {
             self.cancel_find_scan();
         }
@@ -405,7 +407,15 @@ impl Editpad {
                 Task::none()
             }
             Message::ConfirmBatchCloseDiscard => {
-                if let Some(targets) = self.batch_close_confirm.take() {
+                if let Some(ids) = self.batch_close_confirm.take() {
+                    // P213：按 id 现地解析下标——确认条停留期间关掉任意一页，
+                    // 存下来的裸下标就会整体左移，「放弃并关闭」于是清空并
+                    // 移除用户根本没选过的页（P145 修 close_tab_confirm 时
+                    // 漏了这条同族的批量列表）。解析不到 = 期间已被关掉，跳过。
+                    let targets: Vec<usize> = ids
+                        .iter()
+                        .filter_map(|&id| self.tabs.iter().position(|t| t.id == id))
+                        .collect();
                     // 统一放弃：先清各页置脏与内容（与 ConfirmCloseTabDiscard
                     // 同款，防「已移除页的 rope 仍被别名引用」的错觉），再移除。
                     for &idx in &targets {

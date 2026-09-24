@@ -395,11 +395,14 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::Edit(EditOp::InsertText("d2".into())));
         dispatch(&mut app, Message::SwitchTab(1));
 
+        // P213：批量目标列表存的是**页 id**（裸下标在「确认条停留期间又关了
+        // 一页」时会整体左移，指到用户没选过的页上），故断言按 id 比对
+        let id_of_2 = app.tabs[2].id;
         dispatch(&mut app, Message::CloseOtherTabs(1));
         // 目标 = 非固定且非 keep = 仅 {2}（页 0 因固定被豁免）；
         // 含置脏页 → 弹聚合确认而非直接关
         let targets = app.batch_close_confirm.clone().expect("应弹聚合确认");
-        assert_eq!(targets, vec![2], "固定页必须被豁免出批量目标");
+        assert_eq!(targets, vec![id_of_2], "固定页必须被豁免出批量目标");
 
         // 取消：一切原样
         dispatch(&mut app, Message::CancelBatchCloseTabs);
@@ -443,9 +446,10 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::Edit(EditOp::InsertText("d1".into())));
         dispatch(&mut app, Message::SwitchTab(0));
 
+        let ids_of_right: Vec<u64> = app.tabs[1..].iter().map(|t| t.id).collect();
         dispatch(&mut app, Message::CloseTabsRight(0));
         let targets = app.batch_close_confirm.clone().expect("含置脏页应弹确认");
-        assert_eq!(targets, vec![1, 2, 3], "右侧全部非固定页入列");
+        assert_eq!(targets, ids_of_right, "右侧全部非固定页入列");
         dispatch(&mut app, Message::CancelBatchCloseTabs);
         assert_eq!(app.tabs.len(), 4);
 
@@ -454,6 +458,51 @@ fn ctx_menu_card_h_adapts_to_viewport() {
         dispatch(&mut app, Message::CloseTabsRight(0));
         assert!(app.batch_close_confirm.is_none());
         assert_eq!(app.tabs.len(), 1, "右侧干净页应被直接移除");
+    }
+
+    /// P213：批量关闭的目标列表必须存页 id，不能存裸下标。
+    ///
+    /// 形状：`[A 置脏, B 干净, C 置脏(活动)]` → 在 C 上「关闭其他」→ 目标
+    /// `{A,B}` 弹聚合确认；**确认条停留期间**点 B 的 × 关掉 B（B 干净，无需
+    /// 再确认）→ 剩 `[A,C]`，而列表里仍是旧下标 `[0,1]`。此时〔放弃并关闭〕
+    /// 曾照这两个下标动手：A 是真目标（该清该关），但「1」如今指着 **C**——
+    /// 它的 dirty 被清、path 被丢、缓冲区被掏空，随后整页被移除。用户的未保存
+    /// 内容无声消失，而且因为 dirty 是我们自己清的，连一次确认都不会弹。
+    ///
+    /// 与 P145（`close_tab_confirm` 改存下标平移）同族——当时只补了单页那条，
+    /// 批量这条漏在外面。
+    #[test]
+    fn batch_close_confirm_survives_a_tab_closed_while_it_is_shown() {
+        let mut app = app_with_tabs(3); // 页 0 已置脏（"d0"）
+        dispatch(&mut app, Message::SwitchTab(2));
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("keep me".into())));
+        let (id_a, id_b, id_c) = (app.tabs[0].id, app.tabs[1].id, app.tabs[2].id);
+        let content_c = app.tabs[2].editor.borrow().doc.to_text();
+
+        dispatch(&mut app, Message::CloseOtherTabs(2));
+        assert_eq!(
+            app.batch_close_confirm,
+            Some(vec![id_a, id_b]),
+            "目标 = 除 keep 页以外的全部非固定页"
+        );
+
+        // 确认条停留期间关掉 B
+        dispatch(&mut app, Message::CloseTabAt(1));
+        assert_eq!(app.tabs.len(), 2, "干净的 B 应直接移除");
+        assert!(
+            app.batch_close_confirm.is_some(),
+            "关掉别页不该顺手收走批量确认条"
+        );
+
+        dispatch(&mut app, Message::ConfirmBatchCloseDiscard);
+        assert_eq!(app.tabs.len(), 1, "只该移除列表里的 A");
+        assert_eq!(app.tabs[0].id, id_c, "幸存页必须是 C");
+        assert_eq!(
+            app.tabs[0].editor.borrow().doc.to_text(),
+            content_c,
+            "C 的正文不得被动过"
+        );
+        assert!(app.tabs[0].dirty, "C 的置脏不得被代偿清掉");
     }
 
     #[test]

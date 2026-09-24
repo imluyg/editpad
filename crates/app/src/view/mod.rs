@@ -543,10 +543,11 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         // P28 批量关闭确认条：关闭其他/右侧的目标中有置脏页时弹一次，
         // 确认后统一放弃并移除（固定页本就不在目标列表内）
         if let Some(targets) = &self.batch_close_confirm {
+            // P213：targets 是页 id（数量 = 条数，置脏数按 id 现地查）
             let total = targets.len();
             let dirty = targets
                 .iter()
-                .filter(|&&i| self.tabs.get(i).is_some_and(|t| t.dirty))
+                .filter(|&&id| self.tabs.iter().any(|t| t.id == id && t.dirty))
                 .count();
             body = body.push(rule::horizontal(1)).push(
                 row![

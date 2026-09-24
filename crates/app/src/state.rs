@@ -256,9 +256,12 @@ pub(crate) struct Editpad {
     pub(crate) cursor_pos: (f32, f32),
     /// 窗口逻辑尺寸（Resized 事件；(0,0) = 未知，贴边钳制跳过）
     pub(crate) viewport_size: (f32, f32),
-    /// Some(targets) = 批量关闭（关闭其他/右侧）目标列表，任一置脏时
-    /// 先弹一次聚合确认；确认后统一放弃并移除。固定页不在列表内。
-    pub(crate) batch_close_confirm: Option<Vec<usize>>,
+    /// Some(targets) = 批量关闭（关闭其他/右侧）目标**页 id** 列表，任一置脏
+    /// 时先弹一次聚合确认；确认后统一放弃并移除。固定页不在列表内。
+    /// P213：曾是裸下标——确认条停留期间关掉任意一页，整表就指到别的页上
+    /// （「放弃并关闭」会把用户没选过的页清空并移除）。跨异步/跨帧持有页
+    /// 引用一律用 id，与本仓 `Saved(tab_id, ..)` 同规矩。
+    pub(crate) batch_close_confirm: Option<Vec<u64>>,
     // ---------- 未命名页编号（P25） ----------
     /// 下一个未命名页序号（P25 曾为全局单调赋号的来源；P168 起赋号改
     /// 走「最小空闲复用」（见 `assign_untitled_num`），本字段不再被
