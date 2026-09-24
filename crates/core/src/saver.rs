@@ -4,11 +4,41 @@
 //! 要么是完整的新内容，绝不会出现写了一半的损坏文件。
 
 use std::fs;
+use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::document::Document;
 use crate::error::CoreError;
+
+/// 落盘缓冲大小（O-15）：与 loader 侧读块 `crate::loader::CHUNK_SIZE` 同口径
+/// 的 64 KB。ropey 的存储块只有 KB 级，三条保存路径原本逐块 `write_all`
+/// 直写 `File`——50 MB 文档即几十万次 `WriteFile` syscall；经此缓冲后
+/// syscall 次数 ≈ 文档字节数 / 64 KB。
+const SAVE_BUF_BYTES: usize = 64 * 1024;
+
+// 测试钩子（O-15 flush 时序契约）：原子写各步骤的**执行顺序**。
+//
+// 「缓冲必须在 rename 之前 flush」是数据损毁级的时序命题，但在返回值与
+// 落盘结果上都不可观测——BufWriter 的 Drop 会在函数返回后补一次写，目标
+// 文件照样完整，只有「flush 之前进程没了」这种真实掉电场景才暴露；耗时
+// 断言在本仓库不被接受（假红假绿）。故记步骤序列，与 app 层
+// `EditorCore::line_text_calls` 同形状，生产构建整块不参与编译。
+#[cfg(test)]
+thread_local! {
+    static WRITE_STEPS: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn write_steps() -> Vec<&'static str> {
+    WRITE_STEPS.with(|s| s.borrow().clone())
+}
+
+#[cfg(test)]
+fn clear_write_steps() {
+    WRITE_STEPS.with(|s| s.borrow_mut().clear());
+}
 
 pub fn save_atomic(path: &Path, contents: &str) -> Result<(), CoreError> {
     write_atomic(path, contents.as_bytes()).map_err(|source| CoreError::Write {
@@ -145,7 +175,7 @@ fn feed_encoder(
     src: &str,
     last: bool,
     buf: &mut Vec<u8>,
-    file: &mut fs::File,
+    file: &mut std::io::BufWriter<fs::File>,
     unmappable: &mut bool,
 ) -> std::io::Result<()> {
     let mut rest = src;
@@ -191,20 +221,37 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_with(path, |file| file.write_all(bytes))
 }
 
-/// 原子写的内容生产端抽象：调用方拿到已创建的临时文件句柄，
-/// 自行决定一次性写还是分块写；sync 与 rename 由本函数统一收口。
+/// 原子写的内容生产端抽象：调用方拿到已创建的**带缓冲**临时文件写入器，
+/// 自行决定一次性写还是分块写；flush、sync 与 rename 由本函数统一收口。
+///
+/// ⚠️ 闭包**不需要**自己 flush（也 flush 不掉什么）：本函数在闭包返回后
+/// 显式 `flush()` 并把其结果向上报错，随后才 `sync_all()` + rename。
+/// 顺序若写成「先 rename 后 flush」或忽略 flush 的错误，掉电/崩溃后目标
+/// 文件会是空文件或半截文件——数据损毁级回归，比性能问题严重得多。
 fn write_atomic_with<F>(path: &Path, produce: F) -> std::io::Result<()>
 where
-    F: FnOnce(&mut fs::File) -> std::io::Result<()>,
+    F: FnOnce(&mut std::io::BufWriter<fs::File>) -> std::io::Result<()>,
 {
     let tmp_path = temp_sibling(path);
 
     // 临时文件与目标同目录 → 同一卷上，rename 才能原子完成
     let result = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&tmp_path)?;
-        produce(&mut file)?;
+        let file = fs::File::create(&tmp_path)?;
+        let mut writer = io::BufWriter::with_capacity(SAVE_BUF_BYTES, file);
+        produce(&mut writer)?;
+        #[cfg(test)]
+        WRITE_STEPS.with(|s| s.borrow_mut().push("produce"));
+        // 缓冲里剩的字节必须先落到文件，再 sync、再 rename
+        writer.flush()?;
+        #[cfg(test)]
+        WRITE_STEPS.with(|s| s.borrow_mut().push("flush"));
+        // flush 之后缓冲已空，经 get_mut 拿回句柄做 sync_all
+        // （不用 into_inner：其失败会把缓冲连同句柄一起吞掉，这里无状态可丢）
+        let file = writer.get_mut();
         // sync 完成后再 rename，防掉电丢内容
         file.sync_all()?;
+        #[cfg(test)]
+        WRITE_STEPS.with(|s| s.borrow_mut().push("sync"));
         Ok(())
     })();
     if let Err(source) = result {
@@ -216,6 +263,8 @@ where
         let _ = fs::remove_file(&tmp_path);
         return Err(source);
     }
+    #[cfg(test)]
+    WRITE_STEPS.with(|s| s.borrow_mut().push("rename"));
 
     Ok(())
 }
@@ -277,6 +326,43 @@ mod tests {
 
         save_atomic(&target, content).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), content);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// O-15 时序契约：写内容 → **flush** → sync → rename，四步顺序钉死。
+    ///
+    /// 为什么只能用步骤序列：若哪天把顺序改成「先 rename 后 flush」或吞掉
+    /// flush 的错误，**返回值与落盘结果都看不出问题**——`BufWriter` 的 Drop 会
+    /// 在函数返回后补写，只有进程中途没了/掉电才暴露为空文件或半截文件。这类
+    /// 时序命题无法用「结果」观测，而耗时断言在本仓不接受（忙机器假红、温热
+    /// 假绿）→ 记步骤序列，形状同 app 层 `EditorCore::line_text_calls`，
+    /// 生产构建整块不参与编译。
+    #[test]
+    fn atomic_write_flushes_before_sync_and_rename() {
+        let dir = scratch_dir("flush-order");
+        let target = dir.join("order.txt");
+
+        clear_write_steps();
+        save_atomic(&target, "第一版内容").unwrap();
+        assert_eq!(
+            write_steps(),
+            vec!["produce", "flush", "sync", "rename"],
+            "缓冲必须先落到文件，再 sync、再 rename"
+        );
+
+        // 跨缓冲阈值（64 KB）的整篇内容必须逐字节完整：BufWriter 用错会截尾
+        let big = "中文 emoji 🚀 x\n".repeat(8192);
+        assert!(big.len() > SAVE_BUF_BYTES, "样本须超出缓冲才有判别力");
+        let big_target = dir.join("big.txt");
+        clear_write_steps();
+        save_atomic(&big_target, &big).unwrap();
+        assert_eq!(fs::read_to_string(&big_target).unwrap(), big, "超阈值内容不得截断");
+        assert_eq!(
+            write_steps(),
+            vec!["produce", "flush", "sync", "rename"],
+            "超缓冲阈值的路径同样由本函数单点收口"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
