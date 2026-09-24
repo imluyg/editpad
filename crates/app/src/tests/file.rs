@@ -1317,6 +1317,49 @@ external
         assert!(app.tabs[1].dirty, "不得错清活动页的置脏标记");
     }
 
+    /// 「保存并关闭」必须与 Ctrl+S 走同一条落盘管线：按页编码偏好、写前备份、
+    /// 外部改动守卫一个都不能少（旧版直接 `save_document_atomic` 按 UTF-8 写）。
+    #[test]
+    fn close_tab_save_backs_up_before_overwrite() {
+        let (mut app, path) = loaded_real_file_app("close-tab-backup");
+        app.settings.backup_mode = editpad_core::settings::BACKUP_MODE_SIMPLE.to_owned();
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        assert!(app.tabs[0].dirty);
+
+        dispatch(&mut app, Message::CloseTabSave(0));
+
+        let bak = path.with_file_name("note.txt.bak");
+        assert!(
+            bak.is_file(),
+            "保存并关闭必须先做写前备份（磁盘旧内容留档），实际未见 {:?}",
+            bak
+        );
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            "base",
+            "备份的必须是覆写前的磁盘旧内容"
+        );
+    }
+
+    #[test]
+    fn close_tab_save_blocked_by_external_change_guard() {
+        let (mut app, path) = loaded_real_file_app("close-tab-guard");
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+        std::fs::write(&path, "externally replaced").unwrap();
+
+        dispatch(&mut app, Message::CloseTabSave(0));
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "externally replaced",
+            "拦截期间原文件绝不能被覆盖"
+        );
+        assert!(!app.busy, "拦截不是进入保存流程");
+        assert_eq!(app.external_change, Some(vec![0]), "应交外部改动提示条裁决");
+        assert_eq!(app.pending_close_tab, None, "被拦下时不得登记待关页");
+        assert_eq!(app.tabs.len(), 1, "内容没存就不该关页");
+    }
+
     #[test]
     fn confirm_save_and_close_chains_through_all_dirty_pages() {
         // P147 回归：ASK（非快照直退）模式「保存并关闭」曾只存活动页即

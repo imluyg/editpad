@@ -615,6 +615,9 @@ StTooLargeEolSuffix)
             }
             Message::TabSaved(tab_id, version, result) => {
                 self.busy = false;
+                // 写前备份提示随本条回报一并取走（无论落到哪个分支都不该
+                // 留到下一次保存才冒出来），只在「没有其他话要说」时补显
+                let backup_note = self.pending_backup_notice.take();
                 // P146：按发起页 id 定位——存盘期间页集合变动导致的下标
                 // 漂移不再让「保存并关闭」落到别的页上（版本巧合时曾把
                 // 无关的置脏页静默移除、内容无声丢弃）
@@ -638,6 +641,9 @@ StTooLargeEolSuffix)
                                 self.cancel_find_scan();
                             }
                             self.pending_close_tab = None;
+                            if let Some(text) = backup_note {
+                                self.set_status(text);
+                            }
                         } else {
                             self.set_status(self.t(editpad_core::Key::StCancelledAutoClose).to_owned());
                         }
