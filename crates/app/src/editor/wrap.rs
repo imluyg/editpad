@@ -113,7 +113,9 @@ pub(crate) fn pixel_breaks(xs: &[f32], max_px: f32, body: &str) -> Vec<usize> {
     let n = chars.len().min(xs.len().saturating_sub(1));
     let mut breaks = vec![0usize];
     let mut prev = 0usize;
-    for k in 0..n.saturating_sub(1) {
+    // 上界就是 n：契约 xs.len() == 字符数 + 1，故 k = n-1 时 xs[k+1] = xs[n]
+    // 仍在界内——多减一次 1 会让末位字符永不被测，最后一段可整字超预算
+    for k in 0..n {
         if k > prev && xs[k + 1] - xs[prev] > max_px {
             let b = choose_break(&chars, prev, k);
             breaks.push(b);
@@ -448,6 +450,25 @@ mod tests {
         assert_eq!(pixel_breaks(&xs3, 200.0, "😀aa"), vec![0, 1]);
         // 空行
         assert_eq!(pixel_breaks(&[0.0], 100.0, ""), vec![0]);
+    }
+
+    /// 契约 `xs.len() == 字符数 + 1` 下，末位字符也要被测：循环上界多减一次
+    /// 1 会让「最后一个字符压不进预算」这一种溢出永远漏判，于是像素断行与
+    /// 列模型 `wrap_breaks` 分叉（末段整字超预算 → 画到折行边界之外，且该
+    /// 逻辑行的视觉段数少算 1）。
+    #[test]
+    fn pixel_breaks_measures_the_last_character_too() {
+        // 3 字符 ×10px，预算 25px：只能放 2 个，第 3 个必须另起一段
+        assert_eq!(
+            pixel_breaks(&[0., 10., 20., 30.], 25.0, "abc"),
+            vec![0, 2],
+            "末字超预算时必须断出新段（旧实现返回 [0]，整段 30px 压进 25px）"
+        );
+        // 与列模型同场景对拍：两者段数必须一致
+        assert_eq!(pixel_breaks(&[0., 1., 2., 3., 4.], 2.0, "abcd"), vec![0, 2]);
+        assert_eq!(wrap_breaks("abcd", 2), vec![0, 2]);
+        // 末字恰在预算线上：不产空段、不另起
+        assert_eq!(pixel_breaks(&[0., 10., 20., 30.], 30.0, "abc"), vec![0]);
     }
 
     #[test]
