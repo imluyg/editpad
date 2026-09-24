@@ -1,7 +1,7 @@
 # Editpad CI：test / release 阻断性；clippy 阻断（本地基线已清零）；fmt 信息性。
 #
-# ⚠️ fmt 作业暂为 continue-on-error：仓库有数百处格式偏差（2026-09-11 本机实测
-# `cargo fmt --all -- --check` 报 675 个 hunk；rustfmt.toml 仅设 max_width=100，
+# ⚠️ fmt 作业暂为 continue-on-error：仓库有数百处格式偏差（2026-09-24 本机实测
+# `cargo fmt --all -- --check` 报 733 个 hunk；rustfmt.toml 仅设 max_width=100，
 # 即默认风格，偏差来自手写紧凑写法），刻意不在单轮全量格式化——分模块逐批收敛
 # 后再接入阻断。
 #
@@ -20,6 +20,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 最小权限：三个作业都只读仓库（CI 不发布、不打 tag、不推任何东西），而
+# GITHUB_TOKEN 的默认作用域是写——第三方 action（checkout / rust-toolchain /
+# rust-cache）因此也一并拿得到写权限。顶层显式收窄。
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -33,7 +39,12 @@ jobs:
       # 缓存 target/ 与 cargo 注册表：全量编译 iced + syntect 是 CI 的
       # 主要耗时，无缓存时每次 push 都要重来一遍。
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      # --locked：Cargo.lock 与清单不一致时直接失败。本仓带一处手工 vendor 补丁
+      # （[patch.crates-io] iced_tiny_skia），补丁被解析器绕过时 cargo 只给一条
+      # warning（P117/P119/P120 的选区残线/层栈修复会静默回归）——固定解析 +
+      # 锁断言是唯一能提前发现的机制。本机 `cargo metadata --locked` 已验证
+      # 锁与清单同步，加上它不会把 CI 弄红。
+      - run: cargo test --locked --workspace
 
   release-build:
     name: release build
@@ -42,7 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --workspace
+      - run: cargo build --locked --release --workspace
 
   clippy:
     name: clippy (-D warnings)
@@ -55,7 +66,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   fmt:
     name: fmt (informational)
