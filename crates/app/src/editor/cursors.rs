@@ -140,7 +140,7 @@ impl EditorCore {
             // P88：字形墨迹在行盒内下浮 ink_offset——光标矩形下移到
             // 墨迹顶对齐，高度同步收窄到墨迹盒（行盒顶对齐会让光标
             // 顶部悬在首行上方空带、底部压进下行间隙，见
-            // measure_ink_offset 注释；IME 候选框定位同样受益）
+            // measure_ink_box 注释；IME 候选框定位同样受益）
             y: (v as f32 - self.scroll_top) * self.line_height() + self.ink_offset,
             width: CARET_WIDTH,
             height: (self.line_height() - 2.0 * self.ink_offset).max(CARET_WIDTH * 2.0),

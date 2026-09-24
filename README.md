@@ -26,7 +26,10 @@ A windowed notepad built from scratch in Rust: multi-tab, session snapshot resto
 
 ## Quick Start
 
-Environment: Windows 10/11 + Rust stable (toolchain locked by `rust-toolchain.toml`).
+Environment: Windows 10/11 + Rust stable (toolchain locked by `rust-toolchain.toml`)
+**+ Windows 10 SDK** — `crates/app/build.rs` calls the SDK's `rc.exe` to compile the
+exe's version resource and icon, so `rustup` + MSVC Build Tools alone are not enough
+(a machine without the SDK fails at build time with `找不到 rc.exe`).
 
 ```powershell
 cargo run --release          # run
@@ -264,17 +267,19 @@ editpad/
 │   └── app/                    # iced UI shell
 │       ├── src/
 │       │   ├── main.rs         # iced entry + Message enum + module registration
-│       │   ├── update.rs       # update() dispatch + domain methods (editor/file/find/tabs/…)
-│       │   ├── view.rs         # main view assembly (menu bar / tab strip / command palette overlay)
+│       │   ├── update/         # update() dispatch, split by domain (file / tabs / find / edit / settings)
+│       │   ├── view/           # view assembly, split by concern (overlays / find_panel / tab_menu / restore / …)
 │       │   ├── settings_ui.rs  # settings popup UI + neutral styling
 │       │   ├── state.rs        # Editpad state struct + Default
 │       │   ├── hotkeys.rs      # hotkey registry (same data source as the command palette)
-│       │   ├── load / find_scan / highlight_pave / md_preview / fonts / session /
-│       │   │   tab / autosave / heartbeat / chrome / single_instance / icon.rs
+│       │   ├── load / find_scan / highlight_pave / press_observer / md_preview /
+│       │   │   fonts / session / tab / autosave / heartbeat / chrome /
+│       │   │   single_instance / icon.rs
 │       │   ├── editor/         # custom virtualized editor
 │       │   │   ├── core.rs     # EditorCore struct + geometry/layout accessors
-│       │   │   ├── undo / motion / edit / block / highlight.rs   # impl split by domain
-│       │   │   ├── view.rs / wrap.rs / metrics.rs / scrollbars.rs
+│       │   │   ├── edit / motion / undo / block / cursors / dnd / links /
+│       │   │   │   highlight / wrap / metrics / scrollbars.rs   # impl split by domain
+│       │   │   ├── view/       # painting layer (mod + paint / colors / font)
 │       │   │   └── *_tests.rs  # tests accompanying the impl files (#[path]-mounted submodules)
 │       │   └── tests/          # app-layer tests split by domain (tabs/file/find/session/…)
 │       └── assets/             # assets such as app.ico (embedded into the exe by build.rs)

@@ -28,7 +28,9 @@
 
 ## 快速开始
 
-环境：Windows 10/11 + Rust stable（工具链由 `rust-toolchain.toml` 锁定）。
+环境：Windows 10/11 + Rust stable（工具链由 `rust-toolchain.toml` 锁定）**+ Windows 10 SDK**
+——`crates/app/build.rs` 要调 SDK 里的 `rc.exe` 编译 exe 的版本资源与图标，只装
+`rustup` + MSVC Build Tools 不够（无 SDK 的机器会在构建期报「找不到 rc.exe」）。
 
 ```powershell
 cargo run --release          # 运行
@@ -369,17 +371,19 @@ editpad/
 │   └── app/                    # iced 界面壳
 │       ├── src/
 │       │   ├── main.rs         # iced 入口 + Message 枚举 + 模块注册
-│       │   ├── update.rs       # update() 分发 + 域方法（editor/file/find/tabs/…）
-│       │   ├── view.rs         # 主视图组装（菜单栏/标签条/命令面板浮层）
+│       │   ├── update/         # update() 分发，按域拆分（file / tabs / find / edit / settings）
+│       │   ├── view/           # 视图组装，按关注点拆分（overlays / find_panel / tab_menu / restore / …）
 │       │   ├── settings_ui.rs  # 设置弹窗 UI + 中性样式
 │       │   ├── state.rs        # Editpad 状态结构体 + Default
 │       │   ├── hotkeys.rs      # 热键注册表（命令面板同源数据）
-│       │   ├── load / find_scan / highlight_pave / md_preview / fonts / session /
-│       │   │   tab / autosave / heartbeat / chrome / single_instance / icon.rs
+│       │   ├── load / find_scan / highlight_pave / press_observer / md_preview /
+│       │   │   fonts / session / tab / autosave / heartbeat / chrome /
+│       │   │   single_instance / icon.rs
 │       │   ├── editor/         # 自绘虚拟化编辑器
 │       │   │   ├── core.rs     # EditorCore 结构体 + 几何/布局访问器
-│       │   │   ├── undo / motion / edit / block / highlight.rs   # impl 按域拆分
-│       │   │   ├── view.rs / wrap.rs / metrics.rs / scrollbars.rs
+│       │   │   ├── edit / motion / undo / block / cursors / dnd / links /
+│       │   │   │   highlight / wrap / metrics / scrollbars.rs   # impl 按域拆分
+│       │   │   ├── view/       # 绘制层（mod + paint / colors / font）
 │       │   │   └── *_tests.rs  # 随实现文件的测试（#[path] 挂子模块）
 │       │   └── tests/          # app 层测试按域拆分（tabs/file/find/session/…）
 │       └── assets/             # app.ico 等资源（build.rs 编入 exe）

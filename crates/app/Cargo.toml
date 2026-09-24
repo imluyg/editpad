@@ -16,7 +16,7 @@ path = "src/main.rs"
 iced.workspace = true
 rfd.workspace = true
 editpad-core.workspace = true
-# P88 残影根治：字形墨迹偏移实测（measure_ink_offset）需把采样行渲染到
+# P88 残影根治：字形墨迹偏移实测（measure_ink_box）需把采样行渲染到
 # 离屏像素图扫描墨迹行——tiny-skia/iced_graphics 本就在 iced tiny-skia
 # 特性的依赖树里（发布构建已编译），此处仅补直连边，零新增体积。
 tiny-skia = "0.11.4"
