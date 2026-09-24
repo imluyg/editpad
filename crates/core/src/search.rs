@@ -99,8 +99,12 @@ fn for_each_line_until(
         f(line_idx, &text[line_start..i])?;
         line_idx += 1;
         line_start = i + blen;
-        if blen == 2 {
-            chars.next(); // 消费 CRLF 配对的 \n
+        if c == '\r' && next == Some('\n') {
+            // 消费 CRLF 配对的 \n。**按字符身份判，不按宽度**：旧判据写成
+            // `blen == 2`，而 NEL(U+0085) 本身就是 2 字节 → 「NEL 后紧跟一个
+            // 字符」时那个字符被无条件吃掉，NEL+\n 并成一行（行内容里还留着
+            // 裸 \n），此后所有行号左移一位（P217）。
+            chars.next();
         }
     }
     f(line_idx, &text[line_start..])
@@ -1098,6 +1102,44 @@ mod tests {
             out.push(ALPHABET[(state >> 33) as usize % ALPHABET.len()]);
         }
         out
+    }
+
+    /// P217 回归：行界字符**后面紧跟另一个行界字符**时必须切成两行。
+    ///
+    /// 旧切行用 `blen == 2` 当「这是 CRLF 成对」的判据，而 NEL(U+0085) 本身就是
+    /// 2 字节，于是 NEL 后面那个字符被无条件 `chars.next()` 吃掉：`"a\u{85}\nb"`
+    /// 切成两行（第二行是 `"\nb"`），此后所有行号左移一位。用户可见后果：查找
+    /// 全部/在文件中查找报的行号与编辑器不一致，点上去选中的也不是那一处。
+    ///
+    /// ⚠️ 这条**测不出**在既有对拍里不是偶然：`find_all_char_ref` 那份 oracle
+    /// 与本函数共用 `for_each_line`，切错时两者一起错，「新码 == 旧码」恒成立。
+    /// 能暴露它的是与 **rope 路径**（`find_all_document`，行号来自 ropey）同结论。
+    #[test]
+    fn consecutive_line_breaks_split_into_separate_lines() {
+        const BREAKS: [char; 7] = [
+            '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+        ];
+        for &a in &BREAKS {
+            for &b in &BREAKS {
+                let text = format!("x{a}{b}y");
+                // 只有 \r\n 是一整个行界；其余任意两两组合都是两个行界 → 三行
+                let paired = a == '\r' && b == '\n';
+                let mut lines: Vec<(usize, String)> = Vec::new();
+                for_each_line(&text, |i, l| lines.push((i, l.to_owned())));
+                assert_eq!(lines.len(), if paired { 2 } else { 3 }, "{text:?} 切行数错");
+                assert!(
+                    lines.iter().all(|(_, l)| !l.contains(BREAKS)),
+                    "{text:?}: 行内容里不得残留行界字符：{lines:?}"
+                );
+                let y = lines.iter().position(|(_, l)| l == "y").expect("应有 y 行");
+                assert_eq!(y, if paired { 1 } else { 2 }, "{text:?}: y 的行号错");
+                assert_eq!(
+                    find_all(&text, "y", true),
+                    find_all_document(&Document::from_str(&text), "y", true),
+                    "{text:?}: 与 rope 路径口径分叉"
+                );
+            }
+        }
     }
 
     #[test]
