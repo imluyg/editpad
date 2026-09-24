@@ -435,8 +435,12 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
             }
         }
         if matches!(self.peek(), Some('e') | Some('E')) {
-            self.bump();
-            self.out("e");
+            // 指数字符**按原样输出**：本函数对值本身的承诺是「数字书写不做
+            // 改写」（见 `format_json` 的文档），而 `1E5` 被写成 `1e5` 就是在
+            // 改用户的文本——格式化命令不该悄悄编辑内容。
+            if let Some(exp) = self.bump() {
+                self.out_char(exp);
+            }
             if matches!(self.peek(), Some('+') | Some('-')) {
                 if let Some(sign) = self.bump() {
                     self.out_char(sign);
@@ -506,6 +510,24 @@ mod tests {
         // 对象与数组混合嵌套同受封顶
         let mixed = "{\"a\":".repeat(100_000);
         assert!(validate_json(&mixed).unwrap_err().message.contains("嵌套过深"));
+    }
+
+    /// P219：数字书写**不做改写**——函数文档明写的承诺。
+    ///
+    /// ⚠️ 既有样本里就有 `-1.5E-3` 与 `-0.5e+10`，但那条用例只断言**幂等**：
+    /// `1E5 → 1e5 → 1e5` 照样幂等，所以「改写」这个动作本身从没被测过。
+    #[test]
+    fn number_spelling_is_preserved_verbatim() {
+        let cases = [
+            ("1E5", "1E5"),
+            ("1e5", "1e5"),
+            ("-1.5E-3", "-1.5E-3"),
+            ("0E0", "0E0"),
+            (r#"{"a":1E+5,"b":[2e-3,3E4]}"#, "{\n  \"a\": 1E+5,\n  \"b\": [\n    2e-3,\n    3E4\n  ]\n}"),
+        ];
+        for (input, expect) in cases {
+            assert_eq!(format_json(input).unwrap(), expect, "输入 {input}");
+        }
     }
 
     #[test]
