@@ -4,6 +4,10 @@
 # that did not sum up, "not pushed" notes written after the push, and one
 # "watch this flaky test" row whose root cause had already been fixed.
 #
+# It also guards the layout itself: round logs must live in dated day files, and
+# the frozen historical volume must not grow (its append-only rule was the reason
+# it gained 1349 lines in one day, which is what section 6 fails on now).
+#
 # Usage (repo root, Windows PowerShell 5.1+):
 #   powershell -ExecutionPolicy Bypass -File .\tools\ledger-check.ps1
 #   powershell -File .\tools\ledger-check.ps1 -Ledger ..\somewhere\HANDOFF.md -MaxAgeDays 30
@@ -22,9 +26,16 @@
 param(
     # Path to the working ledger, relative to the repo root.
     [string] $Ledger = 'HANDOFF.md',
-    # Dated round-log periods (one immutable file per day).
-    [string] $Periods = 'docs/handoff',
+    # Dated round logs: ONE file per day, holding both the round summary and the
+    # mechanism-level detail that used to go to the append-only archive.
+    [string] $Days = 'docs/days',
+    # Index of the frozen historical volume; it carries that volume's machine
+    # readable size cap, which is what stops the archive from growing again.
+    [string] $ArchiveIndex = 'docs/ARCHIVE-INDEX.md',
     # Machine fields live in an HTML comment so this script can stay ASCII:
+    #   <!-- ARCHIVE-FROZEN file=docs/HANDOFF_ARCHIVE.md lines=9733 date=2026-09-25 -->
+    [string] $FrozenMarker = 'ARCHIVE-FROZEN',
+    # The ledger's own stamp, also an HTML comment (see the encoding note below):
     #   <!-- LEDGER-SNAPSHOT date=2026-09-25 head=eef98a9 tests=777 pushed=yes -->
     [string] $Marker = 'LEDGER-SNAPSHOT',
     # The stamp is stale after this many days.
@@ -148,49 +159,89 @@ if ($lines.Count -gt $MaxLines) { Warn ('ledger is ' + [string] $lines.Count + '
 else { Pass ('ledger size within budget: ' + [string] $lines.Count + ' <= ' + [string] $MaxLines) }
 $rounds = @($lines | Where-Object { $_ -match '^### ' }).Count
 if ($rounds -gt $MaxRoundSummaries) {
-    Warn ([string] $rounds + ' round summaries in this file (budget ' + [string] $MaxRoundSummaries + ') - older ones belong in the archive')
+    Warn ([string] $rounds + ' round summaries in this file (budget ' + [string] $MaxRoundSummaries + ') - they belong in the day file under ' + $Days)
 }
 else { Pass ('round summaries within budget: ' + [string] $rounds) }
 
-# ---------- 5. dated period files ----------
-# Round logs live in docs/handoff/YYYY-MM-DD.md (one immutable file per day),
-# so "read the newest one" must stay reliable: a stray file in that folder would
-# break `ls docs/handoff | tail -1`, and a period older than the last commit
-# means a round was committed but never written up (that is how round 149 got
-# lost from the archive).
-if (Test-Path -LiteralPath $Periods) {
-    # NB: every local below is named apart from the param `$Periods`. PowerShell
+# ---------- 5. dated day files ----------
+# Since round 152 every round log is ONE file per day (docs/days/YYYY-MM-DD.md)
+# holding both the summary and the detail. "Read the newest one" has to stay
+# reliable: a stray file in that folder breaks `ls docs/days | tail -1`, and a
+# newest file older than the last commit means a round was committed but never
+# written up (that is how round 149 lost its detail).
+if (Test-Path -LiteralPath $Days) {
+    # NB: every local below is named apart from the param `$Days`. PowerShell
     # variable names are case-INsensitive, and a param's type constraint stays on
-    # the variable for its whole life, so `$periods = @(<2 FileInfo>)` did not
-    # create a new array: it coerced into `[string] $Periods` and stored
-    # "2026-09-24.md 2026-09-25.md". Measured fallout, all silent: .Count was 1,
-    # [0] was the char '2', and its .Name was the empty string.
-    $mdFiles = @(Get-ChildItem -LiteralPath $Periods -Filter '*.md')
-    $periodFiles = @($mdFiles | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}\.md$' } | Sort-Object Name)
-    if ($periodFiles.Count -eq 0) {
-        Fail ('no YYYY-MM-DD.md period file under ' + $Periods)
+    # the variable for its whole life -- an earlier revision of this file wrote
+    # `$periods = @(<2 FileInfo>)` under `[string] $Periods`, which silently stored
+    # the space-joined string instead: .Count became 1, [0] became the char '2',
+    # and its .Name became the empty string. No error was raised.
+    $mdFiles = @(Get-ChildItem -LiteralPath $Days -Filter '*.md')
+    $dayFiles = @($mdFiles | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}\.md$' } | Sort-Object Name)
+    if ($dayFiles.Count -eq 0) {
+        Fail ('no YYYY-MM-DD.md day file under ' + $Days)
     }
     else {
-        $newestPeriod = $periodFiles[($periodFiles.Count - 1)]
-        Pass ('latest period: ' + $newestPeriod.Name + ' (of ' + [string] $periodFiles.Count + ')')
+        $newestDay = $dayFiles[($dayFiles.Count - 1)]
+        Pass ('latest day file: ' + $newestDay.Name + ' (of ' + [string] $dayFiles.Count + ')')
         $strays = @($mdFiles | Where-Object { $_.Name -notmatch '^\d{4}-\d{2}-\d{2}\.md$' })
         if ($strays.Count -gt 0) {
-            Warn (([string] $strays.Count) + ' non-period file(s) in ' + $Periods + ': ' + (($strays | ForEach-Object { $_.Name }) -join ', '))
+            Warn (([string] $strays.Count) + ' non-day-named file(s) in ' + $Days + ': ' + (($strays | ForEach-Object { $_.Name }) -join ', '))
         }
         if ($null -ne $git) {
             $committed = (& git log -1 --format=%cd --date=short)
             if ($LASTEXITCODE -eq 0 -and $committed) {
                 $committed = ($committed | Select-Object -Last 1).Trim()
-                if ($committed -gt $newestPeriod.BaseName) {
-                    Warn ('last commit is ' + $committed + ' but the newest period is ' + $newestPeriod.BaseName + ' - a round may be unwritten')
+                if ($committed -gt $newestDay.BaseName) {
+                    Warn ('last commit is ' + $committed + ' but the newest day file is ' + $newestDay.BaseName + ' - a round may be unwritten')
                 }
-                else { Pass ('newest period covers the last commit (' + $committed + ')') }
+                else { Pass ('newest day file covers the last commit (' + $committed + ')') }
             }
         }
     }
 }
 else {
-    Warn ('period folder not found: ' + $Periods)
+    Warn ('day folder not found: ' + $Days)
+}
+
+# ---------- 6. the frozen historical volume ----------
+# The old archive was append-only, so it could only ever grow -- it added 1349
+# lines in a single day (8384 -> 9733), and the line budget in section 4 caught
+# none of it because that budget only measures HANDOFF.md. Round logs now go to
+# the day files above, the volume is frozen, and its frozen size is declared in
+# the index so growth (or truncation, which is worse) fails here.
+if (Test-Path -LiteralPath $ArchiveIndex) {
+    $idxLines = [System.IO.File]::ReadAllLines((Resolve-Path -LiteralPath $ArchiveIndex).Path, [System.Text.Encoding]::UTF8)
+    $frozenLine = $null
+    foreach ($l in $idxLines) { if ($l -like ('*' + $FrozenMarker + '*')) { $frozenLine = $l; break } }
+    if ($null -eq $frozenLine) {
+        Fail ('no "' + $FrozenMarker + '" cap line found in ' + $ArchiveIndex)
+    }
+    else {
+        $frozenPath = $null
+        $frozenDeclared = 0
+        if ($frozenLine -match 'file=([^\s>]+)') { $frozenPath = $Matches[1] }
+        if ($frozenLine -match 'lines=(\d+)') { $frozenDeclared = [int] $Matches[1] }
+        if ([string]::IsNullOrEmpty($frozenPath) -or -not (Test-Path -LiteralPath $frozenPath)) {
+            Fail ('frozen volume named in the index does not exist: ' + $frozenPath)
+        }
+        elseif ($frozenDeclared -le 0) {
+            Fail ('index declares no usable lines=... cap')
+        }
+        else {
+            $frozenActual = @([System.IO.File]::ReadAllLines((Resolve-Path -LiteralPath $frozenPath).Path, [System.Text.Encoding]::UTF8)).Count
+            if ($frozenActual -gt $frozenDeclared) {
+                Fail ($frozenPath + ' grew ' + [string] ($frozenActual - $frozenDeclared) + ' line(s) past its freeze at ' + [string] $frozenDeclared + ' - new round logs belong in ' + $Days)
+            }
+            elseif ($frozenActual -lt $frozenDeclared) {
+                Fail ($frozenPath + ' SHRANK to ' + [string] $frozenActual + ' lines (frozen value was ' + [string] $frozenDeclared + ') - history was edited or truncated')
+            }
+            else { Pass ('historical volume frozen at ' + [string] $frozenDeclared + ' lines: ' + $frozenPath) }
+        }
+    }
+}
+else {
+    Warn ('archive index not found: ' + $ArchiveIndex)
 }
 
 Write-Host ('--- ' + $(if ($script:fail) { 'FAIL ' + $script:fail } else { 'PASS' }) + ' ---')
