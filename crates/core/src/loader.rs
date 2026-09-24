@@ -378,6 +378,10 @@ const SAMPLE_HEAD_CHARS: usize = 4096;
 #[derive(Default)]
 struct HeadSample {
     buf: String,
+    /// `buf.chars().count()` 的增量记账（O-10）：改前每推一个字符就把整个
+    /// 样本重数一遍，填满 4096 字符样本约 8.4M 次字符迭代——**每个文件打开
+    /// 都固定付一次**，与文件大小无关。
+    chars: usize,
     full: bool,
 }
 
@@ -388,7 +392,8 @@ impl HeadSample {
         }
         for c in text.chars() {
             self.buf.push(c);
-            if self.buf.chars().count() >= SAMPLE_HEAD_CHARS {
+            self.chars += 1;
+            if self.chars >= SAMPLE_HEAD_CHARS {
                 self.full = true;
                 break;
             }
@@ -913,5 +918,24 @@ mod tests {
             }
         }
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// O-10 护栏：`HeadSample` 的增量字符记账必须与「每推一个字符重数一遍
+    /// 全串」逐段等价——上限按**字符**计（不是字节），到点即置 `full`，
+    /// 之后任何输入都不再改变样本。
+    #[test]
+    fn head_sample_stops_exactly_at_char_limit() {
+        // 8 字符 / 12 字节：按字节计数会得到 6144，当场露馅
+        let chunk = "x中x中x中x中";
+        assert_eq!(chunk.chars().count(), 8);
+        let mut s = HeadSample::default();
+        for _ in 0..(SAMPLE_HEAD_CHARS / 8) {
+            s.push(chunk);
+        }
+        assert_eq!(s.buf.chars().count(), SAMPLE_HEAD_CHARS, "样本必须停在字符上限");
+        assert!(s.full, "达到上限必须置 full");
+        let before = s.buf.clone();
+        s.push(chunk);
+        assert_eq!(s.buf, before, "full 之后不得再增长");
     }
 }
