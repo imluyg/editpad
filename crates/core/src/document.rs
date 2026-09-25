@@ -277,6 +277,34 @@ impl Document {
         self.rope.line(line_idx).len_chars()
     }
 
+    /// 第 `line_idx` 行**不含行尾换行符**的字符数（P284）。
+    ///
+    /// 与 [`Self::line_str`] 再 `trim_end_matches(['\n','\r'])` 后数字符完全
+    /// 等价，但**不扫全行**：ropey 把 `\r` 也算行 break ⇒ 一行的正文不可能以
+    /// `\r`/`\n` 结尾，行尾只可能是 `\n` / `\r\n` / `\r` / 空（末行无换行），
+    /// 所以从行末往回数最多看两个字符就够。长行文档（单行日志/压缩文件）里
+    /// 这是每帧"这行有多少字符"从 O(行长) 变成常数的关键。
+    /// 行号越界返回 0（与 `line_str` 的空串口径一致）。
+    pub fn line_body_len_chars(&self, line_idx: usize) -> usize {
+        if line_idx >= self.rope.len_lines() {
+            return 0;
+        }
+        let line = self.rope.line(line_idx);
+        let n = line.len_chars();
+        let mut end = n;
+        // 最多剥两个字符：`\r\n`。再多一个都不可能是行尾（见上）。
+        for _ in 0..2 {
+            if end == 0 {
+                break;
+            }
+            match line.char(end - 1) {
+                '\n' | '\r' => end -= 1,
+                _ => break,
+            }
+        }
+        end
+    }
+
     /// 从 `char_idx`（含）向后的字符迭代器（第 61 轮括号匹配用；
     /// 零拷贝——rope 叶片级迭代，不产生全文 String）。
     /// 注：ropey 1.6 的 Chars 不支持 DoubleEndedIterator，反向扫描由
@@ -295,6 +323,50 @@ impl Default for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_body_len_chars_matches_the_trimmed_string_on_every_ending() {
+        // P284 的对拍：`line_body_len_chars` 只看行末两个字符，而参照口径是
+        // "物化整行再 trim_end 掉所有 \n/\r 然后数"。行尾形态只有四种
+        // （`\n` / `\r\n` / `\r` / 末行无换行），但"只看两个字符够不够"要由
+        // 对拍说，不由推理说。
+        let cases = [
+            ("a\r\nbb\ncc", "CRLF 开头 + LF + 末行无换行"),
+            ("plain\n", "全 LF"),
+            (
+                "one\rtwo\r\n",
+                "混 CR 与 CRLF（ropey 里 \\r 本身也是行分隔）",
+            ),
+            ("no trailing newline", "整个文档无换行"),
+            ("", "空文档"),
+            ("\n\n", "只有两个空行"),
+            ("中文字\ttab\nemoji 🚀 end\r\n", "宽字符 / Tab / emoji"),
+            ("x\n\ny", "中间夹空行"),
+        ];
+        for (text, label) in cases {
+            let doc = Document::from_str(text);
+            for i in 0..doc.line_count() {
+                let fast = doc.line_body_len_chars(i);
+                let slow = doc
+                    .line_str(i)
+                    .trim_end_matches(['\n', '\r'])
+                    .chars()
+                    .count();
+                assert_eq!(
+                    fast,
+                    slow,
+                    "{label}：第 {i} 行（原始行 {:?}）快速口径 {fast} != 参照 {slow}",
+                    doc.line_str(i)
+                );
+            }
+            // 越界恒 0，与 `line_str` 返回空串的口径一致
+            assert_eq!(
+                doc.line_body_len_chars(doc.line_count() + 7),
+                0,
+                "{label}：越界行号须给 0"
+            );
+        }
+    }
 
     #[test]
     fn insert_and_remove_keep_line_index_consistent() {

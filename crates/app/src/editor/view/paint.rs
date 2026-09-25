@@ -62,10 +62,11 @@ pub(super) fn paint_text_slice(
             clip,
         );
     } else {
-        // O-2：本行字符数提到 run 循环外——`px_of` 内部每次调用都要 O(行长)
-        // 数一遍字符，而这里每个高亮 run 要取两次列像素（5MB 单行上即每帧
-        // 百万次字符扫描）。
-        let lens = text.chars().count();
+        // O-2：本行字符数提到 run 循环外——`px_of` 内部每次调用都要数一遍列，
+        // 每个高亮 run 要取两次像素（5MB 单行上即每帧百万次字符扫描）。
+        // P284：这个数现在来自 rope 的行末判定（`line_display_len`），不再
+        // 扫全行；提到循环外仍是必要的（一次查询而不是每 run 一次）。
+        let lens = core.line_display_len(line);
         for run in runs {
             let s = run.start_col.max(lo);
             let e = run.end_col.min(hi);

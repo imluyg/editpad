@@ -2425,6 +2425,50 @@ fn row_layout_memo_hit_shares_one_table_instead_of_copying_it() {
 }
 
 #[test]
+fn line_display_len_matches_line_text_without_going_through_it() {
+    // P284：绘制路径每个可见行每帧要问 5~6 次"这行有多少字符"。改前每次都
+    // 物化整行再逐字符数（20 行 × 2 万字符 = 每帧两百万步 + 20 次大字符串）。
+    // 两头都要钉：
+    // ① 口径与整行物化**逐格一致**（行尾四种形态 + 宽字符 + emoji + 越界），
+    //    这一头由下面 `line_text` 对照钉；
+    // ② 数长度不得再走 `line_text` 那条物化路径——由取串计数钩子钉。
+    //    ⚠️ 该钩子只看得见 `EditorCore::line_text`，看不见直接调
+    //    `Document::line_str` 的写法（第 187 轮探针实测就是这样漏的：改前的
+    //    老实现走 `doc.line_str`，本断言照样绿）。所以它防的是"退回 app 层
+    //    物化"这一类，另一类要靠 ① 与 core 侧的对拍用例兜。
+    let doc = "短行\nlong\r\ncjk中文字\n\tempty\n\n最后一行无换行";
+    let c = core_with(doc);
+    for line in 0..4 {
+        assert_eq!(
+            c.line_display_len(line),
+            c.line_text(line).chars().count(),
+            "第 {line} 行的字符数须与整行物化口径一致"
+        );
+    }
+    assert_eq!(
+        c.line_display_len(4),
+        0,
+        "末行越界应为 0（与 line_text 空串同口径）"
+    );
+
+    // ②：改前形态（`line_text` + 数一遍）会让计数涨到 128。
+    let big = format!("{}\nshort\n", "x".repeat(50_000));
+    let c = core_with(&big);
+    assert_eq!(c.line_display_len(0), 50_000);
+    assert_eq!(c.line_display_len(1), 5);
+    c.take_line_text_calls();
+    for _ in 0..64 {
+        let _ = c.line_display_len(0);
+        let _ = c.line_display_len(1);
+    }
+    assert_eq!(
+        c.take_line_text_calls(),
+        0,
+        "数长度不许经 `line_text` 物化整行"
+    );
+}
+
+#[test]
 fn row_layout_memo_misses_when_font_changes() {
     let mut c = core_with("abc");
     c.set_viewport_height(1000.0);

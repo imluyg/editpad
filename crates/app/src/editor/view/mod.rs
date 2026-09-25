@@ -338,7 +338,7 @@ impl EditorView {
                     continue;
                 }
                 let text = core.line_text_ref(line);
-                let lens = text.chars().count();
+                let lens = core.line_display_len(line);
                 // P115 勘误：插槽判断须在空行检查**之前**——空行
                 // （新文档/空白行输入）与行尾组字是老浮层实现本可
                 // 显示、三段式嵌入行绘制后会被整行跳过（用户复报
@@ -536,7 +536,7 @@ impl EditorView {
             );
 
             let text = core.line_text_ref(line);
-            let lens = text.chars().count();
+            let lens = core.line_display_len(line);
             // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
             // 同款注释——新文档/空白行输入是老浮层的常见场景）
             let pre_slot: Option<(&str, usize, f32)> =
@@ -692,7 +692,7 @@ impl EditorView {
                     return None;
                 }
                 let rtext = core.line_text_ref(rl);
-                let rlens = rtext.chars().count();
+                let rlens = core.line_display_len(rl);
                 let col_p = core.cursor.col.min(rlens);
                 let pel = p.chars().count();
                 let s: String = rtext
@@ -944,7 +944,7 @@ impl EditorView {
             let (iv_first, iv_last) = core.visible_range();
             for line in iv_first..=iv_last {
                 let text = core.line_text_ref(line);
-                let lens = text.chars().count();
+                let lens = core.line_display_len(line);
                 if core.wrap_enabled() {
                     let breaks = core.segments_of_line(line, &text);
                     let base = core.line_visual_base(line);
@@ -1047,7 +1047,7 @@ impl EditorView {
                     // 的老口径开关 `h_clip_off`），故标记与字形永远同带。
                     // `col` 仍须从行首逐字符累计（Tab 的制表位依赖段内列），但窗口
                     // 之外不再查表、不再递交。
-                    let lens = text.chars().count();
+                    let lens = core.line_display_len(line);
                     // 老口径开关只切**本圈**，不与正文的 `h_clip_off` 混用：
                     // 两个一起切，差分就把两件事糊成一条（判据须断在被改动的差异上）
                     let (wlo, whi, _) = if core.ws_clip_off() {
@@ -1221,7 +1221,7 @@ impl EditorView {
         // 能跨段，几何与命中高亮同款：段相对 x、与控件边界求交）。
         if let Some((line, c0, c1)) = core.link_hover {
             let text = core.line_text_ref(line);
-            let lens = text.chars().count();
+            let lens = core.line_display_len(line);
             let (c0, c1) = (c0.min(lens), c1.min(lens));
             if c0 < c1 {
                 let underline_y =
@@ -1305,7 +1305,7 @@ impl EditorView {
                 // 首段，画错行即画到别的逻辑行上——设计 §4.8），x 走
                 // 段相对（续行左缘起排）
                 let (v, seg_base) = if core.wrap_enabled() {
-                    let lens = text.chars().count();
+                    let lens = core.line_display_len(line);
                     let breaks = core.segments_of_line(line, &text);
                     let seg = wrap_segment_index(&breaks, col.min(lens), lens);
                     let base = core.line_visual_base(line);
@@ -1437,7 +1437,7 @@ impl EditorView {
                         continue; // 视口外的整行片段：不必取串即可否掉
                     }
                     let text = core.line_text_ref(line);
-                    let lens = text.chars().count();
+                    let lens = core.line_display_len(line);
                     let (c0, c1) = (c0.min(lens), c1.min(lens));
                     if c1 <= c0 {
                         continue;
@@ -1563,7 +1563,7 @@ impl EditorView {
             let hi = sel_end.line.min(last_line).min(vis_last);
             for line in lo..=hi {
                 let text = core.line_text_ref(line);
-                let lens = text.chars().count();
+                let lens = core.line_display_len(line);
                 let start_col = if line == sel_start.line {
                     sel_start.col
                 } else {

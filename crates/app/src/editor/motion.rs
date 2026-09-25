@@ -694,14 +694,12 @@ impl EditorCore {
 
     /// 第 `line` 行的可见长度（不含换行符）。
     pub fn line_display_len(&self, line: usize) -> usize {
-        if line >= self.doc.line_count() {
-            return 0;
-        }
-        self.doc
-            .line_str(line)
-            .trim_end_matches(['\n', '\r'])
-            .chars()
-            .count()
+        // 名字是历史遗留：这里一直返回**字符数**、不是显示列宽（第 180 轮就
+        // 记过一次"名字过度声称"，别按名字改语义）。P284 起改为走 rope 的行末
+        // 判定：绘制路径每个可见行每帧要问 5~6 次这个数，原先每次都从行首数到
+        // 行尾并顺手物化整行——20 行 × 2 万字符的文档就是每帧两百万步整行扫描。
+        // 口径与 `line_text(line).chars().count()` 逐字符等价（用例对拍钉住）。
+        self.doc.line_body_len_chars(line)
     }
 
     /// 软换行开关（设置项 word_wrap 下发）。
