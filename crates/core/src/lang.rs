@@ -680,7 +680,8 @@ pub fn fmt_suffix(lang: Lang, key: Key, value: &str) -> String {
 
 /// 「{前缀键}{值}{后缀键}」——值夹在中间（如 `没有匹配「{q}」的设置`）。
 pub fn fmt_wrapped(lang: Lang, pre: Key, value: &str, post: Key) -> String {
-    let mut s = String::with_capacity(value.len() + pre.text(lang).len() + post.text(lang).len() + 8);
+    let mut s =
+        String::with_capacity(value.len() + pre.text(lang).len() + post.text(lang).len() + 8);
     s.push_str(pre.text(lang));
     s.push_str(value);
     s.push_str(post.text(lang));
@@ -893,7 +894,10 @@ impl std::hash::Hash for LangOption {
 impl LangOption {
     /// 全部条目（按 [`Lang::ALL`] 顺序）。
     pub fn all(ui: Lang) -> Vec<LangOption> {
-        Lang::ALL.into_iter().map(|lang| LangOption { lang, ui }).collect()
+        Lang::ALL
+            .into_iter()
+            .map(|lang| LangOption { lang, ui })
+            .collect()
     }
 }
 
@@ -966,8 +970,14 @@ mod tests {
         }
         // ui 字段不影响条目标识（pick_list 用它判等）
         assert_eq!(
-            LangOption { lang: Lang::En, ui: Lang::ZhCn },
-            LangOption { lang: Lang::En, ui: Lang::En }
+            LangOption {
+                lang: Lang::En,
+                ui: Lang::ZhCn
+            },
+            LangOption {
+                lang: Lang::En,
+                ui: Lang::En
+            }
         );
     }
 

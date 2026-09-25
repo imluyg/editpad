@@ -85,7 +85,14 @@ struct Scanner<'a, W: FnMut(&str)> {
 
 impl<'a, W: FnMut(&str)> Scanner<'a, W> {
     fn new(text: &'a str, formatted: bool, emit: W) -> Self {
-        Self { text, pos: 0, line: 1, col: 1, formatted, emit }
+        Self {
+            text,
+            pos: 0,
+            line: 1,
+            col: 1,
+            formatted,
+            emit,
+        }
     }
 
     /// 以「当前待读字符」的位置报错（即指向问题字符本身）。
@@ -133,7 +140,10 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
     }
 
     fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(' ') | Some('\t') | Some('\n') | Some('\r')) {
+        while matches!(
+            self.peek(),
+            Some(' ') | Some('\t') | Some('\n') | Some('\r')
+        ) {
             self.bump();
         }
     }
@@ -222,9 +232,7 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
                     return Ok(());
                 }
                 Some(c) => {
-                    return Err(self.error_here(format!(
-                        "对象成员之间期望 ',' 或 '}}'，实际 {c:?}"
-                    )))
+                    return Err(self.error_here(format!("对象成员之间期望 ',' 或 '}}'，实际 {c:?}")))
                 }
                 None => return Err(self.error_here("意外结束：对象缺少结尾 '}'")),
             }
@@ -261,9 +269,7 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
                     return Ok(());
                 }
                 Some(c) => {
-                    return Err(
-                        self.error_here(format!("数组元素之间期望 ',' 或 ']'，实际 {c:?}"))
-                    )
+                    return Err(self.error_here(format!("数组元素之间期望 ',' 或 ']'，实际 {c:?}")))
                 }
                 None => return Err(self.error_here("意外结束：数组缺少结尾 ']'")),
             }
@@ -330,8 +336,7 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
                                     return Err(JsonError {
                                         line: esc_start.0,
                                         col: esc_start.1,
-                                        message: "代理对不配对：高代理后应跟 \\u 低代理"
-                                            .to_owned(),
+                                        message: "代理对不配对：高代理后应跟 \\u 低代理".to_owned(),
                                     });
                                 }
                             } else if (0xDC00..=0xDFFF).contains(&hi) {
@@ -416,11 +421,7 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
                     }
                 }
             }
-            other => {
-                return Err(
-                    self.error_here(format!("数字缺少整数部分，实际 {}", show(other)))
-                )
-            }
+            other => return Err(self.error_here(format!("数字缺少整数部分，实际 {}", show(other)))),
         }
         if self.peek() == Some('.') {
             self.bump();
@@ -465,9 +466,7 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
                 Some(c) if c == expected => self.out_char(c),
                 Some(c) => {
                     let _ = (self.line, self.col);
-                    return Err(self.error_here(format!(
-                        "非法字面量：期望 {word:?}，遇到 {c:?}"
-                    )));
+                    return Err(self.error_here(format!("非法字面量：期望 {word:?}，遇到 {c:?}")));
                 }
                 None => return Err(self.error_here("意外结束：字面量不完整")),
             }
@@ -509,7 +508,10 @@ mod tests {
         assert!(fmt_err.message.contains("嵌套过深"));
         // 对象与数组混合嵌套同受封顶
         let mixed = "{\"a\":".repeat(100_000);
-        assert!(validate_json(&mixed).unwrap_err().message.contains("嵌套过深"));
+        assert!(validate_json(&mixed)
+            .unwrap_err()
+            .message
+            .contains("嵌套过深"));
     }
 
     /// P219：数字书写**不做改写**——函数文档明写的承诺。
@@ -523,7 +525,10 @@ mod tests {
             ("1e5", "1e5"),
             ("-1.5E-3", "-1.5E-3"),
             ("0E0", "0E0"),
-            (r#"{"a":1E+5,"b":[2e-3,3E4]}"#, "{\n  \"a\": 1E+5,\n  \"b\": [\n    2e-3,\n    3E4\n  ]\n}"),
+            (
+                r#"{"a":1E+5,"b":[2e-3,3E4]}"#,
+                "{\n  \"a\": 1E+5,\n  \"b\": [\n    2e-3,\n    3E4\n  ]\n}",
+            ),
         ];
         for (input, expect) in cases {
             assert_eq!(format_json(input).unwrap(), expect, "输入 {input}");
@@ -552,8 +557,7 @@ mod tests {
 
     #[test]
     fn format_produces_expected_layout() {
-        let pretty =
-            format_json(r#"{"k":[1,{"inner":false},[]],"s":"v"}"#).unwrap();
+        let pretty = format_json(r#"{"k":[1,{"inner":false},[]],"s":"v"}"#).unwrap();
         let expected = "{\n  \"k\": [\n    1,\n    {\n      \"inner\": false\n    },\n    []\n  ],\n  \"s\": \"v\"\n}";
         assert_eq!(pretty, expected);
 
@@ -713,7 +717,11 @@ mod tests {
                 run(text, true, &mut sink).unwrap_or_else(|e| panic!("{text}: {e}"));
             }
             assert!(calls > 0, "formatted=true 必须有输出");
-            assert_eq!(got, format_json(text).unwrap(), "sink 拼接 == format_json：{text:?}");
+            assert_eq!(
+                got,
+                format_json(text).unwrap(),
+                "sink 拼接 == format_json：{text:?}"
+            );
         }
         // 绝对值钉（防「两种模式一起漂」）：前导空白吃掉、缩进仍按 2 空格
         assert_eq!(format_json("  \n\t{\"a\": 1}").unwrap(), "{\n  \"a\": 1\n}");

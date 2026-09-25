@@ -382,7 +382,7 @@ mod tests {
     // ---------- P9 主导行尾 ----------
     #[test]
     fn line_ending_detection_picks_dominant_style() {
-        use LineEnding::{CrLf, Cr, Lf};
+        use LineEnding::{Cr, CrLf, Lf};
         // 空文本 / 无换行文本 → 保守默认 LF
         assert_eq!(LineEnding::detect(""), Lf);
         assert_eq!(LineEnding::detect("no newline at all"), Lf);
@@ -392,8 +392,16 @@ mod tests {
         assert_eq!(LineEnding::detect("a\rb\rc"), Cr);
 
         // 混合行尾：多者胜
-        assert_eq!(LineEnding::detect("a\r\nb\r\nc\nd"), CrLf, "CRLF 多于 LF 应判 CRLF");
-        assert_eq!(LineEnding::detect("a\nb\nc\r\nd"), Lf, "LF 多于 CRLF 应判 LF");
+        assert_eq!(
+            LineEnding::detect("a\r\nb\r\nc\nd"),
+            CrLf,
+            "CRLF 多于 LF 应判 CRLF"
+        );
+        assert_eq!(
+            LineEnding::detect("a\nb\nc\r\nd"),
+            Lf,
+            "LF 多于 CRLF 应判 LF"
+        );
 
         // 三者平票 → 回退 LF
         assert_eq!(LineEnding::detect("a\r\nb\nc\rd"), Lf);
@@ -423,7 +431,11 @@ mod tests {
         assert_eq!(doc.to_text(), "first\r\nsecond\r\n");
 
         assert_eq!(Document::from_str("a\nb\n").line_ending(), LineEnding::Lf);
-        assert_eq!(Document::new().line_ending(), LineEnding::Lf, "空文档默认 LF");
+        assert_eq!(
+            Document::new().line_ending(),
+            LineEnding::Lf,
+            "空文档默认 LF"
+        );
 
         // 克隆快照（撤销栈的基础）必须带着同一行尾元数据
         let snapshot = doc.clone();

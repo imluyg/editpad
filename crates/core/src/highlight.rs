@@ -13,9 +13,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-use syntect::highlighting::{
-    HighlightIterator, HighlightState, Highlighter, Theme, ThemeSet,
-};
+use syntect::highlighting::{HighlightIterator, HighlightState, Highlighter, Theme, ThemeSet};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet};
 
 use crate::syntaxes::{LOG, TOML};
@@ -63,11 +61,14 @@ fn syntax_set() -> &'static SyntaxSet {
 fn theme(dark: bool) -> &'static Theme {
     fn load(name: &str) -> Theme {
         let themes = ThemeSet::load_defaults();
-        themes
-            .themes
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| themes.themes.values().next().cloned().expect("内置主题非空"))
+        themes.themes.get(name).cloned().unwrap_or_else(|| {
+            themes
+                .themes
+                .values()
+                .next()
+                .cloned()
+                .expect("内置主题非空")
+        })
     }
     if dark {
         DARK_THEME.get_or_init(|| load(DARK_THEME_NAME))
@@ -96,7 +97,8 @@ fn hash_text(text: &str) -> u64 {
 }
 
 /// 可选语言下的懒高亮器。
-pub struct LazyHighlighter {    syntax_name: String,
+pub struct LazyHighlighter {
+    syntax_name: String,
     /// 主题明暗档：配色在解析期由主题烘焙进 [`StyledRun`]，换主题必须
     /// 走 [`Self::set_dark_mode`] 整体重建（状态、缓存、代次一并换新）。
     dark: bool,
@@ -374,8 +376,7 @@ impl LazyHighlighter {
 
         // 解析目标行：HighlightIterator 直接产出 (Style, 文本片段)
         let ops = parse.parse_line(target_text, ss).unwrap_or_default();
-        let regions =
-            HighlightIterator::new(&mut highlight, &ops[..], target_text, highlighter);
+        let regions = HighlightIterator::new(&mut highlight, &ops[..], target_text, highlighter);
 
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut char_pos = 0usize;
@@ -412,7 +413,8 @@ impl LazyHighlighter {
         if self.runs_cache.len() >= LINE_CACHE_CAP {
             self.runs_cache.clear();
         }
-        self.runs_cache.insert(line_idx, (hash_text(target_text), runs.clone()));
+        self.runs_cache
+            .insert(line_idx, (hash_text(target_text), runs.clone()));
 
         runs
     }
@@ -507,8 +509,7 @@ impl LazyHighlighter {
 
         // 解析目标行：与精确路径同一产出管线
         let ops = parse.parse_line(target_text, ss).unwrap_or_default();
-        let regions =
-            HighlightIterator::new(&mut highlight, &ops[..], target_text, highlighter);
+        let regions = HighlightIterator::new(&mut highlight, &ops[..], target_text, highlighter);
 
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut char_pos = 0usize;
@@ -546,7 +547,8 @@ impl LazyHighlighter {
         if self.approx_runs_cache.len() >= LINE_CACHE_CAP {
             self.approx_runs_cache.clear();
         }
-        self.approx_runs_cache.insert(line_idx, (hash_text(target_text), runs.clone()));
+        self.approx_runs_cache
+            .insert(line_idx, (hash_text(target_text), runs.clone()));
 
         runs
     }
@@ -689,10 +691,7 @@ pub fn sniff_language(sample: &str, file_name: Option<&str>) -> Option<String> {
 
     // JSON 前缀启发：首非空白是 { 或 [ 且样本同时含引号与冒号
     if let Some(first) = trimmed.chars().next() {
-        if (first == '{' || first == '[')
-            && head.contains('"')
-            && head.contains(':')
-        {
+        if (first == '{' || first == '[') && head.contains('"') && head.contains(':') {
             return Some("JSON".to_owned());
         }
     }
@@ -710,10 +709,11 @@ pub fn resolve_language(path: Option<&Path>, sample: &str) -> Option<String> {
             }
         }
     }
-    let file_name = path.and_then(Path::file_name).and_then(std::ffi::OsStr::to_str);
+    let file_name = path
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str);
     sniff_language(sample, file_name)
 }
-
 
 /// 推进一行状态：解析并驱动高亮状态（丢弃着色结果）。
 fn advance(
@@ -740,13 +740,18 @@ mod tests {
     #[test]
     fn rust_line_is_split_into_multiple_colors() {
         let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
-        let runs = hl.styled_line(0, "fn main() { let x = 1; }", usize::MAX, &mut |_| String::new());
+        let runs = hl.styled_line(0, "fn main() { let x = 1; }", usize::MAX, &mut |_| {
+            String::new()
+        });
         assert!(runs.len() >= 3, "关键字与标识符应分色，实际 {runs:?}");
         assert_eq!(runs.first().unwrap().start_col, 0);
         for pair in runs.windows(2) {
             assert_eq!(pair[0].end_col, pair[1].start_col);
         }
-        assert_eq!(runs.last().unwrap().end_col, "fn main() { let x = 1; }".chars().count());
+        assert_eq!(
+            runs.last().unwrap().end_col,
+            "fn main() { let x = 1; }".chars().count()
+        );
     }
 
     #[test]
@@ -765,7 +770,10 @@ mod tests {
         assert!(hl.line_cache.is_empty(), "旧主题的行缓存不得跨主题复用");
         let dark = hl.styled_line(0, line, usize::MAX, &mut |_| String::new());
         assert!(
-            light.iter().zip(dark.iter()).any(|(a, b)| a.color != b.color),
+            light
+                .iter()
+                .zip(dark.iter())
+                .any(|(a, b)| a.color != b.color),
             "明暗两档的 token 配色应有差异，light={light:?} dark={dark:?}"
         );
 
@@ -787,21 +795,27 @@ mod tests {
 
         assert!(!line0.is_empty());
         assert_eq!(line0[0].color, line1[0].color, "第 1 行开头应延续注释配色");
-        assert!(line1.len() >= 2, "注释结束后应有不同色的代码段，实际 {line1:?}");
+        assert!(
+            line1.len() >= 2,
+            "注释结束后应有不同色的代码段，实际 {line1:?}"
+        );
         assert!(served.is_empty(), "第 0 行已有缓存，不应回索取中间行文本");
     }
 
     #[test]
     fn invalidate_from_truncates_state() {
         let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
-        let _ = hl.styled_line(300, "let a;", usize::MAX, &mut |i| format!("let filler{i} = {i};"));
+        let _ = hl.styled_line(300, "let a;", usize::MAX, &mut |i| {
+            format!("let filler{i} = {i};")
+        });
         assert!(!hl.line_cache.is_empty());
 
         hl.invalidate_from(150);
         assert!(hl.line_cache.iter().all(|(k, _)| *k < 150));
 
-        let runs =
-            hl.styled_line(160, "let b;", usize::MAX, &mut |i| format!("let f{i} = {i};"));
+        let runs = hl.styled_line(160, "let b;", usize::MAX, &mut |i| {
+            format!("let f{i} = {i};")
+        });
         assert!(!runs.is_empty());
     }
 
@@ -826,7 +840,9 @@ mod tests {
     #[test]
     fn invalidate_from_truncates_runs_cache() {
         let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
-        let _ = hl.styled_line(300, "let a;", usize::MAX, &mut |i| format!("let f{i} = {i};"));
+        let _ = hl.styled_line(300, "let a;", usize::MAX, &mut |i| {
+            format!("let f{i} = {i};")
+        });
         assert!(!hl.runs_cache.is_empty());
 
         hl.invalidate_from(150);
@@ -855,13 +871,9 @@ mod tests {
     fn approx_path_caches_runs_and_clears_on_invalidate() {
         let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
         // 越过内联预算走近似路径（app 层 styled_line_limited 返回 None 的场景）
-        let first = hl.styled_line_approx(
-            300,
-            300,
-            "let a;",
-            usize::MAX,
-            &mut |i| format!("let f{i} = {i};"),
-        );
+        let first = hl.styled_line_approx(300, 300, "let a;", usize::MAX, &mut |i| {
+            format!("let f{i} = {i};")
+        });
         assert!(!hl.approx_runs_cache.is_empty(), "近似产物应入缓存");
 
         let second = hl.styled_line_approx(300, 0, "let a;", usize::MAX, &mut |_| {
@@ -883,19 +895,11 @@ mod tests {
             let last = total - 1;
             let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
             let mut asked_max = 0usize;
-            let runs = hl.styled_line(
-                last,
-                "let tail = 1;",
-                total,
-                &mut |i| {
-                    asked_max = asked_max.max(i);
-                    format!("let filler{i} = {i};")
-                },
-            );
-            assert!(
-                !runs.is_empty(),
-                "total={total} 文末行应有正常配色"
-            );
+            let runs = hl.styled_line(last, "let tail = 1;", total, &mut |i| {
+                asked_max = asked_max.max(i);
+                format!("let filler{i} = {i};")
+            });
+            assert!(!runs.is_empty(), "total={total} 文末行应有正常配色");
             assert!(
                 asked_max < total,
                 "total={total} 闭包只该被问有效行号，最大被问到 {asked_max}"
@@ -944,15 +948,27 @@ mod tests {
         // 第 200 行需要检查点 [1] → 缺 1 档，恰在预算内：内联现算成功
         assert_eq!(hl.strides_missing(200), 1);
         let runs = hl
-            .styled_line_limited(200, "let x = 1;", 600, LazyHighlighter::MAX_INLINE_STRIDES, filler)
+            .styled_line_limited(
+                200,
+                "let x = 1;",
+                600,
+                LazyHighlighter::MAX_INLINE_STRIDES,
+                filler,
+            )
             .expect("缺 1 档属于预算内，必须内联现算");
         assert!(!runs.is_empty());
 
         // 第 500 行需 4 个档位、现有 2 个 → 缺 2 超预算 → 拒绝内联
         assert_eq!(hl.strides_missing(500), 2);
         assert!(
-            hl.styled_line_limited(500, "let y = 2;", 600, LazyHighlighter::MAX_INLINE_STRIDES, filler)
-                .is_none(),
+            hl.styled_line_limited(
+                500,
+                "let y = 2;",
+                600,
+                LazyHighlighter::MAX_INLINE_STRIDES,
+                filler
+            )
+            .is_none(),
             "超预算必须返回 None（降级），不得在调用线程大段补建"
         );
     }
@@ -973,7 +989,10 @@ mod tests {
         assert!(hl.phantom_from.is_none(), "后台推进绝不产生垫付空行");
 
         // 再推进无活可干
-        assert_eq!(hl.advance_checkpoints(10, total, &mut |i| format!("{i}")), 0);
+        assert_eq!(
+            hl.advance_checkpoints(10, total, &mut |i| format!("{i}")),
+            0
+        );
 
         // 残余档位在预算内直接可取（末行走同步路径 ≤1 档），且不 panic
         let runs = hl
@@ -1033,7 +1052,10 @@ mod tests {
         while bg_hl.advance_checkpoints(2, total, &mut |i| text_of(i)) > 0 {}
         let bg_runs = bg_hl.styled_line(total - 1, "let a = 1;", total, &mut |i| text_of(i));
 
-        assert_eq!(sync_runs, bg_runs, "后台分批铺建的检查点必须产出与同步路径相同的配色");
+        assert_eq!(
+            sync_runs, bg_runs,
+            "后台分批铺建的检查点必须产出与同步路径相同的配色"
+        );
     }
 
     #[test]
@@ -1058,7 +1080,12 @@ mod tests {
     #[test]
     fn builtin_extensions_win_before_alias_table() {
         // 内建索引命中：直接给规范语法名
-        for (ext, name) in [("rs", "Rust"), ("py", "Python"), ("json", "JSON"), ("yml", "YAML")] {
+        for (ext, name) in [
+            ("rs", "Rust"),
+            ("py", "Python"),
+            ("json", "JSON"),
+            ("yml", "YAML"),
+        ] {
             assert_eq!(syntax_for_extension(ext).as_deref(), Some(name), "{ext}");
         }
         // 别名表兜底
@@ -1089,8 +1116,12 @@ mod tests {
 
         // Log：ERROR 行与 INFO 行的首段颜色必须可区分（级别分色的验收口径）
         let mut log_hl = LazyHighlighter::new_by_name("Editpad Log").expect("Log 语法存在");
-        let error_runs = log_hl.styled_line(0, "[2026-08-24 10:00:00] ERROR boom", 1, &mut |_| String::new());
-        let info_runs = log_hl.styled_line(1, "[2026-08-24 10:00:01] INFO fine", 1, &mut |_| String::new());
+        let error_runs = log_hl.styled_line(0, "[2026-08-24 10:00:00] ERROR boom", 1, &mut |_| {
+            String::new()
+        });
+        let info_runs = log_hl.styled_line(1, "[2026-08-24 10:00:01] INFO fine", 1, &mut |_| {
+            String::new()
+        });
         assert!(!error_runs.is_empty() && !info_runs.is_empty());
         // 级别分色的验收口径：两行全部着色段的颜色序列必须不同
         // （ERROR 行含 invalid 红色系，INFO 行只有 string/numeric 系）
@@ -1103,12 +1134,9 @@ mod tests {
 
         // TOML：注释/节名/字符串至少产出多段配色
         let mut toml_hl = LazyHighlighter::new_by_name("Editpad TOML").expect("TOML 语法存在");
-        let runs = toml_hl.styled_line(
-            0,
-            "# 注释\n[section]\nkey = \"value\"",
-            3,
-            &mut |_| String::new(),
-        );
+        let runs = toml_hl.styled_line(0, "# 注释\n[section]\nkey = \"value\"", 3, &mut |_| {
+            String::new()
+        });
         assert!(runs.len() >= 2, "TOML 应产出分段配色");
     }
 
@@ -1144,7 +1172,10 @@ mod tests {
             sniff_language("[{\"k\": 1}]", None).as_deref(),
             Some("JSON")
         );
-        assert_eq!(sniff_language("---\ntitle: x\n", None).as_deref(), Some("YAML"));
+        assert_eq!(
+            sniff_language("---\ntitle: x\n", None).as_deref(),
+            Some("YAML")
+        );
 
         // 约定文件名优先且大小写不敏感
         assert_eq!(
@@ -1197,13 +1228,7 @@ mod tests {
         let before = hl.checkpoints_len();
 
         // 近似上色：可视区（anchor = 首个可见行）内的行
-        let runs = hl.styled_line_approx(
-            1500,
-            1490,
-            "let v1500 = 1500;",
-            total,
-            text_of,
-        );
+        let runs = hl.styled_line_approx(1500, 1490, "let v1500 = 1500;", total, text_of);
         assert!(!runs.is_empty(), "近似上色必须产出着色片段");
         assert_eq!(
             hl.checkpoints_len(),
@@ -1212,13 +1237,7 @@ mod tests {
         );
 
         // 连续下一行：经近似缓存逐行延续，仍产出片段
-        let runs2 = hl.styled_line_approx(
-            1501,
-            1490,
-            "let v1501 = 1501;",
-            total,
-            text_of,
-        );
+        let runs2 = hl.styled_line_approx(1501, 1490, "let v1501 = 1501;", total, text_of);
         assert!(!runs2.is_empty());
     }
 
@@ -1254,10 +1273,12 @@ mod tests {
     fn approx_state_continues_across_rows() {
         // 跨行块注释：第二行的近似上色应延续第一行的注释态
         // （若无状态延续，第二行按全新状态解析会得到普通代码色）
-        let doc_lines = ["let a = 1;".to_owned(),
+        let doc_lines = [
+            "let a = 1;".to_owned(),
             "/* 跨行注释开始".to_owned(),
             "仍然是注释".to_owned(),
-            "let b = 2;".to_owned()];
+            "let b = 2;".to_owned(),
+        ];
         let total = doc_lines.len();
         let text_of = &mut |i: usize| doc_lines[i].clone();
         let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");

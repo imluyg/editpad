@@ -213,7 +213,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
     let mut line = String::new();
     let mut line_idx = 0usize;
     let lq = LiteralQuery::new(query, case_sensitive); // O-11：备好一次
-    // 上块以 \r 结尾：下块若以 \n 开头则并入同一 CRLF 单元（不另起一行）
+                                                       // 上块以 \r 结尾：下块若以 \n 开头则并入同一 CRLF 单元（不另起一行）
     let mut pending_cr = false;
     for chunk in doc.chunks() {
         let mut rest = chunk;
@@ -287,8 +287,7 @@ thread_local! {
 fn fill_line_chars(doc: &Document, line: usize, buf: &mut Vec<char>) {
     buf.clear();
     buf.extend(
-        doc
-            .chars_from(doc.line_to_char(line))
+        doc.chars_from(doc.line_to_char(line))
             .take(doc.line_len_chars(line))
             .take_while(|&c| c != '\n' && c != '\r'),
     );
@@ -343,7 +342,11 @@ struct LiteralQuery {
 impl LiteralQuery {
     fn new(query: &str, case_sensitive: bool) -> Self {
         Self {
-            folded: query.as_bytes().iter().map(|&b| fold_byte(b, case_sensitive)).collect(),
+            folded: query
+                .as_bytes()
+                .iter()
+                .map(|&b| fold_byte(b, case_sensitive))
+                .collect(),
             chars: query.chars().count(),
             case_sensitive,
         }
@@ -383,7 +386,11 @@ fn scan_line(
         if out.len() >= limit {
             return;
         }
-        out.push(MatchPos { line: line_idx, col, len_chars: lq.chars });
+        out.push(MatchPos {
+            line: line_idx,
+            col,
+            len_chars: lq.chars,
+        });
         from = i + 1;
     }
 }
@@ -594,7 +601,11 @@ pub fn prev_from(matches: &[MatchPos], line: usize, col: usize) -> Option<usize>
     matches
         .iter()
         .rposition(|m| m.line < line || (m.line == line && m.col < col))
-        .or(if matches.is_empty() { None } else { Some(matches.len() - 1) })
+        .or(if matches.is_empty() {
+            None
+        } else {
+            Some(matches.len() - 1)
+        })
 }
 
 /// 单字节大小写折叠：仅 ASCII 受影响，与 [`ascii_case_eq`] 同一口径
@@ -653,7 +664,10 @@ pub fn replace_all(
     if query.is_empty() {
         return (text.to_owned(), 0);
     }
-    let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
+    let fq: Vec<u8> = query
+        .bytes()
+        .map(|b| fold_byte(b, case_sensitive))
+        .collect();
     let mut out = String::with_capacity(text.len());
     let mut count = 0usize;
     let mut pos = 0usize; // 已消费的原文边界 = 下一个搜索起点
@@ -683,22 +697,22 @@ pub fn replace_all_word(
     if query.is_empty() {
         return (text.to_owned(), 0);
     }
-    let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
+    let fq: Vec<u8> = query
+        .bytes()
+        .map(|b| fold_byte(b, case_sensitive))
+        .collect();
     // 整词边界规则的行内口径由 [`whole_word_bounds_ok`] 钉住：**跨行命中一律
     // 保留**（行内边界语义不成立）。字面查询是否跨行只取决于查询自身含不含
     // 行界字符，故在此提前判定——P222 之前这里无条件按「命中两侧字符」判界，
     // 于是含换行的查询出现「条上显示 N 处命中、按全部替换报 0 处」的单向分叉。
-    let crosses_line = query
-        .chars()
-        .any(|c| line_break_byte_len(c, None) > 0);
+    let crosses_line = query.chars().any(|c| line_break_byte_len(c, None) > 0);
     let mut out = String::with_capacity(text.len());
     let mut count = 0usize;
     let mut pos = 0usize; // 已确认写出的原文边界
     let mut i = 0usize; // 下一个搜索起点
     while let Some(hit) = find_next(text.as_bytes(), &fq, case_sensitive, i) {
         // UTF-8 自同步性保证 hit 与 hit+len 均为字符边界（find_next 契约）
-        let before_ok = hit == 0
-            || !text[..hit].chars().next_back().is_some_and(is_word_char);
+        let before_ok = hit == 0 || !text[..hit].chars().next_back().is_some_and(is_word_char);
         let after_ok = !text[hit + fq.len()..]
             .chars()
             .next()
@@ -745,7 +759,10 @@ pub fn replace_all_document(
     let eol = doc.line_ending();
     let query = eol.normalize(query);
     let replacement = eol.normalize(replacement);
-    let fq: Vec<u8> = query.bytes().map(|b| fold_byte(b, case_sensitive)).collect();
+    let fq: Vec<u8> = query
+        .bytes()
+        .map(|b| fold_byte(b, case_sensitive))
+        .collect();
     // 输出容量提示（O-15b）：原状 `String::new()` 从 0 翻倍长到全文大小，
     // 50MB 即 20+ 次 realloc、等量 memcpy，峰值还多一倍。
     // ⚠️ 只在**替换不短于查询**时预容量——那时输出长度 ≥ 输入长度，按文档
@@ -764,9 +781,23 @@ pub fn replace_all_document(
     let mut count = 0usize;
     for chunk in doc.chunks() {
         carry.push_str(chunk);
-        count += drain_matches(&mut carry, &mut out, &fq, &replacement, case_sensitive, false);
+        count += drain_matches(
+            &mut carry,
+            &mut out,
+            &fq,
+            &replacement,
+            case_sensitive,
+            false,
+        );
     }
-    count += drain_matches(&mut carry, &mut out, &fq, &replacement, case_sensitive, true);
+    count += drain_matches(
+        &mut carry,
+        &mut out,
+        &fq,
+        &replacement,
+        case_sensitive,
+        true,
+    );
     (out, count)
 }
 
@@ -905,7 +936,10 @@ pub fn expand_regex_at(
     if m0.start() != byte_start {
         // 行窗口内首个匹配不在命中位置（多行命中被窗口截断等异常形态）：
         // 显式报错而非静默错位展开
-        return Err(format!("命中位置漂移（期望 {byte_start}，实际 {}）", m0.start()));
+        return Err(format!(
+            "命中位置漂移（期望 {byte_start}，实际 {}）",
+            m0.start()
+        ));
     }
     let mut out = String::new();
     caps.expand(replacement, &mut out);
@@ -923,8 +957,12 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
     let mut line = 0usize;
     let mut line_start_char = 0usize;
 
-    let advance_to = |text: &str, byte_pos: &mut usize, char_pos: &mut usize,
-                          line: &mut usize, line_start_char: &mut usize, target: usize| {
+    let advance_to = |text: &str,
+                      byte_pos: &mut usize,
+                      char_pos: &mut usize,
+                      line: &mut usize,
+                      line_start_char: &mut usize,
+                      target: usize| {
         while *byte_pos < target {
             let c = text[*byte_pos..].chars().next().unwrap_or('\0');
             *byte_pos += c.len_utf8();
@@ -944,7 +982,14 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
     };
 
     for &(start, end) in spans {
-        advance_to(text, &mut byte_pos, &mut char_pos, &mut line, &mut line_start_char, start);
+        advance_to(
+            text,
+            &mut byte_pos,
+            &mut char_pos,
+            &mut line,
+            &mut line_start_char,
+            start,
+        );
         let col = char_pos - line_start_char;
         // 命中跨度：同口径计数（\r\n 计 1）
         let mut len_chars = 0usize;
@@ -957,8 +1002,19 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
             }
             len_chars += 1;
         }
-        out.push(MatchPos { line, col, len_chars });
-        advance_to(text, &mut byte_pos, &mut char_pos, &mut line, &mut line_start_char, end);
+        out.push(MatchPos {
+            line,
+            col,
+            len_chars,
+        });
+        advance_to(
+            text,
+            &mut byte_pos,
+            &mut char_pos,
+            &mut line,
+            &mut line_start_char,
+            end,
+        );
     }
     out
 }
@@ -995,19 +1051,47 @@ mod tests {
         assert_eq!(
             find_all(text, "ab", true),
             vec![
-                MatchPos { line: 0, col: 0, len_chars: 2 },
-                MatchPos { line: 0, col: 6, len_chars: 2 },
-                MatchPos { line: 1, col: 1, len_chars: 2 },
+                MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 2
+                },
+                MatchPos {
+                    line: 0,
+                    col: 6,
+                    len_chars: 2
+                },
+                MatchPos {
+                    line: 1,
+                    col: 1,
+                    len_chars: 2
+                },
             ]
         );
         // 不区分大小写：第0行多出 col 3（"AB"）
         assert_eq!(
             find_all(text, "ab", false),
             vec![
-                MatchPos { line: 0, col: 0, len_chars: 2 },
-                MatchPos { line: 0, col: 3, len_chars: 2 },
-                MatchPos { line: 0, col: 6, len_chars: 2 },
-                MatchPos { line: 1, col: 1, len_chars: 2 },
+                MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 2
+                },
+                MatchPos {
+                    line: 0,
+                    col: 3,
+                    len_chars: 2
+                },
+                MatchPos {
+                    line: 0,
+                    col: 6,
+                    len_chars: 2
+                },
+                MatchPos {
+                    line: 1,
+                    col: 1,
+                    len_chars: 2
+                },
             ]
         );
     }
@@ -1018,8 +1102,16 @@ mod tests {
         assert_eq!(
             find_all(text, "你好", true),
             vec![
-                MatchPos { line: 0, col: 0, len_chars: 2 },
-                MatchPos { line: 1, col: 0, len_chars: 2 },
+                MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 2
+                },
+                MatchPos {
+                    line: 1,
+                    col: 0,
+                    len_chars: 2
+                },
             ]
         );
         assert!(find_all(text, "", true).is_empty());
@@ -1034,15 +1126,24 @@ mod tests {
         let text = "a\rb";
         assert_eq!(
             find_all(text, "b", true),
-            vec![MatchPos { line: 1, col: 0, len_chars: 1 }]
+            vec![MatchPos {
+                line: 1,
+                col: 0,
+                len_chars: 1
+            }]
         );
         // 单字符行界 VT/FF/NEL/LS/PS 同口径
         for br in ['\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'] {
             let text = format!("a{br}b");
             assert_eq!(
                 find_all(&text, "b", true),
-                vec![MatchPos { line: 1, col: 0, len_chars: 1 }],
-                "行界字符 U+{:04X}", br as u32
+                vec![MatchPos {
+                    line: 1,
+                    col: 0,
+                    len_chars: 1
+                }],
+                "行界字符 U+{:04X}",
+                br as u32
             );
         }
         // rope 路径与 str 路径同口径
@@ -1054,12 +1155,20 @@ mod tests {
         // 正则路径同口径
         assert_eq!(
             find_all_regex("a\rb", "b", true).unwrap(),
-            vec![MatchPos { line: 1, col: 0, len_chars: 1 }]
+            vec![MatchPos {
+                line: 1,
+                col: 0,
+                len_chars: 1
+            }]
         );
         // 跨行查询沿用 P26 归一口径：查询 \n 命中孤立 \r 的行界
         assert_eq!(
             find_all("a\rb", "a\nb", true),
-            vec![MatchPos { line: 0, col: 0, len_chars: 3 }]
+            vec![MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 3
+            }]
         );
     }
 
@@ -1105,7 +1214,9 @@ mod tests {
         let mut state = seed | 1;
         let mut out = String::with_capacity(len * 4);
         for _ in 0..len {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             out.push(ALPHABET[(state >> 33) as usize % ALPHABET.len()]);
         }
         out
@@ -1152,19 +1263,22 @@ mod tests {
     #[test]
     fn find_all_document_matches_find_all_exactly() {
         let fixtures = [
-            "",                                  // 空文档
-            "single line no newline",            // 单行无换行
-            "foo\nbar foo\n",                    // 常规多行（尾换行）
-            "a\r\nb\r\nc",                       // CRLF：\r\n 是一个行界单元
-            "x\r\ny\nz\rw",                      // 混合 + 孤立 \r（孤立 \r 也是行界）
-            "中文中文\n🚀🚀中\n",                 // 多字节字符列号
-            "\tindent\ttab\t\n",                 // Tab 原样计数
-            "aaaa aa\naa",                       // 重叠命中窗口
+            "",                       // 空文档
+            "single line no newline", // 单行无换行
+            "foo\nbar foo\n",         // 常规多行（尾换行）
+            "a\r\nb\r\nc",            // CRLF：\r\n 是一个行界单元
+            "x\r\ny\nz\rw",           // 混合 + 孤立 \r（孤立 \r 也是行界）
+            "中文中文\n🚀🚀中\n",     // 多字节字符列号
+            "\tindent\ttab\t\n",      // Tab 原样计数
+            "aaaa aa\naa",            // 重叠命中窗口
         ];
         for text in fixtures {
             let doc = Document::from_str(text);
             // P26：查询清单补入跨行查询（含首尾换行、纯换行、含 \r 的永不命中例）
-            for query in ["a", "aa", "foo", "中", "🚀x", "\r", "\r\n", "zz", "\n", "\nfoo", "foo\nbar", "a\nb", "\n\n", "a\r\nb"] {
+            for query in [
+                "a", "aa", "foo", "中", "🚀x", "\r", "\r\n", "zz", "\n", "\nfoo", "foo\nbar",
+                "a\nb", "\n\n", "a\r\nb",
+            ] {
                 for cs in [true, false] {
                     assert_eq!(
                         find_all_document(&doc, query, cs),
@@ -1183,7 +1297,9 @@ mod tests {
             let doc = Document::from_str(&text);
             // P26：随机文本对拍补跨行查询——字母表自带 \n 与孤立 \r，
             // 命中会落在各种行尾形态与块相位上
-            for query in ["a", "ab", "c\n", "中", "xx", "a\r", "\n", "a\nb", "\na", "a\na"] {
+            for query in [
+                "a", "ab", "c\n", "中", "xx", "a\r", "\n", "a\nb", "\na", "a\na",
+            ] {
                 assert_eq!(
                     find_all_document(&doc, query, false),
                     find_all(&text, query, false),
@@ -1200,7 +1316,11 @@ mod tests {
         let doc = Document::from_str(&long);
         assert_eq!(
             find_all_document(&doc, "needle", true),
-            vec![MatchPos { line: 0, col: 100_000, len_chars: 6 }]
+            vec![MatchPos {
+                line: 0,
+                col: 100_000,
+                len_chars: 6
+            }]
         );
         // 空查询约定：返回空表
         assert!(find_all_document(&doc, "", true).is_empty());
@@ -1213,11 +1333,31 @@ mod tests {
         // 存在，但坐标断言本身仍是想要的不变量——列号按**字符**而非字节）
         let text = "the quick brown fox jumps over the lazy dog\n短行 the\n\nthe end 🚀\nno match here\nthe";
         let want = vec![
-            MatchPos { line: 0, col: 0, len_chars: 3 },
-            MatchPos { line: 0, col: 31, len_chars: 3 },
-            MatchPos { line: 1, col: 3, len_chars: 3 },
-            MatchPos { line: 3, col: 0, len_chars: 3 },
-            MatchPos { line: 5, col: 0, len_chars: 3 },
+            MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 3,
+            },
+            MatchPos {
+                line: 0,
+                col: 31,
+                len_chars: 3,
+            },
+            MatchPos {
+                line: 1,
+                col: 3,
+                len_chars: 3,
+            },
+            MatchPos {
+                line: 3,
+                col: 0,
+                len_chars: 3,
+            },
+            MatchPos {
+                line: 5,
+                col: 0,
+                len_chars: 3,
+            },
         ];
         assert_eq!(find_all(text, "the", true), want);
         let doc = Document::from_str(text);
@@ -1258,7 +1398,11 @@ mod tests {
                         continue 'window;
                     }
                 }
-                out.push(MatchPos { line: line_idx, col: start, len_chars: q.len() });
+                out.push(MatchPos {
+                    line: line_idx,
+                    col: start,
+                    len_chars: q.len(),
+                });
             }
         });
         out
@@ -1277,7 +1421,10 @@ mod tests {
             // 加载度自检：随机样本字母表是 a b c \n \r 中 🚀 x，若哪天生成器
             // 变了导致这些查询全部空对空，本用例就成了假绿——先钉住它真的忙。
             let load = find_all(&text, "a", true).len();
-            assert!(load > 1000, "seed={seed} 样本里 'a' 命中仅 {load}，对拍已失去判别力");
+            assert!(
+                load > 1000,
+                "seed={seed} 样本里 'a' 命中仅 {load}，对拍已失去判别力"
+            );
             assert!(
                 text.contains('中') && text.contains('🚀') && text.contains('\r'),
                 "seed={seed} 样本必须含多字节与 \\r 行界"
@@ -1315,19 +1462,33 @@ mod tests {
     #[test]
     fn find_all_byte_scan_agrees_with_char_scan_on_exotic_line_breaks() {
         let fixtures = [
-            "a\u{b}a\u{c}a",                 // VT / FF 也是行界
-            "\u{85}ab\u{85}cd",              // NEL
-            "行\u{2028}前\u{2029}后",         // LS / PS
-            "x\r\ny\rz\nw",                  // CRLF / 孤立 CR / LF 混排
-            "\u{1F600}\u{b}\u{1F600}",        // 4 字节字符夹一个行界
-            "a\u{b}",                        // 行界收尾
+            "a\u{b}a\u{c}a",           // VT / FF 也是行界
+            "\u{85}ab\u{85}cd",        // NEL
+            "行\u{2028}前\u{2029}后",  // LS / PS
+            "x\r\ny\rz\nw",            // CRLF / 孤立 CR / LF 混排
+            "\u{1F600}\u{b}\u{1F600}", // 4 字节字符夹一个行界
+            "a\u{b}",                  // 行界收尾
         ];
         let queries = [
-            "a", "\u{b}", "\u{c}", "\u{85}", "\u{2028}", "\u{2029}", "\u{1F600}", "ab",
-            "x\r", "\r", "行", "前", "后",
+            "a",
+            "\u{b}",
+            "\u{c}",
+            "\u{85}",
+            "\u{2028}",
+            "\u{2029}",
+            "\u{1F600}",
+            "ab",
+            "x\r",
+            "\r",
+            "行",
+            "前",
+            "后",
             // 定例 4（x\r\ny\rz\nw）只有拉丁短串可命中——「x\r」按下面的行界口径
             // 永不命中，故必须补 x / y / cd，否则该定例是空对空的假绿
-            "x", "y", "cd", "z",
+            "x",
+            "y",
+            "cd",
+            "z",
         ];
         for text in fixtures {
             let doc = Document::from_str(text);
@@ -1340,7 +1501,11 @@ mod tests {
                         find_all_char_ref(text, q, cs),
                         "行界定例不等: text={text:?} query={q:?} cs={cs}"
                     );
-                    assert_eq!(find_all_document(&doc, q, cs), got, "rope 路径 text={text:?} query={q:?}");
+                    assert_eq!(
+                        find_all_document(&doc, q, cs),
+                        got,
+                        "rope 路径 text={text:?} query={q:?}"
+                    );
                     any_hit += got.len();
                 }
             }
@@ -1350,16 +1515,30 @@ mod tests {
         // LS/PS 属于行界全集 ⇒ 它们不进入行内容 ⇒ 查询里含这些字符时**永不命中**，
         // 即便文本里确有该字符。与「查询含 \r 也永不命中」同族。改这条要先过
         // N-09 那张分叉矩阵（半修行界口径会把「找不到」变成「找得到换不掉」）。
-        assert!(find_all("a\u{b}b", "\u{b}", true).is_empty(), "VT 是行界：不得作为行内命中");
-        assert!(find_all("行\u{2028}前", "\u{2028}", true).is_empty(), "LS 是行界：同上");
+        assert!(
+            find_all("a\u{b}b", "\u{b}", true).is_empty(),
+            "VT 是行界：不得作为行内命中"
+        );
+        assert!(
+            find_all("行\u{2028}前", "\u{2028}", true).is_empty(),
+            "LS 是行界：同上"
+        );
         assert_eq!(
             find_all("a\u{b}b", "a", true),
-            vec![MatchPos { line: 0, col: 0, len_chars: 1 }],
+            vec![MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 1
+            }],
             "VT 前的一段就是一条独立行"
         );
         assert_eq!(
             find_all("a\u{b}b", "b", true),
-            vec![MatchPos { line: 1, col: 0, len_chars: 1 }],
+            vec![MatchPos {
+                line: 1,
+                col: 0,
+                len_chars: 1
+            }],
             "VT 之后的内容算下一行"
         );
     }
@@ -1374,11 +1553,19 @@ mod tests {
             let hits = find_all(text, "a\nb", true);
             assert_eq!(
                 hits,
-                vec![MatchPos { line: 0, col: 2, len_chars: 3 }],
+                vec![MatchPos {
+                    line: 0,
+                    col: 2,
+                    len_chars: 3
+                }],
                 "text={text:?}"
             );
             let doc = Document::from_str(text);
-            assert_eq!(find_all_document(&doc, "a\nb", true), hits, "rope 路径同结果");
+            assert_eq!(
+                find_all_document(&doc, "a\nb", true),
+                hits,
+                "rope 路径同结果"
+            );
         }
     }
 
@@ -1389,7 +1576,14 @@ mod tests {
         let text = "one\ntwo\rthree\n";
         assert_eq!(Document::from_str(text).line_count(), 4, "\\r 应计作行界");
         let hits = find_all(text, "two\nthree", true);
-        assert_eq!(hits, vec![MatchPos { line: 1, col: 0, len_chars: 9 }]);
+        assert_eq!(
+            hits,
+            vec![MatchPos {
+                line: 1,
+                col: 0,
+                len_chars: 9
+            }]
+        );
         let doc = Document::from_str(text);
         assert_eq!(find_all_document(&doc, "two\nthree", true), hits);
     }
@@ -1401,7 +1595,14 @@ mod tests {
         // 起点 + 显示跨度走线得到的切片恰为匹配文本本身
         let doc = Document::from_str("xx a\r\nb yy");
         let hit = find_all_document(&doc, "a\nb", true);
-        assert_eq!(hit, vec![MatchPos { line: 0, col: 3, len_chars: 3 }]);
+        assert_eq!(
+            hit,
+            vec![MatchPos {
+                line: 0,
+                col: 3,
+                len_chars: 3
+            }]
+        );
 
         // 模拟 select_span 的走线：显示跨度 3 = 行内 1 字符 + 1 次跨行 + 行内 1 字符
         let start = doc.line_to_char(hit[0].line) + hit[0].col;
@@ -1413,13 +1614,28 @@ mod tests {
     fn multiline_query_starting_with_newline_covers_line_break() {
         // 以 \n 开头的查询：命中点挂在上一行行末列，选区恰好覆盖换行符
         let hits = find_all("x\nb", "\nb", true);
-        assert_eq!(hits, vec![MatchPos { line: 0, col: 1, len_chars: 2 }]);
+        assert_eq!(
+            hits,
+            vec![MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 2
+            }]
+        );
         // 查询就是裸 \n：文档里每个行界各得一个命中
         assert_eq!(
             find_all("a\nb\n", "\n", true),
             vec![
-                MatchPos { line: 0, col: 1, len_chars: 1 },
-                MatchPos { line: 1, col: 1, len_chars: 1 },
+                MatchPos {
+                    line: 0,
+                    col: 1,
+                    len_chars: 1
+                },
+                MatchPos {
+                    line: 1,
+                    col: 1,
+                    len_chars: 1
+                },
             ]
         );
     }
@@ -1437,7 +1653,11 @@ mod tests {
         assert!(find_all("x\ry", "x\ry", true).is_empty());
         assert_eq!(
             find_all("x\ry", "x\ny", true),
-            vec![MatchPos { line: 0, col: 0, len_chars: 3 }]
+            vec![MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 3
+            }]
         );
     }
 
@@ -1448,11 +1668,22 @@ mod tests {
         assert_eq!(
             hits,
             vec![
-                MatchPos { line: 0, col: 0, len_chars: 3 },
-                MatchPos { line: 1, col: 0, len_chars: 3 },
+                MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 3
+                },
+                MatchPos {
+                    line: 1,
+                    col: 0,
+                    len_chars: 3
+                },
             ]
         );
-        assert_eq!(find_all_document(&Document::from_str("a\na\na"), "a\na", true), hits);
+        assert_eq!(
+            find_all_document(&Document::from_str("a\na\na"), "a\na", true),
+            hits
+        );
     }
 
     #[test]
@@ -1464,7 +1695,11 @@ mod tests {
         // 大小写折叠照常作用于普通字符（\n 自身无大小写概念）
         assert_eq!(
             find_all("A\r\nB", "a\nb", false),
-            vec![MatchPos { line: 0, col: 0, len_chars: 3 }]
+            vec![MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 3
+            }]
         );
     }
 
@@ -1506,8 +1741,18 @@ mod tests {
                 // 地面真值：find_all 参照路径
                 let truth = find_all(text, &q.iter().collect::<String>(), false);
 
-                assert_eq!(whole_out, truth, "text={text:?} q={:?} 整段推送偏离参照", String::from_iter(q.iter()));
-                assert_eq!(frag_out, truth, "text={text:?} q={:?} 碎片化推送偏离参照", String::from_iter(q.iter()));
+                assert_eq!(
+                    whole_out,
+                    truth,
+                    "text={text:?} q={:?} 整段推送偏离参照",
+                    String::from_iter(q.iter())
+                );
+                assert_eq!(
+                    frag_out,
+                    truth,
+                    "text={text:?} q={:?} 碎片化推送偏离参照",
+                    String::from_iter(q.iter())
+                );
             }
         }
     }
@@ -1565,7 +1810,9 @@ mod tests {
             "needleatstartneedleatend",
         ];
         for text in fixtures {
-            for query in ["a", "aa", "ab", "中", "中文", "🚀", "\r", "\r\n", "needle", "zz"] {
+            for query in [
+                "a", "aa", "ab", "中", "中文", "🚀", "\r", "\r\n", "needle", "zz",
+            ] {
                 for replacement in ["", "X", "XY长", "ab"] {
                     for cs in [true, false] {
                         assert_eq!(
@@ -1587,7 +1834,10 @@ mod tests {
         assert_eq!(replace_all("aaa", "aa", "b", true), ("ba".to_owned(), 1));
 
         // 多字节字符不被切坏：emoji 与中文夹着的命中原样保留其余字符
-        assert_eq!(replace_all("🚀中🚀", "中", "", true), ("🚀🚀".to_owned(), 1));
+        assert_eq!(
+            replace_all("🚀中🚀", "中", "", true),
+            ("🚀🚀".to_owned(), 1)
+        );
         assert_eq!(
             replace_all("中文内容", "内容", "text", true),
             ("中文text".to_owned(), 1)
@@ -1626,7 +1876,10 @@ mod tests {
         }
         // 空查询 no-op：返回全文与 0 次
         let doc = Document::from_str("hello\nworld");
-        assert_eq!(replace_all_document(&doc, "", "X", true), (doc.to_text(), 0));
+        assert_eq!(
+            replace_all_document(&doc, "", "X", true),
+            (doc.to_text(), 0)
+        );
     }
 
     /// O-15b：输出**容量提示**不得改变结果，且两个分支都要走到。
@@ -1723,7 +1976,10 @@ mod tests {
         let doc = Document::from_str(&text);
         let (out, n) = replace_all_document(&doc, &query, "HIT", true);
         assert_eq!(n, 1);
-        assert_eq!(out, format!("{}HIT{}", "a".repeat(20_000), "b".repeat(20_000)));
+        assert_eq!(
+            out,
+            format!("{}HIT{}", "a".repeat(20_000), "b".repeat(20_000))
+        );
     }
 
     // ---------- P70 正则查找/替换 ----------
@@ -1736,9 +1992,21 @@ mod tests {
         assert_eq!(
             hits,
             vec![
-                MatchPos { line: 0, col: 4, len_chars: 1 },
-                MatchPos { line: 1, col: 4, len_chars: 2 },
-                MatchPos { line: 2, col: 4, len_chars: 3 },
+                MatchPos {
+                    line: 0,
+                    col: 4,
+                    len_chars: 1
+                },
+                MatchPos {
+                    line: 1,
+                    col: 4,
+                    len_chars: 2
+                },
+                MatchPos {
+                    line: 2,
+                    col: 4,
+                    len_chars: 3
+                },
             ]
         );
 
@@ -1747,7 +2015,11 @@ mod tests {
         let hits = find_all_regex(text, r"1\r\nbar", false).expect("合法模式");
         assert_eq!(
             hits,
-            vec![MatchPos { line: 0, col: 4, len_chars: 5 }]
+            vec![MatchPos {
+                line: 0,
+                col: 4,
+                len_chars: 5
+            }]
         );
     }
 
@@ -1793,15 +2065,27 @@ mod tests {
         assert_eq!(
             words,
             vec![
-                MatchPos { line: 0, col: 0, len_chars: 3 },
-                MatchPos { line: 1, col: 0, len_chars: 3 },
+                MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 3
+                },
+                MatchPos {
+                    line: 1,
+                    col: 0,
+                    len_chars: 3
+                },
             ]
         );
         // 行尾命中：后边界 = 行尾，保留
         let doc = Document::from_str("x cat");
         assert_eq!(
             filter_whole_word(&doc, find_all_document(&doc, "cat", true)),
-            vec![MatchPos { line: 0, col: 2, len_chars: 3 }]
+            vec![MatchPos {
+                line: 0,
+                col: 2,
+                len_chars: 3
+            }]
         );
     }
 
@@ -1894,21 +2178,48 @@ mod tests {
         // 跨行命中（end > 行内容长度）一律保留：真实命中（查询含 \n）…
         let doc = Document::from_str("cat\ncat");
         let hits = find_all_document(&doc, "t\nc", true);
-        assert_eq!(hits, vec![MatchPos { line: 0, col: 2, len_chars: 3 }]);
+        assert_eq!(
+            hits,
+            vec![MatchPos {
+                line: 0,
+                col: 2,
+                len_chars: 3
+            }]
+        );
         assert_eq!(filter_whole_word(&doc, hits.clone()), hits);
         // …与手工构造的越界命中同口径（end 恰等于行内容是「行尾」，不是越界）
         assert_eq!(
             filter_whole_word(
                 &doc,
                 vec![
-                    MatchPos { line: 0, col: 1, len_chars: 3 }, // end=4 > 3：跨行
-                    MatchPos { line: 0, col: 0, len_chars: 3 }, // end=3 = 行尾：保留
-                    MatchPos { line: 0, col: 0, len_chars: 2 }, // end=2 < 3：后邻 't' 为词字符 → 剔除
+                    MatchPos {
+                        line: 0,
+                        col: 1,
+                        len_chars: 3
+                    }, // end=4 > 3：跨行
+                    MatchPos {
+                        line: 0,
+                        col: 0,
+                        len_chars: 3
+                    }, // end=3 = 行尾：保留
+                    MatchPos {
+                        line: 0,
+                        col: 0,
+                        len_chars: 2
+                    }, // end=2 < 3：后邻 't' 为词字符 → 剔除
                 ]
             ),
             vec![
-                MatchPos { line: 0, col: 1, len_chars: 3 },
-                MatchPos { line: 0, col: 0, len_chars: 3 },
+                MatchPos {
+                    line: 0,
+                    col: 1,
+                    len_chars: 3
+                },
+                MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 3
+                },
             ],
             "越界命中保留、行尾命中保留、词内命中剔除"
         );
@@ -1921,11 +2232,26 @@ mod tests {
         rev.reverse();
         let mut kept_rev = filter_whole_word(&doc, rev);
         kept_rev.sort_by_key(|h| (h.line, h.col));
-        assert_eq!(kept_asc, vec![
-            MatchPos { line: 0, col: 0, len_chars: 3 },
-            MatchPos { line: 1, col: 0, len_chars: 3 },
-            MatchPos { line: 2, col: 4, len_chars: 3 },
-        ]);
+        assert_eq!(
+            kept_asc,
+            vec![
+                MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 3
+                },
+                MatchPos {
+                    line: 1,
+                    col: 0,
+                    len_chars: 3
+                },
+                MatchPos {
+                    line: 2,
+                    col: 4,
+                    len_chars: 3
+                },
+            ]
+        );
         assert_eq!(kept_asc, kept_rev, "乱序输入不得改变过滤结果");
     }
 
@@ -1943,7 +2269,10 @@ mod tests {
         let kept = filter_whole_word(&doc, hits.clone());
         let builds = WHOLE_WORD_LINE_BUILDS.with(|c| c.get());
 
-        assert_eq!(builds, 2, "命中只分布在 2 行 → 只物化 2 次（改前为 202 次）");
+        assert_eq!(
+            builds, 2,
+            "命中只分布在 2 行 → 只物化 2 次（改前为 202 次）"
+        );
         assert_eq!(kept.len(), 202, "全部命中各自独立成词，都应保留");
         assert_eq!(kept, filter_whole_word_naive(&doc, hits), "省钱不改语义");
     }
@@ -2053,10 +2382,16 @@ mod tests {
     #[test]
     fn expand_regex_at_expands_zero_width_match_in_place() {
         // 零宽命中按位置展开：$0 引用整段命中、空匹配也能展开
-        assert_eq!(expand_regex_at("abc", 1, "b*", "[${0}]", true).unwrap(), "[b]");
+        assert_eq!(
+            expand_regex_at("abc", 1, "b*", "[${0}]", true).unwrap(),
+            "[b]"
+        );
         assert_eq!(expand_regex_at("abc", 1, "x*", "Y", true).unwrap(), "Y");
         // 组引用与常规命中同样可用
-        assert_eq!(expand_regex_at("a1b", 0, r"a(\d)", "<$1>", true).unwrap(), "<1>");
+        assert_eq!(
+            expand_regex_at("a1b", 0, r"a(\d)", "<$1>", true).unwrap(),
+            "<1>"
+        );
         // 行窗口内首个匹配不在命中位置：显式报错而非静默错位展开
         assert!(expand_regex_at("abc", 1, "c", "Y", true).is_err());
     }

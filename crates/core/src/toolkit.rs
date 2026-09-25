@@ -167,8 +167,12 @@ pub fn md5_hex(src: &[u8]) -> String {
     }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
-    let (mut a0, mut b0, mut c0, mut d0) =
-        (0x6745_2301u32, 0xefcd_ab89u32, 0x98ba_dcfeu32, 0x1032_5476u32);
+    let (mut a0, mut b0, mut c0, mut d0) = (
+        0x6745_2301u32,
+        0xefcd_ab89u32,
+        0x98ba_dcfeu32,
+        0x1032_5476u32,
+    );
     for block in msg.chunks(64) {
         let m: Vec<u32> = block
             .chunks(4)
@@ -230,8 +234,14 @@ pub fn sha256_hex(src: &[u8]) -> String {
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     let (mut h0, mut h1, mut h2, mut h3, mut h4, mut h5, mut h6, mut h7) = (
-        0x6a09_e667u32, 0xbb67_ae85u32, 0x3c6e_f372u32, 0xa54f_f53au32, 0x510e_527fu32,
-        0x9b05_688cu32, 0x1f83_d9abu32, 0x5be0_cd19u32,
+        0x6a09_e667u32,
+        0xbb67_ae85u32,
+        0x3c6e_f372u32,
+        0xa54f_f53au32,
+        0x510e_527fu32,
+        0x9b05_688cu32,
+        0x1f83_d9abu32,
+        0x5be0_cd19u32,
     );
     for block in msg.chunks(64) {
         let mut w = [0u32; 64];
@@ -310,13 +320,23 @@ mod tests {
             ("foobar", "Zm9vYmFy"),
         ] {
             assert_eq!(base64_encode(src.as_bytes()), want, "encode {src:?}");
-            assert_eq!(base64_decode(want).as_deref(), Some(src.as_bytes()), "decode {want}");
+            assert_eq!(
+                base64_decode(want).as_deref(),
+                Some(src.as_bytes()),
+                "decode {want}"
+            );
         }
         // 二进制字节全值域往返
         let all: Vec<u8> = (0..=255u8).collect();
-        assert_eq!(base64_decode(&base64_encode(&all)).as_deref(), Some(all.as_slice()));
+        assert_eq!(
+            base64_decode(&base64_encode(&all)).as_deref(),
+            Some(all.as_slice())
+        );
         // 容忍空白分块；非法字符拒绝；悬挂单字符拒绝
-        assert_eq!(base64_decode("Zm9v\r\nYmFy").as_deref(), Some(&b"foobar"[..]));
+        assert_eq!(
+            base64_decode("Zm9v\r\nYmFy").as_deref(),
+            Some(&b"foobar"[..])
+        );
         assert!(base64_decode("Zm9*v").is_none());
         assert!(base64_decode("Z").is_none());
     }
@@ -332,7 +352,11 @@ mod tests {
             Some("中文+ emoji 🚀"),
             "编解码恒等：编码只产 %XX，不产 +"
         );
-        assert_eq!(url_decode("中文+emoji").as_deref(), Some("中文 emoji"), "+ 单独还原为空格");
+        assert_eq!(
+            url_decode("中文+emoji").as_deref(),
+            Some("中文 emoji"),
+            "+ 单独还原为空格"
+        );
         // 残缺转义与非法 UTF-8 拒绝
         assert!(url_decode("%2").is_none());
         assert!(url_decode("%ZZ").is_none());
@@ -341,10 +365,7 @@ mod tests {
 
     #[test]
     fn md5_matches_rfc1321_vectors() {
-        assert_eq!(
-            md5_hex(b""),
-            "d41d8cd98f00b204e9800998ecf8427e"
-        );
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
         assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
         assert_eq!(
             md5_hex(b"The quick brown fox jumps over the lazy dog"),

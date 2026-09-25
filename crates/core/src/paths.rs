@@ -162,15 +162,29 @@ mod tests {
 
         // 构造 P101 前遗留布局：config.toml + snapshot/ + 无关注入文件
         fs::create_dir_all(appdata.join("editpad").join("snapshot")).unwrap();
-        fs::write(appdata.join("editpad").join("config.toml"), b"theme = \"dark\"").unwrap();
-        fs::write(appdata.join("editpad").join("snapshot").join("s1.snap"), b"x").unwrap();
+        fs::write(
+            appdata.join("editpad").join("config.toml"),
+            b"theme = \"dark\"",
+        )
+        .unwrap();
+        fs::write(
+            appdata.join("editpad").join("snapshot").join("s1.snap"),
+            b"x",
+        )
+        .unwrap();
 
         // 首个实例（exe_a）整体迁入：config 与 snapshot 都进了自己的
         // 实例目录，遗留目录不再持有数据
         let adopted = data_root_for_base(Some(&exe_a), Some(&appdata)).unwrap();
         assert_eq!(adopted, root_a);
-        assert!(adopted.join("config.toml").is_file(), "config 必须搬入实例目录");
-        assert!(adopted.join("snapshot").join("s1.snap").is_file(), "快照必须搬入实例目录");
+        assert!(
+            adopted.join("config.toml").is_file(),
+            "config 必须搬入实例目录"
+        );
+        assert!(
+            adopted.join("snapshot").join("s1.snap").is_file(),
+            "快照必须搬入实例目录"
+        );
         assert!(
             !appdata.join("editpad").join("config.toml").exists(),
             "遗留目录不得再留 config（互通根被拔掉）"
@@ -182,7 +196,10 @@ mod tests {
         assert!(!root_b2.join("config.toml").exists(), "新拷贝必须零继承");
 
         // 迁移幂等：重复调用结果不变
-        assert_eq!(data_root_for_base(Some(&exe_a), Some(&appdata)).unwrap(), adopted);
+        assert_eq!(
+            data_root_for_base(Some(&exe_a), Some(&appdata)).unwrap(),
+            adopted
+        );
 
         fs::remove_dir_all(&appdata).ok();
     }
@@ -190,7 +207,8 @@ mod tests {
     /// 无遗留数据时不得凭空迁出目录结构（空 editpad 目录保持不动）。
     #[test]
     fn no_legacy_means_fresh_empty_instance() {
-        let appdata = std::env::temp_dir().join(format!("editpad-paths-none-{}", std::process::id()));
+        let appdata =
+            std::env::temp_dir().join(format!("editpad-paths-none-{}", std::process::id()));
         fs::create_dir_all(&appdata).unwrap();
         fs::create_dir_all(appdata.join("editpad")).unwrap(); // 空遗留目录
         let exe = appdata.join("c").join("editpad.exe");

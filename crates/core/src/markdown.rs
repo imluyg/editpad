@@ -315,7 +315,10 @@ mod tests {
         assert_eq!(blocks.len(), 3);
         match &blocks[1] {
             MdBlock::CodeBlock { lines } => {
-                assert_eq!(lines, &vec!["**不是粗体**".to_owned(), "let a = 1;".to_owned()]);
+                assert_eq!(
+                    lines,
+                    &vec!["**不是粗体**".to_owned(), "let a = 1;".to_owned()]
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -345,11 +348,26 @@ mod tests {
         assert_eq!(
             spans,
             vec![
-                MdSpan { text: "粗".into(), style: MD_BOLD },
-                MdSpan { text: "斜".into(), style: 0 },
-                MdSpan { text: "体".into(), style: MD_ITALIC },
-                MdSpan { text: "普通".into(), style: 0 },
-                MdSpan { text: "code".into(), style: MD_CODE },
+                MdSpan {
+                    text: "粗".into(),
+                    style: MD_BOLD
+                },
+                MdSpan {
+                    text: "斜".into(),
+                    style: 0
+                },
+                MdSpan {
+                    text: "体".into(),
+                    style: MD_ITALIC
+                },
+                MdSpan {
+                    text: "普通".into(),
+                    style: 0
+                },
+                MdSpan {
+                    text: "code".into(),
+                    style: MD_CODE
+                },
             ]
         );
     }

@@ -53,7 +53,10 @@ thread_local! {
 ///
 /// `max_files` = 文件数封顶（0 = 不收任何文件，遇到文件即判截断）。
 pub fn walk_files(root: &Path, max_files: usize) -> WalkOutput {
-    let mut out = WalkOutput { files: Vec::new(), truncated: false };
+    let mut out = WalkOutput {
+        files: Vec::new(),
+        truncated: false,
+    };
     walk_dir(root, max_files, 0, &mut out);
     out.files.sort();
     out.files.dedup();
@@ -163,10 +166,9 @@ impl FifMatcher {
     /// 「正则无效返回空表」口径一致，调用方据此整批提前收尾）。
     pub fn build(query: &str, case_sensitive: bool, regex: bool) -> Option<Self> {
         if regex {
-            Some(Self::Regex(crate::search::compile_regex(
-                query, case_sensitive,
-            )
-            .ok()?))
+            Some(Self::Regex(
+                crate::search::compile_regex(query, case_sensitive).ok()?,
+            ))
         } else {
             Some(Self::Literal {
                 query: query.to_owned(),
@@ -188,9 +190,10 @@ pub fn find_in_file_with(
         FifMatcher::Regex(re) => {
             crate::search::find_all_regex_compiled(text, re).unwrap_or_default()
         }
-        FifMatcher::Literal { query, case_sensitive } => {
-            literal_hits(text, query, *case_sensitive, whole_word, max_hits)
-        }
+        FifMatcher::Literal {
+            query,
+            case_sensitive,
+        } => literal_hits(text, query, *case_sensitive, whole_word, max_hits),
     };
     hits.truncate(max_hits);
     hits

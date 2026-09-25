@@ -22,16 +22,22 @@ fn main() {
         Some(path) => {
             eprintln!("加载 {path} …");
             let t = Instant::now();
-            let loaded =
-                load_file(std::path::Path::new(path)).expect("加载失败");
-            eprintln!("加载耗时 {:.1} ms，编码 {}", t.elapsed().as_secs_f64() * 1000.0, loaded.encoding);
+            let loaded = load_file(std::path::Path::new(path)).expect("加载失败");
+            eprintln!(
+                "加载耗时 {:.1} ms，编码 {}",
+                t.elapsed().as_secs_f64() * 1000.0,
+                loaded.encoding
+            );
             (Document::from_str(&loaded.text), format!("文件 {path}"))
         }
         None => (synthetic_doc(), "合成文档（约 45MB）".to_owned()),
     };
 
     let query = "the";
-    println!("== {label}：{} 字符，查询 {query:?}，5 轮取中位数 ==", doc.text_len());
+    println!(
+        "== {label}：{} 字符，查询 {query:?}，5 轮取中位数 ==",
+        doc.text_len()
+    );
 
     let mut old_runs: Vec<Duration> = Vec::new();
     let mut new_runs: Vec<Duration> = Vec::new();
@@ -62,7 +68,9 @@ fn main() {
 
     println!(
         "\n中位数    旧路径 {:8.1} ms（拷贝 {:8.1} ms）        新路径 {:8.1} ms",
-        ms(median(old_runs)), ms(median(copy_runs)), ms(median(new_runs))
+        ms(median(old_runs)),
+        ms(median(copy_runs)),
+        ms(median(new_runs))
     );
 }
 

@@ -23,9 +23,12 @@ fn main() {
         Some(path) => {
             eprintln!("加载 {path} …");
             let t = Instant::now();
-            let loaded =
-                load_file(std::path::Path::new(path)).expect("加载失败");
-            eprintln!("加载耗时 {:.1} ms，编码 {}", t.elapsed().as_secs_f64() * 1000.0, loaded.encoding);
+            let loaded = load_file(std::path::Path::new(path)).expect("加载失败");
+            eprintln!(
+                "加载耗时 {:.1} ms，编码 {}",
+                t.elapsed().as_secs_f64() * 1000.0,
+                loaded.encoding
+            );
             (Document::from_str(&loaded.text), format!("文件 {path}"))
         }
         None => (synthetic_doc(), "合成文档（约 45MB）".to_owned()),

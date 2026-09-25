@@ -102,9 +102,7 @@ pub fn save_document_encoded(
     encoding: SaveEncoding,
 ) -> Result<EncodeNotice, CoreError> {
     match encoding {
-        SaveEncoding::Utf8 => {
-            save_document_atomic(path, doc).map(|_| EncodeNotice::default())
-        }
+        SaveEncoding::Utf8 => save_document_atomic(path, doc).map(|_| EncodeNotice::default()),
         SaveEncoding::Utf8Bom => write_atomic_with(path, |file| {
             file.write_all(&[0xEF, 0xBB, 0xBF])?;
             for chunk in doc.chunks() {
@@ -117,21 +115,11 @@ pub fn save_document_encoded(
             path: path.to_path_buf(),
             source,
         }),
-        SaveEncoding::Gbk => {
-            save_with_legacy_encoder(path, doc, encoding_rs::GBK)
-        }
-        SaveEncoding::Big5 => {
-            save_with_legacy_encoder(path, doc, encoding_rs::BIG5)
-        }
-        SaveEncoding::ShiftJis => {
-            save_with_legacy_encoder(path, doc, encoding_rs::SHIFT_JIS)
-        }
-        SaveEncoding::EucJp => {
-            save_with_legacy_encoder(path, doc, encoding_rs::EUC_JP)
-        }
-        SaveEncoding::EucKr => {
-            save_with_legacy_encoder(path, doc, encoding_rs::EUC_KR)
-        }
+        SaveEncoding::Gbk => save_with_legacy_encoder(path, doc, encoding_rs::GBK),
+        SaveEncoding::Big5 => save_with_legacy_encoder(path, doc, encoding_rs::BIG5),
+        SaveEncoding::ShiftJis => save_with_legacy_encoder(path, doc, encoding_rs::SHIFT_JIS),
+        SaveEncoding::EucJp => save_with_legacy_encoder(path, doc, encoding_rs::EUC_JP),
+        SaveEncoding::EucKr => save_with_legacy_encoder(path, doc, encoding_rs::EUC_KR),
     }
 }
 
@@ -313,7 +301,10 @@ mod tests {
         save_atomic(&target, "第二版").unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "第二版");
 
-        assert!(!temp_sibling(&target).exists(), "临时文件必须被 rename 消费掉");
+        assert!(
+            !temp_sibling(&target).exists(),
+            "临时文件必须被 rename 消费掉"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -357,7 +348,11 @@ mod tests {
         let big_target = dir.join("big.txt");
         clear_write_steps();
         save_atomic(&big_target, &big).unwrap();
-        assert_eq!(fs::read_to_string(&big_target).unwrap(), big, "超阈值内容不得截断");
+        assert_eq!(
+            fs::read_to_string(&big_target).unwrap(),
+            big,
+            "超阈值内容不得截断"
+        );
         assert_eq!(
             write_steps(),
             vec!["produce", "flush", "sync", "rename"],
@@ -387,7 +382,10 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&doc_target).unwrap(), doc.to_text());
         // CRLF 文档保存往返：字节原样保留
-        assert!(fs::read(&doc_target).unwrap().windows(2).any(|w| w == b"\r\n"));
+        assert!(fs::read(&doc_target)
+            .unwrap()
+            .windows(2)
+            .any(|w| w == b"\r\n"));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -416,7 +414,10 @@ mod tests {
             "rename 后不得有临时残留: {leftovers:?}"
         );
         // 多块规模的内容（>64KB）也走同一收口
-        assert!(second.to_text().len() < first.to_text().len(), "前置条件：首轮为多块规模");
+        assert!(
+            second.to_text().len() < first.to_text().len(),
+            "前置条件：首轮为多块规模"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -452,9 +453,8 @@ mod tests {
         let target = dir.join("gbk.txt");
         let text = "第一行中文\nASCII line 2\n尾行";
 
-        let notice =
-            save_document_encoded(&target, &Document::from_str(text), SaveEncoding::Gbk)
-                .expect("GBK 保存应成功");
+        let notice = save_document_encoded(&target, &Document::from_str(text), SaveEncoding::Gbk)
+            .expect("GBK 保存应成功");
         assert!(!notice.unmappable, "纯中英文本无不可映射字符");
 
         // 磁盘字节必须真的是 GBK：用 encoding_rs 解码回原文
@@ -472,8 +472,7 @@ mod tests {
         let target = dir.join("bom.txt");
         let doc = Document::from_str("BOM 内容\n第二行");
 
-        save_document_encoded(&target, &doc, SaveEncoding::Utf8Bom)
-            .expect("BOM 保存应成功");
+        save_document_encoded(&target, &doc, SaveEncoding::Utf8Bom).expect("BOM 保存应成功");
 
         let bytes = fs::read(&target).unwrap();
         assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "必须以 UTF-8 BOM 开头");
@@ -488,15 +487,17 @@ mod tests {
         let target = dir.join("emoji.txt");
         let doc = Document::from_str("中文 ok 🚀 tail");
 
-        let notice =
-            save_document_encoded(&target, &doc, SaveEncoding::Gbk)
-                .expect("保存应成功（不可映射不失败）");
+        let notice = save_document_encoded(&target, &doc, SaveEncoding::Gbk)
+            .expect("保存应成功（不可映射不失败）");
         assert!(notice.unmappable, "emoji 无法映射 GBK，必须置位告警");
 
         let bytes = fs::read(&target).unwrap();
         let (decoded, _, had_errors) = encoding_rs::GBK.decode(&bytes);
         assert!(!had_errors, "数值实体本身是合法 GBK");
-        assert!(decoded.contains("&#"), "emoji 应以 &#N; 实体形式存在：{decoded}");
+        assert!(
+            decoded.contains("&#"),
+            "emoji 应以 &#N; 实体形式存在：{decoded}"
+        );
         assert!(decoded.contains("中文 ok") && decoded.contains("tail"));
 
         fs::remove_dir_all(&dir).ok();
@@ -538,17 +539,18 @@ mod tests {
         let mut text = "中".to_string().repeat(3000);
         text.push_str(&"Ա".to_string().repeat(2000)); // U+0531
         let doc = Document::from_str(&text);
-        assert!(
-            doc.chunks().count() > 1,
-            "用例前提：文档必须跨多个 rope 块"
-        );
+        assert!(doc.chunks().count() > 1, "用例前提：文档必须跨多个 rope 块");
 
         save_document_encoded(&target, &doc, SaveEncoding::Gbk).expect("保存应成功");
 
         let bytes = fs::read(&target).unwrap();
         let (decoded, _, had_errors) = encoding_rs::GBK.decode(&bytes);
         assert!(!had_errors, "实体与 GBK 字节都是合法 GBK");
-        assert_eq!(decoded.matches("&#1329;").count(), 2000, "亚美尼亚段必须完整");
+        assert_eq!(
+            decoded.matches("&#1329;").count(),
+            2000,
+            "亚美尼亚段必须完整"
+        );
         assert_eq!(
             decoded.chars().filter(|&c| c == '中').count(),
             3000,
@@ -578,13 +580,15 @@ mod tests {
         std::fs::create_dir_all(&blocker).unwrap();
 
         let doomed = Document::from_str("new\n");
-        assert!(
-            save_document_encoded(&blocker, &doomed, SaveEncoding::Gbk).is_err()
-        );
+        assert!(save_document_encoded(&blocker, &doomed, SaveEncoding::Gbk).is_err());
         // 目标是 BOM 变体：字节 = BOM 前缀 + 原内容
         assert_eq!(
             fs::read(&target).unwrap(),
-            [0xEF, 0xBB, 0xBF].iter().copied().chain(b"old\n".iter().copied()).collect::<Vec<u8>>(),
+            [0xEF, 0xBB, 0xBF]
+                .iter()
+                .copied()
+                .chain(b"old\n".iter().copied())
+                .collect::<Vec<u8>>(),
             "失败的保存不得破坏既有文件"
         );
 
@@ -598,7 +602,11 @@ mod tests {
         // 各编码一个代表性字符 + ASCII：编码后用 encoding_rs 解码应还原
         let cases = [
             (SaveEncoding::Big5, encoding_rs::BIG5, "繁體測試 ascii"),
-            (SaveEncoding::ShiftJis, encoding_rs::SHIFT_JIS, "日本語テスト"),
+            (
+                SaveEncoding::ShiftJis,
+                encoding_rs::SHIFT_JIS,
+                "日本語テスト",
+            ),
             (SaveEncoding::EucJp, encoding_rs::EUC_JP, "日本語EUC"),
             (SaveEncoding::EucKr, encoding_rs::EUC_KR, "한국어"),
             (SaveEncoding::Gbk, encoding_rs::GBK, "简体中文"),

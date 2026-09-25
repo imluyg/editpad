@@ -150,8 +150,7 @@ fn parse_page_generation(file_name: &str) -> Option<u64> {
     let dash = rest.find("-t")?;
     let (gen_str, tail) = rest.split_at(dash);
     let index_str = tail.strip_suffix(PAGE_SUFFIX)?.strip_prefix("-t")?;
-    let all_digits =
-        |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let all_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     if !all_digits(gen_str) || !all_digits(index_str) {
         return None;
     }
@@ -169,7 +168,14 @@ pub fn write_session(
     active: usize,
     next_untitled: u64,
 ) -> Result<SessionManifest, CoreError> {
-    write_session_at(dir, fresh_generation(), pages, active, next_untitled, WriteMode::Full)
+    write_session_at(
+        dir,
+        fresh_generation(),
+        pages,
+        active,
+        next_untitled,
+        WriteMode::Full,
+    )
 }
 
 /// P31 心跳增量提交的单页输入。
@@ -313,7 +319,11 @@ pub(crate) fn write_session_at(
 ///
 /// P31 起多带一个受保护名单：心跳复用的页文件带着旧代次前缀被新清单
 /// 引用，「代次不同」不能再作为回收依据——引用关系才是活会话的真判据。
-fn gc_stale_pages(dir: &Path, keep_generation: u64, protected: &std::collections::HashSet<String>) -> usize {
+fn gc_stale_pages(
+    dir: &Path,
+    keep_generation: u64,
+    protected: &std::collections::HashSet<String>,
+) -> usize {
     let mut removed = 0;
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -402,8 +412,7 @@ pub fn enforce_quota(dir: &Path, cap_bytes: u64) -> usize {
 
     // 最旧的先出局
     evictable.sort_by_key(|(mtime, _, _)| *mtime);
-    let mut total: u64 =
-        protected_bytes + evictable.iter().map(|(_, len, _)| *len).sum::<u64>();
+    let mut total: u64 = protected_bytes + evictable.iter().map(|(_, len, _)| *len).sum::<u64>();
     let mut removed = 0;
     for (_, len, path) in &evictable {
         if total <= cap_bytes {
@@ -605,7 +614,10 @@ mod tests {
 
         // 清单损坏（半截 TOML）同样按无会话处理
         fs::write(dir.join(MANIFEST_NAME), "tabs = [ { broken").unwrap();
-        assert!(read_manifest(&dir).is_none(), "损坏清单必须被吞掉而不是 panic");
+        assert!(
+            read_manifest(&dir).is_none(),
+            "损坏清单必须被吞掉而不是 panic"
+        );
 
         // 页文件缺失 → 单页读取失败返回 None
         let mut t = named_tab("C:/x.txt", true);
@@ -656,11 +668,14 @@ mod tests {
         assert!(read_manifest(&dir).is_none());
         let third = write_session(
             &dir,
-            &[page({
-                let mut t = named_tab("C:/c.txt", true);
-                t.dirty = true;
-                t
-            }, "gen C")],
+            &[page(
+                {
+                    let mut t = named_tab("C:/c.txt", true);
+                    t.dirty = true;
+                    t
+                },
+                "gen C",
+            )],
             0,
             2,
         )
@@ -671,7 +686,11 @@ mod tests {
             .filter_map(|e| e.file_name().to_str().map(str::to_owned))
             .filter(|n| parse_page_generation(n).is_some())
             .collect();
-        assert_eq!(names, vec![third.tabs[0].file.clone().unwrap()], "孤儿页必须清干净");
+        assert_eq!(
+            names,
+            vec![third.tabs[0].file.clone().unwrap()],
+            "孤儿页必须清干净"
+        );
 
         // 第一代的旧文件名确实属于被回收之列（防呆：确认它曾真实存在过）
         assert!(parse_page_generation(&gen_a_file).is_some());
@@ -691,11 +710,14 @@ mod tests {
         let baseline = write_session_at(
             &dir,
             GEN,
-            &[page({
-                let mut t = named_tab("C:/keep.txt", true);
-                t.dirty = true;
-                t
-            }, "keep")],
+            &[page(
+                {
+                    let mut t = named_tab("C:/keep.txt", true);
+                    t.dirty = true;
+                    t
+                },
+                "keep",
+            )],
             0,
             1,
             WriteMode::Full,
@@ -794,7 +816,10 @@ mod tests {
     fn heartbeat_page_selection_dedupes_by_version_and_throttles_by_size() {
         const CAP: u64 = HEARTBEAT_MAX_PAGE_BYTES;
         // 置脏是前提
-        assert!(!heartbeat_page_selected(false, 100, None, 3), "干净页永不参与");
+        assert!(
+            !heartbeat_page_selected(false, 100, None, 3),
+            "干净页永不参与"
+        );
         // 从未快照过（None）的置脏页必须参与——未命名页的首个兜底
         assert!(heartbeat_page_selected(true, 100, None, 0));
         // 代次去重：版本没推进就跳过；推进了才重写
@@ -802,8 +827,14 @@ mod tests {
         assert!(heartbeat_page_selected(true, 100, Some(2), 3));
 
         // 大小节流：恰好压线允许（>上限才出局），超一字节即跳过
-        assert!(heartbeat_page_selected(true, CAP, Some(1), 2), "恰好等于上限应允许");
-        assert!(!heartbeat_page_selected(true, CAP + 1, None, 9), "超限页只在退出时写");
+        assert!(
+            heartbeat_page_selected(true, CAP, Some(1), 2),
+            "恰好等于上限应允许"
+        );
+        assert!(
+            !heartbeat_page_selected(true, CAP + 1, None, 9),
+            "超限页只在退出时写"
+        );
     }
 
     #[test]
@@ -829,15 +860,27 @@ mod tests {
         let second = write_heartbeat_session(
             &dir,
             &[
-                HeartbeatPage { page: page(a_reuse, "stable"), rewrite: false },
-                HeartbeatPage { page: page(named_tab("C:/churn.txt", true), "v2"), rewrite: true },
-                HeartbeatPage { page: page(c_throttled.clone(), "HUGE"), rewrite: false },
+                HeartbeatPage {
+                    page: page(a_reuse, "stable"),
+                    rewrite: false,
+                },
+                HeartbeatPage {
+                    page: page(named_tab("C:/churn.txt", true), "v2"),
+                    rewrite: true,
+                },
+                HeartbeatPage {
+                    page: page(c_throttled.clone(), "HUGE"),
+                    rewrite: false,
+                },
             ],
             0,
             1,
         )
         .unwrap();
-        assert!(!second.clean_exit, "心跳写的中间清单必须置 clean_exit=false");
+        assert!(
+            !second.clean_exit,
+            "心跳写的中间清单必须置 clean_exit=false"
+        );
         assert_eq!(
             second.tabs[0].file.as_deref(),
             Some(keep_file.as_str()),
@@ -848,8 +891,10 @@ mod tests {
             "变化页必须落新文件"
         );
         assert_eq!(second.tabs[2].file, None, "超限页不得落内容文件");
-        assert!(second.tabs[2].dirty && second.tabs[2].cursor_line == 9,
-            "超限页保持置脏记账与元数据");
+        assert!(
+            second.tabs[2].dirty && second.tabs[2].cursor_line == 9,
+            "超限页保持置脏记账与元数据"
+        );
 
         // 复用的旧代名文件在 GC 后仍然健在且内容可读——「引用关系」
         // 取代「代次相同」成为回收判据的直接后果
@@ -873,8 +918,7 @@ mod tests {
             .filter(|n| parse_page_generation(n).is_some())
             .collect();
         names.sort();
-        let mut expected: Vec<String> =
-            second.tabs.iter().filter_map(|t| t.file.clone()).collect();
+        let mut expected: Vec<String> = second.tabs.iter().filter_map(|t| t.file.clone()).collect();
         expected.sort();
         assert_eq!(names, expected, "GC 后应只剩活会话引用的页文件");
 
@@ -909,7 +953,10 @@ mod tests {
     #[test]
     fn page_file_name_parsing_roundtrips_and_rejects_lookalikes() {
         assert_eq!(parse_page_generation(&page_file_name(7, 0)), Some(7));
-        assert_eq!(parse_page_generation(&page_file_name(1_234_567_890, 12)), Some(1_234_567_890));
+        assert_eq!(
+            parse_page_generation(&page_file_name(1_234_567_890, 12)),
+            Some(1_234_567_890)
+        );
         // 相似但非本项目的命名必须拒绝
         assert_eq!(parse_page_generation("session.toml"), None);
         assert_eq!(parse_page_generation("sabc-t0.snap"), None);

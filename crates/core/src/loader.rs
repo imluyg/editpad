@@ -61,10 +61,13 @@ where
         path: path.to_path_buf(),
         source,
     })?;
-    let total_bytes = file.metadata().map_err(|source| CoreError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?.len();
+    let total_bytes = file
+        .metadata()
+        .map_err(|source| CoreError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
 
     let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
     let mut buffer: Vec<u8> = Vec::with_capacity(total_bytes as usize);
@@ -128,10 +131,13 @@ where
         path: path.to_path_buf(),
         source,
     })?;
-    let total_bytes = file.metadata().map_err(|source| CoreError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?.len();
+    let total_bytes = file
+        .metadata()
+        .map_err(|source| CoreError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
 
     let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
     let mut chunk = vec![0u8; CHUNK_SIZE];
@@ -173,8 +179,17 @@ where
             report(&mut on_progress, first_len as u64, total_bytes);
             let mut head = HeadSample::default();
             let doc = build_pass(
-                &mut reader, path, &chunk[..first_len], bom_len, encoding,
-                total_bytes, 0, total_bytes, &mut on_progress, None, &mut head,
+                &mut reader,
+                path,
+                &chunk[..first_len],
+                bom_len,
+                encoding,
+                total_bytes,
+                0,
+                total_bytes,
+                &mut on_progress,
+                None,
+                &mut head,
             )?;
             Ok(LoadedDocument {
                 doc,
@@ -193,7 +208,11 @@ where
             // 改写，第一趟得出的「UTF-8 合法」结论会落到第二趟的新字节上。
             let utf8_span = total_bytes - total_bytes / 4; // 单趟映射到 [0, 3/4]
             let scanned = scan_and_build_utf8(
-                &mut reader, path, &chunk[..first_len], total_bytes, utf8_span,
+                &mut reader,
+                path,
+                &chunk[..first_len],
+                total_bytes,
+                utf8_span,
                 &mut on_progress,
             )?;
             match scanned {
@@ -201,18 +220,27 @@ where
                 None => {
                     // 回卷重读：用同一个已打开的 fd，不重新 open
                     let mut file = reader.into_inner();
-                    file.seek(std::io::SeekFrom::Start(0)).map_err(|source| CoreError::Read {
-                        path: path.to_path_buf(),
-                        source,
-                    })?;
+                    file.seek(std::io::SeekFrom::Start(0))
+                        .map_err(|source| CoreError::Read {
+                            path: path.to_path_buf(),
+                            source,
+                        })?;
                     let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
                     let first_len = fill_chunk(&mut reader, &mut chunk).map_err(io_err(path))?;
                     let mut stats = BuildStats::default();
                     let mut head = HeadSample::default();
                     let doc = build_pass(
-                        &mut reader, path, &chunk[..first_len], 0, GBK,
-                        total_bytes, utf8_span, total_bytes - utf8_span, &mut on_progress,
-                        Some(&mut stats), &mut head,
+                        &mut reader,
+                        path,
+                        &chunk[..first_len],
+                        0,
+                        GBK,
+                        total_bytes,
+                        utf8_span,
+                        total_bytes - utf8_span,
+                        &mut on_progress,
+                        Some(&mut stats),
+                        &mut head,
                     )?;
                     if stats.replacements as f32 / stats.chars.max(1) as f32
                         > BINARY_REPLACEMENT_RATIO
@@ -221,7 +249,11 @@ where
                             path: path.to_path_buf(),
                         });
                     }
-                    Ok(LoadedDocument { doc, encoding: "GBK", sample: head.buf })
+                    Ok(LoadedDocument {
+                        doc,
+                        encoding: "GBK",
+                        sample: head.buf,
+                    })
                 }
             }
         }
@@ -260,11 +292,24 @@ where
 
     scan.feed(first_chunk);
     // 首块的读入量已由调用点记账，这里不重复计
-    absorb(&mut decoder, first_chunk, false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), &mut head);
+    absorb(
+        &mut decoder,
+        first_chunk,
+        false,
+        &mut out,
+        &mut builder,
+        &mut eol,
+        stats.as_deref_mut(),
+        &mut head,
+    );
     let mut done = first_chunk.len() as u64;
     // 乐观装载被放弃的标志：置位后**只读不装**（不解码、不再分配）
     let mut dropped = false;
-    report(on_progress, scaled_done(done, total_bytes, progress_span), total_bytes);
+    report(
+        on_progress,
+        scaled_done(done, total_bytes, progress_span),
+        total_bytes,
+    );
 
     let mut chunk = vec![0u8; CHUNK_SIZE];
     loop {
@@ -286,22 +331,46 @@ where
             dropped = true;
         }
         if !dropped {
-            absorb(&mut decoder, bytes, false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), &mut head);
+            absorb(
+                &mut decoder,
+                bytes,
+                false,
+                &mut out,
+                &mut builder,
+                &mut eol,
+                stats.as_deref_mut(),
+                &mut head,
+            );
         }
         done += n as u64;
-        report(on_progress, scaled_done(done, total_bytes, progress_span), total_bytes);
+        report(
+            on_progress,
+            scaled_done(done, total_bytes, progress_span),
+            total_bytes,
+        );
     }
 
     // 与旧写法同：扫完才裁决（不在 NUL 处提前 break，保持进度序列与结果一致）
     if scan.saw_nul {
-        return Err(CoreError::BinaryDetected { path: path.to_path_buf() });
+        return Err(CoreError::BinaryDetected {
+            path: path.to_path_buf(),
+        });
     }
     if dropped || !scan.utf8_valid() {
         return Ok(None); // 丢弃乐观 rope，交调用方回卷走 GBK
     }
     // 冲刷解码器尾部（未完的多字节序列）——合法 UTF-8 下应为空操作，
     // 但与 build_pass 保持一致地执行，确保两条形形状完全相同
-    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, None, &mut head);
+    absorb(
+        &mut decoder,
+        b"",
+        true,
+        &mut out,
+        &mut builder,
+        &mut eol,
+        None,
+        &mut head,
+    );
     report(on_progress, total_bytes, total_bytes);
     Ok(Some(LoadedDocument {
         doc: Document::from_parts(builder.finish(), eol.finish()),
@@ -568,7 +637,16 @@ fn build_pass(
 
     // 首块（跳过 BOM 字节）
     if first_chunk.len() > skip {
-        absorb(&mut decoder, &first_chunk[skip..], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), head);
+        absorb(
+            &mut decoder,
+            &first_chunk[skip..],
+            false,
+            &mut out,
+            &mut builder,
+            &mut eol,
+            stats.as_deref_mut(),
+            head,
+        );
     }
     let mut done = first_chunk.len() as u64;
 
@@ -582,14 +660,36 @@ fn build_pass(
             break;
         }
         done += n as u64;
-        absorb(&mut decoder, &chunk[..n], false, &mut out, &mut builder, &mut eol, stats.as_deref_mut(), head);
-        report(on_progress, progress_base + done.min(progress_span), total_bytes);
+        absorb(
+            &mut decoder,
+            &chunk[..n],
+            false,
+            &mut out,
+            &mut builder,
+            &mut eol,
+            stats.as_deref_mut(),
+            head,
+        );
+        report(
+            on_progress,
+            progress_base + done.min(progress_span),
+            total_bytes,
+        );
     }
     // 冲刷解码器尾部（未完的多字节序列 / 未配对代理）
     // P216：stats 必须一并喂进去——悬在半路的尾字节的 U+FFFD **只**出现在这
     // 一次输出里。此前传 None，占比统计系统性少算，二进制防护（P1）在流式
     // 路径上形同虚设（详见 `load_document_streaming` 的判定处）。
-    absorb(&mut decoder, b"", true, &mut out, &mut builder, &mut eol, stats, head);
+    absorb(
+        &mut decoder,
+        b"",
+        true,
+        &mut out,
+        &mut builder,
+        &mut eol,
+        stats,
+        head,
+    );
     report(on_progress, total_bytes, total_bytes);
 
     Ok(Document::from_parts(builder.finish(), eol.finish()))
@@ -711,7 +811,11 @@ mod tests {
         let reads = READ_BYTES.with(|c| c.take());
 
         assert_eq!(loaded.encoding, "UTF-8");
-        assert_eq!(loaded.doc.to_text(), content, "单趟装载的正文必须与源文件逐字一致");
+        assert_eq!(
+            loaded.doc.to_text(),
+            content,
+            "单趟装载的正文必须与源文件逐字一致"
+        );
         assert_eq!(reads, size, "读入字节数应恰等于文件大小（改前是 2×）");
         assert!(events.len() >= 3, "进度回调次数过少：{}", events.len());
         for pair in events.windows(2) {
@@ -794,7 +898,11 @@ mod tests {
             crate::loader::decode(&body).text,
             "回卷重读的兜底结果必须与 decode() 一致"
         );
-        assert_eq!(reads, size * 2, "兜底路径应恰好读两趟（同 fd 回卷，非重开）");
+        assert_eq!(
+            reads,
+            size * 2,
+            "兜底路径应恰好读两趟（同 fd 回卷，非重开）"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -808,12 +916,15 @@ mod tests {
         fs::write(&target, &content).unwrap();
 
         let mut events = Vec::new();
-        let loaded =
-            load_file_streaming(&target, |p| events.push(p)).expect("加载应成功");
+        let loaded = load_file_streaming(&target, |p| events.push(p)).expect("加载应成功");
 
         assert_eq!(loaded.text, content);
         assert_eq!(loaded.encoding, "UTF-8");
-        assert!(events.len() >= 3, "应触发多次进度回调，实际 {} 次", events.len());
+        assert!(
+            events.len() >= 3,
+            "应触发多次进度回调，实际 {} 次",
+            events.len()
+        );
         for pair in events.windows(2) {
             assert!(pair[0].bytes_read <= pair[1].bytes_read, "进度必须单调递增");
         }
@@ -973,7 +1084,12 @@ mod tests {
     #[test]
     fn streaming_document_matches_decode_oracle_across_encodings() {
         let cases: Vec<(&str, Vec<u8>)> = vec![
-            ("plain.txt", "hello 世界 editpad\nsecond line\r\nthird".as_bytes().to_vec()),
+            (
+                "plain.txt",
+                "hello 世界 editpad\nsecond line\r\nthird"
+                    .as_bytes()
+                    .to_vec(),
+            ),
             ("bom.txt", {
                 let mut b = vec![0xEF, 0xBB, 0xBF];
                 b.extend_from_slice("BOM 内容\n第二行".as_bytes());
@@ -994,7 +1110,10 @@ mod tests {
                 b
             }),
             // 已知 GBK 字节对：中=D6D0 文=CEC4
-            ("gbk.txt", vec![0xD6, 0xD0, 0xCE, 0xC4, b',', b' ', b'G', b'B', b'K']),
+            (
+                "gbk.txt",
+                vec![0xD6, 0xD0, 0xCE, 0xC4, b',', b' ', b'G', b'B', b'K'],
+            ),
             ("empty.txt", Vec::new()),
         ];
 
@@ -1002,10 +1121,7 @@ mod tests {
         for (name, bytes) in cases {
             let got = load_doc_via_stream(&dir, name, &bytes);
             let want = decode(&bytes);
-            assert_eq!(
-                got.0, want.text,
-                "{name}: 正文必须与 decode 参照实现一致"
-            );
+            assert_eq!(got.0, want.text, "{name}: 正文必须与 decode 参照实现一致");
             assert_eq!(got.1, want.encoding, "{name}: 编码标签必须一致");
         }
         fs::remove_dir_all(&dir).ok();
@@ -1073,8 +1189,18 @@ mod tests {
     #[test]
     fn eol_counter_cross_chunk_parity() {
         use crate::document::EolCounter;
-        let samples = ["a\r\nb", "a\rb", "a\nb", "\r\n", "\r", "\n", "", "x",
-                       "a\r\n\r\rb\n\r", "\r\r\n\n"];
+        let samples = [
+            "a\r\nb",
+            "a\rb",
+            "a\nb",
+            "\r\n",
+            "\r",
+            "\n",
+            "",
+            "x",
+            "a\r\n\r\rb\n\r",
+            "\r\r\n\n",
+        ];
         for sample in samples {
             for split in 0..=sample.len() {
                 // 任意切分点（含切在 \r 与 \n 中间）都必须得到同一结论
@@ -1082,8 +1208,11 @@ mod tests {
                 counter.push(&sample[..split]);
                 counter.push(&sample[split..]);
                 let streamed = counter.finish();
-                assert_eq!(streamed, LineEnding::detect(sample),
-                    "sample={sample:?} split={split}");
+                assert_eq!(
+                    streamed,
+                    LineEnding::detect(sample),
+                    "sample={sample:?} split={split}"
+                );
             }
         }
     }
@@ -1146,7 +1275,11 @@ mod tests {
         for _ in 0..(SAMPLE_HEAD_CHARS / 8) {
             s.push(chunk);
         }
-        assert_eq!(s.buf.chars().count(), SAMPLE_HEAD_CHARS, "样本必须停在字符上限");
+        assert_eq!(
+            s.buf.chars().count(),
+            SAMPLE_HEAD_CHARS,
+            "样本必须停在字符上限"
+        );
         assert!(s.full, "达到上限必须置 full");
         let before = s.buf.clone();
         s.push(chunk);

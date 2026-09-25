@@ -21,7 +21,10 @@ fn main() {
 
     let doc = synthetic_rust_doc(lines);
     let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
-    println!("== 合成 Rust 文档 {lines} 行（{} 字符），STRIDE=128 ==", doc.text_len());
+    println!(
+        "== 合成 Rust 文档 {lines} 行（{} 字符），STRIDE=128 ==",
+        doc.text_len()
+    );
 
     // 单项成本：Highlighter 构造（styled_line 每次调用都会重建一个）
     let t = Instant::now();
@@ -65,12 +68,9 @@ fn main() {
         let line = (k * 6_005 + 7) % last; // 散开的伪随机行号
         let text = doc.line_str(line);
         let t = Instant::now();
-        let _ = hl.styled_line(
-            line,
-            text.trim_end_matches(['\n', '\r']),
-            total,
-            &mut |i| doc.line_str(i),
-        );
+        let _ = hl.styled_line(line, text.trim_end_matches(['\n', '\r']), total, &mut |i| {
+            doc.line_str(i)
+        });
         warm_total += t.elapsed();
     }
     println!(
@@ -150,7 +150,8 @@ fn main() {
     );
     println!(
         "铺满后 styled_line_limited(末行)        {:8.3} ms（{} 段，应为 Some）",
-        ms(t.elapsed()), runs.map(|r| r.len()).unwrap_or(0)
+        ms(t.elapsed()),
+        runs.map(|r| r.len()).unwrap_or(0)
     );
 }
 
@@ -158,7 +159,8 @@ fn main() {
 /// 与 highlight.rs 内部同一路径，构造开销不计入主题加载）。
 fn highlight_probe() -> syntect::highlighting::Highlighter<'static> {
     fn theme() -> &'static syntect::highlighting::Theme {
-        static THEME: std::sync::OnceLock<syntect::highlighting::Theme> = std::sync::OnceLock::new();
+        static THEME: std::sync::OnceLock<syntect::highlighting::Theme> =
+            std::sync::OnceLock::new();
         THEME.get_or_init(|| {
             syntect::highlighting::ThemeSet::load_defaults()
                 .themes

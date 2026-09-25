@@ -13,11 +13,7 @@ use std::path::PathBuf;
 
 /// 测试专用临时目录（进程级唯一子目录，测试尾部自行清理）。
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "editpad-boundary-{}-{}",
-        std::process::id(),
-        tag
-    ));
+    let dir = std::env::temp_dir().join(format!("editpad-boundary-{}-{}", std::process::id(), tag));
     std::fs::create_dir_all(&dir).expect("创建临时目录失败");
     dir
 }
@@ -107,7 +103,11 @@ fn four_byte_emoji_char_byte_and_search_boundaries() {
     let text = "a\u{1F600}b\nc\u{1F600}";
     let doc = Document::from_str(text);
     assert_eq!(doc.text_len(), 6, "Unicode scalar 口径：emoji 记 1");
-    assert_eq!(doc.text_len_bytes(), 1 + 4 + 1 + 1 + 1 + 4, "UTF-8 字节口径");
+    assert_eq!(
+        doc.text_len_bytes(),
+        1 + 4 + 1 + 1 + 1 + 4,
+        "UTF-8 字节口径"
+    );
     assert_eq!(doc.line_count(), 2);
     assert_eq!(doc.line_str(0), "a\u{1F600}b\n");
     assert_eq!(doc.line_str(1), "c\u{1F600}");
@@ -126,8 +126,7 @@ fn four_byte_emoji_char_byte_and_search_boundaries() {
     assert_eq!(hits[0].col, 1);
     assert_eq!(hits[1].line, 1);
     assert_eq!(hits[1].col, 1);
-    let (out, n) =
-        replace_all_document(&Document::from_str(text), "\u{1F600}", "*", true);
+    let (out, n) = replace_all_document(&Document::from_str(text), "\u{1F600}", "*", true);
     assert_eq!(n, 2);
     assert_eq!(out, "a*b\nc*");
 }
@@ -147,14 +146,14 @@ fn mixed_line_endings_detect_dominant() {
         LineEnding::Lf
     );
     // 平票 → Lf（严格多数判定，无多数即默认）
-    assert_eq!(
-        Document::from_str("a\r\nb\n").line_ending(),
-        LineEnding::Lf
-    );
+    assert_eq!(Document::from_str("a\r\nb\n").line_ending(), LineEnding::Lf);
     // 块尾悬置 \r（P19 跨块统计语义）：crlf 与 cr 平票、lf 为 0 → cr 胜出
     assert_eq!(Document::from_str("a\r\nb\r").line_ending(), LineEnding::Cr);
     // 孤立 \r（旧 Mac 行尾）多数 → Cr
-    assert_eq!(Document::from_str("a\rb\rc\r").line_ending(), LineEnding::Cr);
+    assert_eq!(
+        Document::from_str("a\rb\rc\r").line_ending(),
+        LineEnding::Cr
+    );
 
     // 混合行尾文档的行数与逐行取数（ropey 按 \n / \r\n / \r 都断行；
     // len_lines = 换行数 + 1，末尾换行后的空行计入——Document 契约）

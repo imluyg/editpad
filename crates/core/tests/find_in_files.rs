@@ -6,8 +6,9 @@
 //! 词/单文件封顶组装；filter_whole_word_text 的行界口径（\r\n / 孤立
 //! \r / \n 皆行界）、行首尾边界、跨行命中保留。
 
-use editpad_core::{filter_whole_word_text, find_all, find_in_file, walk_files, WalkOutput,
-    IGNORED_DIRS};
+use editpad_core::{
+    filter_whole_word_text, find_all, find_in_file, walk_files, WalkOutput, IGNORED_DIRS,
+};
 use std::path::PathBuf;
 
 /// 测试专用临时目录（进程级唯一子目录，测试尾部自行清理）——
@@ -18,11 +19,7 @@ struct Scratch {
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "editpad-fif-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let root = std::env::temp_dir().join(format!("editpad-fif-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&root); // 上次残留清场
         std::fs::create_dir_all(&root).expect("创建临时目录失败");
         Scratch { root }
@@ -204,8 +201,14 @@ fn find_in_file_cap_returns_and_allocates_only_the_limit() {
     );
 
     // 「恰好等于命中数」与「上限大于命中数」都不该丢命中、不该判截断
-    assert_eq!(find_in_file(&text, "the", true, false, false, 100_000).len(), 100_000);
-    assert_eq!(find_in_file(&text, "the", true, false, false, 100_001).len(), 100_000);
+    assert_eq!(
+        find_in_file(&text, "the", true, false, false, 100_000).len(),
+        100_000
+    );
+    assert_eq!(
+        find_in_file(&text, "the", true, false, false, 100_001).len(),
+        100_000
+    );
     assert!(find_in_file(&text, "the", true, false, false, 0).is_empty());
 
     // app 层在用的预编译入口走同一个 `literal_hits`，同口径
@@ -241,9 +244,22 @@ fn whole_word_text_boundaries_and_adjacent_words() {
     let hits = find_all(text, "cat", true);
     assert_eq!(hits.len(), 3);
     let kept = filter_whole_word_text(text, hits);
-    assert_eq!(kept, vec![editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
-        editpad_core::MatchPos { line: 0, col: 12, len_chars: 3 }],
-        "catalog 的命中被剔除，行首/行尾两处保留");
+    assert_eq!(
+        kept,
+        vec![
+            editpad_core::MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 3
+            },
+            editpad_core::MatchPos {
+                line: 0,
+                col: 12,
+                len_chars: 3
+            }
+        ],
+        "catalog 的命中被剔除，行首/行尾两处保留"
+    );
 
     // 前后都是标点 = 边界成立
     let kept = filter_whole_word_text("(cat)-cat.", find_all("(cat)-cat.", "cat", true));
@@ -280,8 +296,11 @@ fn whole_word_text_multi_line_line_numbers_match_find_all() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].line, 2);
     assert_eq!(hits[0].col, 4);
-    assert_eq!(filter_whole_word_text(text, hits.clone()), hits,
-        "整词命中原样保留（坐标不动）");
+    assert_eq!(
+        filter_whole_word_text(text, hits.clone()),
+        hits,
+        "整词命中原样保留（坐标不动）"
+    );
 
     // 忽略大小写口径下 word 边界判定不受大小写影响
     let text = "Word WORD word";
@@ -292,10 +311,7 @@ fn whole_word_text_multi_line_line_numbers_match_find_all() {
 #[test]
 fn ignored_dirs_constant_pins_phase_one_scope() {
     // 钉住一期排除范围（设计 §1）：改动须同步设计文档与 README 披露
-    assert_eq!(
-        IGNORED_DIRS,
-        &[".git", "node_modules", "target", "dist"]
-    );
+    assert_eq!(IGNORED_DIRS, &[".git", "node_modules", "target", "dist"]);
 }
 
 #[test]
@@ -344,11 +360,7 @@ fn walk_files_depth_cap_skips_bottomless_trees() {
     std::fs::write(scratch.root.join("shallow.txt"), "reachable").unwrap();
 
     let out = walk_files(&scratch.root, 1000);
-    assert_eq!(
-        out.files.len(),
-        1,
-        "超深子树应整棵跳过，只收录浅层文件"
-    );
+    assert_eq!(out.files.len(), 1, "超深子树应整棵跳过，只收录浅层文件");
     assert!(out.files[0].ends_with("shallow.txt"));
     assert!(!out.truncated, "深度跳过不算截断（与文件数封顶口径区分）");
 }

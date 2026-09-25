@@ -1503,7 +1503,11 @@ mod tests {
             assert_eq!(normalize_language(raw), Lang::En, "{raw:?} 应归一为 en");
         }
         for raw in ["zh", "zh-CN", "zh_cn", "ZH-Hans", "zh-SG"] {
-            assert_eq!(normalize_language(raw), Lang::ZhCn, "{raw:?} 应归一为 zh-CN");
+            assert_eq!(
+                normalize_language(raw),
+                Lang::ZhCn,
+                "{raw:?} 应归一为 zh-CN"
+            );
         }
         // 未知/空/垃圾值 → 默认中文简体（界面默认语言，不因手改配置而错乱）
         for raw in ["", "  ", "fr", "日本語", "xx-YY", "en-US-x-private"] {

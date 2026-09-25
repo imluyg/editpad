@@ -157,10 +157,7 @@ fn fuzz_one(seed: u64, rounds: usize) {
                 let max_span = (boundaries.len() - start_idx - 1).min(5);
                 let k = rng.below(max_span + 1);
                 let end = boundaries[(start_idx + k).min(boundaries.len() - 1)];
-                let (cs, ce) = (
-                    char_index_of(&model, start),
-                    char_index_of(&model, end),
-                );
+                let (cs, ce) = (char_index_of(&model, start), char_index_of(&model, end));
                 doc.remove_range(cs, ce);
                 past.push(model.clone());
                 future.clear();
@@ -178,12 +175,8 @@ fn fuzz_one(seed: u64, rounds: usize) {
                 let nq = eol.normalize(&query);
                 let nr = eol.normalize(&replacement);
                 let expected = model.replacen(&nq, &nr, usize::MAX);
-                let (new_text, count) =
-                    replace_all_document(&doc, &query, &replacement, true);
-                assert_eq!(
-                    new_text, expected,
-                    "seed={seed} step={step} 替换正文不一致"
-                );
+                let (new_text, count) = replace_all_document(&doc, &query, &replacement, true);
+                assert_eq!(new_text, expected, "seed={seed} step={step} 替换正文不一致");
                 assert_eq!(
                     count,
                     model.matches(&nq).count(),
