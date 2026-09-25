@@ -223,6 +223,181 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第十步：不可见字符标记（第 64 轮）自 `draw` 提成方法（A 层，逐字搬移）。
+    ///
+    /// 护栏：`headless_invisibles_marks_toggle_frame_diff`（第①步现证：短路本块后
+    /// 恰好它一条红）。块内 `visible_range()` 原样留在方法里，搬运不改求值次序。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_invisibles(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+    ) {
+        // 不可见字符覆盖标记（第 64 轮）：空格=字符格中央小点、制表符=
+        // 格内短横、行尾=右端短竖标。纯 A 层 quad 叠加，不改文本布局与
+        // 命中测试；x 优先取实测行布局 row_x（O(1)），该行布局未就绪则
+        // 整行跳过（滞后一帧出现，可接受）。可见行外剔除与书签同款。
+        // 第 73 轮 ⑯：软换行开态标记逐视觉段定位（字符所在段 = 视觉行）；
+        // 行尾标只在逻辑行末段画（设计 §4.1）。关态整行单段，恒等退化。
+        if core.show_whitespace || core.show_line_endings {
+            let mark = colors.invisibles;
+            // 空白标记绘制（闭包收纳 A 层 quad 分支，两态共用）
+            let draw_ws_mark =
+                |renderer: &mut iced::Renderer, y: f32, cx: f32, ch: char, adv: usize| match ch {
+                    ' ' => renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: cx + char_w * 0.5 - 1.0,
+                                y: y + lh * 0.62,
+                                width: 2.0,
+                                height: 2.0,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        mark,
+                    ),
+                    '\t' => {
+                        let w = (adv as f32 * char_w * 0.6).max(3.0);
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x: cx + char_w * 0.3,
+                                    y: y + lh * 0.55,
+                                    width: w,
+                                    height: 1.5,
+                                },
+                                ..renderer::Quad::default()
+                            },
+                            mark,
+                        )
+                    }
+                    _ => {}
+                };
+            let (iv_first, iv_last) = core.visible_range();
+            for line in iv_first..=iv_last {
+                let text = core.line_text(line);
+                let lens = text.chars().count();
+                if core.wrap_enabled() {
+                    let breaks = core.segments_of_line(line, &text);
+                    let base = core.line_visual_base(line);
+                    // 最后可见段（视口下缘内的段序上限，供空白标记截断）
+                    let max_vis_seg = {
+                        let mut m = 0usize;
+                        for (s, _) in breaks.iter().enumerate() {
+                            // ⚠️ `<` 必须与左操作数同行（换行会被解析器
+                            // 当成 f32 的泛型参数开始）
+                            if ((base + s as u32) as f32)
+                                < (core.scroll_top + core.viewport_h / lh + 1.0)
+                            {
+                                m = s;
+                            } else {
+                                break;
+                            }
+                        }
+                        m
+                    };
+                    if core.show_line_endings {
+                        // 行尾短竖标只在逻辑行末段画
+                        let last_seg = breaks.len() - 1;
+                        if last_seg <= max_vis_seg {
+                            let v = base + last_seg as u32;
+                            let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                            if y + lh > bounds.y && y < bounds.y + bounds.height {
+                                let cols = core.line_display_len(line);
+                                if let Some(x) = core.row_x(line, cols) {
+                                    // 段相对：x 减末段起点像素（续行左缘）
+                                    let x_rel = x - core.px_of(line, &text, breaks[last_seg]);
+                                    renderer.fill_quad(
+                                        renderer::Quad {
+                                            bounds: Rectangle {
+                                                x: bounds.x + gutter_w + x_rel - scroll_left
+                                                    + char_w * 0.25,
+                                                y: y + lh * 0.25,
+                                                width: 2.0,
+                                                height: lh * 0.45,
+                                            },
+                                            ..renderer::Quad::default()
+                                        },
+                                        mark,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if core.show_whitespace {
+                        let mut col = 0usize;
+                        for ch in text.chars() {
+                            if ch == '\n' || ch == '\r' {
+                                break;
+                            }
+                            let adv = char_cols(ch, col) as usize;
+                            // 字符所在段 → 其视觉行（段序随 col 非降，
+                            // 越过最后可见段的字符直接截断）
+                            let seg = wrap_segment_index(&breaks, col, lens);
+                            if seg > max_vis_seg {
+                                break;
+                            }
+                            let y = bounds.y + ((base + seg as u32) as f32 - core.scroll_top) * lh;
+                            if y + lh > bounds.y && y < bounds.y + bounds.height {
+                                if let Some(x) = core.row_x(line, col) {
+                                    // 段相对：续行字符标记从段起点起排
+                                    let cx = bounds.x + gutter_w + x
+                                        - core.px_of(line, &text, breaks[seg])
+                                        - scroll_left;
+                                    draw_ws_mark(renderer, y, cx, ch, adv);
+                                }
+                            }
+                            col += adv;
+                        }
+                    }
+                    continue;
+                }
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                if core.show_whitespace {
+                    let mut col = 0usize;
+                    for ch in text.chars() {
+                        if ch == '\n' || ch == '\r' {
+                            break;
+                        }
+                        let adv = char_cols(ch, col) as usize;
+                        if let Some(x) = core.row_x(line, col) {
+                            let cx = bounds.x + gutter_w + x - scroll_left;
+                            draw_ws_mark(renderer, y, cx, ch, adv);
+                        }
+                        col += adv;
+                    }
+                }
+                if core.show_line_endings {
+                    // 行尾短竖标：行内容右端再让出四分之一格
+                    let cols = core.line_display_len(line);
+                    if let Some(x) = core.row_x(line, cols) {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x: bounds.x + gutter_w + x - scroll_left + char_w * 0.25,
+                                    y: y + lh * 0.25,
+                                    width: 2.0,
+                                    height: lh * 0.45,
+                                },
+                                ..renderer::Quad::default()
+                            },
+                            mark,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// S-5 第九步：缩进参考线（P132/C4）自 `draw` 提成方法（A 层，函数体逐字搬移）。
     ///
     /// 护栏：`headless_indent_guides_ink_at_tab_stops_and_toggle_off`（第①步现证：
@@ -1239,163 +1414,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         );
 
         // A 层（quad）收口
-        // 不可见字符覆盖标记（第 64 轮）：空格=字符格中央小点、制表符=
-        // 格内短横、行尾=右端短竖标。纯 A 层 quad 叠加，不改文本布局与
-        // 命中测试；x 优先取实测行布局 row_x（O(1)），该行布局未就绪则
-        // 整行跳过（滞后一帧出现，可接受）。可见行外剔除与书签同款。
-        // 第 73 轮 ⑯：软换行开态标记逐视觉段定位（字符所在段 = 视觉行）；
-        // 行尾标只在逻辑行末段画（设计 §4.1）。关态整行单段，恒等退化。
-        if core.show_whitespace || core.show_line_endings {
-            let mark = colors.invisibles;
-            // 空白标记绘制（闭包收纳 A 层 quad 分支，两态共用）
-            let draw_ws_mark =
-                |renderer: &mut iced::Renderer, y: f32, cx: f32, ch: char, adv: usize| match ch {
-                    ' ' => renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: cx + char_w * 0.5 - 1.0,
-                                y: y + lh * 0.62,
-                                width: 2.0,
-                                height: 2.0,
-                            },
-                            ..renderer::Quad::default()
-                        },
-                        mark,
-                    ),
-                    '\t' => {
-                        let w = (adv as f32 * char_w * 0.6).max(3.0);
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: Rectangle {
-                                    x: cx + char_w * 0.3,
-                                    y: y + lh * 0.55,
-                                    width: w,
-                                    height: 1.5,
-                                },
-                                ..renderer::Quad::default()
-                            },
-                            mark,
-                        )
-                    }
-                    _ => {}
-                };
-            let (iv_first, iv_last) = core.visible_range();
-            for line in iv_first..=iv_last {
-                let text = core.line_text(line);
-                let lens = text.chars().count();
-                if core.wrap_enabled() {
-                    let breaks = core.segments_of_line(line, &text);
-                    let base = core.line_visual_base(line);
-                    // 最后可见段（视口下缘内的段序上限，供空白标记截断）
-                    let max_vis_seg = {
-                        let mut m = 0usize;
-                        for (s, _) in breaks.iter().enumerate() {
-                            // ⚠️ `<` 必须与左操作数同行（换行会被解析器
-                            // 当成 f32 的泛型参数开始）
-                            if ((base + s as u32) as f32)
-                                < (core.scroll_top + core.viewport_h / lh + 1.0)
-                            {
-                                m = s;
-                            } else {
-                                break;
-                            }
-                        }
-                        m
-                    };
-                    if core.show_line_endings {
-                        // 行尾短竖标只在逻辑行末段画
-                        let last_seg = breaks.len() - 1;
-                        if last_seg <= max_vis_seg {
-                            let v = base + last_seg as u32;
-                            let y = bounds.y + (v as f32 - core.scroll_top) * lh;
-                            if y + lh > bounds.y && y < bounds.y + bounds.height {
-                                let cols = core.line_display_len(line);
-                                if let Some(x) = core.row_x(line, cols) {
-                                    // 段相对：x 减末段起点像素（续行左缘）
-                                    let x_rel = x - core.px_of(line, &text, breaks[last_seg]);
-                                    renderer.fill_quad(
-                                        renderer::Quad {
-                                            bounds: Rectangle {
-                                                x: bounds.x + gutter_w + x_rel - scroll_left
-                                                    + char_w * 0.25,
-                                                y: y + lh * 0.25,
-                                                width: 2.0,
-                                                height: lh * 0.45,
-                                            },
-                                            ..renderer::Quad::default()
-                                        },
-                                        mark,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    if core.show_whitespace {
-                        let mut col = 0usize;
-                        for ch in text.chars() {
-                            if ch == '\n' || ch == '\r' {
-                                break;
-                            }
-                            let adv = char_cols(ch, col) as usize;
-                            // 字符所在段 → 其视觉行（段序随 col 非降，
-                            // 越过最后可见段的字符直接截断）
-                            let seg = wrap_segment_index(&breaks, col, lens);
-                            if seg > max_vis_seg {
-                                break;
-                            }
-                            let y = bounds.y + ((base + seg as u32) as f32 - core.scroll_top) * lh;
-                            if y + lh > bounds.y && y < bounds.y + bounds.height {
-                                if let Some(x) = core.row_x(line, col) {
-                                    // 段相对：续行字符标记从段起点起排
-                                    let cx = bounds.x + gutter_w + x
-                                        - core.px_of(line, &text, breaks[seg])
-                                        - scroll_left;
-                                    draw_ws_mark(renderer, y, cx, ch, adv);
-                                }
-                            }
-                            col += adv;
-                        }
-                    }
-                    continue;
-                }
-                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
-                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                    continue;
-                }
-                if core.show_whitespace {
-                    let mut col = 0usize;
-                    for ch in text.chars() {
-                        if ch == '\n' || ch == '\r' {
-                            break;
-                        }
-                        let adv = char_cols(ch, col) as usize;
-                        if let Some(x) = core.row_x(line, col) {
-                            let cx = bounds.x + gutter_w + x - scroll_left;
-                            draw_ws_mark(renderer, y, cx, ch, adv);
-                        }
-                        col += adv;
-                    }
-                }
-                if core.show_line_endings {
-                    // 行尾短竖标：行内容右端再让出四分之一格
-                    let cols = core.line_display_len(line);
-                    if let Some(x) = core.row_x(line, cols) {
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: Rectangle {
-                                    x: bounds.x + gutter_w + x - scroll_left + char_w * 0.25,
-                                    y: y + lh * 0.25,
-                                    width: 2.0,
-                                    height: lh * 0.45,
-                                },
-                                ..renderer::Quad::default()
-                            },
-                            mark,
-                        );
-                    }
-                }
-            }
-        }
+        // 不可见字符标记（S-5 第十步外提为 `draw_invisibles`，逐字搬移）
+        self.draw_invisibles(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            lh,
+            char_w,
+            gutter_w,
+            scroll_left,
+        );
         renderer.end_layer();
 
         // B 层：文本专用，四周内缩 TEXT_LAYER_INSET——层边界严格小于
