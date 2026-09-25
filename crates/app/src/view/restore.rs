@@ -199,8 +199,20 @@ impl Editpad {
         self.untitled_next = next_untitled;
 
         self.restore_queue = queue;
-        self.restore_pending = self.restore_queue.len();
         self.begin_restore_load()
+    }
+
+    /// 尚未落地的恢复页数 = 队列里排着的 + 已登记为在途的那一个。
+    /// S-3：这原先是个手写计数器（`restore_pending`），一增一减地另记一份账，
+    /// 生产代码零读者、只有测试在断言它。改成从队列与在途任务派生之后，
+    /// 「计数器与队列不同步」这类账目漂移就没有载体了。
+    /// 在途的那个用 `restore_views` 判定（只有恢复链的加载任务在里面）。
+    pub(crate) fn restore_outstanding(&self) -> usize {
+        let inflight = self
+            .active_load
+            .as_ref()
+            .is_some_and(|job| self.restore_views.contains_key(&job.id));
+        self.restore_queue.len() + usize::from(inflight)
     }
 
     /// 恢复链：载入队列中的下一个命名页（队列空则收尾出汇总）。
@@ -233,10 +245,9 @@ impl Editpad {
         Task::none()
     }
 
-    /// 恢复链的一步收尾：待载数递减；队列排空时出汇总状态。
+    /// 恢复链的一步收尾：队列排空时出汇总状态。
     /// 返回是否需要续排下一页（Loaded 处理器据此链接任务）。
     pub(crate) fn settle_restore_step(&mut self) -> bool {
-        self.restore_pending = self.restore_pending.saturating_sub(1);
         if self.restore_queue.is_empty() {
             self.finish_restore_summary();
             false
@@ -272,7 +283,6 @@ impl Editpad {
         }
         self.restore_failed = 0;
         self.restore_dropped = 0;
-        self.restore_pending = 0;
     }
 
     /// 移除第 idx 个恢复占位页，并把队列中大于 idx 的目标下标整体前移
@@ -298,6 +308,11 @@ impl Editpad {
                 entry.tab -= 1;
             }
         }
+        // S-1：恢复在途时用户可能已弹起关闭确认条。这条移除路径过去只平移
+        // restore_queue 的下标，没管确认条——其前的占位页被移除后，条子会整体
+        // 左移落到相邻页上，〔放弃并关闭〕于是清空并关掉用户根本没选过的页。
+        // 存页 id 之后收口只需一句，且新增移除路径不会再漏。
+        self.dismiss_close_confirm_if_gone();
         // active_tab 可能越界：与 tabs 对齐并同步别名
         self.refresh_cur_handle();
     }

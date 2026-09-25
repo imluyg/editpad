@@ -474,7 +474,7 @@ impl Editpad {
 
         // P21 标签页关闭确认：骨架版仅提供「放弃更改并关闭」出口，
         // 想保留改动请先 Ctrl+S（完整保存后关闭随 P21 完整版补齐）
-        if let Some(idx) = self.close_tab_confirm {
+        if let Some(idx) = self.close_confirm_idx() {
             body = body.push(rule::horizontal(1)).push(
                 row![
                     text(format!(
@@ -502,8 +502,8 @@ impl Editpad {
                     .padding([4, 12])
                     .style(chrome_button_style)
                     .on_press_maybe(
-                        // P145：夹紧兜底——确认条下标随关页平移/清理
-                        //（close_tab_now），此处 get 防未来回归越界
+                        // S-1：idx 由页 id 现地解析（close_confirm_idx），恒在界内；
+                        // 这里的 get 只当保险，不再是防陈旧下标越界的兜底
                         (!self.busy && self.tabs.get(idx).is_some_and(|t| t.path.is_some()))
                             .then_some(Message::CloseTabSave(idx)),
                     ),

@@ -301,12 +301,18 @@ impl Editpad {
         }
     }
 
-    /// P146：置位「清单过期」并推进代次。心跳派发时把代次随载荷带走，
-    /// 成功回报只在代次未变时才清标记——在途心跳期间的结构变化（关页）
+    /// P146：推进清单**意图**代次（＝置「过期」）。心跳派发时把代次随载荷带走，
+    /// 成功回报只在代次未变时才推进已提交代次——在途心跳期间的结构变化（关页）
     /// 不会被人写出的旧清单「洗白」。
     fn touch_manifest_stale(&mut self) {
-        self.session_manifest_stale = true;
         self.manifest_rev += 1;
+    }
+
+    /// S-3：内存态是否比最近一次已提交的清单更新。原先这是一个独立布尔标记，
+    /// 与 `manifest_rev` 各记一份账——两者可以互相矛盾（标记被清而代次已前进），
+    /// 现在过期与否只由代次差推出，矛盾在类型上不再可能。
+    pub(crate) fn manifest_stale(&self) -> bool {
+        self.manifest_committed_rev != self.manifest_rev
     }
 
     pub(crate) fn new(cli_files: Vec<PathBuf>) -> (Self, Task<Message>) {

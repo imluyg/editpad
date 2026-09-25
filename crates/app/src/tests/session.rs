@@ -512,7 +512,7 @@ fn session_restore_rebuilds_tabs_content_active_and_pending_loads() {
     );
     drop(ed1);
     assert!(app.active_load.is_none());
-    assert_eq!(app.restore_pending, 0, "恢复链排空");
+    assert_eq!(app.restore_outstanding(), 0, "恢复链排空");
     assert!(app.status.is_empty(), "全部成功的恢复不打扰状态栏");
 
     editpad_core::snapshot::clear_session(&dir);
@@ -950,7 +950,7 @@ fn restore_chain_resumes_after_an_unrelated_load_settles() {
 
     // 此刻点〔恢复〕：链建起来，但队首被塞回（通道被占）
     let _ = app.accept_session_recover(Some(dir.clone()));
-    assert_eq!(app.restore_pending, 2, "恢复链应已建起来");
+    assert_eq!(app.restore_queue.len(), 2, "恢复链应已建起来");
     assert_eq!(app.restore_queue.len(), 2, "通道被占 → 整条队列停在队首");
     assert_eq!(
         app.active_load.as_ref().unwrap().id,
@@ -1005,7 +1005,11 @@ fn restore_skips_unloadable_page_and_keeps_chain_going() {
     let mut app = Editpad::default();
     let _ = app.restore_from_manifest(&dir, &manifest);
     assert_eq!(app.tabs.len(), 2);
-    assert_eq!(app.restore_pending, 2);
+    assert_eq!(
+        app.restore_outstanding(),
+        2,
+        "两页都还没落地（一页在途、一页排队）"
+    );
     let seq_a = app.active_load.as_ref().unwrap().id;
 
     // 第一页加载失败（文件已被删等）：占位移除、失败计数、
@@ -1045,7 +1049,7 @@ fn restore_skips_unloadable_page_and_keeps_chain_going() {
         Some(Path::new("C:/w/stays.txt"))
     );
     assert!(app.active_load.is_none());
-    assert_eq!(app.restore_pending, 0);
+    assert_eq!(app.restore_queue.len(), 0);
     assert!(
         app.status.contains("会话恢复完成") && app.status.contains("1 页未能恢复"),
         "失败页要有状态栏汇总:{:?}",
@@ -1461,14 +1465,14 @@ fn heartbeat_refreshes_manifest_after_autosave_cleans_tab() {
         ),
     );
     assert!(!app.tab().dirty);
-    assert!(app.session_manifest_stale, "清脏后下一拍必须重写清单");
+    assert!(app.manifest_stale(), "清脏后下一拍必须重写清单");
 
     // 下一拍即使无页被选中也要提交：清单转为「干净页纯元数据」，
     // 否则崩溃恢复会把已落盘内容按旧快照复活成置脏页
     app.run_heartbeat_cycle(&dir).expect("过期清单应触发重写");
     let refreshed = editpad_core::snapshot::read_manifest(&dir).unwrap();
     assert!(!refreshed.tabs[0].dirty && refreshed.tabs[0].file.is_none());
-    assert!(!app.session_manifest_stale, "成功提交后过期标记归零");
+    assert!(!app.manifest_stale(), "成功提交后过期标记归零");
 
     editpad_core::snapshot::clear_session(&dir);
 }
@@ -1589,7 +1593,7 @@ fn heartbeat_result_with_stale_version_does_not_record_account() {
         app.tabs[0].heartbeat_snap.is_none(),
         "版本不符的迟到成果不得记账"
     );
-    assert!(!app.session_manifest_stale, "成功路径仍应清过期标记");
+    assert!(!app.manifest_stale(), "成功路径仍应清过期标记");
     assert!(!app.heartbeat_inflight);
 
     editpad_core::snapshot::clear_session(&dir);
@@ -1859,7 +1863,7 @@ fn heartbeat_ok_does_not_clear_stale_when_tabs_closed_in_flight() {
     app.heartbeat_inflight = true;
     // 在途期间关掉置脏页（放弃更改路径）——结构变化推进过期代次
     dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
-    assert!(app.session_manifest_stale, "关页应置位过期标记");
+    assert!(app.manifest_stale(), "关页应置位过期标记");
     let result = editpad_core::snapshot::write_heartbeat_session(
         &payload.dir,
         &payload.pages,
@@ -1873,13 +1877,13 @@ fn heartbeat_ok_does_not_clear_stale_when_tabs_closed_in_flight() {
         result,
     });
     assert!(
-        app.session_manifest_stale,
+        app.manifest_stale(),
         "在途期间的结构变化必须保持过期标记（派发时的清单已过期）"
     );
 
     // 对照：无在途变化的正常提交照常清除标记
     app.run_heartbeat_cycle(&dir).unwrap();
-    assert!(!app.session_manifest_stale);
+    assert!(!app.manifest_stale());
     editpad_core::snapshot::clear_session(&dir);
 }
 

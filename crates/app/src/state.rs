@@ -252,8 +252,13 @@ pub(crate) struct Editpad {
     pub(crate) open_confirm: Option<PathBuf>,
 
     // ---------- 标签页关闭确认（P21） ----------
-    /// Some(idx) = 第 idx 个标签页置脏，正在确认「放弃更改并关闭」
-    pub(crate) close_tab_confirm: Option<usize>,
+    /// Some(id) = 该页置脏、正在确认「放弃更改并关闭」。存**页 id** 不存下标
+    /// ——跨帧持有的页引用一律用 id（本仓 `Saved(tab_id, ..)` / P213 同规矩），
+    /// 视图侧每帧现地解析。旧写法存裸下标靠两条手工平移维持，而平移只补在
+    /// `close_tab_now` / `close_tabs_now` 两处：`drop_restore_placeholder` 那条
+    /// 移除路径漏在外面（确认条在会话恢复在途时停留、其前的占位页被移除 →
+    /// 下标整体左移，〔放弃并关闭〕落到别的页，越界时直接 panic）。
+    pub(crate) close_tab_confirm: Option<u64>,
     // ---------- 标签右键菜单（P28） ----------
     /// Some(idx) = 正在展示第 idx 个标签页的右键菜单
     pub(crate) tab_context_menu: Option<usize>,
@@ -291,21 +296,20 @@ pub(crate) struct Editpad {
     pub(crate) restore_failed: usize,
     /// 因内存护栏被放弃恢复的页数（§3 P30 第 5 条的截断提示口径）
     pub(crate) restore_dropped: usize,
-    /// 尚未落地的恢复加载页数（归零时出汇总状态）
-    pub(crate) restore_pending: usize,
 
     // ---------- 周期快照心跳（P31） ----------
     /// 心跳提交任务在途标记（全局至多一个；页级账目在 Tab 上）
     pub(crate) heartbeat_inflight: bool,
-    /// 「内存态比最近一次已提交清单更干净/结构已变」标记：保存清脏、
-    /// 关页、换文档等事件置位——下一拍即使无页被代次去重选中也要重写
-    /// 清单，防止崩溃恢复把用户已落盘/已关闭的内容按旧快照复活
-    /// （编辑置脏不置位：崩溃丢 ≤1 个间隔的输入正是心跳的设计语义）。
-    pub(crate) session_manifest_stale: bool,
-    /// P146：过期标记的代次计数——每次置位 +1。心跳派发时随载荷带走，
-    /// 成功回报只在「派发后没有新置位」时才清标记（在途期间关页曾被
-    /// 成功回报误清，清单留着已关页永不重写，崩溃恢复复活已关页）。
+    /// 清单**意图**代次：每次「内存态比最近一次已提交清单更新/结构已变」的
+    /// 事件 +1（保存清脏、关页、换文档、重命名等；编辑置脏不置位——崩溃丢
+    /// ≤1 个间隔的输入正是心跳的设计语义）。心跳派发时随载荷带走，成功回报
+    /// 只在「派发后没有新置位」时才推进已提交代次（P146 的护栏）。
     pub(crate) manifest_rev: u64,
+    /// 最近一次**已成功落盘**清单的代次（S-3：取代原先独立的
+    /// `session_manifest_stale: bool`）。过期与否由两代次是否相等推出
+    /// （[`Editpad::manifest_stale`]），于是「rev 已前进、bool 却被清掉」这类
+    /// 互相矛盾的账目在类型上就不可能出现——那正是 P146 修过的形状。
+    pub(crate) manifest_committed_rev: u64,
     /// 快照目录注入点（测试用）；None = 系统配置目录。
     pub(crate) snapshot_dir_override: Option<PathBuf>,
     /// P102：窗口几何最后一次落盘时刻（拖动/拉伸事件高频，节流用）。
@@ -460,11 +464,10 @@ impl Default for Editpad {
             recover_prompt: None,
             restore_failed: 0,
             restore_dropped: 0,
-            restore_pending: 0,
             // P31：周期快照心跳状态
             heartbeat_inflight: false,
-            session_manifest_stale: false,
             manifest_rev: 0,
+            manifest_committed_rev: 0,
             snapshot_dir_override: None,
             last_geometry_persist: None,
         }

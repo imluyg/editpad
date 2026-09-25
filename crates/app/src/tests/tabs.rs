@@ -135,7 +135,7 @@ fn close_tab_flow_respects_dirty_and_never_empties_tabs() {
 
     // 置脏页关闭 → 先确认不移除
     dispatch(&mut app, Message::CloseTabRequest);
-    assert_eq!(app.close_tab_confirm, Some(0));
+    assert_eq!(app.close_confirm_idx(), Some(0));
     assert_eq!(app.tabs.len(), 1);
 
     // 取消：页面原样保留
@@ -379,7 +379,7 @@ fn close_tab_at_routes_clean_dirty_and_pinned_pages() {
     dispatch(&mut app, Message::NewTab);
     dispatch(&mut app, Message::SwitchTab(0));
     dispatch(&mut app, Message::CloseTabAt(0));
-    assert_eq!(app.close_tab_confirm, Some(0), "置脏页应弹关闭确认条");
+    assert_eq!(app.close_confirm_idx(), Some(0), "置脏页应弹关闭确认条");
     dispatch(&mut app, Message::CancelCloseTab);
 
     // 固定页：拒绝关闭并留痕状态栏
@@ -783,7 +783,7 @@ fn tab_rename_inline_renames_file_and_migrates_recents() {
     assert_eq!(app.tabs[0].path.as_ref(), Some(&new_path));
     assert!(app.tabs[0].file_stamp.is_some(), "新路径重记比对戳");
     assert!(app.renaming_tab.is_none() && app.rename_input.is_empty());
-    assert!(app.session_manifest_stale, "清单记的是旧路径，必须置陈旧");
+    assert!(app.manifest_stale(), "清单记的是旧路径，必须置陈旧");
     // 最近文件迁移
     assert!(
         app.settings
@@ -1064,12 +1064,13 @@ fn tab_font_zoom_overrides_and_reset_follows_global() {
     assert!((app.cur_handle.borrow().font_size() - (global - 2.0)).abs() < 0.01);
 }
 
-// ---------- P145：关闭确认条下标随页集合变动修正 ----------
+// ---------- S-1：关闭确认条按页 id 追踪落点（取代下标平移） ----------
 
 #[test]
-fn close_confirm_bar_index_shifts_when_earlier_tab_removed() {
-    // 确认条打开期间其前的页被关 → 确认下标必须随左移平移；旧实现
-    // 存陈旧下标，下一帧视图侧 tabs[idx] 越界 panic / 指向错页。
+fn close_confirm_bar_tracks_its_tab_when_earlier_tab_removed() {
+    // 确认条存页 id：其前的页被关掉后，落点跟着页集合左移，但**始终是同一页**。
+    // 旧写法存裸下标并靠 close_tab_now 手工平移——平移逻辑本身没错，错在它必须
+    // 被每一条移除路径记得调用（见下面那条 drop_restore_placeholder 的用例）。
     // 3 页：0 干净、1 置脏（确认条目标）、2 干净。
     let mut app = Editpad::default();
     dispatch(&mut app, Message::NewTab);
@@ -1078,15 +1079,22 @@ fn close_confirm_bar_index_shifts_when_earlier_tab_removed() {
     // 页1 已置脏，弹确认条
     dispatch(&mut app, Message::SwitchTab(1));
     dispatch(&mut app, Message::CloseTabRequest);
-    assert_eq!(app.close_tab_confirm, Some(1));
-    // 关掉其后的页2（干净直关）——确认条不受影响
+    let confirmed = app.close_tab_confirm.expect("确认条应已弹起");
+    assert_eq!(app.close_confirm_idx(), Some(1));
+    assert_eq!(app.tabs[1].id, confirmed, "存的是页 id 而不是下标");
+    // 关掉其后的页2（干净直关）——落点不变
     dispatch(&mut app, Message::SwitchTab(2));
     dispatch(&mut app, Message::CloseTabRequest);
-    assert_eq!(app.close_tab_confirm, Some(1), "其后的页被关不影响确认下标");
-    // 关掉其前的页0（干净直关）——确认下标左移平移
+    assert_eq!(
+        app.close_confirm_idx(),
+        Some(1),
+        "其后的页被关不影响确认落点"
+    );
+    // 关掉其前的页0（干净直关）——下标左移，目标页不变
     dispatch(&mut app, Message::SwitchTab(0));
     dispatch(&mut app, Message::CloseTabRequest);
-    assert_eq!(app.close_tab_confirm, Some(0), "确认下标应随左移平移");
+    assert_eq!(app.close_tab_confirm, Some(confirmed), "目标页 id 不漂移");
+    assert_eq!(app.close_confirm_idx(), Some(0), "落点随页集合左移");
     assert_eq!(app.tabs.len(), 1);
     // 确认流走完：置脏页1（现下标0）放弃关闭，确认条清空
     dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
@@ -1094,14 +1102,66 @@ fn close_confirm_bar_index_shifts_when_earlier_tab_removed() {
 }
 
 #[test]
+fn close_confirm_bar_survives_restore_placeholder_removal() {
+    // S-1 的真漏口：会话恢复在途时用户弹起关闭确认条，恢复链随后丢掉一个
+    // 占位页。`drop_restore_placeholder` 只平移 restore_queue 的下标，旧写法
+    // 里没人管确认条 → 条子整体左移一格，〔放弃并关闭〕于是清空并关掉用户
+    // **根本没选过**的那一页。
+    let mut app = Editpad::default();
+    // 页 0 摆成恢复占位页的形状（drop_restore_placeholder 的准入判据）
+    app.tabs[0].untitled_num = None;
+    dispatch(&mut app, Message::NewTab);
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("D 未保存".into())),
+    );
+    dispatch(&mut app, Message::NewTab);
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("C 已落盘".into())),
+    );
+    app.tabs[2].dirty = false; // C 是干净页（脏只在 D 上）
+                               // 在 D（下标 1）上点 ×：置脏 → 转确认条
+    dispatch(&mut app, Message::SwitchTab(1));
+    dispatch(&mut app, Message::CloseTabAt(1));
+    let confirmed = app.close_tab_confirm.expect("D 的确认条应弹起");
+    assert_eq!(app.close_confirm_idx(), Some(1));
+    // 恢复链丢掉 D 前面那个占位页
+    app.drop_restore_placeholder(0);
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(
+        app.close_tab_confirm,
+        Some(confirmed),
+        "目标页还在，条子不得消失"
+    );
+    assert_eq!(app.close_confirm_idx(), Some(0), "落点左移后仍指向 D");
+    let target_text = app
+        .close_confirm_idx()
+        .map(|i| app.tabs[i].editor.borrow().doc.to_text());
+    assert_eq!(
+        target_text.as_deref(),
+        Some("D 未保存"),
+        "确认条指向的必须还是 D（旧写法这里会指向 C）"
+    );
+    // 走完确认流：被关掉的是 D，C 连同内容原样留下
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "C 已落盘",
+        "幸存者必须是用户没选过的那个页——旧写法会把 C 清空并关闭，剩下被掏空的 D"
+    );
+}
+
+#[test]
 fn batch_close_clears_confirm_bar_when_confirmed_tab_in_targets() {
-    // 批量移除把确认页自身也关掉 → 确认条必须清空（防陈旧下标）。
+    // 批量移除把确认页自身也关掉 → 确认条必须清空（陈旧 id 解析不到）。
     let mut app = Editpad::default();
     dispatch(&mut app, Message::Edit(EditOp::InsertText("d0".into())));
     dispatch(&mut app, Message::NewTab);
     dispatch(&mut app, Message::SwitchTab(0));
     dispatch(&mut app, Message::CloseTabRequest); // 页0 置脏 → 确认条
-    assert_eq!(app.close_tab_confirm, Some(0));
+    assert_eq!(app.close_confirm_idx(), Some(0));
     assert_eq!(app.close_tabs_now(&[0]), 1);
     assert_eq!(
         app.close_tab_confirm, None,

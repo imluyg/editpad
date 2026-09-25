@@ -6,6 +6,22 @@
 use super::*;
 
 impl Editpad {
+    /// 关闭确认条当前落在第几页：状态里存**页 id**、下标每帧现地解析
+    /// （S-1 规矩）。解析不到 = 该页已被关掉，视图侧自然不再渲染确认条。
+    pub(crate) fn close_confirm_idx(&self) -> Option<usize> {
+        let id = self.close_tab_confirm?;
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// 确认目标页已不在 tabs 里时收起确认条——所有移除页面的路径共用这一句。
+    /// 旧式做法是「按其前方移除的个数把下标左移」，要求每条新路径都记得补一遍
+    /// 平移；漏补的那条（`drop_restore_placeholder`）会让确认条落到别的页上。
+    pub(crate) fn dismiss_close_confirm_if_gone(&mut self) {
+        if self.close_confirm_idx().is_none() {
+            self.close_tab_confirm = None;
+        }
+    }
+
     /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页
     /// （新页分配下一个未命名序号）。返回是否真的移除了页面。
     pub(super) fn close_tab_now(&mut self, idx: usize) -> bool {
@@ -22,14 +38,8 @@ impl Editpad {
         // P112：悬停的页被关掉 → 悬停态清空（下一个指针移动事件会
         // 按新下标重新置位；不清的话陈旧下标会悬停染色到错页）
         self.hovered_tab = None;
-        // P145：关闭确认条存的是裸下标——页集合变动后陈旧下标会让视图
-        // 侧 tabs[idx] 越界 panic 或指向错页。确认页自身被关 → 清；
-        // 其前的页被关 → 随左移平移（视图侧每帧消费该下标）。
-        self.close_tab_confirm = match self.close_tab_confirm {
-            Some(c) if c == idx => None,
-            Some(c) if c > idx => Some(c - 1),
-            other => other,
-        };
+        // P145→S-1：确认条存页 id，这里只需「目标页没了就收起」，不再平移下标
+        self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {
             self.assign_untitled_num(last);
         }
@@ -70,15 +80,8 @@ impl Editpad {
         // P112：悬停页可能在被移除之列——批量移除后悬停态统一清空
         // （下一个指针移动事件按新下标重新置位）
         self.hovered_tab = None;
-        // P145：批量移除同样修正关闭确认条的下标（确认页在移除集内 →
-        // 清；否则按其前方被移除的个数左移）——理由同 close_tab_now。
-        self.close_tab_confirm = self.close_tab_confirm.and_then(|c| {
-            if idxs.contains(&c) {
-                None
-            } else {
-                Some(c - idxs.iter().filter(|&&i| i < c).count())
-            }
-        });
+        // S-1：同 close_tab_now——按页 id 存在性收口，不数移除了几个
+        self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {
             self.assign_untitled_num(last);
         }
@@ -232,7 +235,7 @@ impl Editpad {
                     self.set_status(self.t(editpad_core::Key::StPinnedMustUnpin).to_owned());
                 } else if self.tabs[idx].dirty {
                     // 置脏页先确认（骨架版仅提供「放弃更改」出口）
-                    self.close_tab_confirm = Some(idx);
+                    self.close_tab_confirm = Some(self.tabs[idx].id);
                 } else if self.close_tab_now(idx) {
                     self.cancel_find_scan();
                 }
@@ -394,7 +397,7 @@ impl Editpad {
                     } else if self.tabs[idx].dirty {
                         // 置脏走既有单页确认条（含「保存并关闭」出口）
                         self.batch_close_confirm = None;
-                        self.close_tab_confirm = Some(idx);
+                        self.close_tab_confirm = Some(self.tabs[idx].id);
                     } else if self.close_tab_now(idx) {
                         self.cancel_find_scan();
                     }

@@ -81,7 +81,7 @@ impl Editpad {
     /// 心跳提交准备：无变化且清单不过期时返回 None（本轮零 IO）。
     pub(crate) fn prepare_heartbeat_commit(&self, dir: &Path) -> Option<HeartbeatPayload> {
         let plan = self.heartbeat_plan();
-        if plan.is_empty() && !self.session_manifest_stale {
+        if plan.is_empty() && !self.manifest_stale() {
             return None;
         }
         Some(HeartbeatPayload {
@@ -107,7 +107,7 @@ impl Editpad {
                 // 清零：在途心跳期间关掉的页不在本次写出的清单里，标记被清
                 // 后永不重写，崩溃恢复会把已关页连同旧内容复活。
                 if outcome.rev == self.manifest_rev {
-                    self.session_manifest_stale = false;
+                    self.manifest_committed_rev = outcome.rev;
                 }
                 for (man_idx, tab_id, version) in outcome.plan {
                     // 页按 id 定位（在途关页只让下标左移，id 不会错位）；
