@@ -4335,6 +4335,168 @@ fn find_highlight_paints_only_the_hit_span_when_wrap_off() {
     assert!(xmin > 20, "底色左缘 x={xmin} 压进了行号栏");
 }
 
+/// S-5 第七步护栏（第②步补，本块此前**无人看守**）：背景 quad 与行号栏底 quad
+/// 都必须真的上屏。
+///
+/// 为什么非补不可：第 164 轮按四步法第①步把这两枚 quad 整块短路掉跑全量，
+/// **574 条全绿**——一块画满整个控件的东西居然没人管。两层原因：
+/// * 既有像素用例全部**铺白底 + 白清屏**，而浅色主题的背景本来就是白
+///   ⇒ 浅色下「不画背景」与「画白背景」像素相同，这一半**结构上测不到**。
+///   本用例把清屏色换成品红补上（见 `render` 里那条注释）；
+/// * 行号栏的 0xF2 浅灰在浅色下是可辨差异，但过去所有用例只量带上的字/圆点/
+///   选区，没有一条去量「栏底本身是什么颜色」。
+///
+/// ⇒ 判据取**同帧内的颜色事实**（不做跨帧比对，避开 P33 钉字与量宽冷热那族
+/// 不确定性），且**深浅两主题各测一半**。期望值一律现取自 `EditorColors::resolve`／
+/// `theme.palette()`，不写死十六进制——配色改了用例跟着走，不会变成第二条陈旧断言。
+///
+/// ⚠️ 通道序按本仓实测是 **BGRA**（期望 (43,45,49) 读出来是 (49,45,43)），
+/// 判等写成「正序或反序任一命中」，第 60 轮为同样的事踩过一次。
+#[test]
+fn headless_backdrop_paints_background_and_gutter_strip() {
+    let doc = "ab\ncd\n";
+    let (w, h) = (700u32, 500u32);
+    // 采样区：文档只有 2 行，视口 300px 高 ⇒ y ∈ [120,280) 既无正文也无行号数字，
+    // 两枚底 quad 在该区是**唯一**的着色来源（无滚动条：内容远小于一屏）。
+    let (scan_y0, scan_y1) = (120usize, 280usize);
+
+    let render = |theme: &Theme| -> (tiny_skia::Pixmap, f32) {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str(doc));
+            c.set_viewport_width(600.0);
+            c.set_viewport_height(300.0);
+            c.scroll_top = 0.0;
+        }
+        let gutter_w = core.borrow().gutter_width();
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        // 光栅底铺**品红**而不是白：白底会让浅色主题「不画背景」与「画白背景」像素
+        // 相同（夹具自身致盲）。品红不等于任何主题的中性底色，两主题的「没画」都可见。
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 0, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        view.draw(
+            &tree,
+            &mut renderer,
+            theme,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[viewport_rect],
+            // 清屏色＝品红（不是白）：iced 的 tiny-skia `draw` 会先用这个颜色清掉
+            // 损伤区，铺在下面的白/品红底都会被它盖掉——所以「quad 没画」在画面上的
+            // 表现是这个清屏色。用白就会让浅色主题（背景也是白）测不出东西。
+            Color::from_rgb8(255, 0, 255),
+        );
+        (pixels, gutter_w)
+    };
+
+    // 一条扫描线上「与期望底色相符（±2 取整容差）」的像素占比
+    let match_ratio = |px: &tiny_skia::Pixmap, x0: u32, x1: u32, want: (f32, f32, f32)| -> f32 {
+        let (wr, wg, wb) = (want.0 * 255.0, want.1 * 255.0, want.2 * 255.0);
+        let (mut hit, mut total) = (0u32, 0u32);
+        for y in scan_y0..scan_y1 {
+            for x in x0..x1 {
+                let Some(p) = px.pixel(x, y as u32) else {
+                    continue;
+                };
+                total += 1;
+                // 通道序按本仓实测为 **BGRA**（第 60 轮就为此踩过一次）：期望
+                // (43,45,49) 的深色底在这里读出来是 (49,45,43)。故按「正序或反序
+                // 任一命中」判等——两序只差通道排列，颜色本身仍要逐通道对上，
+                // 白/品红一类完全不同的底依旧不命中。
+                let (pr, pg, pb) = (p.red() as f32, p.green() as f32, p.blue() as f32);
+                let near = |a: f32, b: f32| (a - b).abs() <= 2.0;
+                if (near(pr, wr) && near(pg, wg) && near(pb, wb))
+                    || (near(pr, wb) && near(pg, wg) && near(pb, wr))
+                {
+                    hit += 1;
+                }
+            }
+        }
+        hit as f32 / total.max(1) as f32
+    };
+    let rgb = |c: Color| (c.r, c.g, c.b);
+
+    // ---------- 深色主题：背景 quad ----------
+    let dark = Theme::Dark;
+    let dark_bg = rgb(dark.palette().background);
+    // 夹具自证：深色底必须与光栅白底明显不同，否则本主题这一半是空断言
+    assert!(
+        dark_bg.0 < 0.9 && dark_bg.1 < 0.9 && dark_bg.2 < 0.9,
+        "夹具失效：深色主题 background 为 {dark_bg:?}，与白底无法区分"
+    );
+    let (px_dark, gw_dark) = render(&dark);
+    let body_dark = match_ratio(&px_dark, gw_dark.ceil() as u32 + 2, 560, dark_bg);
+    assert!(
+        body_dark > 0.9,
+        "深色主题正文区只有 {:.0}% 是主题背景色：背景 quad 没上屏",
+        body_dark * 100.0
+    );
+    // 行号栏在深色下由 palette 派生（lighten），必须与正文区**不同**，
+    // 且与 resolve() 给的 gutter_bg 同色
+    let dark_gutter = rgb(super::colors::EditorColors::resolve(&dark).gutter_bg);
+    let strip_dark = match_ratio(&px_dark, 2, (gw_dark - 2.0).max(3.0) as u32, dark_gutter);
+    assert!(
+        strip_dark > 0.9,
+        "深色主题行号栏只有 {:.0}% 命中 gutter_bg {dark_gutter:?}：栏底 quad 没上屏",
+        strip_dark * 100.0
+    );
+
+    // ---------- 浅色主题：行号栏 quad（0xF2 浅灰，与白底可分）----------
+    let light = Theme::Light;
+    let light_gutter = rgb(super::colors::EditorColors::resolve(&light).gutter_bg);
+    assert!(
+        light_gutter.0 < 0.99,
+        "夹具失效：浅色 gutter_bg {light_gutter:?} 与白底同色，这一半测不出东西"
+    );
+    let (px_light, gw_light) = render(&light);
+    let strip_light = match_ratio(&px_light, 2, (gw_light - 2.0).max(3.0) as u32, light_gutter);
+    assert!(
+        strip_light > 0.9,
+        "浅色主题行号栏只有 {:.0}% 命中 gutter_bg {light_gutter:?}：栏底 quad 没上屏",
+        strip_light * 100.0
+    );
+    // 浅色主题的背景 quad：清屏色是品红，所以「白底没画上去」现在也测得出来
+    // （旧写法铺白底时这一半是空断言，正是它让整块 quad 无人看守）。
+    let light_body = match_ratio(
+        &px_light,
+        gw_light.ceil() as u32 + 2,
+        560,
+        rgb(light.palette().background),
+    );
+    assert!(
+        light_body > 0.9,
+        "浅色主题正文区只有 {:.0}% 是主题背景色：背景 quad 没上屏",
+        light_body * 100.0
+    );
+    eprintln!(
+        "[S-5⑦] 浅色正文背景命中 {:.0}%／浅色栏底 {:.0}%／深色正文背景 {:.0}%／深色栏底 {:.0}%（gutter_w 浅={gw_light:.1} 深={gw_dark:.1}）",
+        light_body * 100.0,
+        strip_light * 100.0,
+        body_dark * 100.0,
+        strip_dark * 100.0
+    );
+}
+
 /// S-5 护栏（外提光标层的前置）：**光标竖线必须真的上屏，且只占光标那一列**。
 ///
 /// 为什么非补不可：既有像素用例覆盖了滚动条刻度、选区带、组字、折行段与书签
