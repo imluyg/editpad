@@ -132,16 +132,17 @@ fn next_line_break(s: &str) -> Option<(usize, usize)> {
 
 /// 找出全部匹配（按文档顺序）。查询串为空时返回空表。
 ///
-/// P26：查询含 `\n` 时走 `MultiLineScanner` 跨行归一分支——
-/// 文本侧 `\r\n` / 孤立 `\r` / `\n` 都算一个换行单元与查询的 `\n`
-/// 判等；不含 `\n` 的查询维持原有单行路径，行为零变化。
+/// P26：查询含行界字符（`\n`，P257 起另含 `\r`）时走 `MultiLineScanner`
+/// 跨行归一分支——文本侧 `\r\n` / 孤立 `\r` / `\n` 都算一个换行单元，
+/// 与查询侧 `query_tokens` 的归一逐字对齐；不含行界的查询维持原有
+/// 单行路径，行为零变化。
 pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> {
     let mut out = Vec::new();
     if query.is_empty() {
         return out;
     }
     let q: Vec<char> = query.chars().collect();
-    if q.contains(&'\n') {
+    if query_is_multiline(&q) {
         scan_multiline_str(text, &q, case_sensitive, &mut out);
         return out;
     }
@@ -173,7 +174,7 @@ pub(crate) fn find_all_limited(
         return out;
     }
     let q: Vec<char> = query.chars().collect();
-    if q.contains(&'\n') {
+    if query_is_multiline(&q) {
         let mut all = find_all(text, query, case_sensitive);
         all.truncate(limit);
         return all;
@@ -205,7 +206,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
 
     // P26：跨行查询与 find_all 共用同一个扫描器（对拍不发散的结构保证），
     // rope 按存储块流式喂入，窗口缓冲 O(查询长度)
-    if q.contains(&'\n') {
+    if query_is_multiline(&q) {
         scan_multiline_chunks(doc, &q, case_sensitive, &mut out);
         return out;
     }
@@ -400,24 +401,63 @@ fn scan_line(
 /// 文本流归一后的扫描 token：普通字符，或一个换行单元。
 ///
 /// 文本侧 `\r\n`、孤立 `\r`、`\n` 三种行尾一律折叠成 [`ScanToken::Newline`]
-/// （与 ropey/编辑器的行界口径一致）；查询侧只做字面映射——字面 `\n`
-/// 映射为 [`ScanToken::Newline`]（因此能命中任何形态的文本换行），
-/// 字面 `\r` 保持普通字符（文本侧不再产出 `\r` token，故含 `\r`
-/// 的查询在本分支永不命中——相比旧实现「含 `\n` 恒零命中」无回归，
-/// 纯增量能力）。
+/// （与 ropey/编辑器的行界口径一致）；查询侧按 [`query_tokens`] 走**同一套**
+/// 归一（`\r\n` 并成一个单元、孤立 `\r` 与 `\n` 各算一个），故含换行的查询
+/// 能命中任何形态的文本换行。
+///
+/// ⚠️ 除 `\r`/`\n` 之外的单字符行界（VT/FF/NEL/LS/PS）在查询侧仍按普通字符
+/// 处理（＝匹配不到任何 token）。这是**有意**的：文本侧把它们折成 Newline
+/// 单元，若查询侧也映射成 Newline，则「含 NEL 的查询」在显示侧会命中**任意**
+/// 换行、在替换侧（`replace_all*` 按字节扫）只命中那一个 NEL 字节——两侧又
+/// 分叉。留作已知残余口径，见台账 §2 的 mixed-EOL 一条。
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ScanToken {
     Char(char),
     Newline,
 }
 
-/// 查询字符 -> 扫描 token 的字面映射（见 [`ScanToken`] 文档）。
-fn query_token(c: char) -> ScanToken {
-    if c == '\n' {
-        ScanToken::Newline
-    } else {
-        ScanToken::Char(c)
+/// 查询串 -> token 序列：与文本侧 `MultiLineScanner::push_str` **同一套**
+/// 行界归一口径（P257）。
+///
+/// 必须**成对判** `\r\n`：若拆成两个 Newline token，查询 `"a\r\nb"` 就只能
+/// 匹配「a + 两个换行 + b」（空行），而替换侧 `LineEnding::normalize` 之后
+/// 按一个 CRLF 匹配 ⇒ 显示与替换再次背离。孤立 `\r` 与 `\n` 各算一个单元，
+/// 与文本侧逐字对齐。
+fn query_tokens(q: &[char]) -> Vec<ScanToken> {
+    let mut out = Vec::with_capacity(q.len());
+    let mut i = 0usize;
+    while i < q.len() {
+        match q[i] {
+            '\n' => {
+                out.push(ScanToken::Newline);
+                i += 1;
+            }
+            '\r' => {
+                out.push(ScanToken::Newline);
+                // 查询里的 \r\n 是一个逻辑换行：整体消费（与 normalize 同口径）
+                i += if q.get(i + 1) == Some(&'\n') { 2 } else { 1 };
+            }
+            c => {
+                out.push(ScanToken::Char(c));
+                i += 1;
+            }
+        }
     }
+    out
+}
+
+/// 该查询是否需要走跨行滑动窗口内核——**全仓唯一判据**（`find_all`、
+/// `find_all_limited`、`find_all_document` 与测试侧 oracle 共用，防止四份
+/// 副本各自漂移）。
+///
+/// 判据不能只认 `\n`：字面 `\r` 在文本侧同样是换行单元，替换侧
+/// （`replace_all_document` 内部的 `eol.normalize(query)`，P26 钉住的既定
+/// 语义）也早把 `\r` 当换行处理。此前只认 `\n`，于是查找框输入 `\r` 时
+/// 显示侧结构性 0 命中、全部替换却报告并执行 N 处——实测 LF 文档
+/// `a\nb\nc\na\nb\n` 以 Find=`\r`/Replace=`X` 得 `aXbXcXaXbX`（整篇行尾被
+/// 改掉），而面板写着「无匹配」。
+fn query_is_multiline(q: &[char]) -> bool {
+    q.iter().any(|&c| c == '\n' || c == '\r')
 }
 
 /// token 判等：普通字符走 ASCII 折叠；查询的换行单元恰好对应文本侧
@@ -464,7 +504,7 @@ struct MultiLineScanner {
 impl MultiLineScanner {
     fn new(q: &[char], case_sensitive: bool) -> Self {
         Self {
-            q: q.iter().map(|&c| query_token(c)).collect(),
+            q: query_tokens(q),
             case_sensitive,
             buf: std::collections::VecDeque::with_capacity(q.len().min(4096)),
             cur_line: 0,
@@ -1399,7 +1439,7 @@ mod tests {
             return out;
         }
         let q: Vec<char> = query.chars().collect();
-        if q.contains(&'\n') {
+        if query_is_multiline(&q) {
             return find_all(text, query, case_sensitive);
         }
         let mut lc: Vec<char> = Vec::new();
@@ -1661,25 +1701,58 @@ mod tests {
         );
     }
 
+    /// P257 改判：本用例的前身 `multiline_query_with_literal_cr_never_matches`
+    /// 钉的是「含字面 `\r` 的查询恒不命中」。那条契约与替换侧对立——
+    /// `replace_all_document` 内部先 `eol.normalize(query)`，会把查询里的 `\r`
+    /// 改写成本文档主导换行——于是查找框输入 `\r` 时面板显示 0 处，「全部替换」
+    /// 却报告并执行 N 处（实测 LF 文档 Find=`\r`/Replace=`X` 得 `aXbXcXaXbX`，
+    /// 整篇行尾被删光）。现按**新契约**钉住：查询侧与文本侧同一套换行归一，
+    /// `\r` / `\n` / `\r\n` 三种写法**互相等价**。
     #[test]
-    fn multiline_query_with_literal_cr_never_matches() {
-        // 含字面 \r 且含 \n 的查询走归一分支：文本侧不再产出 \r token，
-        // 故永不命中（相比旧实现「含 \n 恒零命中」无回归，纯增量）
-        assert!(find_all("a\r\nb", "a\r\nb", true).is_empty());
-        assert!(find_all_document(&Document::from_str("a\r\nb"), "a\r\nb", true).is_empty());
-
-        // 对照：行界统一后 \r 只作为行界存在（与 ropey 同源），单行窗口
-        // 内不会再出现字面 \r——含 \r 不含 \n 的查询恒不命中；
-        // 跨行匹配一律经 \n 查询走归一分支（孤立 \r 折叠判等）
-        assert!(find_all("x\ry", "x\ry", true).is_empty());
+    fn multiline_query_cr_lf_and_crlf_forms_are_equivalent() {
+        for text in ["a\r\nb", "a\nb", "a\rb"] {
+            for query in ["a\r\nb", "a\nb", "a\rb"] {
+                let want = find_all(text, "a\nb", true);
+                assert_eq!(
+                    find_all(text, query, true),
+                    want,
+                    "文本 {text:?} 查询 {query:?}：与 LF 写法不等价"
+                );
+                assert_eq!(
+                    find_all_document(&Document::from_str(text), query, true),
+                    want,
+                    "rope 路径与 &str 路径在文本 {text:?} 查询 {query:?} 上分叉"
+                );
+            }
+        }
+        // 精确形状：跨度按"换行单元计 1"——`\r\n` 在查询与文本两侧都只算一个
+        // token，所以 `"a\r\nb"` 的查询长度是 3 而非 4。
         assert_eq!(
-            find_all("x\ry", "x\ny", true),
+            find_all("a\r\nb", "a\r\nb", true),
             vec![MatchPos {
                 line: 0,
                 col: 0,
                 len_chars: 3
             }]
         );
+        // 孤立 `\r` 与 `\n` 同样各算一个单元（与 ropey/编辑器行号同源）
+        assert_eq!(
+            find_all("x\ry", "x\ry", true),
+            vec![MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 3
+            }]
+        );
+        assert_eq!(
+            find_all("x\ry", "x\ny", true),
+            find_all("x\ry", "x\ry", true),
+            "CR 文档上两种写法必须给出同一命中"
+        );
+        // 反例护栏：`\r\n` 查询是**一个**单元，不是空行（两个单元）。
+        // 若哪天有人把它拆成两个 Newline token，这条会红。
+        assert!(find_all("a\r\n\r\nb", "a\r\nb", true).is_empty());
+        assert_eq!(find_all("a\r\n\r\nb", "a\r\n\r\nb", true).len(), 1);
     }
 
     #[test]
@@ -2383,6 +2456,141 @@ mod tests {
             loaded > 500,
             "自检：这批组合里必须有足够多真的发生替换，否则整条用例是空转（实际 {loaded}）"
         );
+    }
+
+    /// P257：**查找面板显示的命中数**与**全部替换报告的次数**必须同源。
+    ///
+    /// 两件事在用户眼前是同一句话——「找到 N 处」与「替换了 N 处」——所以它们
+    /// 结构性相等才可信。改前的实测背离（9 格，见本轮台账）：查询含字面 `\r`
+    /// 时显示侧恒 0（`query_is_multiline` 只认 `\n` ⇒ 走单行路径，而行内容里
+    /// 不可能有 `\r`），替换侧却先 `eol.normalize(query)` 把那个 `\r` 改写成本
+    /// 文档主导换行 ⇒ 凭空造出命中。LF 文档 `a\nb\nc\na\nb\n` 以 Find=`\r`、
+    /// Replace=`X` 实得 `aXbXcXaXbX`：**面板写着无匹配，整篇行尾却被删光**。
+    ///
+    /// ## 为什么不是简单两边比个数
+    /// 面板列的是**可跳转的位置**，替换天然是**非重叠改写**：查询 `"aa"` 打在
+    /// `"aaaa"` 上面板给 3 处（位置 0/1/2 都能跳），替换只吃 2 处。所以真不变式
+    /// 是「替换数 == 面板命中表贪心取出的非重叠子集大小」——与 P222 那条穷举
+    /// 对拍同款折算。又因贪心折算要按**字符**偏移算跨度，而行界在 CRLF 文档里
+    /// 占 2 字符、在 token 跨度里只计 1（`len_chars` 的既定口径，见
+    /// [`MultiLineScanner::push_token`]），故折算只对 LF / CR 两家精确；CRLF 家
+    /// 与混行尾文档退而断**方向**：替换绝不得超过面板显示数——那正是
+    /// 「面板说无匹配、文档却被改掉」的形状，也是本条要防的那个回归。
+    #[test]
+    fn find_panel_count_equals_replace_all_count() {
+        /// 把面板命中表贪心折算成非重叠子集大小（P222 同款算法）
+        let greedy = |doc: &Document, hits: &[MatchPos]| -> usize {
+            let mut n = 0usize;
+            let mut free_from = 0usize;
+            for h in hits {
+                let start = doc.line_to_char(h.line) + h.col;
+                if start >= free_from {
+                    n += 1;
+                    free_from = start + h.len_chars;
+                }
+            }
+            n
+        };
+        let enumerate = |alphabet: &[char], len: usize| -> Vec<String> {
+            let n = alphabet.len() as u32;
+            (0..n.pow(len as u32))
+                .map(|code| {
+                    let mut rest = code;
+                    let mut s = String::new();
+                    for _ in 0..len {
+                        s.push(alphabet[(rest % n) as usize]);
+                        rest /= n;
+                    }
+                    s
+                })
+                .collect::<Vec<_>>()
+        };
+        // 三家各自齐行尾（CRLF 由 LF 家族整串改写而来，不含裸 \r）
+        let mut texts: Vec<(&str, String)> = Vec::new();
+        for len in 0..=4 {
+            for t in enumerate(&['a', 'b', '\n'], len) {
+                texts.push(("LF", t.clone()));
+                texts.push(("CRLF", t.replace('\n', "\r\n")));
+            }
+            for t in enumerate(&['a', 'b', '\r'], len) {
+                texts.push(("CR", t));
+            }
+        }
+        let queries = [
+            "a", "ab", "\n", "\r", "\n\n", "\r\n", "a\n", "a\r", "a\r\n", "\ra", "b\n",
+        ];
+        let mut n_cells = 0usize;
+        // 改前必然翻红的格：齐行尾文档 + 含 \r 的查询 + 真的有替换发生
+        let mut cr_query_replaced = 0usize;
+        for (style, text) in &texts {
+            let doc = Document::from_str(text);
+            let eol = doc.line_ending();
+            // 行界占 1 字符时贪心折算精确（LF / CR 两家）
+            let exact = *style == "LF" || *style == "CR";
+            for query in &queries {
+                for cs in [true, false] {
+                    // 显示路径（view/scans.rs:129-131）：unescape 后**不**归一；
+                    // 非整词看裸命中表，整词看过滤器保留的那部分
+                    let hits = find_all_document(&doc, query, cs);
+                    let shown = hits.len();
+                    let hits_word = filter_whole_word(&doc, find_all_document(&doc, query, cs));
+                    let shown_word = hits_word.len();
+                    // 替换路径·非整词（core 内部自行归一查询）
+                    let (_, n_plain) = replace_all_document(&doc, query, "X", cs);
+                    // 替换路径·整词（update/find.rs 先归一再走 &str 版）
+                    let (_, n_word) = replace_all_word(text, &eol.normalize(query), "X", cs);
+                    if exact {
+                        assert_eq!(
+                            n_plain,
+                            greedy(&doc, &hits),
+                            "{style} 文本 {text:?} 查询 {query:?} cs={cs}：非整词替换数 != 面板命中贪心折算"
+                        );
+                        assert_eq!(
+                            n_word,
+                            greedy(&doc, &hits_word),
+                            "{style} 文本 {text:?} 查询 {query:?} cs={cs}：整词替换数 != 面板整词命中贪心折算"
+                        );
+                    }
+                    assert!(
+                        n_plain <= shown,
+                        "{style} 文本 {text:?} 查询 {query:?} cs={cs}：面板 {shown} 处却替换了 {n_plain} 处——\
+                         替换不得超过面板显示数（P257 的形状）"
+                    );
+                    assert!(
+                        n_word <= shown_word,
+                        "{style} 文本 {text:?} 查询 {query:?} cs={cs}：面板整词 {shown_word} 处却整词替换了 {n_word} 处"
+                    );
+                    if query.contains('\r') && n_plain > 0 {
+                        cr_query_replaced += 1;
+                    }
+                    n_cells += 1;
+                }
+            }
+        }
+        assert!(n_cells > 2000, "自检：组合数只有 {n_cells}，穷举没跑起来");
+        assert!(
+            cr_query_replaced > 20,
+            "自检：含 \\r 的查询必须真的在齐行尾文档上产生替换（实际 {cr_query_replaced} 格），\
+             否则本用例对 P257 那格背离已经失去判别力"
+        );
+
+        // ---- 混行尾：只防危险方向（欠替换另有登记，见台账 §2）----
+        for text in ["a\nb\nc\na\nb\rc\ra\nb", "\r", "a\r\nb\rc", "x\ny\rz\n"] {
+            let doc = Document::from_str(text);
+            let eol = doc.line_ending();
+            for query in &queries {
+                let shown = find_all_document(&doc, query, true).len();
+                let shown_word =
+                    filter_whole_word(&doc, find_all_document(&doc, query, true)).len();
+                let (_, n_plain) = replace_all_document(&doc, query, "X", true);
+                let (_, n_word) = replace_all_word(text, &eol.normalize(query), "X", true);
+                assert!(
+                    shown >= n_plain && shown_word >= n_word,
+                    "混行尾文本 {text:?} 查询 {query:?}：面板 {shown}/{shown_word} 处却替换了 \
+                     {n_plain}/{n_word} 处——绝不允许替换比面板显示的更多"
+                );
+            }
+        }
     }
 
     #[test]
