@@ -982,21 +982,27 @@ impl EditorView {
                         }
                     }
                     if core.show_whitespace {
+                        // ⚠️ 两个计数器各管各的（P267）：`col` 是**显示列**，只喂给
+                        // `char_cols` 的制表位算式和标记宽度；`idx` 是**字符序**，
+                        // 喂给 `row_x` 与 `wrap_segment_index`——`row_x` 查的
+                        // `xs` 表按字符索引（`core.rs` 的 `xs[col.min(last)]`），
+                        // 用显示列去查在 CJK（每字进 2 列）或制表符（跳到制表位）
+                        // 之后会一路右偏，最远被钳到行末。
                         let mut col = 0usize;
-                        for ch in text.chars() {
+                        for (idx, ch) in text.chars().enumerate() {
                             if ch == '\n' || ch == '\r' {
                                 break;
                             }
                             let adv = char_cols(ch, col) as usize;
-                            // 字符所在段 → 其视觉行（段序随 col 非降，
+                            // 字符所在段 → 其视觉行（段序随 idx 非降，
                             // 越过最后可见段的字符直接截断）
-                            let seg = wrap_segment_index(&breaks, col, lens);
+                            let seg = wrap_segment_index(&breaks, idx, lens);
                             if seg > max_vis_seg {
                                 break;
                             }
                             let y = bounds.y + ((base + seg as u32) as f32 - core.scroll_top) * lh;
                             if y + lh > bounds.y && y < bounds.y + bounds.height {
-                                if let Some(x) = core.row_x(line, col) {
+                                if let Some(x) = core.row_x(line, idx) {
                                     // 段相对：续行字符标记从段起点起排
                                     let cx = bounds.x + gutter_w + x
                                         - core.px_of(line, &text, breaks[seg])
@@ -1014,13 +1020,15 @@ impl EditorView {
                     continue;
                 }
                 if core.show_whitespace {
+                    // P267：与开态那份同病同治——`idx` 查表、`col` 只管制表位与
+                    // 标记宽度。**两侧都要改**，这是本仓第 6 次"分叉只守一边"。
                     let mut col = 0usize;
-                    for ch in text.chars() {
+                    for (idx, ch) in text.chars().enumerate() {
                         if ch == '\n' || ch == '\r' {
                             break;
                         }
                         let adv = char_cols(ch, col) as usize;
-                        if let Some(x) = core.row_x(line, col) {
+                        if let Some(x) = core.row_x(line, idx) {
                             let cx = bounds.x + gutter_w + x - scroll_left;
                             draw_ws_mark(renderer, y, cx, ch, adv);
                         }

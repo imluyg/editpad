@@ -2680,6 +2680,122 @@ fn headless_invisibles_marks_toggle_frame_diff() {
     );
 }
 
+/// P267（headless 像素级）：**空格标记必须落在它自己那一格里**。
+///
+/// 病灶：`draw_invisibles` 的两份循环用**显示列**去查按**字符**索引的
+/// `row_x`（`xs[col.min(last)]`）。CJK 每字进 2 列、制表符跳到制表位 ⇒
+/// 只要行内出现过宽字符，其后的每个标记都一路右偏，最远被钳到行末——
+/// 用户看到的就是"点画在行尾、空格底下什么都没有"。
+/// 既有那条用例的夹具是 `a b\tc`：Tab 恰好落在制表位上，显示列 == 字符序，
+/// 所以这个偏移**从来没有被暴露**（同一条用例本轮只数差异像素，不看位置）。
+///
+/// 判据方向：开/关两帧的差异墨迹必须整体落在正文右缘**之内**。
+/// 改前那个点被画到 `xs[4]`（正文最后一个字符 'x' 的右缘之外）⇒ 红；
+/// 改后落在「中中」与「x」之间的空格格内 ⇒ 绿。
+/// 开态与关态**各测一遍**——病灶本来就在两份副本里（本仓第 6 次"分叉只守一边"）。
+#[test]
+fn headless_invisible_space_mark_stays_inside_its_own_cell() {
+    use super::super::CursorPos;
+    let (w, h) = (400u32, 300u32);
+
+    let render = |wrap_on: bool, show: bool| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            // 「中中 x」：空格是第 3 个字符（idx 2），显示列却是 4
+            c.reset_document(editpad_core::Document::from_str("中中 x"));
+            c.set_viewport_width(360.0);
+            c.set_viewport_height(260.0);
+            // 光标钉在行首：两帧都有 ⇒ 在差分里互相抵消，也不参与"正文右缘"
+            c.cursor = CursorPos { line: 0, col: 0 };
+            c.set_word_wrap(wrap_on);
+            // 只开空格标记：行尾短竖标本就该画在正文右缘之外，会污染本判据
+            c.set_invisibles(show, false);
+        }
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(360.0, 260.0), Size::new(360.0, 260.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(20.0, 20.0));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
+        pixels
+    };
+
+    for wrap_on in [false, true] {
+        let off = render(wrap_on, false);
+        let on = render(wrap_on, true);
+        // 正文右缘 = 关态里最靠右的一列非白像素（'x' 的字面右缘）
+        let body_right = (0..w).rev().find(|&x| {
+            (0..h).any(|y| match off.pixel(x, y) {
+                Some(p) => !(p.red() > 245 && p.green() > 245 && p.blue() > 245),
+                None => false,
+            })
+        });
+        let body_right = body_right.expect("关态必须画出正文");
+        // 标记墨迹的最右列：开/关两帧差分出的一切像素
+        let mut mark_right = None::<u32>;
+        let mut mark_px = 0u32;
+        for y in 0..h {
+            for x in 0..w {
+                if let (Some(a), Some(b)) = (off.pixel(x, y), on.pixel(x, y)) {
+                    if (a.red() as i32 - b.red() as i32).abs() > 8
+                        || (a.green() as i32 - b.green() as i32).abs() > 8
+                        || (a.blue() as i32 - b.blue() as i32).abs() > 8
+                    {
+                        mark_px += 1;
+                        mark_right = Some(mark_right.map_or(x, |m: u32| m.max(x)));
+                    }
+                }
+            }
+        }
+        let mark_right = mark_right.unwrap_or_else(|| {
+            panic!("wrap_on={wrap_on}：开/关两帧毫无差异，标记根本没画出来，本判据是空转")
+        });
+        eprintln!(
+            "[P267] wrap_on={wrap_on} 正文右缘 x={body_right}，标记最右 x={mark_right}，差异 {mark_px}px"
+        );
+        assert!(
+            mark_right <= body_right,
+            "wrap_on={wrap_on}：空格标记画到了 x={mark_right}，已在正文右缘 x={body_right} 之外\
+             ——它在按显示列查按字符索引的 x 表（P267 的病灶）"
+        );
+        // 再钉一格方向性：标记必须明显偏左（落在「中中」与「x」之间），
+        // 而不是"刚好贴着右缘"——防判据被一次整体位移糊过去
+        assert!(
+            (body_right as i32 - mark_right as i32) >= 4,
+            "wrap_on={wrap_on}：标记最右 x={mark_right} 离正文右缘 x={body_right} 太近，\
+             不像落在自己那格里"
+        );
+    }
+}
+
 /// 第 66 轮 主线 A 手段 4：滚动×字号×主题 组合批——任意组合下，
 /// 控件矩形之外的画布必须保持纯背景色（P59/P66 越界墨迹历史病灶的
 /// 参数化回归网）。文档含长行（水平滚动活动）、书签（gutter 墨迹）、
