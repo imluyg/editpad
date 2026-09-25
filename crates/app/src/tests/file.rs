@@ -414,6 +414,38 @@ fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
     assert_eq!(loaded.encoding, "GBK");
 }
 
+/// P263：**调度点**必须走 `autosave_encoding`（只测纯函数与写盘组合的那两条，
+/// 挡不住有人把这里改回 `unwrap_or(Utf8)`）。
+///
+/// 判据取"跳过"这一侧，因为**改前的实现从不跳过**：标签指不到可写编码
+/// （UTF-16LE/BE 等）的页应当保持置脏、等用户显式保存；而 GBK 标签的页照旧
+/// 要排得上（否则就成了"自动保存悄悄对所有非 UTF-8 文件失效"）。
+#[test]
+fn autosave_scheduling_uses_the_encoding_rule_and_skips_unwritable_labels() {
+    // ① 不可写标签 ⇒ 不排自动保存，且保持置脏
+    let mut app = loaded_txt_app();
+    app.settings.autosave_enabled = true;
+    app.tabs[0].encoding_label = "UTF-16LE".to_owned();
+    app.tabs[0].save_encoding = None;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(
+        !app.tabs[0].autosave_inflight,
+        "UTF-16 的文件不该被自动保存按 UTF-8 覆写——应当跳过这一页"
+    );
+    assert!(app.tab().dirty, "跳过必须保持置脏，等用户显式保存");
+
+    // ② 正对照：GBK 标签照旧排得上（改前它排得上、但会写成 UTF-8）
+    let mut app2 = loaded_txt_app();
+    app2.settings.autosave_enabled = true;
+    app2.tabs[0].encoding_label = "GBK".to_owned();
+    app2.tabs[0].save_encoding = None;
+    dispatch(&mut app2, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(
+        app2.tabs[0].autosave_inflight,
+        "GBK 页必须仍然享受自动保存，否则这条修复就变成了功能倒退"
+    );
+}
+
 #[test]
 fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
     let mut app = loaded_txt_app();

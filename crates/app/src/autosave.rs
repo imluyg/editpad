@@ -75,6 +75,29 @@ pub(crate) async fn drive_autosave_once(
     Message::TabAutosaved(tab_id, version, thread_path, outcome)
 }
 
+/// 自动保存该用哪个编码落盘（P263）——纯函数，可单测。
+///
+/// 规则：**自动保存不许改变文件的编码**。它没有"用户刚点了一下保存"这个
+/// 知情时机，手动路径那套转码提示在这里根本不会发生。
+/// 1. 用户显式选过的目标编码优先（那是他选过的事，且选完就该一直生效）；
+/// 2. 没选过 ⇒ 沿用该页当前的编码标签（`encoding_label` 与
+///    [`editpad_core::SaveEncoding::label`] 同口径，装载链与手动保存链都写它）；
+/// 3. 标签指不到本编辑器能写出的编码（UTF-16LE/BE、或未知标签）⇒ 返回
+///    `None` = **这一页不做自动保存**，保持置脏，等用户显式保存
+///    （那时手动路径会给转码提示，决定权回到用户手上）。
+///
+/// 改前的形状是 `save_encoding.unwrap_or(Utf8)`，而**刚从磁盘打开的文件
+/// `save_encoding` 恒为 `None`**（P67 既定语义："新载入的文件回到默认 UTF-8
+/// 偏好"）。于是打开一个 GBK 文件、敲一个字，防抖窗睡满后磁盘上就是 UTF-8 了
+/// —— 而调度处那行注释写的是"与手动保存同参，防静默转码"：**代码本身就是那次
+/// 静默转码**。手动路径至少还会说一句话，自动路径连这句都没有。
+pub(crate) fn autosave_encoding(
+    save: Option<editpad_core::SaveEncoding>,
+    label: &str,
+) -> Option<editpad_core::SaveEncoding> {
+    save.or_else(|| editpad_core::SaveEncoding::from_label(label))
+}
+
 /// 防抖窗睡满后的实际落盘动作（线程体调用；同步函数便于测试直击磁盘
 /// 字节）。按传入编码落盘（与手动保存同参），编码附带的不可映射告警
 /// 不上浮打扰。
@@ -295,6 +318,72 @@ mod tests {
             "留存的 19 份历史档 + 本轮新档 = 上限：{names:?}"
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P263：自动保存不许改变文件编码。
+    ///
+    /// 改前的选码是 `save_encoding.unwrap_or(Utf8)`，而**刚从磁盘打开的文件
+    /// `save_encoding` 恒为 `None`**（P67 语义）⇒ 打开一个 GBK 文件、敲一个字，
+    /// 两秒后磁盘上就是 UTF-8，且自动保存路径没有任何提示。
+    #[test]
+    fn autosave_encoding_never_changes_the_files_own_encoding() {
+        use editpad_core::SaveEncoding as SE;
+        // 没显式选过 ⇒ 沿用该页当前的编码标签
+        assert_eq!(autosave_encoding(None, "GBK"), Some(SE::Gbk));
+        assert_eq!(autosave_encoding(None, "Big5"), Some(SE::Big5));
+        assert_eq!(autosave_encoding(None, "UTF-8"), Some(SE::Utf8));
+        assert_eq!(autosave_encoding(None, "UTF-8(BOM)"), Some(SE::Utf8Bom));
+        // 本编辑器写不出的编码 ⇒ None = 这一页不自动保存（保持置脏等显式保存），
+        // 而不是偷偷换成 UTF-8
+        for l in ["UTF-16LE", "UTF-16BE", "", "windows-1252", "Shift-JIS"] {
+            assert_eq!(
+                autosave_encoding(None, l),
+                None,
+                "标签 {l:?} 不该被自动保存改写"
+            );
+        }
+        // 用户显式选过的目标优先（那也是他选过的事）
+        assert_eq!(autosave_encoding(Some(SE::Gbk), "UTF-8"), Some(SE::Gbk));
+        assert_eq!(autosave_encoding(Some(SE::Utf8), "GBK"), Some(SE::Utf8));
+        // 全集一致性：凡本编辑器能写的编码，标签都必须反查得回来——否则
+        // "打开→没动过编码→自动保存"会把那种页永久排除在自动保存之外
+        for e in SE::ALL {
+            assert_eq!(
+                autosave_encoding(None, e.label()),
+                Some(e),
+                "{e:?} 的标签反查不回来"
+            );
+        }
+    }
+
+    /// P263 的落盘侧：按新规则选出的编码写盘后，磁盘字节必须仍是原编码字节。
+    #[test]
+    fn autosave_write_keeps_gbk_bytes_on_disk() {
+        let dir = scratch_dir("p263-encoding");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("gbk.txt");
+        // 磁盘上先有一个 GBK 文件，内容"中文"（GBK: D6D0 CEC4）
+        std::fs::write(&target, [0xD6u8, 0xD0, 0xCE, 0xC4]).unwrap();
+        let doc = editpad_core::Document::from_str("中文X");
+
+        let enc = autosave_encoding(None, "GBK").expect("GBK 必须能反查回来");
+        assert!(
+            matches!(write_to_disk(&target, &doc, enc), AutosaveOutcome::Written),
+            "按 GBK 自动保存应当成功"
+        );
+        let written = std::fs::read(&target).unwrap();
+        assert!(
+            written.starts_with(&[0xD6, 0xD0, 0xCE, 0xC4]),
+            "磁盘上必须还是 GBK 字节，实际 {written:?}"
+        );
+        // 这一句就是改前的行为：自动保存按 UTF-8 覆写，前四字节会变成 E4 B8 AD E6 96 87
+        let utf8_head = "中文".as_bytes();
+        assert_ne!(
+            &written[..4],
+            utf8_head,
+            "前四字节等于 UTF-8 ⇒ 自动保存又转码了"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

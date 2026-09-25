@@ -1098,14 +1098,24 @@ impl Editpad {
             };
             let doc = self.tabs[idx].editor.borrow().doc.clone();
             let version = self.tabs[idx].version;
-            // 落盘配置随任务快照下发：保存编码（与手动保存同参，防静默
-            // 转码）、外部修改比对戳、防抖窗（后台线程无 &Settings/&Tab
-            // 可用）。**不含备份模式**——自动保存不做写前备份，见
-            // `autosave::write_to_disk`
+            // 落盘配置随任务快照下发：保存编码、外部修改比对戳、防抖窗
+            // （后台线程无 &Settings/&Tab 可用）。**不含备份模式**——自动保存
+            // 不做写前备份，见 `autosave::write_to_disk`
+            //
+            // P263：编码取自 `autosave_encoding`——自动保存**不许改变文件编码**。
+            // 旧写法 `save_encoding.unwrap_or(Utf8)` 在"刚从磁盘打开的文件"上
+            // 恒等于 UTF-8（那种页的 `save_encoding` 按 P67 就是 None），于是
+            // 打开 GBK 文件敲一个字，两秒后磁盘上就成了 UTF-8，且自动保存路径
+            // 没有任何转码提示（提示只在手动保存的回报里）。指不到可写编码的页
+            // （UTF-16LE/BE 等）在此跳过，保持置脏，把决定权留给显式保存。
+            let Some(enc) = crate::autosave::autosave_encoding(
+                self.tabs[idx].save_encoding,
+                &self.tabs[idx].encoding_label,
+            ) else {
+                continue;
+            };
             let task = AutosaveTask {
-                encoding: self.tabs[idx]
-                    .save_encoding
-                    .unwrap_or(editpad_core::SaveEncoding::Utf8),
+                encoding: enc,
                 expected_stamp: self.tabs[idx].file_stamp,
                 delay: std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs)),
             };
