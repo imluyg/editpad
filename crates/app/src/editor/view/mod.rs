@@ -223,6 +223,183 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第十二步第三段：关态（软换行不开）逐逻辑行的正文绘制自 `draw` 提出。
+    ///
+    /// 这是 `draw` 里最后两块之一。本方法体与原 `else` 分支逐行对应，只做了
+    /// **标识符替换**（`core`→`f.core`、`bounds`→`f.bounds`、`colors`→`f.colors`、
+    /// `lh`→`f.lh`、`text_x0`→`f.text_x0`、`gutter_w`→`f.gutter_w`、
+    /// `scroll_left`→`f.scroll_left`、`palette.text`→`f.palette_text`、
+    /// `preedit_text`/`preedit_w`/`preedit_clip`→`f.*`、`body_font`→`self.font`
+    /// ——后两者本就同值），没有任何逻辑改写；等价性用「把上述替换反向归一后
+    /// 与 `git show HEAD` 原文 `diff`」机械复核，不靠眼睛（做法同第 169 轮的
+    /// 三角核对：搬家用的 `comm -23` 在这种替换下会堆满噪声，不作证据）。
+    ///
+    /// `gutter_font` 同理在方法内按 `draw` 头部同一公式现算
+    /// （`core.gutter_font().unwrap_or(本帧字形族)`），不新增字段。
+    fn draw_body_wrap_off(&self, renderer: &mut iced::Renderer, f: &DrawFrame<'_>) {
+        let core = f.core;
+        let bounds = f.bounds;
+        let colors = f.colors;
+        let lh = f.lh;
+        let text_x0 = f.text_x0;
+        let gutter_w = f.gutter_w;
+        let scroll_left = f.scroll_left;
+        let body_font = self.font;
+        let gutter_font = core.gutter_font().unwrap_or(body_font);
+        let palette_text = f.palette_text;
+        let preedit_clip = f.preedit_clip;
+        let preedit_w = f.preedit_w;
+        let (first, last) = core.visible_range();
+        for line in first..=last {
+            let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+            // P66：只跳过完全在视口外的行；上下缘的半可见行照常绘制，
+            // 越界部分由图层掩码裁掉（P59 时代的「不完整行跳过」退役——
+            // 那是整行对齐的前提，也是行号钉死的共谋）
+            if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                continue;
+            }
+
+            // 行号数字：口径与 P66附/P150/P154 那串历史一起搬进
+            // `draw_gutter_number`（开态分支用的是同一份代码，第 169 轮去重）。
+            self.draw_gutter_number(
+                renderer,
+                core,
+                bounds,
+                colors,
+                gutter_font,
+                lh,
+                gutter_w,
+                line,
+                y,
+            );
+
+            let text = core.line_text(line);
+            let lens = text.chars().count();
+            // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
+            // 同款注释——新文档/空白行输入是老浮层的常见场景）
+            let pre_slot: Option<(&str, usize, f32)> =
+                f.preedit_text.as_deref().zip(preedit_w).and_then(|(p, w)| {
+                    (core.cursor.line == line && core.cursor.col <= lens).then_some((
+                        p,
+                        core.cursor.col,
+                        w,
+                    ))
+                });
+            if text.is_empty() {
+                // 空行：组字画在行首（col 必 0；clip = 控件右缘，关态
+                // 无折行边界，超视口部分由掩码硬裁、可水平滚动）
+                if let Some((p, _, w)) = pre_slot {
+                    if w > 0.0 {
+                        renderer.fill_text(
+                            core_text::Text {
+                                content: p.to_owned(),
+                                bounds: Size::new(f32::INFINITY, lh),
+                                size: Pixels(core.font_size()),
+                                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                font: body_font,
+                                align_x: core_text::Alignment::Default,
+                                align_y: alignment::Vertical::Top,
+                                shaping: core_text::Shaping::Advanced,
+                                wrapping: core_text::Wrapping::None,
+                            },
+                            Point::new(text_x0, y),
+                            colors.preedit_text,
+                            preedit_clip,
+                        );
+                    }
+                }
+                continue;
+            }
+            let runs = core.highlight_runs(line, &text);
+            // P115：本行含组字插入点 → 三段式（关态无折行约束，后文整体
+            // 右移组字实测宽；超视口部分由 B 层掩码硬裁，可水平滚动查看）
+            if let Some((p, col_p, w)) = pre_slot {
+                let rel = core.px_of(line, &text, col_p);
+                paint_text_slice(
+                    renderer,
+                    core,
+                    body_font,
+                    text_x0,
+                    y,
+                    line,
+                    0,
+                    &text,
+                    0,
+                    col_p,
+                    0.0,
+                    palette_text,
+                    &runs,
+                    bounds,
+                );
+                renderer.fill_text(
+                    core_text::Text {
+                        content: p.to_owned(),
+                        bounds: Size::new(f32::INFINITY, lh),
+                        size: Pixels(core.font_size()),
+                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                        font: body_font,
+                        align_x: core_text::Alignment::Default,
+                        align_y: alignment::Vertical::Top,
+                        shaping: core_text::Shaping::Advanced,
+                        wrapping: core_text::Wrapping::None,
+                    },
+                    Point::new(text_x0 + rel, y),
+                    colors.preedit_text,
+                    preedit_clip,
+                );
+                paint_text_slice(
+                    renderer,
+                    core,
+                    body_font,
+                    text_x0,
+                    y,
+                    line,
+                    0,
+                    &text,
+                    col_p,
+                    lens,
+                    rel + w,
+                    palette_text,
+                    &runs,
+                    preedit_clip,
+                );
+                continue;
+            }
+            // 关态横向剔除：只 shape 可能上屏的字符窗口（行长 4000 而视口
+            // 只装得下 ~60 字符时的主要帧成本）。屏幕 x = text_x0 + 行首基准
+            // px，故文本层裁剪带 [bounds.x, bounds.x + bounds.width] 对应
+            // 行首基准 [scroll_left - gutter_w, scroll_left + bounds.width
+            // - gutter_w]（含压在进行号栏下方的左段——旧口径本就整行绘制，
+            // 那部分一直会上屏，只是被层掩码裁掉）。
+            let (wlo, whi, wlo_px) = core.h_clip_window(
+                line,
+                &text,
+                lens,
+                scroll_left - gutter_w,
+                scroll_left + bounds.width - gutter_w,
+            );
+            // 无 runs 分支整片一片、落点全靠 dx；有 runs 分支逐 run 从行级
+            // 布局取绝对像素——此时 dx 必须为 0，否则整行右移一个窗口宽。
+            let dx = if runs.is_empty() { wlo_px } else { 0.0 };
+            paint_text_slice(
+                renderer,
+                core,
+                body_font,
+                text_x0,
+                y,
+                line,
+                0,
+                &text,
+                wlo,
+                whi,
+                dx,
+                palette_text,
+                &runs,
+                bounds,
+            );
+        }
+    }
+
     /// S-5 第十二步第二段：组字行「插入重排」的**预计算**自 `draw` 提出（P115 续）。
     ///
     /// 合成串 S = 前文 + 组字 + 后文，按真实字形宽（`shape_row_xs` 与正文同源）
@@ -1409,11 +1586,18 @@ struct DrawFrame<'a> {
     core: &'a EditorCore,
     bounds: Rectangle,
     colors: &'a EditorColors,
+    /// 正文前景色 = `theme.palette().text`。`theme` 只是 `draw` 的入参，
+    /// 提不出到方法里，故把这一帧解析出的颜色放进上下文（只读量）。
+    palette_text: Color,
     lh: f32,
     text_x0: f32,
     gutter_w: f32,
     scroll_left: f32,
+    /// 组字串的裁剪盒（与 `display_right_edge` 同门控）。
+    preedit_clip: Rectangle,
     preedit_w: Option<f32>,
+    /// 存引用而非克隆：方法里 `preedit_text.as_deref()` 的写法与 `draw` 里逐字相同。
+    preedit_text: &'a Option<String>,
     reflow: Option<&'a ReflowLayout>,
 }
 
@@ -1685,6 +1869,27 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 不重排（右移+可滚动，既有口径）
         let reflow =
             self.compute_reflow(&core, body_font, &preedit_text, text_x0, display_right_edge);
+        // S-5 第十二步第三段：本帧上下文**上移到这里**构造（原先在 C 层、正文两份
+        // 分支之后才构造，所以正文块根本用不上它）。构造点前移是安全的：`draw` 里
+        // 最后一次 `borrow_mut`（`set_wrap_sb_reserve`）远在本行之前，而 `f` 只持
+        // `&EditorCore` 与若干只读量 ⇒ 与在途 `Ref` 共存期内不会再有可变借用。
+        // 新增的三个字段都是本帧只读量（见结构体定义处的逐条注释）；`char_w`／
+        // `display_right_edge` 等开态分支真正要用时再加——加了没人读会被
+        // `-D warnings` 的 dead_code 直接拦下（本轮就被拦过一次）。
+        let f = DrawFrame {
+            core: &core,
+            bounds,
+            colors: &colors,
+            palette_text: palette.text,
+            lh,
+            text_x0,
+            gutter_w,
+            scroll_left,
+            preedit_clip,
+            preedit_w,
+            preedit_text: &preedit_text,
+            reflow: reflow.as_ref(),
+        };
         if core.wrap_enabled() {
             let total = core.visual_rows_total();
             if total > 0 {
@@ -1924,155 +2129,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 }
             }
         } else {
-            let (first, last) = core.visible_range();
-            for line in first..=last {
-                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
-                // P66：只跳过完全在视口外的行；上下缘的半可见行照常绘制，
-                // 越界部分由图层掩码裁掉（P59 时代的「不完整行跳过」退役——
-                // 那是整行对齐的前提，也是行号钉死的共谋）
-                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                    continue;
-                }
-
-                // 行号数字：口径与 P66附/P150/P154 那串历史一起搬进
-                // `draw_gutter_number`（开态分支用的是同一份代码，第 169 轮去重）。
-                self.draw_gutter_number(
-                    renderer,
-                    &core,
-                    bounds,
-                    &colors,
-                    gutter_font,
-                    lh,
-                    gutter_w,
-                    line,
-                    y,
-                );
-
-                let text = core.line_text(line);
-                let lens = text.chars().count();
-                // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
-                // 同款注释——新文档/空白行输入是老浮层的常见场景）
-                let pre_slot: Option<(&str, usize, f32)> =
-                    preedit_text.as_deref().zip(preedit_w).and_then(|(p, w)| {
-                        (core.cursor.line == line && core.cursor.col <= lens).then_some((
-                            p,
-                            core.cursor.col,
-                            w,
-                        ))
-                    });
-                if text.is_empty() {
-                    // 空行：组字画在行首（col 必 0；clip = 控件右缘，关态
-                    // 无折行边界，超视口部分由掩码硬裁、可水平滚动）
-                    if let Some((p, _, w)) = pre_slot {
-                        if w > 0.0 {
-                            renderer.fill_text(
-                                core_text::Text {
-                                    content: p.to_owned(),
-                                    bounds: Size::new(f32::INFINITY, lh),
-                                    size: Pixels(core.font_size()),
-                                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                    font: body_font,
-                                    align_x: core_text::Alignment::Default,
-                                    align_y: alignment::Vertical::Top,
-                                    shaping: core_text::Shaping::Advanced,
-                                    wrapping: core_text::Wrapping::None,
-                                },
-                                Point::new(text_x0, y),
-                                colors.preedit_text,
-                                preedit_clip,
-                            );
-                        }
-                    }
-                    continue;
-                }
-                let runs = core.highlight_runs(line, &text);
-                // P115：本行含组字插入点 → 三段式（关态无折行约束，后文整体
-                // 右移组字实测宽；超视口部分由 B 层掩码硬裁，可水平滚动查看）
-                if let Some((p, col_p, w)) = pre_slot {
-                    let rel = core.px_of(line, &text, col_p);
-                    paint_text_slice(
-                        renderer,
-                        &core,
-                        body_font,
-                        text_x0,
-                        y,
-                        line,
-                        0,
-                        &text,
-                        0,
-                        col_p,
-                        0.0,
-                        palette.text,
-                        &runs,
-                        bounds,
-                    );
-                    renderer.fill_text(
-                        core_text::Text {
-                            content: p.to_owned(),
-                            bounds: Size::new(f32::INFINITY, lh),
-                            size: Pixels(core.font_size()),
-                            line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                            font: body_font,
-                            align_x: core_text::Alignment::Default,
-                            align_y: alignment::Vertical::Top,
-                            shaping: core_text::Shaping::Advanced,
-                            wrapping: core_text::Wrapping::None,
-                        },
-                        Point::new(text_x0 + rel, y),
-                        colors.preedit_text,
-                        preedit_clip,
-                    );
-                    paint_text_slice(
-                        renderer,
-                        &core,
-                        body_font,
-                        text_x0,
-                        y,
-                        line,
-                        0,
-                        &text,
-                        col_p,
-                        lens,
-                        rel + w,
-                        palette.text,
-                        &runs,
-                        preedit_clip,
-                    );
-                    continue;
-                }
-                // 关态横向剔除：只 shape 可能上屏的字符窗口（行长 4000 而视口
-                // 只装得下 ~60 字符时的主要帧成本）。屏幕 x = text_x0 + 行首基准
-                // px，故文本层裁剪带 [bounds.x, bounds.x + bounds.width] 对应
-                // 行首基准 [scroll_left - gutter_w, scroll_left + bounds.width
-                // - gutter_w]（含压在进行号栏下方的左段——旧口径本就整行绘制，
-                // 那部分一直会上屏，只是被层掩码裁掉）。
-                let (wlo, whi, wlo_px) = core.h_clip_window(
-                    line,
-                    &text,
-                    lens,
-                    scroll_left - gutter_w,
-                    scroll_left + bounds.width - gutter_w,
-                );
-                // 无 runs 分支整片一片、落点全靠 dx；有 runs 分支逐 run 从行级
-                // 布局取绝对像素——此时 dx 必须为 0，否则整行右移一个窗口宽。
-                let dx = if runs.is_empty() { wlo_px } else { 0.0 };
-                paint_text_slice(
-                    renderer,
-                    &core,
-                    body_font,
-                    text_x0,
-                    y,
-                    line,
-                    0,
-                    &text,
-                    wlo,
-                    whi,
-                    dx,
-                    palette.text,
-                    &runs,
-                    bounds,
-                );
-            }
+            // 关态逐逻辑行绘制（S-5 第十二步第三段外提为 `draw_body_wrap_off`）
+            self.draw_body_wrap_off(renderer, &f);
         }
 
         // 组字串文字已并入 B 层正文三段式绘制（P115）：前文 + 组字（正文
@@ -2098,17 +2156,6 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             reflow.as_ref(),
         );
 
-        let f = DrawFrame {
-            core: &core,
-            bounds,
-            colors: &colors,
-            lh,
-            text_x0,
-            gutter_w,
-            scroll_left,
-            preedit_w,
-            reflow: reflow.as_ref(),
-        };
         self.draw_carets(renderer, &f);
 
         self.draw_scrollbars(renderer, &core, bounds, &colors, &sb, &hsb);
