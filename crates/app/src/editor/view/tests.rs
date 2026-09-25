@@ -3902,3 +3902,140 @@ fn p150_two_digit_line_number_keeps_last_glyph() {
         );
     }
 }
+
+/// 软换行 Phase 2「查找联动」：开态下查找命中底色必须落在**该命中所属视觉段**那一行，
+/// 且续行的带从段首（正文左缘）起排、不是绝对列偏移。
+///
+/// 这片区域的两次修复（P94 段相对绘制、P96 顺带揪出的「hit_test 续行命中恒落段首」）
+/// 都改在 `segments_of_line` 与 `line_visual_base` 的口径上，而 P123 的命中高亮
+/// 此前**只在关态被测过**——即"选区画对了"并不蕴含"命中底色画对了"，两条路径各自
+/// 有一份拆段循环。本用例用两帧差分把底色单独钉出来。
+#[test]
+fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
+    let text: String = "abcdefghij ".repeat(18);
+    let total_chars = text.chars().count();
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&text));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.set_word_wrap(true);
+        c.reconcile_wrap_index();
+        c.scroll_top = 0.0;
+    }
+    // 夹具自证：这一行必须真的折出 ≥3 段，且记下末段的起始列
+    let segs = core.borrow().line_visual_segments(0);
+    assert!(
+        segs >= 3,
+        "夹具失效：{total_chars} 字符在 600px 预算下只折出 {segs} 段，测不到续行"
+    );
+    let last_seg_start = {
+        let c = core.borrow();
+        let t = c.line_text(0);
+        let breaks = c.segments_of_line(0, &t);
+        breaks.last().copied().unwrap_or(0)
+    };
+    assert!(
+        last_seg_start > 0,
+        "夹具失效：末段起始列为 {last_seg_start}，与首段无法区分"
+    );
+
+    // 画一帧（含两次前置预热帧），返回像素缓冲
+    let frame = |hits: Vec<editpad_core::MatchPos>| -> Vec<u8> {
+        core.borrow_mut().find_hl = hits;
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let (w, h) = (620u32, 340u32);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let style = iced::advanced::renderer::Style::default();
+        // 前置预热帧：冷帧量宽失败会让整版平移（P189 的像素护栏教训）
+        for _ in 0..3 {
+            view.draw(
+                &tree,
+                &mut renderer,
+                &Theme::Light,
+                &style,
+                lyt,
+                mouse::Cursor::Unavailable,
+                &rect,
+            );
+        }
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[rect],
+            Color::WHITE,
+        );
+        pixels.data().to_vec()
+    };
+
+    // 与真实渲染循环同构的最小无头管线：底色差 = 两次帧像素之差（正文两帧完全相同）
+    let (w, h) = (620usize, 340usize);
+    let base = frame(Vec::new());
+    let ink_rows = |a: &[u8], b: &[u8]| -> (Vec<usize>, usize) {
+        let mut rows: Vec<usize> = Vec::new();
+        let mut min_x = usize::MAX;
+        for y in 0..h {
+            let mut hit_row = false;
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                if a[i..i + 4] != b[i..i + 4] {
+                    hit_row = true;
+                    if x < min_x {
+                        min_x = x;
+                    }
+                }
+            }
+            if hit_row {
+                rows.push(y);
+            }
+        }
+        (rows, min_x)
+    };
+    let head = frame(vec![editpad_core::MatchPos {
+        line: 0,
+        col: 0,
+        len_chars: 3,
+    }]);
+    let tail = frame(vec![editpad_core::MatchPos {
+        line: 0,
+        col: last_seg_start,
+        len_chars: 3,
+    }]);
+    let (rows_head, minx_head) = ink_rows(&base, &head);
+    let (rows_tail, minx_tail) = ink_rows(&base, &tail);
+    assert!(
+        !rows_head.is_empty() && !rows_tail.is_empty(),
+        "两帧无差异＝命中底色根本没画出来（夹具或绘制路径失效）"
+    );
+    let lh = core.borrow().line_height();
+    assert!(
+        rows_head.len() as f32 <= lh * 1.9 && rows_tail.len() as f32 <= lh * 1.9,
+        "底色跨了多行：首段 {} 行 / 续段 {} 行（一条命中只应染一个视觉行，行高 {lh:.1}）",
+        rows_head.len(),
+        rows_tail.len()
+    );
+    let overlap = rows_head.iter().filter(|y| rows_tail.contains(y)).count();
+    assert_eq!(
+        overlap, 0,
+        "首段与续段的命中墨迹行重叠 ⇒ 底色没有按视觉段定位（回到按逻辑行画一条带）"
+    );
+    assert!(
+        (minx_head as i64 - minx_tail as i64).abs() <= 3,
+        "续段命中左缘 x={minx_tail} 与首段 x={minx_head} 相差 >3px ⇒ 续行仍按绝对列偏移起排"
+    );
+}
