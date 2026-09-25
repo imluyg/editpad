@@ -138,6 +138,121 @@ impl EditorView {
         core.refresh_visible_row_layouts(self.font);
     }
 
+    /// S-5 第二步：主光标 / 附加光标 / 拖拽落点竖线自 `draw` 提成方法。
+    /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
+    /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
+    /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    fn draw_carets(&self, renderer: &mut iced::Renderer, f: &DrawFrame<'_>) {
+        let core = f.core;
+        let bounds = f.bounds;
+        let colors = f.colors;
+        let lh = f.lh;
+        let text_x0 = f.text_x0;
+        let gutter_w = f.gutter_w;
+        let scroll_left = f.scroll_left;
+        let preedit_w = f.preedit_w;
+        let reflow = f.reflow;
+
+        // 光标竖线（静止期按闪烁相位隐现；活动窗口期内常显）。
+        // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹；
+        // P66：半可见行的光标也绘制，与正文行同规则
+        // P115：组字中光标画在组字**可显示尾**（后文右移起点）——
+        // 与主流编辑器「光标随组字前进」观感一致；重排存在时按合成流
+        // 组字尾所在段定位（可能随重排折到下一段）
+        let caret = core.caret_rect_relative();
+        let caret_in_view = caret.y + caret.height > 0.0 && caret.y < core.viewport_h;
+        if core.caret_visible() && caret_in_view {
+            let (cx, cy) = if let Some(r) = &reflow {
+                let s1 = (r.col_p + r.pel).min(r.s.chars().count());
+                match reflow_seg_of(&r.breaks, s1) {
+                    Some(bj) => {
+                        let x = text_x0 + (r.s_xs[s1] - r.s_xs[r.breaks[bj]]);
+                        let y = bounds.y
+                            + (r.v0 as f32 + bj as f32 - core.scroll_top) * lh
+                            + core.ink_offset;
+                        (x, y)
+                    }
+                    None => (bounds.x + caret.x + 0.0, bounds.y + caret.y),
+                }
+            } else {
+                // P164：帧首已实测，直接消费
+                let pre_dx =
+                    preedit_w.map_or(0.0f32, |w| core.preedit_visual_w(core.cursor.col, w));
+                (bounds.x + caret.x + pre_dx, bounds.y + caret.y)
+            };
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: cx,
+                        y: cy,
+                        width: caret.width,
+                        height: caret.height,
+                    },
+                    ..renderer::Quad::default()
+                },
+                colors.caret,
+            );
+        }
+
+        // B10 多光标：附加光标竖线（与主光标同闪同色；caret_rect_at
+        // 重入几何，视口剔除同款口径）。组字偏移/折行重排只属主光标
+        // （IME 锚主光标，设计 §3.7），附加光标恒走基础几何。
+        if core.caret_visible() && core.has_multi() {
+            for pos in core.all_cursors() {
+                if pos == core.cursor {
+                    continue; // 主光标已在上方绘制（含组字偏移）
+                }
+                let r = core.caret_rect_at(pos);
+                let in_view = r.y + r.height > 0.0 && r.y < core.viewport_h;
+                if in_view {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: bounds.x + r.x,
+                                y: bounds.y + r.y,
+                                width: r.width,
+                                height: r.height,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        colors.caret,
+                    );
+                }
+            }
+        }
+
+        // P135：拖拽落点指示器——插入点竖线（拖拽中恒显不闪烁，颜色
+        // 同光标；折行开态按所在视觉段段相对定位）
+        if let Some(d) = &core.dnd {
+            if d.started {
+                let text = core.line_text(d.drop.line);
+                let v = core.visual_row_of(d.drop.line, d.drop.col);
+                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                if y >= bounds.y - lh && y <= bounds.y + bounds.height {
+                    let x_rel = if core.wrap_enabled() {
+                        let (_, _, s0, _) = core.locate_visual(v);
+                        core.px_of(d.drop.line, &text, d.drop.col)
+                            - core.px_of(d.drop.line, &text, s0)
+                    } else {
+                        core.px_of(d.drop.line, &text, d.drop.col)
+                    };
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x: bounds.x + gutter_w + x_rel - scroll_left,
+                                y,
+                                width: 1.5,
+                                height: lh,
+                            },
+                            ..renderer::Quad::default()
+                        },
+                        colors.caret,
+                    );
+                }
+            }
+        }
+    }
+
     /// S-5 第一步：两根滚动条与 P131 刻度条的绘制自 `draw` 提成方法。
     /// 函数体逐字搬移、零行为变更；`sb`/`hsb` 由调用方传入本帧测量结果
     /// （P59 把测量提前到裁剪层之前，绘制与折行预算共用同一结果）。
@@ -264,6 +379,28 @@ impl EditorView {
             }
         }
     }
+}
+
+/// S-5：`draw` 各分块共用的**本帧只读量**。
+///
+/// 为什么要有它：这些原先都是 `draw` 的局部变量，块与块之间只能靠同作用域
+/// 共享，于是外提任何一块都要十几个参数（决策记录 S-5 记的「十余个共享量」
+/// 就是这个），提取动作一多签名先失控。收进一个结构体后，外提方法只多一个
+/// `f: &DrawFrame`。
+///
+/// ⚠️ 只放**只读**量：绘制期间要写回 `core` 的事（行布局注入、折行预留翻转）
+/// 一律留在 `draw` 头部做完再构造本结构体——结构体持有 `&EditorCore`，
+/// 与 `Ref` 共存期内的任何 `borrow_mut` 都会 panic。
+struct DrawFrame<'a> {
+    core: &'a EditorCore,
+    bounds: Rectangle,
+    colors: &'a EditorColors,
+    lh: f32,
+    text_x0: f32,
+    gutter_w: f32,
+    scroll_left: f32,
+    preedit_w: Option<f32>,
+    reflow: Option<&'a ReflowLayout>,
 }
 
 impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
@@ -1556,104 +1693,18 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
-        // 光标竖线（静止期按闪烁相位隐现；活动窗口期内常显）。
-        // P59：光标行不在可视范围（滚轮滚走）时不绘制，杜绝越界墨迹；
-        // P66：半可见行的光标也绘制，与正文行同规则
-        // P115：组字中光标画在组字**可显示尾**（后文右移起点）——
-        // 与主流编辑器「光标随组字前进」观感一致；重排存在时按合成流
-        // 组字尾所在段定位（可能随重排折到下一段）
-        let caret = core.caret_rect_relative();
-        let caret_in_view = caret.y + caret.height > 0.0 && caret.y < core.viewport_h;
-        if core.caret_visible() && caret_in_view {
-            let (cx, cy) = if let Some(r) = &reflow {
-                let s1 = (r.col_p + r.pel).min(r.s.chars().count());
-                match reflow_seg_of(&r.breaks, s1) {
-                    Some(bj) => {
-                        let x = text_x0 + (r.s_xs[s1] - r.s_xs[r.breaks[bj]]);
-                        let y = bounds.y
-                            + (r.v0 as f32 + bj as f32 - core.scroll_top) * lh
-                            + core.ink_offset;
-                        (x, y)
-                    }
-                    None => (bounds.x + caret.x + 0.0, bounds.y + caret.y),
-                }
-            } else {
-                // P164：帧首已实测，直接消费
-                let pre_dx =
-                    preedit_w.map_or(0.0f32, |w| core.preedit_visual_w(core.cursor.col, w));
-                (bounds.x + caret.x + pre_dx, bounds.y + caret.y)
-            };
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: Rectangle {
-                        x: cx,
-                        y: cy,
-                        width: caret.width,
-                        height: caret.height,
-                    },
-                    ..renderer::Quad::default()
-                },
-                colors.caret,
-            );
-        }
-
-        // B10 多光标：附加光标竖线（与主光标同闪同色；caret_rect_at
-        // 重入几何，视口剔除同款口径）。组字偏移/折行重排只属主光标
-        // （IME 锚主光标，设计 §3.7），附加光标恒走基础几何。
-        if core.caret_visible() && core.has_multi() {
-            for pos in core.all_cursors() {
-                if pos == core.cursor {
-                    continue; // 主光标已在上方绘制（含组字偏移）
-                }
-                let r = core.caret_rect_at(pos);
-                let in_view = r.y + r.height > 0.0 && r.y < core.viewport_h;
-                if in_view {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: bounds.x + r.x,
-                                y: bounds.y + r.y,
-                                width: r.width,
-                                height: r.height,
-                            },
-                            ..renderer::Quad::default()
-                        },
-                        colors.caret,
-                    );
-                }
-            }
-        }
-
-        // P135：拖拽落点指示器——插入点竖线（拖拽中恒显不闪烁，颜色
-        // 同光标；折行开态按所在视觉段段相对定位）
-        if let Some(d) = &core.dnd {
-            if d.started {
-                let text = core.line_text(d.drop.line);
-                let v = core.visual_row_of(d.drop.line, d.drop.col);
-                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
-                if y >= bounds.y - lh && y <= bounds.y + bounds.height {
-                    let x_rel = if core.wrap_enabled() {
-                        let (_, _, s0, _) = core.locate_visual(v);
-                        core.px_of(d.drop.line, &text, d.drop.col)
-                            - core.px_of(d.drop.line, &text, s0)
-                    } else {
-                        core.px_of(d.drop.line, &text, d.drop.col)
-                    };
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: bounds.x + gutter_w + x_rel - scroll_left,
-                                y,
-                                width: 1.5,
-                                height: lh,
-                            },
-                            ..renderer::Quad::default()
-                        },
-                        colors.caret,
-                    );
-                }
-            }
-        }
+        let f = DrawFrame {
+            core: &core,
+            bounds,
+            colors: &colors,
+            lh,
+            text_x0,
+            gutter_w,
+            scroll_left,
+            preedit_w,
+            reflow: reflow.as_ref(),
+        };
+        self.draw_carets(renderer, &f);
 
         self.draw_scrollbars(renderer, &core, bounds, &colors, &sb, &hsb);
 
