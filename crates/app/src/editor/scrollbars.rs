@@ -100,6 +100,23 @@ impl VScrollbar {
         }
     }
 
+    /// ⑦（第 183 轮）：把「迟滞抬起来的 `needed`」补成与之一致的几何。
+    ///
+    /// [`Self::measure`] 在「内容放得下」那一支给的是**退化几何**（`thumb_h = 0`、
+    /// `range_lines = 0`）。P116 的滞回死区可以在这一支上把 `needed` 判回 `true`
+    /// （边界处保留让位、防逐帧翻转），而调用点过去只改标志位不改几何 ⇒ 画出来的
+    /// 是「有轨道没滑块」的一根，且 `hits()` 已成立，拖动经 `range_lines = 0`
+    /// 把滚动位置归零。放得下时的诚实几何 = 滑块铺满轨道。
+    pub(crate) fn with_forced_needed(mut self, needed: bool) -> Self {
+        if !self.needed && needed {
+            self.thumb_y = self.track_y;
+            self.thumb_h = self.track_h;
+            self.range_lines = 1.0;
+        }
+        self.needed = needed;
+        self
+    }
+
     /// 滑块顶部目标 y → scroll_top（已夹紧到行程内）。
     pub(crate) fn scroll_for_thumb_y(&self, thumb_top_y: f32) -> f32 {
         let travel = (self.track_h - self.thumb_h).max(1e-3);
@@ -287,6 +304,49 @@ mod tests {
 
     const VIS: f32 = 18.0;
     const H: f32 = 2.0;
+
+    /// ⑦：滞回可以在「内容恰好放得下」这一支把 `needed` 抬回 true，而 `measure`
+    /// 给的是退化几何（`thumb_h = 0`、`range_lines = 0`）。只抬标志不改几何 = 画出
+    /// 一根「有轨道没滑块」的滚动条，且 `hits()` 已成立，拖动经 `range_lines = 0`
+    /// 把滚动位置归零。
+    #[test]
+    fn p272_forced_needed_keeps_thumb_geometry_consistent() {
+        // 内容 = 视口高度 ⇒ measure 走「放得下」那一支
+        let fits = VScrollbar::measure(10, 200.0, 20.0, 200.0, 0.0);
+        assert!(!fits.needed, "夹具：内容放得下时 measure 应判 not needed");
+        assert_eq!(fits.thumb_h, 0.0, "夹具：not needed 支给的是退化几何");
+        assert!(
+            wrap_sb_reserve_needed(10.0, 10.0, true, H),
+            "夹具：死区内必须维持让位，否则这一格覆盖不到缺陷"
+        );
+
+        let sb = fits.with_forced_needed(true);
+        assert!(sb.needed);
+        assert!(
+            sb.thumb_h > 0.0 && (sb.thumb_h - sb.track_h).abs() < 0.001,
+            "抬起 needed 之后滑块必须铺满轨道，实际 thumb_h={}",
+            sb.thumb_h
+        );
+        assert!(
+            sb.range_lines >= 1.0,
+            "行程不得停在 0（否则拖动经 range_lines=0 归零）"
+        );
+        let target = sb.scroll_for_thumb_y(sb.track_y + sb.track_h);
+        assert!(
+            target.is_finite() && target <= sb.range_lines + 0.001,
+            "轨道末端的拖动目标须落在合法行程内，实际 {target}"
+        );
+
+        // 反向对照：不抬时一字不动（关态与未翻转的帧零影响）
+        assert_eq!(fits.with_forced_needed(false), fits);
+        let over = VScrollbar::measure(20, 200.0, 20.0, 200.0, 0.0);
+        assert!(over.needed, "夹具：内容超出视口时 measure 判 needed");
+        assert_eq!(
+            over.with_forced_needed(true),
+            over,
+            "measure 已判 needed 时不得改动几何"
+        );
+    }
 
     /// 滞回的两条腿必须镜像：未让位要「明显超出」才进入，已让位要「明显放下」
     /// 才退出。只写对一条腿就会自锁——一旦让位再也出不来。

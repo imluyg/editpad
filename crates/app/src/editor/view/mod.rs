@@ -1946,14 +1946,15 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             core.scroll_top,
         );
         if core.wrap_enabled() {
-            // 滞回判定抽成纯函数（穷尽测试见 scrollbars 侧用例），此处只负责
-            // 「绘制与折行预算共用同一个 needed」
-            sb.needed = wrap_sb_reserve_needed(
+            // 滞回判定抽成纯函数（穷尽测试见 scrollbars 侧用例），此处负责让
+            // 「绘制、折行预算、滑块几何」三者共用同一个 needed
+            // （⑦：迟滞把 needed 抬回 true 时，measure 的退化几何必须一起改）
+            sb = sb.with_forced_needed(wrap_sb_reserve_needed(
                 core.scroll_content_lines() as f32,
                 core.viewport_h / lh.max(1e-3),
                 core.wrap_sb_reserve,
                 WRAP_SB_RESERVE_HYSTERESIS_LINES,
-            );
+            ));
         }
         let (hcontent_px, hview_px) = if core.wrap_enabled() {
             (0.0, (bounds.width - gutter_w).max(0.0))
