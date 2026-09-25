@@ -154,6 +154,75 @@ fn move_line_rebuilds_with_dominant_crlf_and_keeps_col() {
     assert_eq!(c.cursor, CursorPos { line: 1, col: 3 }, "光标列尽量保持");
 }
 
+/// P258：行块重建的「末尾补回换行」判据必须看**被替换区域自身**是否以行尾
+/// 收尾，而不是看区域末址等不等于文档长度。
+///
+/// 后果不止是少一个字节：文档以换行收尾时末真实行的 `re == text_len`，旧判据
+/// 在此不补 ⇒ 行尾被吃掉，`len_lines` 随之少一行——**行号/滚动条/书签的总行数
+/// 当场和屏幕对不上**，存盘也少一个换行。同一判据在 [`EditorCore::collect_line_block`]
+/// 的 `nl_tail`（第 64 轮「勘误第二半」）与 P80 的 `duplicate_current_lines`
+/// 都已修过，`move_current_lines` / `trim_touched_lines` 是漏抄的两份副本。
+#[test]
+fn line_block_rebuild_preserves_document_trailing_newline() {
+    // --- 移动末行：LF 文档 ---
+    let mut c = core_with("l1\nl2\nl3\n");
+    c.cursor = CursorPos { line: 2, col: 0 };
+    assert!(c.move_current_lines(true));
+    assert_eq!(
+        c.doc.to_text(),
+        "l1\nl3\nl2\n",
+        "把末行上移不得吃掉文档末尾换行"
+    );
+    assert_eq!(
+        c.doc.line_count(),
+        4,
+        "行数不变式：末行上移前后各 4 行（含幻影末行）"
+    );
+
+    // --- 移动末行：CRLF 文档（补回的必须是主导行尾，不产生混合行尾）---
+    let mut d = core_with("l1\r\nl2\r\nl3\r\n");
+    d.cursor = CursorPos { line: 2, col: 0 };
+    assert!(d.move_current_lines(true));
+    assert_eq!(d.doc.to_text(), "l1\r\nl3\r\nl2\r\n");
+
+    // --- 清理末行行尾空白 ---
+    let mut e = core_with("a  \nb  \n");
+    assert!(e.trim_touched_lines(TrimMode::Trailing));
+    assert_eq!(
+        e.doc.to_text(),
+        "a\nb\n",
+        "整篇去尾空白同样不得吃掉文档末尾换行"
+    );
+    let mut f = core_with("x  \ny  \n");
+    f.anchor = Some(CursorPos { line: 1, col: 0 });
+    f.cursor = CursorPos { line: 1, col: 1 };
+    assert!(f.trim_touched_lines(TrimMode::Trailing));
+    assert_eq!(f.doc.to_text(), "x  \ny\n", "只清末行时末尾换行仍在");
+
+    // --- 反对照：原本就没有末尾换行的文档，不许被"补"出来 ---
+    let mut g = core_with("l1\nl2\nl3");
+    g.cursor = CursorPos { line: 2, col: 0 };
+    assert!(g.move_current_lines(true));
+    assert_eq!(g.doc.to_text(), "l1\nl3\nl2", "无尾随换行的文档保持无");
+    let mut h = core_with("a  \nb  ");
+    assert!(h.trim_touched_lines(TrimMode::Trailing));
+    assert_eq!(h.doc.to_text(), "a\nb", "同理：清理不新增行尾");
+
+    // --- 多行块整体轮换、且块尾就是文档末尾换行（幻影行未进重建列表）---
+    let mut i = core_with("p\nq1\nq2\n");
+    i.anchor = Some(CursorPos { line: 1, col: 0 });
+    // 光标必须落在末行**列 > 0**：选区末端的 col 0 不算触及该行（既有口径），
+    // 那样只剩一行参与，测不到"块尾=文档末尾换行"的形状。
+    i.cursor = CursorPos { line: 2, col: 1 };
+    assert!(i.move_current_lines(true));
+    assert_eq!(
+        i.doc.to_text(),
+        "q1\nq2\np\n",
+        "三行块与顶行轮换后末尾换行仍在"
+    );
+    assert_eq!(i.doc.line_count(), 4, "行数不变式：仍是 4 行（含幻影末行）");
+}
+
 #[test]
 fn move_line_clamps_caret_column_to_the_landing_line() {
     // 多行选区且光标停在块首行时，落点行换进来的是**别的内容**（下移落 b+1
@@ -486,15 +555,21 @@ fn lone_carriage_return_is_a_line_break_in_ropey_terms() {
         "a\r\nb\r\nc\r\n",
         "幻影不参与排序，尾随换行保持"
     );
-    // ② 行移动沿用同一剥离口径（P73 原行为不变）
+    // ② 行移动沿用同一剥离口径（P73 原行为不变）。
+    //    ⚠️ P258 改判：本格的预期值原先是 `"p\r\nz\r\nq"`——即把文档末尾那个
+    //    孤立 `\r` 吃掉。那不是口径，是缺陷本身被钉成了契约：同一测试的 ① 格
+    //    （`sort_lines` 走 `collect_line_block` 的 `phantom_tail` + `nl_tail`）
+    //    在同样的"以孤立 \r 收尾"文档上给出 `"a\r\nb\r\nc\r\n"`，即**按主导行尾
+    //    补回**。两条路径处理同一件事却给出相反结论，收口后移动与排序同口径。
     let mut d = core_with("p\r\nq\r\nz\r");
     d.cursor = CursorPos { line: 2, col: 0 };
     assert!(d.move_current_lines(true));
     assert_eq!(
         d.doc.to_text(),
-        "p\r\nz\r\nq",
-        "末行以孤立 \\r 收尾=有行尾的普通行"
+        "p\r\nz\r\nq\r\n",
+        "末行以孤立 \\r 收尾=有行尾的普通行：行尾按主导行尾补回，与 ① 的排序路径同口径"
     );
+    assert_eq!(d.doc.line_count(), 4, "补回后行数与移动前一致");
     // ③ 清理：去首只动行首；混合行尾块经主导行尾重建（P9 口径）
     let mut e = core_with(" x\nabc\r");
     assert!(e.trim_touched_lines(TrimMode::Leading));

@@ -1,6 +1,29 @@
 use super::metrics::TAB_STOP_COLS;
 use super::*;
 
+/// 行块重建时要不要在末尾补回一个主导行尾——**全仓唯一判据**。
+///
+/// 两条相反的规定，缺一不可：
+/// 1. 判据得看「被替换掉的区域自身是否以换行单元收尾」，而不是「区域末址是否
+///    等于文档长度」：文档以换行收尾时**末真实行**的 `re == text_len`，而它被
+///    换掉的文本里明明带着行尾，旧判据在此不补 ⇒ 移动/清理末行吃掉文档末尾
+///    换行（存盘少一个换行，`len_lines` 少一行，行号与滚动条当场对不上屏幕）。
+/// 2. 但**幻影末行**已进重建列表时绝不能再补：那一行正文为空，`lines.join(nl)`
+///    本身就以行尾收尾，补第二次就凭空多出一个空行。无选区的整篇清理走的正是
+///    `b == count-1` 这条含幻影行的形状（实测 `trim_touched_lines` 曾由第 1 条
+///    单独放开而把 `"a  \nb  \n"` 清成 `"a\nb\n\n"`）。
+///
+/// 与本文件 [`EditorCore::collect_line_block`] 里 `phantom_tail` + `nl_tail`
+/// 那一对判据（第 64 轮「勘误第二半」）同口径，P80 勘误
+/// （`duplicate_current_lines`）是同族第三处；`move_current_lines` 与
+/// `trim_touched_lines` 是漏抄的两份副本，现收成一处防第五份。
+fn block_rebuild_needs_tail_nl(doc: &Document, rs: usize, re: usize, last: usize) -> bool {
+    let phantom_included = last + 1 == doc.line_count() && doc.line_len_chars(last) == 0;
+    !phantom_included
+        && (re < doc.text_len()
+            || (re > rs && matches!(doc.slice_text(re - 1, re).as_str(), "\n" | "\r")))
+}
+
 impl EditorCore {
     /// 光标/选区触及的行范围（含首尾）。选区末点落在某行行首（col 0）时
     /// 该行不算触及——视觉上选区没有盖到它的任何字符。
@@ -150,7 +173,7 @@ impl EditorCore {
         }
         let nl = self.doc.line_ending().newline();
         let mut rebuilt = lines.join(nl);
-        if re < self.doc.text_len() {
+        if block_rebuild_needs_tail_nl(&self.doc, rs, re, last) {
             rebuilt.push_str(nl);
         }
         self.snapshot();
@@ -288,8 +311,8 @@ impl EditorCore {
         self.snapshot();
         let nl = self.doc.line_ending().newline();
         let mut rebuilt = lines.join(nl);
-        if re < self.doc.text_len() {
-            rebuilt.push_str(nl); // 区域不是文档末尾：补回块尾换行
+        if block_rebuild_needs_tail_nl(&self.doc, rs, re, b) {
+            rebuilt.push_str(nl); // 区域自带行尾就得补回，除非重建列表已含幻影末行
         }
         self.doc.remove_range(rs, re);
         self.doc.insert(rs, &rebuilt);
