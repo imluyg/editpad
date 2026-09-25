@@ -178,6 +178,14 @@ where
             // BOM / UTF-16 单趟直达：进度线性，首报仍是原始字节数（与改前一致）
             report(&mut on_progress, first_len as u64, total_bytes);
             let mut head = HeadSample::default();
+            // P265：`UTF-8(BOM)` 这一支必须**统计**替换字符并按同一阈值判二进制。
+            // 改前一律传 `None`：贴了 BOM 的文件里凡是非法 UTF-8 序列都被 lossy
+            // 换成 U+FFFD 无声收下，用户一按保存就把这堆损毁文本当原文写回磁盘
+            // （与 `decode` 那侧同源，见 [`decode_body`] 的说明）。
+            // UTF-16LE/BE 两支**继续不判**：那里的 0x00 是合法字符字节，
+            // 「含 NUL 即二进制」这条判据对宽编码根本不成立。
+            let guard_replacements = label == "UTF-8(BOM)";
+            let mut stats = BuildStats::default();
             let doc = build_pass(
                 &mut reader,
                 path,
@@ -188,9 +196,20 @@ where
                 0,
                 total_bytes,
                 &mut on_progress,
-                None,
+                if guard_replacements {
+                    Some(&mut stats)
+                } else {
+                    None
+                },
                 &mut head,
             )?;
+            if guard_replacements
+                && stats.replacements as f32 / stats.chars.max(1) as f32 > BINARY_REPLACEMENT_RATIO
+            {
+                return Err(CoreError::BinaryDetected {
+                    path: path.to_path_buf(),
+                });
+            }
             Ok(LoadedDocument {
                 doc,
                 encoding: label,
@@ -707,18 +726,24 @@ fn reject_binary(path: &Path, loaded: LoadedText) -> Result<LoadedText, CoreErro
 }
 
 /// 解码策略（顺序敏感）：
-/// 1. UTF-8 BOM → 去掉 BOM 按 UTF-8；
+/// 1. UTF-8 BOM → **剥掉 BOM 后走与无 BOM 主路径同一份判据链**（`decode_body`），
+///    只有正文确实是合法 UTF-8 时才把标签写成 `UTF-8(BOM)`；改前这里
+///    `from_utf8_lossy` + 恒 `is_binary: false`，把两道二进制防护一起绕过（P265）；
 /// 2. UTF-16 LE / BE BOM → 对应解码；
 /// 3. 无 BOM：含 NUL 字节 → 判二进制（UTF-16 文件已在上面由 BOM 分流）；
 /// 4. 严格 UTF-8 校验，通过即按 UTF-8；
 /// 5. 校验失败 → GBK 兜底；U+FFFD 占比超阈值同样判二进制。
 pub fn decode(bytes: &[u8]) -> LoadedText {
-    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return LoadedText {
-            text: String::from_utf8_lossy(&bytes[3..]).into_owned(),
-            encoding: "UTF-8(BOM)",
-            is_binary: false,
-        };
+    if let Some(body) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        let mut loaded = decode_body(body);
+        // 只有正文真是合法 UTF-8 才配得上 "UTF-8(BOM)" 这个标签：标签一路
+        // 决定状态栏、转码知情（P6）与自动保存选码（P263），不能替一坨
+        // 解码失败的字节作证。GBK 兜底成功时标签保持 "GBK"（那才是它本来的
+        // 编码，存回去也不该再贴 BOM）。
+        if loaded.encoding == "UTF-8" {
+            loaded.encoding = "UTF-8(BOM)";
+        }
+        return loaded;
     }
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let mut loaded = decode_with(UTF_16LE, &bytes[2..], "UTF-16LE");
@@ -730,6 +755,19 @@ pub fn decode(bytes: &[u8]) -> LoadedText {
         loaded.is_binary = false;
         return loaded;
     }
+    decode_body(bytes)
+}
+
+/// 无 BOM 主体的判据链：NUL → 严格 UTF-8 → GBK 兜底 + U+FFFD 占比。
+///
+/// 抽成一处的理由是**共用**：P265 之前 UTF-8 BOM 分支自己走
+/// `String::from_utf8_lossy` 并硬编 `is_binary: false`，于是
+/// ① 含 NUL 的二进制只要前面贴个 BOM 就当文本载入，② 非法字节被 lossy 换成
+/// U+FFFD 后既不打二进制标记、也没人统计占比——一个 GBK 文件被工具误加 BOM
+/// 就变成一屏乱码进编辑器，用户一按保存就把这堆 U+FFFD 当"原文"写回磁盘。
+/// 那是数据损毁，不是显示问题（与本仓 P216 那次"二进制防护被某条路径绕过"
+/// 同族）。共用判据链之后这类"分叉只守一边"结构上不再可能。
+fn decode_body(bytes: &[u8]) -> LoadedText {
     // NUL 字节是最强的二进制信号：任何合法文本编码（除带 BOM 的 UTF-16 外）
     // 都不会出现它。放在 UTF-16 分流之后，避免误伤 ASCII 段含 0x00 的宽编码。
     if bytes.contains(&0) {
@@ -960,6 +998,93 @@ mod tests {
         assert!(!loaded.is_binary, "合法 GBK 文本不得误判为二进制");
     }
 
+    /// P265：UTF-8 BOM 只说明"作者意图是 UTF-8"，**不保证正文真是 UTF-8**。
+    ///
+    /// 改前的 BOM 分支是 `String::from_utf8_lossy(&bytes[3..])` + 恒
+    /// `is_binary: false`，于是主路径那两道防护（含 NUL 判二进制、U+FFFD 占比
+    /// 判二进制）被一起绕过：一个被工具误加 BOM 的 GBK 文件会解成一屏
+    /// U+FFFD 当作文本收下，用户一按保存就把这堆损毁字节当原文写回磁盘——
+    /// 那是数据损毁，不是显示问题。现在 BOM 分支共用 [`decode_body`]。
+    #[test]
+    fn utf8_bom_body_shares_the_binary_guards() {
+        // ① 正文确实是合法 UTF-8：标签与文本一律照旧（这一条防"修过头"）
+        let mut ok = vec![0xEF, 0xBB, 0xBF];
+        ok.extend_from_slice("内容\n".as_bytes());
+        let loaded = decode(&ok);
+        assert_eq!(loaded.text, "内容\n");
+        assert_eq!(loaded.encoding, "UTF-8(BOM)");
+        assert!(!loaded.is_binary);
+
+        // ② GBK 正文被误加 BOM：以前是一屏乱码当文本收下，现在按主路径同款
+        //    兜底解出正确汉字，且**标签跟着说实话**（不再声称是 UTF-8(BOM)——
+        //    标签一路决定状态栏、转码知情与自动保存选码，不能替解不开的字节作证）
+        let mut gbk_bom = vec![0xEF, 0xBB, 0xBF];
+        gbk_bom.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]); // “中文” 的 GBK
+        let loaded = decode(&gbk_bom);
+        assert_eq!(loaded.text, "中文", "BOM 版 GBK 正文应被兜底解出");
+        assert_eq!(loaded.encoding, "GBK", "标签必须说实话，不是 UTF-8(BOM)");
+        assert!(!loaded.is_binary);
+
+        // ③ BOM + 含 NUL 的"二进制"：改前 NUL 判据根本轮不到
+        let mut nul_bom = vec![0xEF, 0xBB, 0xBF];
+        nul_bom.extend_from_slice(&[0x4D, 0x5A, 0x00, 0x90]);
+        assert!(
+            decode(&nul_bom).is_binary,
+            "贴了 BOM 的二进制照样得判为二进制（改前这条恒 false）"
+        );
+
+        // ④ BOM + GBK 也未分配的字节：兜底也解不出东西 ⇒ 占比判据必须生效
+        //    （0x80 不行——GBK 把它映射成「€」，实测解出 64 个合法字符；
+        //    0xFF 在 GBK 里未分配，才是真的解不出）
+        let mut junk_bom = vec![0xEF, 0xBB, 0xBF];
+        junk_bom.extend_from_slice(&[0xFFu8; 64]);
+        assert!(
+            decode(&junk_bom).is_binary,
+            "全是 U+FFFD 的正文不能被当作文本收下，实际 {:?}",
+            decode(&junk_bom)
+        );
+    }
+
+    /// P265 的流式孪生：**大文件也不能绕过占比判据**。
+    ///
+    /// 与 `decode` 那侧同源的老问题。这里 `Plan::Direct(UTF_8, "UTF-8(BOM)", 3)`
+    /// 改前给 `build_pass` 传 `None`（根本不统计）。
+    /// ⚠️ 如实披露一处**残余不对称**：流式直达分支没有 GBK 兜底重读那一步
+    /// （那要动 `ScanThenBuild` 的回卷与 `bom_len`，而那条链上有 TOCTOU 与前
+    /// 进进度上报的历史），所以"误加 BOM 的 GBK 文件"在小文件上是**按 GBK
+    /// 正确恢复**（见上一条用例 ②），在大文件上是**拒绝打开**。两边都不再
+    /// 损毁数据，但行为不一致，已记台账 §2。
+    #[test]
+    fn streaming_utf8_bom_applies_the_replacement_guard() {
+        let dir = scratch_dir("p265-bom-stream");
+        fs::create_dir_all(&dir).unwrap();
+
+        // 合法 BOM 文件照旧正常载入
+        let good = dir.join("good.txt");
+        let mut good_bytes = vec![0xEF, 0xBB, 0xBF];
+        good_bytes.extend_from_slice("中文内容\n第二行\n".as_bytes());
+        fs::write(&good, &good_bytes).unwrap();
+        let loaded = load_document_streaming(&good, |_| {}).expect("合法 BOM 文件应能载入");
+        assert_eq!(loaded.doc.to_text(), "中文内容\n第二行\n");
+        assert_eq!(loaded.encoding, "UTF-8(BOM)");
+
+        // 纯高位字节的"BOM 文件"必须被拒（改前：整屏 U+FFFD 静默收下）
+        let junk = dir.join("junk.txt");
+        let mut junk_bytes = vec![0xEF, 0xBB, 0xBF];
+        junk_bytes.extend_from_slice(&[0x80u8; 4096]);
+        fs::write(&junk, &junk_bytes).unwrap();
+        match load_document_streaming(&junk, |_| {}) {
+            Err(CoreError::BinaryDetected { .. }) => {}
+            Ok(other) => panic!(
+                "BOM + 全非法字节应判二进制，实际收下 {} 字符、标签 {:?}",
+                other.doc.to_text().chars().count(),
+                other.encoding
+            ),
+            Err(e) => panic!("期望 BinaryDetected，实际 {e:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
     // ---------- P1 二进制防护 ----------
 
     #[test]
@@ -1003,7 +1128,14 @@ mod tests {
     }
 
     #[test]
-    fn utf8_bom_and_utf16_paths_never_flagged_binary() {
+    fn utf16_bom_and_plain_files_are_not_flagged_binary() {
+        // ⚠️ 本用例原名 `utf8_bom_and_utf16_paths_never_flagged_binary`——**名字里
+        // 那半 "utf8_bom" 它从来没测过**（通篇没有 `EF BB BF` 输入）。第 179 轮
+        // 修 P265 时正是这个"看着切题"的名字让那个洞多活了一段：BOM 分支的
+        // 防护被整体绕过，而这条用例照绿。UTF-8 BOM 现在由
+        // [`utf8_bom_body_shares_the_binary_guards`] 与
+        // [`streaming_utf8_bom_applies_the_replacement_guard`] 覆盖，本用例
+        // 改名叫它真正断言的东西。
         // 带 BOM 的 UTF-16LE：ASCII 段每字符都带 0x00，但已由 BOM 分流，不得误判
         let loaded = decode(&[0xFF, 0xFE, 0x68, 0x00, 0x69, 0x00]);
         assert!(!loaded.is_binary);
