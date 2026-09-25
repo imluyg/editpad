@@ -2478,7 +2478,7 @@ mod tests {
     /// 「面板说无匹配、文档却被改掉」的形状，也是本条要防的那个回归。
     #[test]
     fn find_panel_count_equals_replace_all_count() {
-        /// 把面板命中表贪心折算成非重叠子集大小（P222 同款算法）
+        // 把面板命中表贪心折算成非重叠子集大小（P222 同款算法）
         let greedy = |doc: &Document, hits: &[MatchPos]| -> usize {
             let mut n = 0usize;
             let mut free_from = 0usize;
