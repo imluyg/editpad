@@ -223,6 +223,70 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第十二步第二段：组字行「插入重排」的**预计算**自 `draw` 提出（P115 续）。
+    ///
+    /// 合成串 S = 前文 + 组字 + 后文，按真实字形宽（`shape_row_xs` 与正文同源）
+    /// 与折行预算重断行；被挤出的后文**换行**到下段（修前在折行边界截断 →
+    /// 行尾大片空白，用户复报）；`k` = 该行视觉段数增量，后续逻辑行绘制整体
+    /// 下移；shape 失败回退调用方旧三段式/空行逻辑（`pre_slot` 分支仍在）；
+    /// 关态不重排（右移 + 可滚动，既有口径）。
+    ///
+    /// 护栏：`headless_preedit_reflow_wraps_tail_and_shifts_following_lines`
+    /// （第①步现证：把本预计算短路成恒 `None` 后，全量 796 条只红它一条 ⇒
+    /// 有主，但不厚——P118 那条名字含 reflow 的用例竟不红，见日档备注）。
+    /// 与 `draw` 的唯一差异是最外层 `let reflow: Option<ReflowLayout> =` 换成了
+    /// 返回表达式，函数体 40 行逐字照抄。
+    fn compute_reflow(
+        &self,
+        core: &EditorCore,
+        body_font: Font,
+        preedit_text: &Option<String>,
+        text_x0: f32,
+        display_right_edge: f32,
+    ) -> Option<ReflowLayout> {
+        if core.wrap_enabled() {
+            preedit_text.as_deref().and_then(|p| {
+                let rl = core.cursor.line;
+                if rl >= core.doc.line_count() {
+                    return None;
+                }
+                let rtext = core.line_text(rl);
+                let rlens = rtext.chars().count();
+                let col_p = core.cursor.col.min(rlens);
+                let pel = p.chars().count();
+                let s: String = rtext
+                    .chars()
+                    .take(col_p)
+                    .chain(p.chars())
+                    .chain(rtext.chars().skip(col_p))
+                    .collect();
+                if s.is_empty() {
+                    return None;
+                }
+                let s_xs = shape_row_xs(body_font, core.font_size(), &s)?;
+                if s_xs.len() < 2 {
+                    return None;
+                }
+                let budget = (display_right_edge - text_x0).max(1.0);
+                let breaks = pixel_breaks(&s_xs, budget, &s);
+                let old_segs = core.segments_of_line(rl, &rtext).len() as isize;
+                let k = (breaks.len() as isize - old_segs).max(0);
+                Some(ReflowLayout {
+                    line: rl,
+                    col_p,
+                    pel,
+                    s,
+                    s_xs,
+                    breaks,
+                    k,
+                    v0: core.line_visual_base(rl),
+                })
+            })
+        } else {
+            None
+        }
+    }
+
     /// S-5 第十二步第一段：行号数字绘制**去重**。`draw` 的开态与关态两条分支
     /// 原本各有一份**逐字相同**的 20 行代码（第 169 轮取证：`git show HEAD` 取出
     /// 两段、去掉注释与缩进后 `diff` 为空，唯一差异是一行注释）。这里合成一个
@@ -1619,47 +1683,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 复报）；k = 该行视觉段数增量，后续逻辑行绘制整体下移；shape
         // 失败回退下方旧三段式/空行逻辑（pre_slot 分支仍在）；关态
         // 不重排（右移+可滚动，既有口径）
-        let reflow: Option<ReflowLayout> = if core.wrap_enabled() {
-            preedit_text.as_deref().and_then(|p| {
-                let rl = core.cursor.line;
-                if rl >= core.doc.line_count() {
-                    return None;
-                }
-                let rtext = core.line_text(rl);
-                let rlens = rtext.chars().count();
-                let col_p = core.cursor.col.min(rlens);
-                let pel = p.chars().count();
-                let s: String = rtext
-                    .chars()
-                    .take(col_p)
-                    .chain(p.chars())
-                    .chain(rtext.chars().skip(col_p))
-                    .collect();
-                if s.is_empty() {
-                    return None;
-                }
-                let s_xs = shape_row_xs(body_font, core.font_size(), &s)?;
-                if s_xs.len() < 2 {
-                    return None;
-                }
-                let budget = (display_right_edge - text_x0).max(1.0);
-                let breaks = pixel_breaks(&s_xs, budget, &s);
-                let old_segs = core.segments_of_line(rl, &rtext).len() as isize;
-                let k = (breaks.len() as isize - old_segs).max(0);
-                Some(ReflowLayout {
-                    line: rl,
-                    col_p,
-                    pel,
-                    s,
-                    s_xs,
-                    breaks,
-                    k,
-                    v0: core.line_visual_base(rl),
-                })
-            })
-        } else {
-            None
-        };
+        let reflow =
+            self.compute_reflow(&core, body_font, &preedit_text, text_x0, display_right_edge);
         if core.wrap_enabled() {
             let total = core.visual_rows_total();
             if total > 0 {
