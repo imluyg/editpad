@@ -4208,6 +4208,133 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
     );
 }
 
+/// P123 命中底色的**关态**守卫（S-5 第五步的前置护栏）。
+///
+/// 为什么非补不可：`wrap_find_highlight_paints_on_the_hit_visual_segment` 只跑
+/// `set_word_wrap(true)`，而这段绘制有**两份**拆段循环（开态逐视觉段／关态逐逻辑行）。
+/// 第 162 轮按 S-5 四步法第①步实测：把整块短路成"一颗都不画"，全量 793 条里**只有
+/// 开态那一条红**——关态分支此前无人看守（`o1_find_hit_draw_cost_...` 断的是次数
+/// 上界，短路只会让次数更小、恒不红）。外提前先补齐，否则搬完"全绿"不构成等价证据。
+#[test]
+fn find_highlight_paints_only_the_hit_span_when_wrap_off() {
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        let doc: String = (0..20)
+            .map(|i| format!("row-{i:02} abcdefgh ijklmnop\n"))
+            .collect();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.scroll_top = 0.0;
+        // 关态：软换行不开（默认即关，这里显式写出来表意）
+        c.set_word_wrap(false);
+    }
+    let lh = core.borrow().line_height();
+    let hit_line = 5usize;
+
+    let frame = |hits: Vec<editpad_core::MatchPos>| -> Vec<u8> {
+        core.borrow_mut().find_hl = hits;
+        let mut view = EditorView {
+            core: core.clone(),
+            // 显式字体名：底色差分是跨两帧比对，P33 的一次性全局钉字若落在两帧
+            // 之间会让整版平移（同文件里 s5_caret 那处的教训），钉住字形族才可比。
+            font: Font {
+                family: iced::font::Family::Name("NSimSun"),
+                ..iced::Font::MONOSPACE
+            },
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(view.font, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let (w, h) = (620u32, 340u32);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let style = iced::advanced::renderer::Style::default();
+        // 前置预热帧：冷帧量宽失败会让整版平移（P189 的像素护栏教训）
+        for _ in 0..3 {
+            view.draw(
+                &tree,
+                &mut renderer,
+                &Theme::Light,
+                &style,
+                lyt,
+                mouse::Cursor::Unavailable,
+                &rect,
+            );
+        }
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[rect],
+            Color::WHITE,
+        );
+        pixels.data().to_vec()
+    };
+
+    let (w, h) = (620usize, 340usize);
+    // 只扫正文区：`find_hl` 同时喂给 P131 的滚动条刻度条（那条有它自己的用例
+    // `headless_find_and_bookmark_marks_ink_on_scrollbar_track` 看守），刻度标记
+    // 落在控件右缘 x≈590 的窄条上、纵向按行号比例摆——不排掉它，下面的"行带/跨度"
+    // 两条判据会被一个正确的东西搞红。
+    const TEXT_SCAN_END: usize = 580;
+    // 差分 = 「有命中」减「无命中」：正文/行号/滚动条两帧完全相同，剩下的只有底色
+    let diff_box = |a: &[u8], b: &[u8]| -> (usize, usize, usize, usize, usize) {
+        let (mut ymin, mut ymax) = (usize::MAX, 0usize);
+        let (mut xmin, mut xmax) = (usize::MAX, 0usize);
+        let mut n = 0usize;
+        for y in 0..h {
+            for x in 0..TEXT_SCAN_END {
+                let i = (y * w + x) * 4;
+                if a[i..i + 4] != b[i..i + 4] {
+                    n += 1;
+                    ymin = ymin.min(y);
+                    ymax = ymax.max(y);
+                    xmin = xmin.min(x);
+                    xmax = xmax.max(x);
+                }
+            }
+        }
+        (n, ymin, ymax, xmin, xmax)
+    };
+    let base = frame(Vec::new());
+    let hit = frame(vec![editpad_core::MatchPos {
+        line: hit_line,
+        col: 3,
+        len_chars: 4,
+    }]);
+    let (n, ymin, ymax, xmin, xmax) = diff_box(&base, &hit);
+    eprintln!(
+        "[P123关态] 命中底色差分 {n}px，y=[{ymin}..{ymax}] x=[{xmin}..{xmax}]（行高 {lh:.1}）"
+    );
+
+    // ① 存在性 + 夹具自证：短路整块 / 底色根本没画 ⇒ 这里是 0px
+    assert!(
+        n > 20,
+        "关态命中底色没有上屏（差分仅 {n}px）：夹具或绘制路径失效"
+    );
+    // ② 落在**命中那一行**：行带只能在 hit_line±1 行内（decoration_inset 会下移几 px）
+    assert!(
+        ymin as f32 >= (hit_line - 1) as f32 * lh && ymax as f32 <= (hit_line + 2) as f32 * lh,
+        "底色落在 y=[{ymin}..{ymax}]，而命中在第 {hit_line} 行（行高 {lh:.1}）：行带错位"
+    );
+    // ③ 只涂命中跨度，不是整行：4 字符宽 ≈ 30px 量级，右端不越过 x=120
+    assert!(
+        xmax - xmin <= 120,
+        "底色横向跨度 {}px：只该涂 4 个字符的命中，不该整行铺满",
+        xmax - xmin
+    );
+    // ④ 在正文区，不在行号栏里
+    assert!(xmin > 20, "底色左缘 x={xmin} 压进了行号栏");
+}
+
 /// S-5 护栏（外提光标层的前置）：**光标竖线必须真的上屏，且只占光标那一列**。
 ///
 /// 为什么非补不可：既有像素用例覆盖了滚动条刻度、选区带、组字、折行段与书签
