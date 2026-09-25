@@ -2066,86 +2066,153 @@ fn o3_indent_guides_add_no_whole_line_fetch() {
 // 不能用取串**次数**——一次取串可以有几万字符——改断言整帧进 shaping 的
 // **字符数**（`EditorCore::shaped_chars` 探针，`paint_text_slice` 入口累加）。
 
-/// 关态长行管线：造 `lines` 行、每行 `line_len` 字符的文档，横向滚动
-/// `scroll_left` 后画一帧；返回（整帧进 shaping 的字符数，光栅化像素）。
-/// `clip_off` = true 走**改前老口径**（`h_clip_off` 开关，整行进 shaping），
-/// 用于「剔除对像素不可见」的同文档对照——换文档内容比是比不得的：行宽是
-/// 实测字形宽，尾部字符一换 `max_row_width_px` 就变，水平滚动条跟着改形。
+/// 同一份长行夹具的无头管线；core / view / renderer / tree / mask **跨帧共用**，
+/// 每帧只切 `h_clip_off` 这一个开关（`frame` 的入参），并把两处**时钟依赖**钉死。
+///
+/// 钉时钟是这条用例"偶发红"的真因（第 186 轮实测勘定，此前两次归因都不对）：
+/// 见 [`LongLineFixture::frame`]。共用 fixture 是同一方向上的收口——被比较的两帧
+/// 之间除了被测开关，不该再有"各自新建 core ⇒ 各自向全局 font_system 量一次字宽"
+/// 这种差异（虽然本次实测它并不是红的原因）。
+struct LongLineFixture {
+    core: EditorHandle,
+    view: EditorView,
+    renderer: iced::Renderer,
+    tree: Tree,
+    limits: layout::Limits,
+    viewport_rect: Rectangle,
+    viewport: iced_graphics::Viewport,
+    mask: tiny_skia::Mask,
+    w: u32,
+    h: u32,
+}
+
+impl LongLineFixture {
+    /// 造 `lines` 行、每行 `line_len` 字符的文档，横向滚动 `scroll_left`。
+    fn new(lines: usize, line_len: usize, scroll_left: f32) -> Self {
+        // 显式字体名，不用 BODY_FONT：P33 的进程级钉字是**一次性全局变更**，
+        // 全量并发时它可能正好落在本用例两帧之间——两帧解析到不同字形族，
+        // 字符宽度一变整行文字就集体位移，比出来的差分与本改动毫无关系
+        // （同族处置见 `headless_caret_and_selection_never_ink_above_first_row`）。
+        let font = Font {
+            family: iced::font::Family::Name("NSimSun"),
+            ..iced::Font::MONOSPACE
+        };
+        let doc: String = (0..lines)
+            .map(|i| {
+                let mut s = String::with_capacity(line_len + 1);
+                for k in 0..line_len {
+                    // 逐字符变着写，避免整行同字被任何按游程合并的优化掩盖差异
+                    s.push((b'a' + ((k + i) % 26) as u8) as char);
+                }
+                s.push('\n');
+                s
+            })
+            .collect();
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str(&doc));
+            c.set_viewport_width(600.0);
+            c.set_viewport_height(300.0);
+            // reset_document 会把滚动量复位，必须在它之后设
+            c.scroll_left = scroll_left;
+        }
+        let (w, h) = (700u32, 500u32);
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        LongLineFixture {
+            core: core.clone(),
+            view: EditorView {
+                core,
+                font,
+                zoom_accum: 0.0,
+            },
+            renderer: iced::Renderer::new(font, Pixels(16.0)),
+            tree: Tree::empty(),
+            limits: layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0)),
+            viewport_rect,
+            viewport: iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0),
+            mask: tiny_skia::Mask::new(w, h).expect("mask"),
+            w,
+            h,
+        }
+    }
+
+    /// 画一帧并光栅化：`clip_off` = true 走**改前老口径**（整行进 shaping），
+    /// 用于「剔除对像素不可见」的同文档对照。返回（整帧进 shaping 的字符数，
+    /// 光栅化像素）。
+    fn frame(&mut self, clip_off: bool) -> (usize, Vec<u8>) {
+        {
+            let mut c = self.core.borrow_mut();
+            // 把两处**墙上时钟依赖**钉成常量（本仓既有像素护栏都这么做，见
+            // `sb_activity = None; // 滚动条 alpha 有时钟差`）：
+            // ① 滚动条淡出——`scrollbar_visibility()` 按 `sb_activity.elapsed()`
+            //   算 alpha，静止 900ms 起淡、再 300ms 淡完；两帧之间只要跨过这个
+            //   窗口，就一帧画得出滚动条、另一帧画不出，差异正好是一条
+            //   10px 宽 × 满高的轨道（复现实测 4966 px，首差在 x=589/y=2 即右缘
+            //   轨道顶）。机器越忙、单帧越慢，跨窗概率越大——这条用例红的一直
+            //   是这个，不是字形度量、也不是 vendor 丢图元。
+            // ② 光标活动窗——`caret_visible()` 在 `last_activity` 起 450ms 内
+            //   常显、过期后按 `blink_on` 相位隐没，跨过 450ms 同样会让两帧
+            //   在光标处不一致。钉成"无活动记录 + 相位为显"即与耗时无关。
+            c.sb_activity = None;
+            c.last_activity = None;
+            c.blink_on = true;
+            c.h_clip_off = clip_off;
+            // 清零两个探针（取串次数不参与本批断言，清掉以免被别的计数口径误读）
+            let _ = c.take_line_text_calls();
+            let _ = c.take_shaped_chars();
+        }
+        // 夹具自检：三处时钟依赖确已钉死。将来谁把上面的赋值挪走或改条件，
+        // 这里当场红——否则退化形式不是"编译不过"，而是"偶发红"，最难查的那种。
+        debug_assert_eq!(
+            self.core.borrow().scrollbar_visibility(),
+            0.0,
+            "滚动条 alpha 没被钉住：两帧比较会随机器忙闲在淡出窗两侧各画一次"
+        );
+        debug_assert!(
+            self.core.borrow().caret_visible(),
+            "光标可见性仍随 last_activity/blink_on 漂，跨帧比较不成立"
+        );
+        // 与真实渲染循环同款：每帧先 reset 清层栈（同族做法见稳态帧用例）
+        self.renderer.reset(self.viewport_rect);
+        let mut pixels = tiny_skia::Pixmap::new(self.w, self.h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let node = self
+            .view
+            .layout(&mut self.tree, &self.renderer, &self.limits);
+        let lyt = Layout::new(&node);
+        self.view.draw(
+            &self.tree,
+            &mut self.renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &self.viewport_rect,
+        );
+        let damage = vec![self.viewport_rect];
+        self.renderer.draw(
+            &mut pixels.as_mut(),
+            &mut self.mask,
+            &self.viewport,
+            &damage,
+            Color::WHITE,
+        );
+        let shaped = self.core.borrow().take_shaped_chars();
+        (shaped, pixels.data().to_vec())
+    }
+}
+
+/// 单帧薄封装——只要 shaping 字符数的成本用例用它；**跨帧比像素必须共用一个
+/// [`LongLineFixture`]**，理由见那里。换文档内容比是比不得的：行宽是实测字形宽，
+/// 尾部字符一换 `max_row_width_px` 就变，水平滚动条跟着改形。
 fn draw_long_line_frame(
     lines: usize,
     line_len: usize,
     scroll_left: f32,
     clip_off: bool,
 ) -> (usize, Vec<u8>) {
-    // 显式字体名，不用 BODY_FONT：P33 的进程级钉字是**一次性全局变更**，
-    // 全量并发时它可能正好落在本用例两帧之间——两帧解析到不同字形族，
-    // 字符宽度一变整行文字就集体位移，比出来的差分与本改动毫无关系
-    // （同族处置见 `headless_caret_and_selection_never_ink_above_first_row`）。
-    let font = Font {
-        family: iced::font::Family::Name("NSimSun"),
-        ..iced::Font::MONOSPACE
-    };
-    let doc: String = (0..lines)
-        .map(|i| {
-            let mut s = String::with_capacity(line_len + 1);
-            for k in 0..line_len {
-                // 逐字符变着写，避免整行同字被任何按游程合并的优化掩盖差异
-                s.push((b'a' + ((k + i) % 26) as u8) as char);
-            }
-            s.push('\n');
-            s
-        })
-        .collect();
-    let core = EditorHandle::default();
-    {
-        let mut c = core.borrow_mut();
-        c.reset_document(editpad_core::Document::from_str(&doc));
-        c.set_viewport_width(600.0);
-        c.set_viewport_height(300.0);
-        // reset_document 会把滚动量复位，必须在它之后设
-        c.scroll_left = scroll_left;
-        #[cfg(test)]
-        {
-            c.h_clip_off = clip_off;
-            // 清零两个探针（取串次数不参与本批断言，清掉以免被别的计数口径误读）
-            let _ = c.take_line_text_calls();
-            let _ = c.take_shaped_chars();
-        }
-    }
-    let mut view = EditorView {
-        core: core.clone(),
-        font,
-        zoom_accum: 0.0,
-    };
-    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
-    let mut tree = Tree::empty();
-    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
-    let node = view.layout(&mut tree, &renderer, &limits);
-    let lyt = Layout::new(&node);
-    let (w, h) = (700u32, 500u32);
-    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
-    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
-    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
-    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
-    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
-    view.draw(
-        &tree,
-        &mut renderer,
-        &Theme::Light,
-        &iced::advanced::renderer::Style::default(),
-        lyt,
-        mouse::Cursor::Unavailable,
-        &viewport_rect,
-    );
-    renderer.draw(
-        &mut pixels.as_mut(),
-        &mut mask,
-        &viewport,
-        &[viewport_rect],
-        Color::WHITE,
-    );
-    let shaped = core.borrow().take_shaped_chars();
-    (shaped, pixels.data().to_vec())
+    LongLineFixture::new(lines, line_len, scroll_left).frame(clip_off)
 }
 
 /// 关态不可见字符标记的横向剔除管线：**4 行**、每行 `line_len` 组「字母+空格」
@@ -2444,21 +2511,30 @@ fn o3_long_line_shaping_is_capped_by_viewport_width_not_line_length() {
 /// 无 runs 分支要靠调用点传的 `dx` 把整片文字搬回正确的绝对位置，
 /// `dx` 若算错，这一组会整体错位而 `scroll_left = 0` 那组照样绿。
 ///
-/// ⚠️ 第 183 轮实测本用例在全量并发下**偶发红**（同一段源码两次跑，一次两帧
-/// 逐位相同、另一次开态帧多 5440 px 墨迹），已连同另外两条像素用例的同现象记进
-/// §2 待勘；本轮不动它的判据（改成单向断言等于把一个还没定案的现象写进契约）。
+/// ⚠️ 这条曾在全量并发下**偶发红**，第 186 轮勘定为两处时钟依赖所致，判据一字未改
+/// （见 [`LongLineFixture::frame`] 的钉死）。同时**撤回两条早先的错误归因**：
+/// ① "两帧解析到不同字形度量、整版平移"——若是平移，独有墨迹必然**两侧都有**，
+///   而失败信息是 `开态独有 4966 px / 改前独有 0 px`，即一侧完全包含另一侧，
+///   只能是"某一层在一帧里画了、另一帧没画"；首差像素 x=589/y=2 正落在右缘
+///   10px 宽的滚动条轨道顶（`SCROLLBAR_WIDTH = 10`，10 × 满高 ≈ 4800 px）。
+/// ② "vendor 在万级图元帧里偶发丢掉屏内内容"——同一条失败信息，被丢的不是屏内
+///   正文而是滚动条层，且它与图元量无关（`h_clip_off` 关掉剔除、图元更多的那一帧
+///   反而是少画的那侧）。池 ① 与 ② 自始至终是同一个现象。
 #[test]
 fn o3_horizontal_clipping_is_pixel_identical_to_full_line_paint() {
     for scroll_left in [0.0f32, 1_500.0, 12_000.0] {
-        // 第 183 轮：先画一帧**丢掉**。台账第 160/161 轮就把这条破坏源点名为
-        // 「P33 的一次性全局钉字落在两帧之间」——全量并发时本用例前面跑什么并不
-        // 确定，钉字/字形回退链的首次解析就可能落在下面两帧中间，两帧解析到不同
-        // 度量，整版一平移这条「逐像素相同」就红了（实测加了新像素用例进池后
-        // 3 跑红 2；只并跑本用例与新用例则 4 跑 0 红；把新用例 --skip 掉 3 跑
-        // 0 红）。先跑一帧把一次性初始化吃掉，判据一个字不用放宽。
-        let _ = draw_long_line_frame(20, 4_000, scroll_left, false);
-        let (shaped_on, px_on) = draw_long_line_frame(20, 4_000, scroll_left, false);
-        let (shaped_off, px_off) = draw_long_line_frame(20, 4_000, scroll_left, true);
+        let mut fx = LongLineFixture::new(20, 4_000, scroll_left);
+        // 先画一帧**丢掉**：吃掉字形链/度量的一次性初始化（第 184 轮的处置保留）。
+        // 共用 fixture 之后这帧也是唯一走「memo 冷路径」的一帧，所以顺手把它的
+        // shaping 量也断一下——否则改后两帧都 memo 温热，冷路径的剔除就没人看了。
+        let (shaped_cold, _) = fx.frame(false);
+        let (shaped_on, px_on) = fx.frame(false);
+        let (shaped_off, px_off) = fx.frame(true);
+        assert!(
+            shaped_cold < shaped_off,
+            "scroll_left={scroll_left}：首帧（memo 冷）就该只 shape {shaped_cold} 字符，\
+             却比改前 {shaped_off} 不少——横向剔除没进冷路径"
+        );
         assert!(
             shaped_on < shaped_off,
             "scroll_left={scroll_left}：开态 shaping {shaped_on} 不少于改前 {shaped_off}，剔除没生效"
