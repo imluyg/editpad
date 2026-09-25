@@ -194,6 +194,9 @@ pub(crate) struct Editpad {
     pub(crate) fif_results: Vec<crate::find_scan::FileHits>,
     /// 结果是否因封顶截断（2 万文件 / 5000 总命中）
     pub(crate) fif_truncated: bool,
+    /// 最近一次扫描里**没能完成匹配**的文件数（正则运行期错误，如回溯超限）。
+    /// 与「零命中」分开记：混在一起等于替用户把坏查询报成好答案（N-15）。
+    pub(crate) fif_failed: usize,
     /// FIF 命中点击的待跳转（行 0 起, 列, 跨度）——下一次 Loaded 装载
     /// 结算后一次性消费（select_span 选区落在命中上）
     pub(crate) pending_fif_goto: Option<(usize, usize, usize)>,
@@ -419,6 +422,7 @@ impl Default for Editpad {
             fif_progress: Arc::new(AtomicUsize::new(0)),
             fif_results: Vec::new(),
             fif_truncated: false,
+            fif_failed: 0,
             pending_fif_goto: None,
             hl_paving: None,
             hl_pave_cancel: Arc::default(),

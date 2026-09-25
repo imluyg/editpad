@@ -214,10 +214,32 @@ fn find_in_file_cap_returns_and_allocates_only_the_limit() {
     // app 层在用的预编译入口走同一个 `literal_hits`，同口径
     let matcher = editpad_core::FifMatcher::build("the", true, false).unwrap();
     assert_eq!(
-        editpad_core::find_in_file_with(&text, &matcher, false, 3),
+        editpad_core::find_in_file_with(&text, &matcher, false, 3).unwrap(),
         find_in_file(&text, "the", true, false, false, 3),
         "find_in_file 与 find_in_file_with 的封顶结果必须一致"
     );
+}
+
+#[test]
+fn find_in_file_with_reports_regex_runtime_error_not_empty_hits() {
+    // N-15 更正后的真缺陷：旧写法 `.unwrap_or_default()` 把 fancy-regex 的
+    // **运行期**错误（回溯超限，引擎默认上限 100 万步）吞成空表——于是
+    // 「这个文件没跑完」在面板上长成「这个文件没命中」的样子，一个坏查询
+    // 被伪装成一个好答案。
+    //
+    // 与「无效正则」分开钉：编译期失败仍走 build→None→空表兜底（见
+    // `find_in_file_regex_and_invalid_regex_fallback`），那是 UI 预校验之后
+    // 的竞态防御，不是本条要区分的那件事。
+    let matcher = editpad_core::FifMatcher::build("(a|b|ab)*(?>c)", true, true).unwrap();
+    let err = editpad_core::find_in_file_with(&"ab".repeat(60), &matcher, false, 100)
+        .expect_err("运行期错误必须上抛，不得静默成空表");
+    assert!(!err.is_empty(), "错误串要能给用户看");
+
+    // 同一条正则换成短文本：必须真的返回命中——证明上面那条红是「跑失败」
+    // 而不是「这模式本来就跑不出东西」（否则本用例是空转）。注意文本要能
+    // 走完 `(a|b|ab)*(?>c)`：`ab` 只到「无命中」，`abc` 才真出一个命中。
+    let ok = editpad_core::find_in_file_with("abc", &matcher, false, 100).unwrap();
+    assert_eq!(ok.len(), 1);
 }
 
 #[test]

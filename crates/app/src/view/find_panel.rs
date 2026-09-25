@@ -96,13 +96,18 @@ impl Editpad {
                 self.fif_progress.load(std::sync::atomic::Ordering::Relaxed),
                 self.t(editpad_core::Key::ScanProgressSuffix)
             )
+        } else if self.fif_failed > 0 {
+            // 「无匹配」只能留给真的扫完的文件：有文件因正则运行期错误没跑完
+            // 时说无匹配，就是这条修复要消灭的那个假象（N-15）
+            editpad_core::fmt_fif_failed(self.lang(), self.fif_failed)
         } else if total_hits == 0 {
             self.t(editpad_core::Key::DirNoMatch).to_owned()
         } else {
             editpad_core::fmt_fif_panel_title(self.lang(), total_files, total_hits, false)
         };
         let header = row![
-            text(if self.fif_truncated {
+            text(if self.fif_truncated && self.fif_failed == 0 {
+                // 失败分支的句子已自陈「结果不完整」，不再叠第二条后缀
                 format!("{title}{}", self.t(editpad_core::Key::FifReachedCapSuffix))
             } else {
                 title

@@ -142,25 +142,30 @@ pub(crate) struct FifScanPayload {
 /// 目录扫描本体（同步、可直接单测）：walk_files 遍历 → 逐文件大小
 /// 预检 → load_file（编码嗅探/二进制拒绝全继承）→ find_in_file。
 /// 任一文件失败（二进制/IO）跳过不中断；每文件 progress +1。
-pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
+///
+/// 返回 `(结果, 触达封顶, 未完成匹配的文件数)`。第三项单列而非并进
+/// 「零命中」：正则回溯超限只让**个别**文件没跑完，把它算成「无命中」
+/// 就等于替用户把一个坏查询伪装成一个好答案。
+pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool, usize) {
     if payload.cancelled.load(Ordering::Relaxed) {
-        return (Vec::new(), false);
+        return (Vec::new(), false, 0);
     }
     // P146：正则编译一次跨文件复用（曾每文件重编译，O(文件数) 次放大）；
     // 正则无效与 find_in_file 的「返回空表」口径一致——整批提前收尾
     let Some(matcher) =
         editpad_core::FifMatcher::build(&payload.query, payload.case_sensitive, payload.regex)
     else {
-        return (Vec::new(), false);
+        return (Vec::new(), false, 0);
     };
     let mut results: Vec<FileHits> = Vec::new();
     let mut total_hits = 0usize;
+    let mut failed_files = 0usize;
     let walk = editpad_core::walk_files(&payload.dir, payload.max_files);
     let mut truncated = walk.truncated;
     for path in walk.files {
         if payload.cancelled.load(Ordering::Relaxed) {
             // 取消：已扫出的部分结果仍然有效，如实返回
-            return (results, truncated);
+            return (results, truncated, failed_files);
         }
         payload.progress.fetch_add(1, Ordering::Relaxed);
         // 大文件豁免（64 MB，同备份口径）
@@ -174,12 +179,20 @@ pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
         let Ok(loaded) = editpad_core::load_file(&path) else {
             continue;
         };
-        let hits = editpad_core::find_in_file_with(
+        let hits = match editpad_core::find_in_file_with(
             &loaded.text,
             &matcher,
             payload.whole_word,
             payload.max_hits_per_file,
-        );
+        ) {
+            Ok(hits) => hits,
+            // 正则运行期失败（回溯超限等）：这个文件**没跑完**，与
+            // 「跑完且零命中」是两件事，计数后继续扫其余文件。
+            Err(_) => {
+                failed_files += 1;
+                continue;
+            }
+        };
         if hits.is_empty() {
             continue;
         }
@@ -199,7 +212,7 @@ pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
             break;
         }
     }
-    (results, truncated)
+    (results, truncated, failed_files)
 }
 
 /// 按行序升序的命中批量提取行摘录（P147：切行复用 core 的
@@ -224,11 +237,11 @@ fn collect_excerpts(text: &str, hits: &[editpad_core::MatchPos], max_cols: usize
 /// seq 二次过滤。
 pub(crate) async fn drive_find_in_files(payload: FifScanPayload) -> Message {
     let seq = payload.seq;
-    let (results, truncated) = await_on_thread(move || {
+    let (results, truncated, failed) = await_on_thread(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fif_scan_dir(&payload)))
-            .unwrap_or((Vec::new(), false))
+            .unwrap_or((Vec::new(), false, 0))
     })
     .await
-    .unwrap_or((Vec::new(), false));
-    Message::FifScanDone(seq, results, truncated)
+    .unwrap_or((Vec::new(), false, 0));
+    Message::FifScanDone(seq, results, truncated, failed)
 }

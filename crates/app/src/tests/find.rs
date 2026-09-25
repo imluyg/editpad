@@ -813,8 +813,9 @@ fn fif_scan_dir_walks_tree_skips_binary_and_truncates() {
         max_hits_per_file: max_per,
     };
 
-    let (results, truncated) = fif_scan_dir(&mk(100, 100));
+    let (results, truncated, failed) = fif_scan_dir(&mk(100, 100));
     assert!(!truncated);
+    assert_eq!(failed, 0, "字面模式不存在运行期失败");
     assert_eq!(
         results.len(),
         1,
@@ -825,13 +826,13 @@ fn fif_scan_dir_walks_tree_skips_binary_and_truncates() {
     assert!(results[0].hits[0].excerpt.contains("needle"), "摘录预计算");
 
     // 总命中封顶：截断明示
-    let (results, truncated) = fif_scan_dir(&mk(1, 100));
+    let (results, truncated, _) = fif_scan_dir(&mk(1, 100));
     assert!(truncated, "总命中达封顶即截断");
     assert!(!results.is_empty());
 
     // 单文件封顶：截断到 max_hits_per_file
-    let (_, _) = fif_scan_dir(&mk(100, 1));
-    let (results, _) = fif_scan_dir(&mk(100, 1));
+    let (_, _, _) = fif_scan_dir(&mk(100, 1));
+    let (results, _, _) = fif_scan_dir(&mk(100, 1));
     assert!(results.iter().all(|f| f.hits.len() <= 1));
 
     // 取消标志：直接返回空
@@ -839,7 +840,47 @@ fn fif_scan_dir_walks_tree_skips_binary_and_truncates() {
     cancelled
         .cancelled
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(fif_scan_dir(&cancelled), (Vec::new(), false));
+    assert_eq!(fif_scan_dir(&cancelled), (Vec::new(), false, 0));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// N-15：正则**运行期**失败的文件必须单独计数，不能混进「零命中」。
+/// 旧写法 `.unwrap_or_default()` 让整批文件都没跑完时面板写「无匹配」——
+/// 一个坏查询被伪装成了一个好答案。
+#[test]
+fn fif_scan_dir_counts_files_that_failed_to_match() {
+    use crate::find_scan::{fif_scan_dir, FifScanPayload};
+    let dir = scratch_dir("fif-failed");
+    fs_create_dir_all(&dir);
+    // 触发构造取自 core 的同款用例：歧义分割确定性触限（默认上限 100 万步）
+    let pathological = "ab".repeat(60);
+    std::fs::write(dir.join("a.txt"), &pathological).unwrap();
+    std::fs::write(dir.join("b.txt"), &pathological).unwrap();
+    // 一个短文件不触限且**真的命中**（`ab` 只走到「无命中」，证明不了结果
+    // 通道还活着）→ 证明计数不是「所有文件都算失败」的假象
+    std::fs::write(dir.join("short.txt"), "abc").unwrap();
+
+    let mk = || FifScanPayload {
+        seq: 1,
+        dir: dir.clone(),
+        query: "(a|b|ab)*(?>c)".into(),
+        case_sensitive: true,
+        regex: true,
+        whole_word: false,
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        progress: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        max_files: 100,
+        max_total_hits: 100,
+        max_hits_per_file: 100,
+    };
+
+    let (results, truncated, failed) = fif_scan_dir(&mk());
+    assert_eq!(failed, 2, "两个长文件触限，短文件不算");
+    assert_eq!(results.len(), 1, "未失败的文件照常出结果");
+    assert_eq!(results[0].hits.len(), 1);
+    assert!(results[0].path.ends_with("short.txt"));
+    assert!(!truncated, "触限不是封顶，两件事分开记");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -870,12 +911,22 @@ fn find_in_files_toggle_scan_done_and_seq_guard() {
             excerpt: "abc".into(),
         }],
     };
-    dispatch(&mut app, Message::FifScanDone(8, vec![fh.clone()], true));
+    dispatch(&mut app, Message::FifScanDone(8, vec![fh.clone()], true, 0));
     assert!(app.fif_results.is_empty(), "过期序号的结果丢弃");
-    dispatch(&mut app, Message::FifScanDone(7, vec![fh], true));
+    dispatch(&mut app, Message::FifScanDone(7, vec![fh], true, 0));
     assert_eq!(app.fif_results.len(), 1, "当前代结果回填");
     assert!(app.fif_truncated);
     assert!(app.status.contains("封顶"), "截断明示上状态栏");
+
+    // 匹配失败数优先于封顶：坏正则能让整批文件都没跑完
+    app.fif_scan = Some(9);
+    dispatch(&mut app, Message::FifScanDone(9, Vec::new(), true, 3));
+    assert_eq!(app.fif_failed, 3);
+    assert!(
+        app.status.contains("匹配失败") && app.status.contains('3'),
+        "失败计数上状态栏，且不得被封顶文案盖掉：{}",
+        app.status
+    );
 }
 
 #[test]
@@ -992,7 +1043,7 @@ fn fif_scan_dir_boundary_dirs_encodings_and_regex() {
     // 空目录：空结果、无截断
     let empty = scratch_dir("fif-empty");
     fs_create_dir_all(&empty);
-    let (results, truncated) = fif_scan_dir(&mk(empty.clone(), false));
+    let (results, truncated, _) = fif_scan_dir(&mk(empty.clone(), false));
     assert!(
         results.is_empty() && !truncated,
         "空目录 = 空结果不误报截断"
@@ -1005,12 +1056,12 @@ fn fif_scan_dir_boundary_dirs_encodings_and_regex() {
     fs_create_dir_all(&excluded.join("node_modules"));
     std::fs::write(excluded.join(".hidden/x.txt"), "needle").unwrap();
     std::fs::write(excluded.join("node_modules/x.txt"), "needle").unwrap();
-    let (results, truncated) = fif_scan_dir(&mk(excluded.clone(), false));
+    let (results, truncated, _) = fif_scan_dir(&mk(excluded.clone(), false));
     assert!(results.is_empty() && !truncated);
     let _ = std::fs::remove_dir_all(&excluded);
 
     // 不存在的根：静默空结果
-    let (results, truncated) = fif_scan_dir(&mk(std::path::PathBuf::from("Z:/no/such"), false));
+    let (results, truncated, _) = fif_scan_dir(&mk(std::path::PathBuf::from("Z:/no/such"), false));
     assert!(results.is_empty() && !truncated);
 
     // GBK 编码文件：load_file 兜底解码 → 中文查询命中（编码嗅探继承）
@@ -1019,10 +1070,10 @@ fn fif_scan_dir_boundary_dirs_encodings_and_regex() {
     std::fs::write(gbk.join("gbk.txt"), b"\xD6\xD0\xCE\xC4 needle").unwrap();
     let mut payload = mk(gbk.clone(), false);
     payload.query = "needle".into();
-    let (results, _) = fif_scan_dir(&payload);
+    let (results, _, _) = fif_scan_dir(&payload);
     assert_eq!(results.len(), 1, "GBK 文件参与扫描");
     payload.query = "中".into();
-    let (results, _) = fif_scan_dir(&payload);
+    let (results, _, _) = fif_scan_dir(&payload);
     assert_eq!(results.len(), 1, "GBK 兜底解码后中文查询命中");
     let _ = std::fs::remove_dir_all(&gbk);
 
@@ -1033,7 +1084,7 @@ fn fif_scan_dir_boundary_dirs_encodings_and_regex() {
     std::fs::write(crlf.join("c.txt"), "one\r\nneedle two\r\nthree needle").unwrap();
     let mut payload = mk(crlf.clone(), true);
     payload.query = r"needle \w+".into();
-    let (results, _) = fif_scan_dir(&payload);
+    let (results, _, _) = fif_scan_dir(&payload);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].hits.len(), 1);
     assert_eq!(results[0].hits[0].pos.line, 1, "CRLF 行界口径");

@@ -10,7 +10,7 @@
 //! 规则只作用于**目录**——`.` 开头的隐藏文件（如 `.gitignore`）参与
 //! 扫描，文件内容本身常是检索对象。
 
-use crate::search::{find_all, find_all_limited, find_all_regex, whole_word_bounds_ok, MatchPos};
+use crate::search::{find_all, find_all_limited, whole_word_bounds_ok, MatchPos};
 use std::path::{Path, PathBuf};
 
 /// 遍历时跳过的噪音目录名（「遵守忽略规则」的一期口径；.gitignore
@@ -105,10 +105,13 @@ fn walk_dir(dir: &Path, max_files: usize, depth: usize, out: &mut WalkOutput) {
 }
 
 /// 单文件命中组装（设计 §3.2）。字面走 `crate::search::find_all_limited`
-/// （封顶即早退）、正则走 [`find_all_regex`]；整词只作用于字面模式（正则的
-/// 边界语义由模式自身表达，与编辑器查找栏同口径）；正则无效返回空表（UI 层
-/// 启动扫描前已预校验，此处兜底不 panic）。`max_hits` = 单文件命中封顶，
-/// 超出截断（截断事实由调用方按总量口径统一明示）。
+/// （封顶即早退）、正则走 [`crate::search::find_all_regex`]；整词只作用于字面模式（正则的
+/// 边界语义由模式自身表达，与编辑器查找栏同口径）。`max_hits` = 单文件命中
+/// 封顶，超出截断（截断事实由调用方按总量口径统一明示）。
+///
+/// **正则无效返回空表**（UI 层启动扫描前已预校验，此处兜底不 panic）；
+/// 但正则**运行期**失败（回溯超限等）不在这里吞——那是本文件之外的调用方
+/// 需要区分的第二件事，走 [`find_in_file_with`] 的 `Err`。
 ///
 /// 结果恒等于「全量扫描 → 按同一顺序取前 `max_hits` 个」，见
 /// `tests/find_in_files.rs` 的对拍用例。
@@ -120,13 +123,12 @@ pub fn find_in_file(
     whole_word: bool,
     max_hits: usize,
 ) -> Vec<MatchPos> {
-    let mut hits = if regex {
-        find_all_regex(text, query, case_sensitive).unwrap_or_default()
-    } else {
-        literal_hits(text, query, case_sensitive, whole_word, max_hits)
+    // 与 find_in_file_with 同一具身体（S-4：孪生不各写一份）：本函数的
+    // 「无效即空表」是它对 UI 预校验的既有承诺，运行期失败在此降级为空。
+    let Some(matcher) = FifMatcher::build(query, case_sensitive, regex) else {
+        return Vec::new();
     };
-    hits.truncate(max_hits);
-    hits
+    find_in_file_with(text, &matcher, whole_word, max_hits).unwrap_or_default()
 }
 
 /// 字面模式的命中装配（[`find_in_file`] 与 [`find_in_file_with`] 共用）。
@@ -178,25 +180,28 @@ impl FifMatcher {
     }
 }
 
-/// 单文件命中组装的复用版：语义与 [`find_in_file`] 完全一致
+/// 单文件命中组装的复用版：命中口径与 [`find_in_file`] 完全一致
 /// （整词只作用于字面模式），只是正则来自预编译的 [`FifMatcher`]。
+///
+/// **`Err` = 这个文件没能完成匹配**（fancy-regex 的运行期错误，最常见是
+/// 回溯超限——引擎默认上限 100 万步，见 `search::regex_replace_propagates_
+/// runtime_errors_instead_of_panic`）。调用方必须把它与「扫完但零命中」
+/// 分开报：两者都当成零命中，就等于替用户把一个坏查询伪装成一个好答案。
 pub fn find_in_file_with(
     text: &str,
     matcher: &FifMatcher,
     whole_word: bool,
     max_hits: usize,
-) -> Vec<MatchPos> {
+) -> Result<Vec<MatchPos>, String> {
     let mut hits = match matcher {
-        FifMatcher::Regex(re) => {
-            crate::search::find_all_regex_compiled(text, re).unwrap_or_default()
-        }
+        FifMatcher::Regex(re) => crate::search::find_all_regex_compiled(text, re)?,
         FifMatcher::Literal {
             query,
             case_sensitive,
         } => literal_hits(text, query, *case_sensitive, whole_word, max_hits),
     };
     hits.truncate(max_hits);
-    hits
+    Ok(hits)
 }
 
 /// [`crate::search::filter_whole_word`] 的 &str 版：只保留命中起点前

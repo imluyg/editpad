@@ -336,8 +336,9 @@ enum Message {
     FifBrowseFolder,
     /// 「浏览…」选定目录（None = 用户取消对话框，不动现有目录）
     FifDirPicked(Option<PathBuf>),
-    /// 后台目录扫描完成：(任务序号, 结果, 是否封顶截断)。序号过期丢弃
-    FifScanDone(u64, Vec<crate::find_scan::FileHits>, bool),
+    /// 后台目录扫描完成：(任务序号, 结果, 是否封顶截断, 未完成匹配的文件数)。
+    /// 序号过期丢弃；末项是正则运行期错误（回溯超限）的文件数，与零命中不同义
+    FifScanDone(u64, Vec<crate::find_scan::FileHits>, bool, usize),
     /// 点击结果面板某文件的某条命中：已开页切换跳转，未开页装载后跳转
     FifGoto(usize, usize),
     // ---------- 行操作扩充 + 查找全部（第 62 轮） ----------

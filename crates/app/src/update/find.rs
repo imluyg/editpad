@@ -201,14 +201,19 @@ impl Editpad {
                 Task::none()
             }
             // 目录扫描完成：seq 过期的结果丢弃（FindScanDone 同构）
-            Message::FifScanDone(seq, results, truncated) => {
+            Message::FifScanDone(seq, results, truncated, failed) => {
                 if self.fif_scan == Some(seq) {
                     self.fif_scan = None;
                     let files = results.len();
                     let hits: usize = results.iter().map(|f| f.hits.len()).sum();
                     self.fif_results = results;
                     self.fif_truncated = truncated;
-                    if truncated {
+                    self.fif_failed = failed;
+                    if failed > 0 {
+                        // 优先级高于「封顶截断」：坏正则能让整批文件都没跑完，
+                        // 报「N 个文件匹配失败」比报命中数更要紧（N-15）
+                        self.set_status(editpad_core::fmt_fif_failed(self.lang(), failed));
+                    } else if truncated {
                         self.set_status(format!(
                             "{}{files}{}{hits}{}",
                             self.t(editpad_core::Key::StFifTruncatedPrefix),

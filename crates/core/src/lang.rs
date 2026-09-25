@@ -771,6 +771,16 @@ pub fn fmt_fif_panel_title(lang: Lang, files: usize, hits: usize, truncated: boo
     s
 }
 
+/// 「N 个文件匹配失败」的状态行短句（N-15：正则运行期错误不得静默成零命中）。
+pub fn fmt_fif_failed(lang: Lang, failed: usize) -> String {
+    match lang {
+        Lang::ZhCn => format!("在文件中查找：{failed} 个文件匹配失败，结果不完整"),
+        Lang::En => {
+            format!("Find in Files: {failed} file(s) failed to match; results are incomplete")
+        }
+    }
+}
+
 /// 结果面板里的单个文件头（`relative/path  （3 处）`）。
 pub fn fmt_file_hits(lang: Lang, rel: &str, hits: usize) -> String {
     format!(
