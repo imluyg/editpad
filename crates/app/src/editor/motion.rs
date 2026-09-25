@@ -1210,6 +1210,44 @@ impl EditorCore {
         s1
     }
 
+    /// 第 `line` 行的不含换行文本，走**纪元键控 memo**（P283）。
+    ///
+    /// 为什么要有这条：一帧里同一个可见行会被正文、选区带、不可见字符标记、
+    /// 链接下划线等好几个圈各取一次整行串——实测 14 个可见行取 47 次 ⇒ 同一行
+    /// 被完整物化 3.4 遍。短行无所谓；而本仓的主用例（单行日志 / 压缩文件 /
+    /// 长 CSV）里一行能有几万字符，那就是每帧多抄几百 KB 的堆分配 + memcpy。
+    /// 本函数只有第一个调用方真的取串，同纪元内的后续调用方只多拿一个
+    /// `Rc<str>` 把手（refcount +1）。
+    ///
+    /// 新鲜度与行布局 memo 同一底座：`content_epoch` 由
+    /// `invalidate_highlight_from`（正文突变的唯一汇点）自增，纪元一变整表清空
+    /// ⇒ 不存在"改完还发旧文本"的窗口。缓存按**字节**封顶（长行文档里 256 KB
+    /// 就够本帧用，超出的行照常现取，只是不省）。
+    /// 取串本身仍走 [`Self::line_text`]——两处口径（trim 掉行尾 `\n`/`\r`）
+    /// 必须只有一份实现。
+    pub(crate) fn line_text_ref(&self, line: usize) -> Rc<str> {
+        const LINE_TEXT_MEMO_MAX_BYTES: usize = 256 * 1024;
+        let epoch = self.content_epoch;
+        {
+            let mut memo = self.line_text_memo.borrow_mut();
+            if memo.epoch != epoch {
+                memo.map.clear();
+                memo.bytes = 0;
+                memo.epoch = epoch;
+            } else if let Some(hit) = memo.map.get(&line) {
+                return hit.clone();
+            }
+        }
+        let fetched: Rc<str> = Rc::from(self.line_text(line).as_str());
+        let mut memo = self.line_text_memo.borrow_mut();
+        // 只在仍是同一纪元时收表；顺手也挡住"缓存自己被写坏"的情况。
+        if memo.epoch == epoch && memo.bytes + fetched.len() <= LINE_TEXT_MEMO_MAX_BYTES {
+            memo.bytes += fetched.len();
+            memo.map.insert(line, fetched.clone());
+        }
+        fetched
+    }
+
     /// 第 `line` 行的不含换行文本。
     pub(crate) fn line_text(&self, line: usize) -> String {
         if line >= self.doc.line_count() {

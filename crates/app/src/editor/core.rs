@@ -443,6 +443,15 @@ pub(crate) struct Snapshot {
 // 可读，语义见下方各字段文档（bracket_cache / sel_span_cache）。
 type BracketCache = RefCell<Option<(CursorPos, Option<(usize, usize)>)>>;
 type SelSpanCache = RefCell<Option<((usize, usize), Option<usize>)>>;
+/// P283：整行文本的纪元键控 memo（`EditorCore::line_text_ref` 的存储）。
+/// `bytes` 是已缓存字符串的字节数之和，用来封顶——长行文档里一行就能有几万字符。
+#[derive(Default)]
+pub(crate) struct LineTextMemo {
+    pub(crate) epoch: u64,
+    pub(crate) map: HashMap<usize, Rc<str>>,
+    pub(crate) bytes: usize,
+}
+type LineTextMemoCell = RefCell<LineTextMemo>;
 /// P162 可见行 shaping memo 的值：`(正文字体, 字号, 内容纪元, 字形起点表)`。
 /// 起别名只为把四元组里那个 `Rc<[f32]>` 收进一处名字（clippy type_complexity）。
 type RowLayoutMemo = HashMap<usize, (Font, f32, u64, Rc<[f32]>)>;
@@ -612,6 +621,9 @@ pub struct EditorCore {
     /// 值 = 显示字符数（None = 无选区）。跨行精确计数是 O(选区行数)，
     /// 状态栏每帧查询必须有缓存；失效走同一汇点（P81 口径）。
     pub(crate) sel_span_cache: SelSpanCache,
+    /// P283：`line_text_ref` 的 memo。键 = 行号，新鲜度 = `content_epoch`
+    /// （正文突变的唯一汇点，与行布局 memo 同一底座）；纪元一变整体清空。
+    pub(crate) line_text_memo: LineTextMemoCell,
     /// 不可见字符覆盖标记开关（第 63 轮）：渲染层读取；不影响文档
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
@@ -781,6 +793,7 @@ impl Default for EditorCore {
             find_hl: Vec::new(),
             bracket_cache: RefCell::new(None),
             sel_span_cache: RefCell::new(None),
+            line_text_memo: RefCell::new(LineTextMemo::default()),
             show_whitespace: false,
             show_line_endings: false,
             #[cfg(test)]
@@ -929,7 +942,9 @@ impl EditorCore {
             let xs = match cached {
                 Some(xs) => xs,
                 None => {
-                    let text = self.line_text(line);
+                    // P283：走整行 memo——正文那一圈本来就把同一行取了一遍，
+                    // 两边各取一次就是每帧多抄一份长行。
+                    let text = self.line_text_ref(line);
                     let Some(xs) = shape_row_xs(font, size, &text) else {
                         continue;
                     };

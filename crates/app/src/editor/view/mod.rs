@@ -301,7 +301,7 @@ impl EditorView {
                 if reflow.as_ref().is_some_and(|r| r.line == line) {
                     if !reflow_painted {
                         reflow_painted = true;
-                        let rtext = core.line_text(line);
+                        let rtext = core.line_text_ref(line);
                         let rruns = core.highlight_runs(line, &rtext);
                         if let Some(r) = &reflow {
                             for (bi, &bs) in r.breaks.iter().enumerate() {
@@ -337,7 +337,7 @@ impl EditorView {
                     }
                     continue;
                 }
-                let text = core.line_text(line);
+                let text = core.line_text_ref(line);
                 let lens = text.chars().count();
                 // P115 勘误：插槽判断须在空行检查**之前**——空行
                 // （新文档/空白行输入）与行尾组字是老浮层实现本可
@@ -535,7 +535,7 @@ impl EditorView {
                 y,
             );
 
-            let text = core.line_text(line);
+            let text = core.line_text_ref(line);
             let lens = text.chars().count();
             // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
             // 同款注释——新文档/空白行输入是老浮层的常见场景）
@@ -691,7 +691,7 @@ impl EditorView {
                 if rl >= core.doc.line_count() {
                     return None;
                 }
-                let rtext = core.line_text(rl);
+                let rtext = core.line_text_ref(rl);
                 let rlens = rtext.chars().count();
                 let col_p = core.cursor.col.min(rlens);
                 let pel = p.chars().count();
@@ -943,7 +943,7 @@ impl EditorView {
                 };
             let (iv_first, iv_last) = core.visible_range();
             for line in iv_first..=iv_last {
-                let text = core.line_text(line);
+                let text = core.line_text_ref(line);
                 let lens = text.chars().count();
                 if core.wrap_enabled() {
                     let breaks = core.segments_of_line(line, &text);
@@ -1220,7 +1220,7 @@ impl EditorView {
         //（与括号匹配/预编辑下划线同族）。折行开态按视觉段拆分（URL 可
         // 能跨段，几何与命中高亮同款：段相对 x、与控件边界求交）。
         if let Some((line, c0, c1)) = core.link_hover {
-            let text = core.line_text(line);
+            let text = core.line_text_ref(line);
             let lens = text.chars().count();
             let (c0, c1) = (c0.min(lens), c1.min(lens));
             if c0 < c1 {
@@ -1299,7 +1299,7 @@ impl EditorView {
             for off in [boff, other] {
                 let line = core.doc.char_to_line(off);
                 let col = off - core.doc.line_to_char(line);
-                let text = core.line_text(line);
+                let text = core.line_text_ref(line);
                 let x = core.px_of(line, &text, col);
                 // 第 73 轮 ⑯：折行开态 y 经视觉行映射（括号可能落在非
                 // 首段，画错行即画到别的逻辑行上——设计 §4.8），x 走
@@ -1363,7 +1363,7 @@ impl EditorView {
                 if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                     continue;
                 }
-                let text = core.line_text(line);
+                let text = core.line_text_ref(line);
                 let cols = text.chars().count();
                 let x0 = core.px_of(line, &text, c0.min(cols));
                 let x1 = core.px_of(line, &text, c1.min(cols).max(c0.min(cols)));
@@ -1436,7 +1436,7 @@ impl EditorView {
                     if line < vis_first || line > vis_last {
                         continue; // 视口外的整行片段：不必取串即可否掉
                     }
-                    let text = core.line_text(line);
+                    let text = core.line_text_ref(line);
                     let lens = text.chars().count();
                     let (c0, c1) = (c0.min(lens), c1.min(lens));
                     if c1 <= c0 {
@@ -1562,7 +1562,7 @@ impl EditorView {
             let lo = sel_start.line.max(vis_first);
             let hi = sel_end.line.min(last_line).min(vis_last);
             for line in lo..=hi {
-                let text = core.line_text(line);
+                let text = core.line_text_ref(line);
                 let lens = text.chars().count();
                 let start_col = if line == sel_start.line {
                     sel_start.col
@@ -1751,7 +1751,7 @@ impl EditorView {
         // 同光标；折行开态按所在视觉段段相对定位）
         if let Some(d) = &core.dnd {
             if d.started {
-                let text = core.line_text(d.drop.line);
+                let text = core.line_text_ref(d.drop.line);
                 let v = core.visual_row_of(d.drop.line, d.drop.col);
                 let y = bounds.y + (v as f32 - core.scroll_top) * lh;
                 if y >= bounds.y - lh && y <= bounds.y + bounds.height {
