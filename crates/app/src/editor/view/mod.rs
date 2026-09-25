@@ -26,7 +26,7 @@ use iced::{
 };
 
 use super::core::{
-    lighten, luminance, CursorPos, EditOp, EditorHandle, ImeCommit, CARET_WIDTH,
+    lighten, luminance, CursorPos, EditOp, EditorCore, EditorHandle, ImeCommit, CARET_WIDTH,
     SCROLL_LINES_PER_NOTCH, WRAP_SB_RESERVE_HYSTERESIS_LINES,
 };
 use super::metrics::{
@@ -136,6 +136,133 @@ impl EditorView {
         // （行内容/字体/字号变化后键自然失配，下一帧自动重算）。
         let mut core = self.core.borrow_mut();
         core.refresh_visible_row_layouts(self.font);
+    }
+
+    /// S-5 第一步：两根滚动条与 P131 刻度条的绘制自 `draw` 提成方法。
+    /// 函数体逐字搬移、零行为变更；`sb`/`hsb` 由调用方传入本帧测量结果
+    /// （P59 把测量提前到裁剪层之前，绘制与折行预算共用同一结果）。
+    /// 调用点仍在 C 层内、`end_layer` 之前，绘制次序与原先一致。
+    fn draw_scrollbars(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        sb: &VScrollbar,
+        hsb: &HScrollbar,
+    ) {
+        // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）。
+        // P53：按活动淡入淡出——闲置滑块自动隐藏，不再常驻遮挡行尾；
+        // alpha≈0 时整条跳绘（含命中门控，隐藏即不可点）
+        if sb.needed {
+            let sb_alpha = core.scrollbar_visibility();
+            if sb_alpha > 0.004 {
+                let track_color = Color {
+                    a: colors.scrollbar_track.a * sb_alpha,
+                    ..colors.scrollbar_track
+                };
+                let thumb_color = Color {
+                    a: colors.scrollbar_thumb.a * sb_alpha,
+                    ..colors.scrollbar_thumb
+                };
+                let track_rect = Rectangle {
+                    x: bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - SCROLLBAR_WIDTH,
+                    y: bounds.y + sb.track_y,
+                    width: SCROLLBAR_WIDTH,
+                    height: sb.track_h,
+                };
+                let mut track_quad = renderer::Quad::default();
+                track_quad.bounds = track_rect;
+                track_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
+                renderer.fill_quad(track_quad, track_color);
+
+                let thumb = sb.thumb_rect(bounds.width);
+                let mut thumb_quad = renderer::Quad::default();
+                thumb_quad.bounds = Rectangle {
+                    x: bounds.x + thumb.x,
+                    y: bounds.y + thumb.y,
+                    ..thumb
+                };
+                thumb_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
+                renderer.fill_quad(thumb_quad, thumb_color);
+
+                // P131 标记条：命中（橙）与书签（琥珀）刻度画在轨道上
+                //（thumb 之上——thumb 半透明不遮挡刻度），随条淡入淡出
+                //（刻度属于滚动条的一部分，闲置隐藏与条一致）。位置 =
+                // 视觉行口径换算（软换行开态经 WrapIndex，禁逻辑行直乘行
+                // 高），右对齐贴轨道内缘、y 居中于换算点。
+                let hit_marks = core.scrollbar_hit_marks();
+                let bm_marks = core.scrollbar_bookmark_marks();
+                if !hit_marks.is_empty() || !bm_marks.is_empty() {
+                    let mark_x = bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - MARK_WIDTH;
+                    let mut mark_quad = renderer::Quad::default();
+                    mark_quad.bounds = Rectangle {
+                        x: mark_x,
+                        width: MARK_WIDTH,
+                        height: MARK_HEIGHT,
+                        y: 0.0,
+                    };
+                    for &(row, _) in &bm_marks {
+                        mark_quad.bounds.y = bounds.y + mark_y_for_row(row, sb) - MARK_HEIGHT * 0.5;
+                        renderer.fill_quad(
+                            mark_quad,
+                            Color {
+                                a: colors.bookmark.a * sb_alpha,
+                                ..colors.bookmark
+                            },
+                        );
+                    }
+                    for &(row, _) in &hit_marks {
+                        mark_quad.bounds.y = bounds.y + mark_y_for_row(row, sb) - MARK_HEIGHT * 0.5;
+                        renderer.fill_quad(
+                            mark_quad,
+                            Color {
+                                a: FIND_MARK_COLOR.a * sb_alpha,
+                                ..FIND_MARK_COLOR
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）。
+        // P45：行程统一走「列模型 ∪ 真实行宽」口径，与滚动钳制一致。
+        // P54：与竖直条共用活动戳，同款淡入淡出（横向滚动点亮，闲置淡出）。
+        // P59：测量已提前到裁剪层之前。
+        if hsb.needed {
+            let sb_alpha = core.scrollbar_visibility();
+            if sb_alpha > 0.004 {
+                let track_color = Color {
+                    a: colors.scrollbar_track.a * sb_alpha,
+                    ..colors.scrollbar_track
+                };
+                let thumb_color = Color {
+                    a: colors.scrollbar_thumb.a * sb_alpha,
+                    ..colors.scrollbar_thumb
+                };
+                let track_rect = Rectangle {
+                    x: bounds.x + hsb.track_x,
+                    y: bounds.y + bounds.height - SCROLLBAR_EDGE_INSET - SCROLLBAR_THUMB_THICKNESS,
+                    width: hsb.track_w,
+                    height: SCROLLBAR_THUMB_THICKNESS,
+                };
+                let mut track_quad = renderer::Quad::default();
+                track_quad.bounds = track_rect;
+                track_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
+                renderer.fill_quad(track_quad, track_color);
+
+                let thumb = hsb.thumb_rect(bounds.height);
+                let mut thumb_quad = renderer::Quad::default();
+                thumb_quad.bounds = Rectangle {
+                    x: bounds.x + thumb.x,
+                    y: bounds.y + thumb.y,
+                    ..thumb
+                };
+                thumb_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
+                renderer.fill_quad(thumb_quad, thumb_color);
+            }
+        }
     }
 }
 
@@ -1528,120 +1655,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             }
         }
 
-        // 垂直滚动条：内容超出视口才绘制（覆盖在正文右缘之上）。
-        // P53：按活动淡入淡出——闲置滑块自动隐藏，不再常驻遮挡行尾；
-        // alpha≈0 时整条跳绘（含命中门控，隐藏即不可点）
-        if sb.needed {
-            let sb_alpha = core.scrollbar_visibility();
-            if sb_alpha > 0.004 {
-                let track_color = Color {
-                    a: colors.scrollbar_track.a * sb_alpha,
-                    ..colors.scrollbar_track
-                };
-                let thumb_color = Color {
-                    a: colors.scrollbar_thumb.a * sb_alpha,
-                    ..colors.scrollbar_thumb
-                };
-                let track_rect = Rectangle {
-                    x: bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - SCROLLBAR_WIDTH,
-                    y: bounds.y + sb.track_y,
-                    width: SCROLLBAR_WIDTH,
-                    height: sb.track_h,
-                };
-                let mut track_quad = renderer::Quad::default();
-                track_quad.bounds = track_rect;
-                track_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
-                renderer.fill_quad(track_quad, track_color);
-
-                let thumb = sb.thumb_rect(bounds.width);
-                let mut thumb_quad = renderer::Quad::default();
-                thumb_quad.bounds = Rectangle {
-                    x: bounds.x + thumb.x,
-                    y: bounds.y + thumb.y,
-                    ..thumb
-                };
-                thumb_quad.border.radius = Radius::from(SCROLLBAR_WIDTH / 2.0);
-                renderer.fill_quad(thumb_quad, thumb_color);
-
-                // P131 标记条：命中（橙）与书签（琥珀）刻度画在轨道上
-                //（thumb 之上——thumb 半透明不遮挡刻度），随条淡入淡出
-                //（刻度属于滚动条的一部分，闲置隐藏与条一致）。位置 =
-                // 视觉行口径换算（软换行开态经 WrapIndex，禁逻辑行直乘行
-                // 高），右对齐贴轨道内缘、y 居中于换算点。
-                let hit_marks = core.scrollbar_hit_marks();
-                let bm_marks = core.scrollbar_bookmark_marks();
-                if !hit_marks.is_empty() || !bm_marks.is_empty() {
-                    let mark_x = bounds.x + bounds.width - SCROLLBAR_EDGE_INSET - MARK_WIDTH;
-                    let mut mark_quad = renderer::Quad::default();
-                    mark_quad.bounds = Rectangle {
-                        x: mark_x,
-                        width: MARK_WIDTH,
-                        height: MARK_HEIGHT,
-                        y: 0.0,
-                    };
-                    for &(row, _) in &bm_marks {
-                        mark_quad.bounds.y =
-                            bounds.y + mark_y_for_row(row, &sb) - MARK_HEIGHT * 0.5;
-                        renderer.fill_quad(
-                            mark_quad,
-                            Color {
-                                a: colors.bookmark.a * sb_alpha,
-                                ..colors.bookmark
-                            },
-                        );
-                    }
-                    for &(row, _) in &hit_marks {
-                        mark_quad.bounds.y =
-                            bounds.y + mark_y_for_row(row, &sb) - MARK_HEIGHT * 0.5;
-                        renderer.fill_quad(
-                            mark_quad,
-                            Color {
-                                a: FIND_MARK_COLOR.a * sb_alpha,
-                                ..FIND_MARK_COLOR
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        // 水平滚动条（P13）：内容超宽才绘制（覆盖在正文下缘之上）。
-        // P45：行程统一走「列模型 ∪ 真实行宽」口径，与滚动钳制一致。
-        // P54：与竖直条共用活动戳，同款淡入淡出（横向滚动点亮，闲置淡出）。
-        // P59：测量已提前到裁剪层之前。
-        if hsb.needed {
-            let sb_alpha = core.scrollbar_visibility();
-            if sb_alpha > 0.004 {
-                let track_color = Color {
-                    a: colors.scrollbar_track.a * sb_alpha,
-                    ..colors.scrollbar_track
-                };
-                let thumb_color = Color {
-                    a: colors.scrollbar_thumb.a * sb_alpha,
-                    ..colors.scrollbar_thumb
-                };
-                let track_rect = Rectangle {
-                    x: bounds.x + hsb.track_x,
-                    y: bounds.y + bounds.height - SCROLLBAR_EDGE_INSET - SCROLLBAR_THUMB_THICKNESS,
-                    width: hsb.track_w,
-                    height: SCROLLBAR_THUMB_THICKNESS,
-                };
-                let mut track_quad = renderer::Quad::default();
-                track_quad.bounds = track_rect;
-                track_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
-                renderer.fill_quad(track_quad, track_color);
-
-                let thumb = hsb.thumb_rect(bounds.height);
-                let mut thumb_quad = renderer::Quad::default();
-                thumb_quad.bounds = Rectangle {
-                    x: bounds.x + thumb.x,
-                    y: bounds.y + thumb.y,
-                    ..thumb
-                };
-                thumb_quad.border.radius = Radius::from(SCROLLBAR_THUMB_THICKNESS / 2.0);
-                renderer.fill_quad(thumb_quad, thumb_color);
-            }
-        }
+        self.draw_scrollbars(renderer, &core, bounds, &colors, &sb, &hsb);
 
         // C 层（压顶 quad）收口
         renderer.end_layer();
