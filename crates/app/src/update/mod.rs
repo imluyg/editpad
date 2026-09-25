@@ -772,6 +772,19 @@ impl Editpad {
             self.status_is_error = false;
             self.find_status = false;
         }
+        // S-2 第二步：两块停靠浮层并进本出口。它们与查找栏同槽停靠，此前各有
+        // 自己的切换路径（Ctrl+Shift+A / F12）而 Esc 漏过——收起了查找栏却把
+        // 结果面板留在屏上。FIF 关栏必须连带取消在途目录扫描（与
+        // FindInFilesToggled 的关闭分支同一口径），否则后台仍在扫一块看不见的面板。
+        self.find_all_visible = false;
+        self.fif_visible = false;
+        self.cancel_fif_scan();
+        // 崩溃恢复提示条：Esc = 「这次不裁决」，与〔丢弃〕不同义——那条会
+        // clear_session 把快照删掉。这里只收起提示，快照留在原处下次启动再问。
+        self.recover_prompt = None;
+        // 列编辑器对话框**不进**本出口，是刻意的：它是模态浮层，Esc 在
+        // `update/edit.rs` 的按键分支里先于本函数收自己（顶层优先，与主流编辑器
+        // 一致）；并进来会让「点菜单背板」也变成关对话框。
         self.find_drag = None;
     }
 

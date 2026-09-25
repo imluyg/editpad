@@ -34,11 +34,41 @@ fn esc_dismisses_every_transient_prompt() {
     app.find_status = true;
     app.status = "第 1/3 处匹配".to_owned();
     app.find_drag = Some(FindDrag::Pending);
+    // S-2 第二步新并进来的三处（外加一处**故意不并**的，见下方反向断言）
+    app.find_all_visible = true;
+    app.fif_visible = true;
+    app.fif_scan = Some(3);
+    app.recover_prompt = Some(editpad_core::snapshot::SessionManifest {
+        generation: 7,
+        tabs: Vec::new(),
+        active: 0,
+        next_untitled: 0,
+        clean_exit: false,
+    });
+    app.column_editor_visible = true;
 
     dispatch(&mut app, Message::BarsDismissed);
 
     // ---- 断言全集清零 ----
     assert!(!app.find_visible, "查找栏");
+    assert!(!app.find_all_visible, "「查找全部」结果面板（P82）");
+    assert!(!app.fif_visible, "FIF 结果面板（A8）");
+    assert_eq!(app.fif_scan, None, "关 FIF 面板必须连带取消在途目录扫描");
+    assert!(
+        app.fif_cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "取消标志置位——否则后台线程继续扫一块看不见的面板"
+    );
+    assert!(
+        app.recover_prompt.is_none(),
+        "崩溃恢复条随 Esc 收起。注意这只清**提示条**：本出口拿不到快照目录、\
+         也不调 clear_session，所以磁盘快照原样留着，下次启动仍会再问一次\
+         （真删快照的是〔丢弃〕= discard_session_recover）"
+    );
+    assert!(
+        app.column_editor_visible,
+        "列编辑器对话框是模态浮层，Esc 由按键分支顶层优先自收，不走本出口 \
+         （并进来越界：点菜单背板会变成关对话框）"
+    );
     assert!(!app.goto_visible, "转跳栏");
     assert!(!app.recents_visible, "最近文件");
     assert!(!app.palette_visible, "命令面板");
