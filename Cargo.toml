@@ -16,7 +16,7 @@ thiserror = "2"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-dirs = "6"
+dirs = "7"
 # D-2：app 壳直连的两个渲染层依赖也走 workspace 口径。tiny-skia 由 vendor 的
 # iced_tiny_skia 补丁要求（"0.11"），此前在 crates/app/Cargo.toml 里写死
 # "0.11.4" 绕过了统一声明——同族 iced_widget 已解析到 0.14.2 而补丁钉的是
