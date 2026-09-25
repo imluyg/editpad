@@ -17,8 +17,12 @@ updates:
       day: monday
       time: "06:00"
       timezone: "Asia/Shanghai"
-    # 锁面依赖多（iced 一族互相牵动），一次开一屏 PR 只会淹没真信号。
-    open-pull-requests-limit: 5
+    # 0 = 关掉「版本升级 PR」，但**保留 Dependabot 的安全更新**（漏洞公告仍会来）。
+    # 用户裁定（2026-09-25）：远端只保留 `main`，不要每周一长出 `dependabot/*` 分支。
+    # 想恢复这套预警机制：把下面两处 0 改回正整数（原先是 cargo 5 / actions 3）即可，
+    # 上面那段"为什么需要它"的理由仍然成立——vendor 补丁与 iced 版本线的耦合，
+    # 目前只剩 CI 里那两道「已经动了锁才响」的闸门在看守，没有提前量。
+    open-pull-requests-limit: 0
     # 同族版本一起升，减少「iced_widget 升了、iced_graphics 没升」这类半截升级。
     groups:
       iced:
@@ -39,7 +43,8 @@ updates:
       day: monday
       time: "06:00"
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 3
+    # 同上：版本升级 PR 关掉（用户裁定，理由见 cargo 那一节的注释）
+    open-pull-requests-limit: 0
     commit-message:
       prefix: ci
     labels:
