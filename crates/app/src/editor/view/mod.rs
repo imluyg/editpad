@@ -1617,6 +1617,22 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     );
                     continue;
                 }
+                // 关态横向剔除：只 shape 可能上屏的字符窗口（行长 4000 而视口
+                // 只装得下 ~60 字符时的主要帧成本）。屏幕 x = text_x0 + 行首基准
+                // px，故文本层裁剪带 [bounds.x, bounds.x + bounds.width] 对应
+                // 行首基准 [scroll_left - gutter_w, scroll_left + bounds.width
+                // - gutter_w]（含压在进行号栏下方的左段——旧口径本就整行绘制，
+                // 那部分一直会上屏，只是被层掩码裁掉）。
+                let (wlo, whi, wlo_px) = core.h_clip_window(
+                    line,
+                    &text,
+                    lens,
+                    scroll_left - gutter_w,
+                    scroll_left + bounds.width - gutter_w,
+                );
+                // 无 runs 分支整片一片、落点全靠 dx；有 runs 分支逐 run 从行级
+                // 布局取绝对像素——此时 dx 必须为 0，否则整行右移一个窗口宽。
+                let dx = if runs.is_empty() { wlo_px } else { 0.0 };
                 paint_text_slice(
                     renderer,
                     &core,
@@ -1626,9 +1642,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     line,
                     0,
                     &text,
-                    0,
-                    lens,
-                    0.0,
+                    wlo,
+                    whi,
+                    dx,
                     palette.text,
                     &runs,
                     bounds,

@@ -1855,6 +1855,174 @@ fn o1_find_hit_draw_cost_scales_with_viewport_not_document() {
     );
 }
 
+// ---------- 关态长行的**横向**剔除（O-1 的姊妹命题，第 157 轮勘出） ----------
+//
+// O-1 把绘制循环按视口**行**剔干净了，但一行只要有一列可见就整行进 shaping：
+// 视口 600px 装得下 ~60 个字符，4000 字符的行仍完整进 cosmic-text（第 157 轮
+// 实测行长 11→4000 时取串次数一动不动、帧耗时 113→861ms）。所以这里的护栏
+// 不能用取串**次数**——一次取串可以有几万字符——改断言整帧进 shaping 的
+// **字符数**（`EditorCore::shaped_chars` 探针，`paint_text_slice` 入口累加）。
+
+/// 关态长行管线：造 `lines` 行、每行 `line_len` 字符的文档，横向滚动
+/// `scroll_left` 后画一帧；返回（整帧进 shaping 的字符数，光栅化像素）。
+/// `clip_off` = true 走**改前老口径**（`h_clip_off` 开关，整行进 shaping），
+/// 用于「剔除对像素不可见」的同文档对照——换文档内容比是比不得的：行宽是
+/// 实测字形宽，尾部字符一换 `max_row_width_px` 就变，水平滚动条跟着改形。
+fn draw_long_line_frame(
+    lines: usize,
+    line_len: usize,
+    scroll_left: f32,
+    clip_off: bool,
+) -> (usize, Vec<u8>) {
+    // 显式字体名，不用 BODY_FONT：P33 的进程级钉字是**一次性全局变更**，
+    // 全量并发时它可能正好落在本用例两帧之间——两帧解析到不同字形族，
+    // 字符宽度一变整行文字就集体位移，比出来的差分与本改动毫无关系
+    // （同族处置见 `headless_caret_and_selection_never_ink_above_first_row`）。
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let doc: String = (0..lines)
+        .map(|i| {
+            let mut s = String::with_capacity(line_len + 1);
+            for k in 0..line_len {
+                // 逐字符变着写，避免整行同字被任何按游程合并的优化掩盖差异
+                s.push((b'a' + ((k + i) % 26) as u8) as char);
+            }
+            s.push('\n');
+            s
+        })
+        .collect();
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        // reset_document 会把滚动量复位，必须在它之后设
+        c.scroll_left = scroll_left;
+        #[cfg(test)]
+        {
+            c.h_clip_off = clip_off;
+            // 清零两个探针（取串次数不参与本批断言，清掉以免被别的计数口径误读）
+            let _ = c.take_line_text_calls();
+            let _ = c.take_shaped_chars();
+        }
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let (w, h) = (700u32, 500u32);
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &[viewport_rect],
+        Color::WHITE,
+    );
+    let shaped = core.borrow().take_shaped_chars();
+    (shaped, pixels.data().to_vec())
+}
+
+/// 正文带（x ≥ 120，即行号栏右侧）的墨迹像素数。行号数字全在 x < 120，
+/// 所以这个计数**只可能**来自正文——它同时充当「帧不是空白」的夹具自证。
+fn body_ink(px: &[u8]) -> u32 {
+    let mut n = 0u32;
+    for y in 0..500usize {
+        for x in 120..700usize {
+            let i = (y * 700 + x) * 4;
+            if px[i] < 250 || px[i + 1] < 250 || px[i + 2] < 250 {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// 横向剔除的成本契约：整帧进 shaping 的字符数不得随行长出格。
+///
+/// 自带敏感性证明：同一份文档用 `h_clip_off` 再画一帧 = **改前老算法的
+/// oracle**，两帧之差就是本改动的收益。改前若把这行断言删了才绿，这里
+/// 会当场红（不必靠手工短路源码来验）。
+#[test]
+fn o3_long_line_shaping_is_capped_by_viewport_width_not_line_length() {
+    let short = draw_long_line_frame(20, 11, 0.0, false).0;
+    let near = draw_long_line_frame(20, 4_000, 0.0, false).0;
+    let far = draw_long_line_frame(20, 20_000, 0.0, false).0;
+    let oracle = draw_long_line_frame(20, 4_000, 0.0, true).0;
+    eprintln!(
+        "[O-3续] 关态单帧进 shaping 字符数：行长 11 {short} / 4 千 {near} / 2 万 {far}；\
+         同文档改前口径 {oracle}"
+    );
+    assert!(short > 0, "探针失效：整帧一次 shaping 都没有");
+    // 相对判据：行长 ×5 不该让 shaping 量跟着放大
+    assert!(
+        far <= near * 12 / 10 + 200,
+        "行长 4 千→2 万使整帧 shaping 由 {near} 涨到 {far}：横向未剔除"
+    );
+    // 敏感性判据：改前同一份文档要付 ≈ 可视行 × 行长，剔除必须把它砍到一个
+    // 视口宽的量级（实测 64 000 → 1 778，即 ~36 倍）。
+    assert!(
+        oracle > 40_000,
+        "老口径 oracle 只有 {oracle}：探针或开关失效，下面的对比不构成证据"
+    );
+    assert!(
+        near * 10 < oracle,
+        "剔除只把 {oracle} 砍到 {near}，不足一个数量级：未按视口结算"
+    );
+}
+
+/// 横向剔除的像素契约：**同一份文档**只切开关，两帧必须逐像素相同。
+///
+/// 这是本改动的核心等价性证据——窗口边界落在视口之外，剔掉的那段本来就
+/// 不在屏上。`scroll_left = 1500` 那组尤其要紧：此时窗口左端不在 0，
+/// 无 runs 分支要靠调用点传的 `dx` 把整片文字搬回正确的绝对位置，
+/// `dx` 若算错，这一组会整体错位而 `scroll_left = 0` 那组照样绿。
+#[test]
+fn o3_horizontal_clipping_is_pixel_identical_to_full_line_paint() {
+    for scroll_left in [0.0f32, 1_500.0, 12_000.0] {
+        let (shaped_on, px_on) = draw_long_line_frame(20, 4_000, scroll_left, false);
+        let (shaped_off, px_off) = draw_long_line_frame(20, 4_000, scroll_left, true);
+        assert!(
+            shaped_on < shaped_off,
+            "scroll_left={scroll_left}：开态 shaping {shaped_on} 不少于改前 {shaped_off}，剔除没生效"
+        );
+        assert_eq!(
+            px_on, px_off,
+            "scroll_left={scroll_left}：横向剔除改变了像素（开态 {shaped_on} 字符 / 改前 {shaped_off} 字符）"
+        );
+        let ink = body_ink(&px_on);
+        assert!(
+            ink > 500,
+            "scroll_left={scroll_left}：正文带墨迹仅 {ink} px，剔除把该显示的一段剔没了"
+        );
+        eprintln!(
+            "[O-3续] scroll_left={scroll_left}：shaping {shaped_off} → {shaped_on} 字符，像素逐点相同，正文墨迹 {ink} px"
+        );
+    }
+}
+
 /// O-1 的反证护栏：**单帧判据**——剔除只许砍掉视口外的行，可见行一行都不许漏。
 ///
 /// 一帧之内直接问「每一可视行的选区带在不在」，与渲染次数无关。
@@ -4052,6 +4220,13 @@ fn s5_caret_layer_inks_on_the_caret_column() {
     use super::super::CursorPos;
     let (w, h) = (400u32, 300u32);
     let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    // 显式字体名：本用例判的是「blink 开/关两帧差分」，而 P33 的进程级钉字是
+    // **一次性全局变更**——全量并发下它可能正好落在两帧之间，两帧解析到不同
+    // 字形族 → 整行文字集体位移 → 差分带上一堆正文，"不像一条竖线"假红。
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
     let render = |blink_on: bool| -> tiny_skia::Pixmap {
         let core = EditorHandle::default();
         {
@@ -4068,10 +4243,10 @@ fn s5_caret_layer_inks_on_the_caret_column() {
         }
         let mut view = EditorView {
             core,
-            font: BODY_FONT,
+            font,
             zoom_accum: 0.0,
         };
-        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut renderer = iced::Renderer::new(font, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
         let node = view.layout(&mut tree, &renderer, &limits);

@@ -485,3 +485,93 @@ fn overwrite_resets_on_document_change() {
     c.reset_document(Document::from_str("b"));
     assert!(!c.overwrite, "换文档复位为插入模式");
 }
+
+// ---------- 关态横向剔除的窗口求解（纯函数 + 退路门控） ----------
+//
+// xs 口径 = `shape_row_xs`：`len == 字符数 + 1`，`xs[i]` 为第 i 个字符左缘、
+// 末项为行尾 x，单调不减。下列用例一律用「每字符 10px」的理想表，
+// 使「哪几个字符该留在窗口里」可以手算核对。
+
+#[test]
+fn h_clip_window_of_xs_covers_exactly_the_char_band() {
+    let xs: Vec<f32> = (0..=10).map(|i| i as f32 * 10.0).collect(); // 10 字符 × 10px
+                                                                    // 可视区覆盖整行 → 不剔
+    assert_eq!(visible_window_of_xs(&xs, 0.0, 100.0, 0), (0, 10));
+    // 左界 50 压在字符 5 的起点上：字符 4 占 [40,50] 恰好整枚在界外
+    assert_eq!(visible_window_of_xs(&xs, 50.0, 100.0, 0), (5, 10));
+    // 左界 55 落在字符 5 内部 → 横跨边界的字符必须保留
+    assert_eq!(visible_window_of_xs(&xs, 55.0, 100.0, 0), (5, 10));
+    // 右界 90：字符 9 起点恰为 90（零宽度落在界外）→ 弃
+    assert_eq!(visible_window_of_xs(&xs, 0.0, 90.0, 0), (0, 9));
+    // 右界 95：字符 9 占 [90,100] 被右界切到 → 保留
+    assert_eq!(visible_window_of_xs(&xs, 0.0, 95.0, 0), (0, 10));
+    // 两侧各留余量（边界子串独立 shaping 的连字/字距差推到裁剪带里）
+    assert_eq!(visible_window_of_xs(&xs, 50.0, 100.0, 2), (3, 10));
+    // 可视区整体在行右端之外 → 空窗口（一字符都不必 shape）
+    assert_eq!(visible_window_of_xs(&xs, 500.0, 600.0, 0), (10, 10));
+    // 可视区整体在行左端之外（横向滚动量不足以为负的退化控件）→ 同样空窗口
+    assert_eq!(visible_window_of_xs(&xs, -50.0, -10.0, 0), (0, 0));
+}
+
+#[test]
+fn h_clip_window_of_xs_degrades_safely_on_degenerate_input() {
+    // 空行（表只有一项 = 行首 0）
+    assert_eq!(visible_window_of_xs(&[0.0], 0.0, 100.0, 0), (0, 0));
+    // 单字符行，可视区盖住它
+    assert_eq!(visible_window_of_xs(&[0.0, 10.0], 0.0, 10.0, 0), (0, 1));
+    // 区间反向 / 零宽 → 宁可不剔
+    let xs: Vec<f32> = (0..=10).map(|i| i as f32 * 10.0).collect();
+    assert_eq!(visible_window_of_xs(&xs, 80.0, 20.0, 0), (0, 10));
+    assert_eq!(visible_window_of_xs(&xs, 50.0, 50.0, 0), (0, 10));
+    // NaN（bounds/滚动量异常）→ 整行，恒安全
+    assert_eq!(
+        visible_window_of_xs(&xs, f32::NAN, 100.0, 0),
+        (0, 10),
+        "NaN 不得把正文剔空"
+    );
+    assert_eq!(
+        visible_window_of_xs(&xs, 0.0, f32::INFINITY, 0),
+        (0, 10),
+        "INFINITY 右界 = 不剔"
+    );
+    // 余量再大也不会越界（lo≤hi 恒成立）
+    let (lo, hi) = visible_window_of_xs(&xs, 50.0, 60.0, 999);
+    assert_eq!((lo, hi), (0, 10));
+}
+
+#[test]
+fn h_clip_window_falls_back_to_full_line_unless_layout_matches() {
+    let long = "z".repeat(2000);
+    let mut c = core_with(&long);
+    let text = c.line_text(0);
+    assert_eq!(text.chars().count(), 2000);
+    let x_to = 6000.0f32;
+    // ① 本行未注入布局 → 整行（列模型反推窗口是 O(行长)，剔了反而更贵）
+    assert_eq!(
+        c.h_clip_window(0, &text, 2000, 5000.0, x_to),
+        (0, 2000, 0.0)
+    );
+    // ② 表长与行字符数不吻合（行刚变短/变长）→ 整行
+    c.set_row_layout(0, (0..=5).map(|i| i as f32 * 10.0).collect());
+    assert_eq!(
+        c.h_clip_window(0, &text, 2000, 5000.0, x_to),
+        (0, 2000, 0.0)
+    );
+    // 吻合后按表裁剪：每字符 10px ⇒ 可视区 [5000,6000] 是字符 500..600，
+    // 左右各 64 字符余量 → [436, 664)，起点像素 = 4360
+    c.set_row_layout(0, (0..=2000).map(|i| i as f32 * 10.0).collect());
+    assert_eq!(
+        c.h_clip_window(0, &text, 2000, 5000.0, x_to),
+        (436, 664, 4360.0),
+        "窗口与行首偏移必须同源（偏移取自行级布局，不是列模型）"
+    );
+    // ③ 字号失配（缩放帧旧 xs）→ 整行，与 px_of_len 同一判据
+    c.row_layouts_font_size = c.font_size + 5.0;
+    assert_eq!(
+        c.h_clip_window(0, &text, 2000, 5000.0, x_to),
+        (0, 2000, 0.0)
+    );
+    c.row_layouts_font_size = c.font_size;
+    // ④ 可视区盖住整行 → 走整行退路（常见短行路径零行为变更）
+    assert_eq!(c.h_clip_window(0, &text, 2000, 0.0, 1e9), (0, 2000, 0.0));
+}

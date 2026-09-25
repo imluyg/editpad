@@ -36,6 +36,8 @@ pub(super) fn paint_text_slice(
     if lo >= hi {
         return;
     }
+    #[cfg(test)]
+    core.count_shaped_chars(hi - lo);
     let lh = core.line_height();
     let size = core.font_size();
     if runs.is_empty() {

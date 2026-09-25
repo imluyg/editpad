@@ -106,6 +106,43 @@ pub(crate) fn prefix_width(text: &str, col: usize) -> f32 {
     width
 }
 
+/// 关态横向剔除的左右安全余量（字符数）。见 [`visible_window_of_xs`]。
+pub(crate) const H_CLIP_MARGIN_CHARS: usize = 64;
+
+/// 关态横向剔除的窗口求解（纯函数；单测见 `edit_tests` 的 `h_clip_*` 批）。
+///
+/// `xs` = 该行字形起点表，`shape_row_xs` 口径：`xs[i]` 为第 i 个字符左缘，
+/// 末项 = 行尾 x，故 `xs.len() == 字符数 + 1` 且单调不减。
+/// 返回**可能上屏**的字符区间 `[lo, hi)`，坐标 `x_from`/`x_to` 以行首为基准。
+///
+/// **为什么要留余量**：窗口内的子串是独立 shaping 的，边界处与整行 shaping
+/// 可能有连字/字距差异（`Shaping::Advanced` 的固有性质，与本仓高亮 run 逐段
+/// 绘制同源——那些边界一直在画）。把边界推到可视区外 `margin_chars` 个字符，
+/// 差异就落在文本层的裁剪带里，上屏零区别；窗口位置本身取自 `xs`，
+/// 故可见字符的落点与整行绘制逐像素一致。
+pub(crate) fn visible_window_of_xs(
+    xs: &[f32],
+    x_from: f32,
+    x_to: f32,
+    margin_chars: usize,
+) -> (usize, usize) {
+    if xs.len() < 2 {
+        return (0, 0);
+    }
+    let lens = xs.len() - 1;
+    // 区间无效（含 NaN / 反向）时宁可不剔——退化为整行，恒安全
+    if !(x_from.is_finite() && x_to.is_finite()) || x_to <= x_from {
+        return (0, lens);
+    }
+    // 最后一个左缘 ≤ x_from 的字符横跨可视区左界，必须保留；它左边的一切整体可弃
+    let left = xs.partition_point(|&v| v <= x_from);
+    let lo = left.saturating_sub(1 + margin_chars);
+    // 左缘 ≥ x_to 的字符起不再需要（切片右开，故该索引本身即 hi）
+    let right = xs.partition_point(|&v| v < x_to);
+    let hi = right.saturating_add(margin_chars).clamp(lo, lens);
+    (lo, hi)
+}
+
 /// 统计待插入文本的「换行单元数」与末行列数（P9）：
 /// `\r\n` 与孤立 `\r` 也各算一次换行——旧实现 `split('\n')` 只认 `\n`，
 /// CRLF 文本入文后光标列会漂移一个字符。

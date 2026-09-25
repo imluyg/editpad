@@ -15,7 +15,8 @@ pub(crate) use editpad_core::{
 
 pub(crate) use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width, shape_row_xs,
-    validate_measured_char_width, RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
+    validate_measured_char_width, visible_window_of_xs, H_CLIP_MARGIN_CHARS,
+    RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
 };
 pub(crate) use super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
 pub(crate) use super::wrap::{segment_index, WrapCache};
@@ -599,6 +600,16 @@ pub struct EditorCore {
     /// 生产构建整字段不参与编译。
     #[cfg(test)]
     pub(crate) line_text_calls: std::cell::Cell<usize>,
+    /// 测试钩子（横向剔除契约）：整帧交给文本 shaping 的**字符数**合计。
+    /// 取串次数管不住「单行超长」这一维（一行只取一次串，却可以有几百万
+    /// 字符进 shaping），故另设本计数。生产构建整字段不参与编译。
+    #[cfg(test)]
+    pub(crate) shaped_chars: std::cell::Cell<usize>,
+    /// 测试开关（横向剔除的老口径对照）：置 true 时 `h_clip_window` 恒返回整行，
+    /// 即第 160 轮之前的绘制路径。像素等价性用例拿它当**改前算法的 oracle**——
+    /// 同一份文档、同一次滚动，只切这一个开关，两帧必须逐像素相同。
+    #[cfg(test)]
+    pub(crate) h_clip_off: bool,
     /// P133：悬停链接的字符区间 `(line, c0, c1)`（下划线绘制数据源）。
     /// 鼠标移动探测写入；编辑后经失效汇点清空（跨度可能失配）。
     pub(crate) link_hover: Option<(usize, usize, usize)>,
@@ -728,6 +739,10 @@ impl Default for EditorCore {
             show_line_endings: false,
             #[cfg(test)]
             line_text_calls: std::cell::Cell::new(0),
+            #[cfg(test)]
+            shaped_chars: std::cell::Cell::new(0),
+            #[cfg(test)]
+            h_clip_off: false,
             // P132：绘制开关默认关（Settings 默认 true 在应用层下发时生效；
             // 无头测试构造的裸 core 不画参考线）
             indent_guides: false,
@@ -927,6 +942,66 @@ impl EditorCore {
             Some(xs) if size_ok && xs.len().saturating_sub(1) >= col => xs[col],
             _ => prefix_width(text, col) * self.char_width(),
         }
+    }
+
+    /// **关态横向剔除**：给出一行中可能上屏的字符窗口，供正文绘制只 shape
+    /// 这一段（长行主用例——单行日志 / 压缩文件 / 长 CSV）。
+    ///
+    /// 与 O-1 的纵向剔除是姊妹命题：O-1 按**视口行**砍掉不可见的行，但一行
+    /// 只要「有一列可见」就整行进 shaping——视口 600px 只装得下 ~60 个字符，
+    /// 4000 字符的行仍完整进 cosmic-text（第 157 轮实测：行长 11→4000 时取串
+    /// 次数与可视行数一动不动，帧耗时 113→861ms）。本函数把横向也按像素区间砍。
+    ///
+    /// 返回 `(lo, hi, lo_px)`：`[lo, hi)` 为需要绘制的字符区间，`lo_px` 为其
+    /// 相对行首的像素起点（无高亮 runs 时整片绘制要靠自己带这个偏移，
+    /// 有 runs 时 `paint_text_slice` 逐 run 从 `xs` 取绝对位置、偏移应为 0）。
+    ///
+    /// 三条退路一律返回整行 `(0, lens, 0.0)`，即既有口径、绝不因剔除漏画：
+    /// ① 字号与本行布局不一致（缩放帧旧 xs，`px_of_len` 同口径判定）；
+    /// ② 本行未注入布局，或表长与当前行字符数不吻合（行刚变短/变长，
+    ///    此时用 `prefix_width` 反推窗口是 O(行长) 的，剔了反而更贵）；
+    /// ③ 窗口覆盖整行（短行/未横向滚动——常见路径，零行为变更）。
+    pub(crate) fn h_clip_window(
+        &self,
+        line: usize,
+        text: &str,
+        lens: usize,
+        x_from: f32,
+        x_to: f32,
+    ) -> (usize, usize, f32) {
+        let full = (0, lens, 0.0);
+        // 老口径对照开关（仅测试构建存在）：整行进 shaping，即第 160 轮之前
+        #[cfg(test)]
+        if self.h_clip_off {
+            return full;
+        }
+        let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
+        if !size_ok {
+            return full;
+        }
+        let Some(xs) = self.row_layouts.get(&line) else {
+            return full;
+        };
+        if xs.len() != lens + 1 {
+            return full;
+        }
+        let (lo, hi) = visible_window_of_xs(xs, x_from, x_to, H_CLIP_MARGIN_CHARS);
+        if lo == 0 && hi >= lens {
+            return full;
+        }
+        (lo, hi, self.px_of_len(line, text, lo, lens))
+    }
+
+    /// 测试钩子（横向剔除契约）：读取并清零整帧 shaping 字符计数。
+    #[cfg(test)]
+    pub(crate) fn take_shaped_chars(&self) -> usize {
+        self.shaped_chars.take()
+    }
+
+    /// 测试钩子：累加本帧进 shaping 的字符数（`paint_text_slice` 入口调用）。
+    #[cfg(test)]
+    pub(crate) fn count_shaped_chars(&self, n: usize) {
+        self.shaped_chars.set(self.shaped_chars.get() + n);
     }
 
     /// 水平内容宽（像素）：列模型高水位与真实行宽证据取较大者。
