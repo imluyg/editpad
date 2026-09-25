@@ -483,7 +483,16 @@ impl Editpad {
                 }
                 let tab = &mut self.tabs[idx];
                 match outcome {
-                    AutosaveOutcome::Written => {
+                    AutosaveOutcome::Written(written) => {
+                        // P271（原 P264）：标签 = **磁盘上真实的编码**，与手动保存
+                        // 那条路径同口径（见本文件 `SaveDone` 臂的 P67 段）。改前的
+                        // 形状是「落盘用调度时刻的编码，标签原地不动」：用户在防抖窗
+                        // 内改过编码菜单（那条只写 `save_encoding`，不动标签）之后，
+                        // 本轮自动保存按旧编码写出，状态栏于是报着一个文件里根本没有的
+                        // 编码，要等下一次手动保存才前进一格。顺带修好下游的转码提示：
+                        // `transcode_notice` 拿 `prev_label` 与目标比，旧标签会让
+                        // 「GBK→GBK」看似无转码，而磁盘其实已是 UTF-8。
+                        tab.encoding_label = written.label().to_owned();
                         // 版本一致 = 快照之后没有新编辑：可以安全清脏
                         if tab.version == version {
                             tab.dirty = false;

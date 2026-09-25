@@ -4,9 +4,13 @@ use super::*;
 /// P146 代次过期作废（调度后页被编辑/回基线/改路径/关页——写盘动作
 /// 本身被跳过，什么都没发生）。拒写不是失败——磁盘上发生了别人（其他
 /// 编辑器/同步工具）的改动，盲写会覆盖它；裁决权交给 P52 外部修改提示条。
+///
+/// P271（原 P264）：`Written` 携带**实际写出的编码**。调度时刻到落盘之间用户
+/// 可能改过编码菜单，落盘用的仍是调度时刻那份快照；消费端要能把标签对齐到
+/// 磁盘上真实的字节，否则状态栏报的编码与文件内容不一致。
 #[derive(Debug, Clone)]
 pub(crate) enum AutosaveOutcome {
-    Written,
+    Written(editpad_core::SaveEncoding),
     SkippedExternalChange,
     Failed(String),
     Superseded,
@@ -112,7 +116,7 @@ pub(crate) fn write_to_disk(
     encoding: editpad_core::SaveEncoding,
 ) -> AutosaveOutcome {
     match editpad_core::save_document_encoded(path, doc, encoding) {
-        Ok(_) => AutosaveOutcome::Written,
+        Ok(_) => AutosaveOutcome::Written(encoding),
         Err(e) => AutosaveOutcome::Failed(e.to_string()),
     }
 }
@@ -369,7 +373,10 @@ mod tests {
 
         let enc = autosave_encoding(None, "GBK").expect("GBK 必须能反查回来");
         assert!(
-            matches!(write_to_disk(&target, &doc, enc), AutosaveOutcome::Written),
+            matches!(
+                write_to_disk(&target, &doc, enc),
+                AutosaveOutcome::Written(_)
+            ),
             "按 GBK 自动保存应当成功"
         );
         let written = std::fs::read(&target).unwrap();
@@ -403,7 +410,7 @@ mod tests {
             editpad_core::SaveEncoding::Utf8,
         );
         assert!(
-            matches!(outcome, AutosaveOutcome::Written),
+            matches!(outcome, AutosaveOutcome::Written(_)),
             "实际 {outcome:?}"
         );
         assert_eq!(

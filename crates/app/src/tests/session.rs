@@ -842,7 +842,7 @@ fn restored_dirty_pages_stay_dirty_when_undo_revisits_snapshot_state() {
             tid,
             v,
             PathBuf::from("C:/w/report.txt"),
-            AutosaveOutcome::Written,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
         ),
     );
     assert!(!app.tabs[1].dirty);
@@ -1592,7 +1592,7 @@ fn heartbeat_refreshes_manifest_after_autosave_cleans_tab() {
             tid,
             version,
             PathBuf::from("C:/doc/note.txt"),
-            AutosaveOutcome::Written,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
         ),
     );
     assert!(!app.tab().dirty);

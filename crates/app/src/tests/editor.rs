@@ -285,7 +285,7 @@ fn undo_back_to_saved_content_clears_dirty_and_redo_restores() {
             tid,
             v,
             PathBuf::from("C:/doc/note.txt"),
-            AutosaveOutcome::Written,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
         ),
     );
     assert!(!app.tab().dirty);

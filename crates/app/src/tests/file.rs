@@ -291,7 +291,7 @@ fn edit_schedules_single_inflight_autosave_and_success_clears_dirty() {
             tid,
             scheduled_version + 1,
             PathBuf::from("C:/doc/note.txt"),
-            AutosaveOutcome::Written,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
         ),
     );
     assert!(!app.tab().dirty, "版本一致时落盘应清脏");
@@ -314,7 +314,7 @@ fn autosave_stale_version_keeps_dirty() {
             tid,
             stale,
             PathBuf::from("C:/doc/note.txt"),
-            AutosaveOutcome::Written,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
         ),
     );
 
@@ -348,7 +348,12 @@ fn autosave_written_with_stale_version_rearms_debounce() {
 
     dispatch(
         &mut app,
-        Message::TabAutosaved(tid, stale, path, AutosaveOutcome::Written),
+        Message::TabAutosaved(
+            tid,
+            stale,
+            path,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
+        ),
     );
 
     assert!(app.tabs[0].dirty, "版本不符应保持置脏");
@@ -404,7 +409,7 @@ fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
     let doc = editpad_core::Document::from_str(text);
     let outcome = write_to_disk(&path, &doc, editpad_core::SaveEncoding::Gbk);
     assert!(
-        matches!(outcome, AutosaveOutcome::Written),
+        matches!(outcome, AutosaveOutcome::Written(_)),
         "落盘应成功，实际 {outcome:?}"
     );
     let bytes = std::fs::read(&path).unwrap();
@@ -444,6 +449,87 @@ fn autosave_scheduling_uses_the_encoding_rule_and_skips_unwritable_labels() {
         app2.tabs[0].autosave_inflight,
         "GBK 页必须仍然享受自动保存，否则这条修复就变成了功能倒退"
     );
+}
+
+/// P271（原 P264）：自动保存之后，编码标签必须前进到**实际写出的那个编码**。
+///
+/// 走完整链路而不手搓结局：调度点的选码规则 → 真实写盘线程落盘 → 回报进
+/// `update` → 标签。改前的形状是「落盘用调度时刻的编码、标签原地不动」——
+/// 用户在防抖窗内改过编码菜单（那条动作只写 `save_encoding`，不碰标签）之后，
+/// 状态栏报着一个文件里根本没有的编码，要等下一次手动保存才纠正。
+#[test]
+fn autosave_label_follows_the_encoding_actually_written() {
+    // ① 本轮落盘 UTF-8：标签必须跟着走（改前停在 GBK —— 这一格是缺陷本身）
+    let (mut app, path) = loaded_real_file_app("autosave-label-enc");
+    app.settings.autosave_enabled = true;
+    app.tabs[0].encoding_label = "GBK".to_owned();
+    app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Utf8);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("中".into())));
+    let text = app.tabs[0].editor.borrow().doc.to_text();
+    let msg = drive_reported_autosave(&mut app, &path);
+    dispatch(&mut app, msg);
+    assert_eq!(
+        app.tabs[0].encoding_label,
+        editpad_core::SaveEncoding::Utf8.label(),
+        "落盘的是 UTF-8，标签就不许停在 GBK"
+    );
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        on_disk.trim_start_matches('\u{feff}'),
+        text,
+        "磁盘字节必须是 UTF-8 形态"
+    );
+
+    // ② 反向对照：本轮真的按 GBK 落盘 ⇒ 标签必须停在 GBK。
+    // 缺了这一格，「一律写成 UTF-8」也能通过 ①。
+    let (mut app2, path2) = loaded_real_file_app("autosave-label-enc2");
+    app2.settings.autosave_enabled = true;
+    app2.tabs[0].encoding_label = "GBK".to_owned();
+    app2.tabs[0].save_encoding = None;
+    dispatch(&mut app2, Message::Edit(EditOp::InsertText("中".into())));
+    let text2 = app2.tabs[0].editor.borrow().doc.to_text();
+    let msg2 = drive_reported_autosave(&mut app2, &path2);
+    dispatch(&mut app2, msg2);
+    assert_eq!(
+        app2.tabs[0].encoding_label,
+        editpad_core::SaveEncoding::Gbk.label(),
+        "按 GBK 落盘时标签不得被改写"
+    );
+    let bytes2 = std::fs::read(&path2).unwrap();
+    assert_ne!(
+        bytes2,
+        text2.as_bytes().to_vec(),
+        "磁盘不得是 UTF-8 形态（GBK 落盘才是这一格的语义）"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&path2);
+}
+
+/// 用**调度点同一套**选码规则造任务、交给真实写盘线程跑完，返回它将要回报的消息。
+fn drive_reported_autosave(app: &mut Editpad, path: &std::path::Path) -> Message {
+    use std::sync::atomic::Ordering;
+    let (tid, version) = (app.tabs[0].id, app.tabs[0].version);
+    let doc = app.tabs[0].editor.borrow().doc.clone();
+    let enc =
+        crate::autosave::autosave_encoding(app.tabs[0].save_encoding, &app.tabs[0].encoding_label)
+            .expect("夹具的标签必须指得到可写编码");
+    let gen = app.tabs[0].autosave_gen.clone();
+    let my_gen = gen.load(Ordering::Relaxed);
+    let task = AutosaveTask {
+        encoding: enc,
+        expected_stamp: None,
+        delay: std::time::Duration::from_millis(20),
+    };
+    block_on(drive_autosave_once(
+        tid,
+        path.to_path_buf(),
+        doc,
+        version,
+        gen,
+        my_gen,
+        task,
+    ))
 }
 
 #[test]
@@ -588,7 +674,7 @@ fn p63_written_outcome_clears_dirty_and_mismatched_path_report_is_dropped() {
             tid,
             v,
             PathBuf::from("C:/other/renamed.txt"),
-            AutosaveOutcome::Written,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
         ),
     );
     assert!(
@@ -598,7 +684,12 @@ fn p63_written_outcome_clears_dirty_and_mismatched_path_report_is_dropped() {
 
     dispatch(
         &mut app,
-        Message::TabAutosaved(tid, v, path, AutosaveOutcome::Written),
+        Message::TabAutosaved(
+            tid,
+            v,
+            path,
+            AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
+        ),
     );
     assert!(!app.tab().dirty && !app.tabs[0].autosave_inflight);
 }
@@ -1676,7 +1767,7 @@ fn autosave_superseded_by_generation_bump_skips_write() {
         task,
     );
     match block_on(fut) {
-        Message::TabAutosaved(_, _, _, AutosaveOutcome::Written) => {}
+        Message::TabAutosaved(_, _, _, AutosaveOutcome::Written(_)) => {}
         other => panic!("代次一致应照常落盘，实际 {other:?}"),
     }
     assert!(path.exists());
