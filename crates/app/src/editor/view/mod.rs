@@ -223,6 +223,63 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第十二步第一段：行号数字绘制**去重**。`draw` 的开态与关态两条分支
+    /// 原本各有一份**逐字相同**的 20 行代码（第 169 轮取证：`git show HEAD` 取出
+    /// 两段、去掉注释与缩进后 `diff` 为空，唯一差异是一行注释）。这里合成一个
+    /// 方法、两处调用——是去重不是搬家，故搬运账目另用「两段代码逐行相同」那条
+    /// diff 证明，`comm -23` 那种集合差分证明不了"两份变一份"。
+    ///
+    /// 护栏（两份各有看守，第①步分别短路验过）：
+    /// * 开态那份单独摘掉 ⇒ `p150_two_digit_line_number_keeps_last_glyph` 红；
+    /// * 两份一起摘掉 ⇒ 另加 `p66_gutter_ink_moves_with_smooth_scroll` 红。
+    ///
+    /// 口径沿革（P66附／P150／P154）都在下面这段注释里，别再抄回调用点。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_gutter_number(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        gutter_font: Font,
+        lh: f32,
+        gutter_w: f32,
+        line: usize,
+        y: f32,
+    ) {
+        // P66附 改「计算左缘 + Default 对齐」。上游把 Cached 文本的损伤矩形存为
+        // Rectangle::new(position, size)——Right 对齐时 position 是右缘、矩形向
+        // 右展开，而字形实际向左展开 → 损伤区永远错位到字形右侧空白带，部分
+        // 重绘时数字不被重绘（用户截图：滚动后行号滞后一帧/序号重复，内容却
+        // 总是新鲜——Default 对齐的内容矩形方向正确）。数字是 ASCII 等宽
+        // （P42 实测 char_w，行号字号按 GUTTER_FONT_SCALE 线性折算），左缘可
+        // 精确计算：num_x + num_w = 行号栏右缘 − GUTTER_MIN，视觉仍是右对齐。
+        // P150：盒宽改用「行号字号实测字宽 × 位数 + GUTTER_NUM_SLACK」——线性
+        // 折算与盒宽等于文本宽度都会让上游丢掉末位字形（用户复现：自定义比例
+        // 字体 + 24px 下 10/11/12 只画出首位）。
+        let num = (line + 1).to_string();
+        let digits = num.chars().count();
+        let num_w = digits as f32 * core.gutter_char_width();
+        let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
+        renderer.fill_text(
+            core_text::Text {
+                content: num,
+                bounds: Size::new(core.gutter_number_box_w(digits), lh),
+                size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
+                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                // P154：行号用行号族（未下发 = 正文字体）
+                font: gutter_font,
+                align_x: core_text::Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: core_text::Shaping::Basic,
+                wrapping: core_text::Wrapping::None,
+            },
+            Point::new(num_x, y),
+            colors.gutter_text,
+            bounds,
+        );
+    }
+
     /// S-5 第十一步：输入法下划线（C 层）自 `draw` 提成方法（函数体逐字搬移）。
     ///
     /// 参数名一律沿用 `draw` 里那些局部的名字，为的是让函数体**一个字都不必改**；
@@ -1638,27 +1695,16 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     // （左缘 + Default 对齐，P66附 口径；数字仍右对齐于
                     // 行号栏右缘 − GUTTER_MIN）
                     if seg == 0 {
-                        let num = (line + 1).to_string();
-                        // P150：同关态口径（实测字宽 + 1px 余量）
-                        let digits = num.chars().count();
-                        let num_w = digits as f32 * core.gutter_char_width();
-                        let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
-                        renderer.fill_text(
-                            core_text::Text {
-                                content: num,
-                                bounds: Size::new(core.gutter_number_box_w(digits), lh),
-                                size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
-                                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                // P154：行号用行号族（未下发 = 正文字体）
-                                font: gutter_font,
-                                align_x: core_text::Alignment::Default,
-                                align_y: alignment::Vertical::Top,
-                                shaping: core_text::Shaping::Basic,
-                                wrapping: core_text::Wrapping::None,
-                            },
-                            Point::new(num_x, y),
-                            colors.gutter_text,
+                        self.draw_gutter_number(
+                            renderer,
+                            &core,
                             bounds,
+                            &colors,
+                            gutter_font,
+                            lh,
+                            gutter_w,
+                            line,
+                            y,
                         );
                     }
                     // P115 续：组字行（含空行）由重排全量绘制——首个被迭代
@@ -1863,37 +1909,18 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     continue;
                 }
 
-                // 行号数字：P66附 改「计算左缘 + Default 对齐」。上游把 Cached
-                // 文本的损伤矩形存为 Rectangle::new(position, size)——Right 对齐
-                // 时 position 是右缘、矩形向右展开，而字形实际向左展开 → 损伤区
-                // 永远错位到字形右侧空白带，部分重绘时数字不被重绘（用户截图：
-                // 滚动后行号滞后一帧/序号重复，内容却总是新鲜——Default 对齐的
-                // 内容矩形方向正确）。数字是 ASCII 等宽（P42 实测 char_w，行号
-                // 字号按 GUTTER_FONT_SCALE 线性折算），左缘可精确计算：
-                // num_x + num_w = 行号栏右缘 − GUTTER_MIN，视觉仍是右对齐。
-                // P150：盒宽改用「行号字号实测字宽 × 位数 + GUTTER_NUM_SLACK」
-                // ——线性折算与盒宽等于文本宽度都会让上游丢掉末位字形
-                //（用户复现：自定义比例字体 + 24px 下 10/11/12 只画出首位）。
-                let num = (line + 1).to_string();
-                let digits = num.chars().count();
-                let num_w = digits as f32 * core.gutter_char_width();
-                let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
-                renderer.fill_text(
-                    core_text::Text {
-                        content: num,
-                        bounds: Size::new(core.gutter_number_box_w(digits), lh),
-                        size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
-                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                        // P154：行号用行号族（未下发 = 正文字体）
-                        font: gutter_font,
-                        align_x: core_text::Alignment::Default,
-                        align_y: alignment::Vertical::Top,
-                        shaping: core_text::Shaping::Basic,
-                        wrapping: core_text::Wrapping::None,
-                    },
-                    Point::new(num_x, y),
-                    colors.gutter_text,
+                // 行号数字：口径与 P66附/P150/P154 那串历史一起搬进
+                // `draw_gutter_number`（开态分支用的是同一份代码，第 169 轮去重）。
+                self.draw_gutter_number(
+                    renderer,
+                    &core,
                     bounds,
+                    &colors,
+                    gutter_font,
+                    lh,
+                    gutter_w,
+                    line,
+                    y,
                 );
 
                 let text = core.line_text(line);
