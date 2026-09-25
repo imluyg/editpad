@@ -223,6 +223,139 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第八步：链接悬停下划线（P133）自 `draw` 提成方法（A 层，函数体逐字搬移）。
+    ///
+    /// 护栏：`headless_link_hover_underline_ink_under_token`（第①步实测：把本块与
+    /// 括号匹配块一起短路 ⇒ 恰好红这两条）。参数表与 `draw_block_highlight` 同构。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_link_hover(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+    ) {
+        // 链接悬停下划线（P133，路线图 E2）：悬停 token 下方 1.5px 线
+        //（与括号匹配/预编辑下划线同族）。折行开态按视觉段拆分（URL 可
+        // 能跨段，几何与命中高亮同款：段相对 x、与控件边界求交）。
+        if let Some((line, c0, c1)) = core.link_hover {
+            let text = core.line_text(line);
+            let lens = text.chars().count();
+            let (c0, c1) = (c0.min(lens), c1.min(lens));
+            if c0 < c1 {
+                let underline_y =
+                    |row: f32| -> f32 { bounds.y + (row - core.scroll_top) * lh + lh - 3.0 };
+                let mut draw_piece = |x: f32, w: f32, row: f32| {
+                    let Some(rect) = Rectangle {
+                        x: bounds.x + gutter_w + x - scroll_left,
+                        y: underline_y(row),
+                        width: w.max(char_w * 0.4),
+                        height: 1.5,
+                    }
+                    .intersection(&bounds) else {
+                        return;
+                    };
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: rect,
+                            ..renderer::Quad::default()
+                        },
+                        colors.link_underline,
+                    );
+                };
+                if core.wrap_enabled() {
+                    let base_v = core.line_visual_base(line);
+                    let breaks = core.segments_of_line(line, &text);
+                    for (s, &seg_start) in breaks.iter().enumerate() {
+                        let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
+                        let cs = c0.max(seg_start);
+                        let ce = c1.min(seg_end);
+                        if ce <= cs {
+                            continue;
+                        }
+                        let row = base_v as f32 + s as f32;
+                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
+                            continue;
+                        }
+                        let seg_base = core.px_of(line, &text, seg_start);
+                        let x0 = core.px_of(line, &text, cs) - seg_base;
+                        let x1 = core.px_of(line, &text, ce) - seg_base;
+                        draw_piece(x0, x1 - x0, row);
+                    }
+                } else {
+                    let row = line as f32;
+                    if row >= core.scroll_top && row <= core.scroll_top + core.viewport_h / lh {
+                        draw_piece(
+                            core.px_of(line, &text, c0),
+                            core.px_of(line, &text, c1) - core.px_of(line, &text, c0),
+                            row,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// S-5 第八步：括号匹配下划线（第 61 轮）自 `draw` 提成方法（A 层，逐字搬移）。
+    ///
+    /// 护栏：`headless_bracket_underline_ink_at_matched_pair`。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_bracket_match(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+    ) {
+        // 括号匹配高亮（第 61 轮）：光标邻接括号时，两侧括号各画一条
+        // 2px 下划线（A 层 quad，随掩码裁剪；查询带光标键控缓存，
+        // 命中帧零扫描）。括号恒 ASCII 单列，宽 = char_w。
+        if let Some((boff, other)) = core.bracket_match() {
+            for off in [boff, other] {
+                let line = core.doc.char_to_line(off);
+                let col = off - core.doc.line_to_char(line);
+                let text = core.line_text(line);
+                let x = core.px_of(line, &text, col);
+                // 第 73 轮 ⑯：折行开态 y 经视觉行映射（括号可能落在非
+                // 首段，画错行即画到别的逻辑行上——设计 §4.8），x 走
+                // 段相对（续行左缘起排）
+                let (v, seg_base) = if core.wrap_enabled() {
+                    let lens = text.chars().count();
+                    let breaks = core.segments_of_line(line, &text);
+                    let seg = wrap_segment_index(&breaks, col.min(lens), lens);
+                    let base = core.line_visual_base(line);
+                    (base + seg as u32, core.px_of(line, &text, breaks[seg]))
+                } else {
+                    (line as u32, 0.0)
+                };
+                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + gutter_w + (x - seg_base) - scroll_left,
+                            y: y + lh - 2.0,
+                            width: char_w.max(2.0),
+                            height: 2.0,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.bracket,
+                );
+            }
+        }
+    }
+
     /// S-5 第四步：列块高亮自 `draw` 提成方法（A 层，函数体逐字搬移）。
     ///
     /// 与书签圆点同款：本块只用 7 个本帧只读量，显式传参比塞进 `DrawFrame`
@@ -911,65 +1044,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
 
         self.draw_bookmark_dots(renderer, &core, bounds, &colors, lh);
 
-        // 链接悬停下划线（P133，路线图 E2）：悬停 token 下方 1.5px 线
-        //（与括号匹配/预编辑下划线同族）。折行开态按视觉段拆分（URL 可
-        // 能跨段，几何与命中高亮同款：段相对 x、与控件边界求交）。
-        if let Some((line, c0, c1)) = core.link_hover {
-            let text = core.line_text(line);
-            let lens = text.chars().count();
-            let (c0, c1) = (c0.min(lens), c1.min(lens));
-            if c0 < c1 {
-                let underline_y =
-                    |row: f32| -> f32 { bounds.y + (row - core.scroll_top) * lh + lh - 3.0 };
-                let mut draw_piece = |x: f32, w: f32, row: f32| {
-                    let Some(rect) = Rectangle {
-                        x: bounds.x + gutter_w + x - scroll_left,
-                        y: underline_y(row),
-                        width: w.max(char_w * 0.4),
-                        height: 1.5,
-                    }
-                    .intersection(&bounds) else {
-                        return;
-                    };
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: rect,
-                            ..renderer::Quad::default()
-                        },
-                        colors.link_underline,
-                    );
-                };
-                if core.wrap_enabled() {
-                    let base_v = core.line_visual_base(line);
-                    let breaks = core.segments_of_line(line, &text);
-                    for (s, &seg_start) in breaks.iter().enumerate() {
-                        let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
-                        let cs = c0.max(seg_start);
-                        let ce = c1.min(seg_end);
-                        if ce <= cs {
-                            continue;
-                        }
-                        let row = base_v as f32 + s as f32;
-                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
-                            continue;
-                        }
-                        let seg_base = core.px_of(line, &text, seg_start);
-                        let x0 = core.px_of(line, &text, cs) - seg_base;
-                        let x1 = core.px_of(line, &text, ce) - seg_base;
-                        draw_piece(x0, x1 - x0, row);
-                    }
-                } else {
-                    let row = line as f32;
-                    if row >= core.scroll_top && row <= core.scroll_top + core.viewport_h / lh {
-                        draw_piece(
-                            core.px_of(line, &text, c0),
-                            core.px_of(line, &text, c1) - core.px_of(line, &text, c0),
-                            row,
-                        );
-                    }
-                }
-            }
-        }
+        // 链接悬停下划线（S-5 第八步外提为 `draw_link_hover`，逐字搬移）
+        self.draw_link_hover(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            lh,
+            char_w,
+            gutter_w,
+            scroll_left,
+        );
 
         // 缩进参考线（P132，路线图 C4）：行首缩进制表位倍数处的淡竖线，
         // 画在正文之下（A 层）。每个可见逻辑行各自绘制（覆盖本行行盒
@@ -1085,45 +1170,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             scroll_left,
         );
 
-        // 括号匹配高亮（第 61 轮）：光标邻接括号时，两侧括号各画一条
-        // 2px 下划线（A 层 quad，随掩码裁剪；查询带光标键控缓存，
-        // 命中帧零扫描）。括号恒 ASCII 单列，宽 = char_w。
-        if let Some((boff, other)) = core.bracket_match() {
-            for off in [boff, other] {
-                let line = core.doc.char_to_line(off);
-                let col = off - core.doc.line_to_char(line);
-                let text = core.line_text(line);
-                let x = core.px_of(line, &text, col);
-                // 第 73 轮 ⑯：折行开态 y 经视觉行映射（括号可能落在非
-                // 首段，画错行即画到别的逻辑行上——设计 §4.8），x 走
-                // 段相对（续行左缘起排）
-                let (v, seg_base) = if core.wrap_enabled() {
-                    let lens = text.chars().count();
-                    let breaks = core.segments_of_line(line, &text);
-                    let seg = wrap_segment_index(&breaks, col.min(lens), lens);
-                    let base = core.line_visual_base(line);
-                    (base + seg as u32, core.px_of(line, &text, breaks[seg]))
-                } else {
-                    (line as u32, 0.0)
-                };
-                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
-                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                    continue;
-                }
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: Rectangle {
-                            x: bounds.x + gutter_w + (x - seg_base) - scroll_left,
-                            y: y + lh - 2.0,
-                            width: char_w.max(2.0),
-                            height: 2.0,
-                        },
-                        ..renderer::Quad::default()
-                    },
-                    colors.bracket,
-                );
-            }
-        }
+        // 括号匹配下划线（S-5 第八步外提为 `draw_bracket_match`，逐字搬移）
+        self.draw_bracket_match(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            lh,
+            char_w,
+            gutter_w,
+            scroll_left,
+        );
 
         // A 层（quad）收口
         // 不可见字符覆盖标记（第 64 轮）：空格=字符格中央小点、制表符=
