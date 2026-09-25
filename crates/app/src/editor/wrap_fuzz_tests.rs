@@ -173,8 +173,9 @@ fn wrap_index_matches_full_rebuild_across_random_edits() {
 /// 脱钩。改前实测：500 行 505 次 / 2000 行 2005 次 / 1 万行 10 005 次
 /// （每一次回车都付全文档代价），改后三档都是 5 次。
 ///
-/// 正确性不在这里测：与本条无关心——`wrap_index_matches_full_rebuild_across_random_edits`
-/// 拿「整表重建」当 oracle 逐行对照，增量平移一旦与真值不一致它先红。
+/// 正确性不由这条契约负责：它只管次数。增量平移是否与真值一致，交给
+/// `wrap_index_matches_full_rebuild_across_random_edits` —— 那个 oracle 逐行
+/// 对照「整表重建」，平移算错就先在那里红。
 #[test]
 fn wrap_line_count_change_cost_is_independent_of_document_size() {
     let mut counts: Vec<(usize, usize)> = Vec::new();
