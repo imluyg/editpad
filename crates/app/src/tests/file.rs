@@ -1720,6 +1720,51 @@ fn close_tab_save_blocked_by_external_change_guard() {
     assert_eq!(app.tabs.len(), 1, "内容没存就不该关页");
 }
 
+/// S-4 合并后的唯一维护点 `save_page`：三条拒绝出口一律「未启动」，且
+/// 只有真的启动写盘才登记 `pending_close_tab`。
+/// 这条用例钉的是**合并本身**：待关标记若在拒绝出口留下残值，之后任意一次
+/// 无关的 `Saved` 回报都会被抢成 `TabSaved`（关窗链劫持）；而普通 Ctrl+S
+/// 那条链绝不能登记待关页。
+#[test]
+fn save_page_refuses_cleanly_and_registers_close_chain_only_when_starting() {
+    // ① busy：不启动、不登记
+    let (mut app, _p) = loaded_real_file_app("gate-busy");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    app.busy = true;
+    let (task, started) = app.save_page(0, true);
+    drop(task);
+    assert!(!started, "busy 期间不得启动写盘");
+    assert_eq!(app.pending_close_tab, None, "未启动不得留待关标记");
+
+    // ② P63 外部改动：不启动、交提示条裁决、不登记
+    let (mut app, path) = loaded_real_file_app("gate-external");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    std::fs::write(&path, "externally replaced").unwrap();
+    let (task, started) = app.save_page(0, true);
+    drop(task);
+    assert!(!started, "守卫拦下时不算启动写盘");
+    assert_eq!(app.pending_close_tab, None, "拦下不得留待关标记");
+    assert_eq!(app.external_change, prompt_ids(&app, &[0]));
+
+    // ③ 正常路径（保存并关闭那条链）：启动 + 登记 + 进 busy
+    let (mut app, _p) = loaded_real_file_app("gate-launch");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tid = app.tabs[0].id;
+    let (task, started) = app.save_page(0, true);
+    drop(task);
+    assert!(started);
+    assert_eq!(app.pending_close_tab, Some(tid), "启动的那刻才登记待关页");
+    assert!(app.busy, "启动写盘必须进 busy");
+
+    // ④ 同一个正常路径经 Ctrl+S 那条链：启动，但**不**登记待关页
+    let (mut app, _p) = loaded_real_file_app("gate-plain");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let (task, started) = app.save_page(0, false);
+    drop(task);
+    assert!(started);
+    assert_eq!(app.pending_close_tab, None, "普通保存不得登记逐页关闭链");
+}
+
 /// 逐页关窗链的两个停摆出口：未命名置脏页要交给另存为对话框接管；
 /// 被 P63 守卫拦下的页必须作废关窗标记——留着的后果是用户随后任何一次
 /// 成功的 Ctrl+S 都会把窗口突然关掉。

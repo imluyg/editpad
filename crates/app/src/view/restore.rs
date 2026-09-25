@@ -207,6 +207,9 @@ impl Editpad {
     /// 生产代码零读者、只有测试在断言它。改成从队列与在途任务派生之后，
     /// 「计数器与队列不同步」这类账目漂移就没有载体了。
     /// 在途的那个用 `restore_views` 判定（只有恢复链的加载任务在里面）。
+    /// `#[cfg(test)]`：生产路径不读它（恢复进度提示直接用队列与汇总计数），
+    /// 留着会撞 `clippy -D warnings` 的 dead-code。
+    #[cfg(test)]
     pub(crate) fn restore_outstanding(&self) -> usize {
         let inflight = self
             .active_load

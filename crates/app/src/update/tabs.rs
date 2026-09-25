@@ -263,8 +263,10 @@ impl Editpad {
                 Task::none()
             }
             Message::CloseTabSave(idx) => {
-                // 「保存并关闭」：已命名的置脏页先落盘，
-                // TabSaved 成功且清脏后再真正移除页面
+                // S-4：落盘次序与 Ctrl+S 共用 `save_page`（原先这里是第二份手写
+                // 实现，缺 P63 外部改动守卫、缺写前备份、且恒按 UTF-8 静默转码——
+                // P172 逐条补齐后两份仍在，本条把它合并掉）。
+                // 本入口的差额只有两点：未命名页要留提示、回报走 TabSaved。
                 if idx >= self.tabs.len() || self.busy {
                     return Task::none();
                 }
@@ -272,52 +274,7 @@ impl Editpad {
                     self.set_status(self.t(editpad_core::Key::StRenameUntitledFirst).to_owned());
                     return Task::none();
                 }
-                let path = self.tabs[idx].path.clone().expect("上方已确认非空");
-                // P63 同款外部改动守卫（本路径曾没有）：磁盘现状 ≠ 记录戳时
-                // 既不落盘也不关页，裁决交给 P52 提示条——否则另一程序或同步盘
-                // 的改动被无声覆盖。守卫照 idx 记账（`save()` 只管活动页，
-                // 后台页要走得自己判）。
-                if let Some(recorded) = self.tabs[idx].file_stamp {
-                    if file_changed_externally(Some(recorded), file_stamp(&path)) {
-                        let id = self.tabs[idx].id; // P220：入队用页 id
-                        let queue = self.external_change.get_or_insert_with(Vec::new);
-                        if !queue.contains(&id) {
-                            queue.push(id);
-                        }
-                        self.status = self.t(editpad_core::Key::StExternalPaused).to_owned();
-                        return Task::none();
-                    }
-                }
-                self.enter_busy();
-                // 第 64 轮 ⑭ 同款写前备份（本路径曾没有）：同步执行，提示暂存
-                // 待落盘回报后补显（口径与 `save()` 一致）
-                if let Some(note) =
-                    crate::perform_backup_before_overwrite(&path, &self.settings.backup_mode)
-                {
-                    let lang = self.lang();
-                    self.pending_backup_notice = Some(note.text(lang));
-                }
-                let doc = self.tabs[idx].editor.borrow().doc.clone();
-                let version = self.tabs[idx].version;
-                // P146：记发起页 id（存盘期间下标漂移曾致错页无确认关闭）
-                // 并作废在途自动保存（手动保存接管本页写盘）
-                let tab_id = self.tabs[idx].id;
-                self.tabs[idx].invalidate_autosave();
-                self.pending_close_tab = Some(tab_id);
-                // P67：按页编码偏好落盘——曾用 `save_document_atomic` 恒按 UTF-8
-                // 写，把用户选的 GBK/BOM 偏好静默转码掉
-                let encoding = self.tabs[idx]
-                    .save_encoding
-                    .unwrap_or(editpad_core::SaveEncoding::Utf8);
-                Task::perform(
-                    async move {
-                        let saved = editpad_core::save_document_encoded(&path, &doc, encoding)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string());
-                        (version, saved)
-                    },
-                    move |(version, result)| Message::TabSaved(tab_id, version, result),
-                )
+                self.save_page(idx, true).0
             }
             // ---------- 标签右键菜单（P28；P39 起为浮层） ----------
             Message::TabContextMenu(i) => {

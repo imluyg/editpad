@@ -970,31 +970,44 @@ impl Editpad {
         )
     }
 
-    pub(super) fn save(&mut self) -> Task<Message> {
-        // 落盘未启动 = 「保存并关闭」链无法推进。关窗标记必须在**每一个**
-        // 拒绝出口作废（收在本函数一处，不靠调用方各自补条件）：留着它，用户
-        // 随后任意一次成功的 Ctrl+S 都会走到 Saved 分支把窗口突然关掉。
-        if self.busy || self.tab().path.is_none() {
-            self.pending_close = false;
-            return Task::none();
+    /// 把第 `idx` 页落盘的唯一次序：busy/未命名 → P63 外部改动守卫 →
+    /// `enter_busy` → 写前备份 → 按页编码偏好 + 作废在途自动保存 →
+    /// `Task::perform`。返回 `(任务, 是否真的启动了写盘)`。
+    ///
+    /// S-4（孪生合并）：这条次序此前在 `save()` 与页签「保存并关闭」
+    /// （`CloseTabSave`）各写一遍，第 146 轮（P172）实测到的后果是残缺那遍
+    /// **恒按 UTF-8 静默转码、无写前备份、无 P63 守卫**——即用户的 GBK 文件
+    /// 一次「保存并关闭」就被改码。当时逐条补齐，但两份实现仍然靠人记住同步；
+    /// 现在两个入口共用本函数，将来给保存加任何一道守卫都只有一处可漏。
+    ///
+    /// 回报消息仍分两条且**刻意不合并**：`Saved` 要兑现 `pending_close`
+    /// 关窗链，`TabSaved` 要兑现 `pending_close_tab` 逐页关闭链。
+    /// `as_close_chain` = true 时由本函数在**真的启动写盘的那一刻**登记
+    /// `pending_close_tab`——放在调用方登记会在三条拒绝出口上留下残值，
+    /// 那枚残值能把之后无关的 `Saved` 抢成 `TabSaved`。
+    pub(crate) fn save_page(&mut self, idx: usize, as_close_chain: bool) -> (Task<Message>, bool) {
+        let Some(tab) = self.tabs.get(idx) else {
+            return (Task::none(), false);
+        };
+        if self.busy || tab.path.is_none() {
+            return (Task::none(), false);
         }
         // P63 外部修改守卫：磁盘现状 ≠ 记录戳 → 不落盘。场景是页置脏且
         // 应用持续聚焦期间文件被外部改动（无焦点切换事件，P50 巡检不触
         // 发），此时 Ctrl+S 会无声覆盖。拦截后把裁决交给 P52 提示条：
         // 〔忽略〕按磁盘现状重记戳，再按一次 Ctrl+S = 两步的有意覆盖；
         // 〔重新加载〕放弃本地改动。干净页同样适用（写 = 无差别覆盖）。
-        let path = self.tab().path.clone().expect("上方已确认非空");
-        if let Some(recorded) = self.tab().file_stamp {
+        let path = tab.path.clone().expect("上方已确认非空");
+        let tab_id = tab.id;
+        if let Some(recorded) = tab.file_stamp {
             if file_changed_externally(Some(recorded), file_stamp(&path)) {
-                let idx = self.active_tab;
-                let id = self.tabs[idx].id; // P220：入队用页 id
                 let queue = self.external_change.get_or_insert_with(Vec::new);
-                if !queue.contains(&id) {
-                    queue.push(id);
+                // P220：入队用页 id（下标会在条子停留期间左移）
+                if !queue.contains(&tab_id) {
+                    queue.push(tab_id);
                 }
                 self.status = self.t(editpad_core::Key::StExternalPaused).to_owned();
-                self.pending_close = false; // 同上：本拒绝出口也要作废关窗标记
-                return Task::none();
+                return (Task::none(), false);
             }
         }
         self.enter_busy();
@@ -1009,29 +1022,49 @@ impl Editpad {
             self.pending_backup_notice = Some(note.text(lang));
         }
         // P67：按页编码偏好落盘（None = 默认 UTF-8，历史行为）
-        let encoding = self
-            .tab()
+        let encoding = self.tabs[idx]
             .save_encoding
             .unwrap_or(editpad_core::SaveEncoding::Utf8);
         // P146：手动保存接管本页写盘——先作废在途自动保存（双写者并发
         // 曾可交错写同一目标；且自动保存回报晚于手动保存落地会搅乱账目）
-        self.tab_mut().invalidate_autosave();
+        self.tabs[idx].invalidate_autosave();
         // P19 行动项 3：rope 结构共享克隆（O(1)），分块原子写盘，
         // 不再经 to_text() 产生全文 String（50MB 场景省 ~50MB 峰值）
-        let doc = self.cur_handle.borrow().doc.clone();
+        let doc = self.tabs[idx].editor.borrow().doc.clone();
         // P18 版本守卫：记录本次落盘对应的内容版本
-        let version = self.tab().version;
-        // P146：随回报携带发起页 id——保存期间切页/关页不再把账目
-        // 记到「完成时刻的活动页」（错清别页置脏标记 → 关页无确认丢内容）
-        let tab_id = self.tab().id;
-        Task::perform(
+        let version = self.tabs[idx].version;
+        let close_chain = as_close_chain;
+        if as_close_chain {
+            self.pending_close_tab = Some(tab_id);
+        }
+        let task = Task::perform(
             async move {
                 let saved = editpad_core::save_document_encoded(&path, &doc, encoding)
                     .map_err(|e| e.to_string());
                 (version, saved)
             },
-            move |(version, result)| Message::Saved(tab_id, version, result),
-        )
+            move |(version, result)| {
+                if close_chain {
+                    // TabSaved 只关心成/败（关链不提示转码结果）
+                    Message::TabSaved(tab_id, version, result.map(|_| ()))
+                } else {
+                    Message::Saved(tab_id, version, result)
+                }
+            },
+        );
+        (task, true)
+    }
+
+    pub(super) fn save(&mut self) -> Task<Message> {
+        // S-4：落盘次序收在 `save_page` 一处，本函数只剩「活动页 + 关窗标记」。
+        // 落盘未启动 = 「保存并关闭」链无法推进。关窗标记必须在**每一个**
+        // 拒绝出口作废（收在本函数一处，不靠调用方各自补条件）：留着它，用户
+        // 随后任意一次成功的 Ctrl+S 都会走到 Saved 分支把窗口突然关掉。
+        let (task, started) = self.save_page(self.active_tab, false);
+        if !started {
+            self.pending_close = false;
+        }
+        task
     }
 
     /// 单个标签页的自动保存是否就绪：已命名、有未存改动、
