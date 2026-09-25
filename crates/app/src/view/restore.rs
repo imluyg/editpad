@@ -74,6 +74,10 @@ impl Editpad {
             // 页编辑器；Loaded 路径不触碰换行/字号，无需再补发）
             tab.wrap_override = meta.wrap_override;
             tab.font_size_override = meta.font_size_override;
+            // ⚠️ 编码相关的两个字段**不在这里**回填：`restore_placeholder_ready`
+            // 拿 `encoding_label.is_empty()` 当"这一格还是没被填过的占位页"的旁证
+            // 之一，在此统一写标签会把排队装载链卡住（实测连红两条既有恢复用例）。
+            // 只在内容来自快照的那条分支里回填，见下方 `(Some(path), Some(_))`。
             {
                 let mut ed = tab.editor.borrow_mut();
                 ed.set_word_wrap(tab.wrap_override.unwrap_or(self.settings.word_wrap));
@@ -143,8 +147,25 @@ impl Editpad {
                                 );
                             }
                             tab.path = Some(PathBuf::from(path));
-                            // 快照恒为 UTF-8 落盘；原文件编码知情权随下次保存归一
-                            tab.encoding_label = "UTF-8".to_owned();
+                            // P260：编码标签按清单回填。改前这里写死
+                            // `tab.encoding_label = "UTF-8"`——那个字符串说的是"快照在
+                            // 内存里怎么表示"，而 app 的转码知情判据要的是"磁盘上那份
+                            // 文件是什么编码"（`main.rs::transcode_notice`：原编码为空
+                            // **或**与目标相同 ⇒ 不提示）。于是 GBK 文件崩一次再保存时
+                            // "原编码 == 目标编码"恒成立 ⇒ 那句「知情权随下次保存归一」
+                            // 结构性放不出来，文件被无声转码且没有回退路径。
+                            // 旧清单没有这个字段 ⇒ 兜回改前的 `"UTF-8"`，不给恢复链引入
+                            // 新的可见变化（状态栏编码位不会突然变空）。
+                            tab.encoding_label = meta
+                                .encoding_label
+                                .clone()
+                                .unwrap_or_else(|| "UTF-8".to_owned());
+                            // 用户显式选过的保存目标编码一并存活：恢复后直接按原编码
+                            // 存回去，连"提示他要转码"都不需要（什么都没转）。
+                            tab.save_encoding = meta
+                                .save_encoding
+                                .as_deref()
+                                .and_then(editpad_core::SaveEncoding::from_label);
                             tab.dirty = true;
                         }
                         None => {

@@ -25,6 +25,10 @@ impl Editpad {
             // P134：每页显示覆盖随会话保存（C7）
             wrap_override: t.wrap_override,
             font_size_override: t.font_size_override,
+            // P260：编码知情链也要随会话存活。空串是"未命名页/从未装载过文件"
+            // 的既有表示（`Tab::default`），存成 None 免得清单里出现空字符串。
+            encoding_label: (!t.encoding_label.is_empty()).then(|| t.encoding_label.clone()),
+            save_encoding: t.save_encoding.map(|e| e.label().to_owned()),
         }
     }
 

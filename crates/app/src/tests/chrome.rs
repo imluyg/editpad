@@ -610,4 +610,23 @@ fn status_menu_card_height_covers_every_encoding_item() {
     labels.sort_unstable();
     labels.dedup();
     assert_eq!(labels.len(), n, "编码表里有同名条目");
+
+    // P259 × P260：弹层条目表必须覆盖 core 的编码全集。少一项就是"那个编码在
+    // 界面上不存在"（P259 的病根），多一项（core 已删的编码）同样是病。
+    // 这一条把"菜单内容"与"枚举全集"两个真相钉在一起，不再靠人肉对齐。
+    for e in editpad_core::SaveEncoding::ALL {
+        assert!(
+            ENCODING_MENU_ITEMS
+                .iter()
+                .any(|(l, enc)| *enc == e && *l == e.label()),
+            "编码全集里的 {:?}（标签 {:?}）没有对应的弹层条目",
+            e,
+            e.label()
+        );
+    }
+    assert_eq!(
+        n,
+        editpad_core::SaveEncoding::ALL.len(),
+        "弹层条目数与编码全集条目数不等——有侧漏抄"
+    );
 }

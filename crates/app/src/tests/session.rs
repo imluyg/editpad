@@ -374,6 +374,8 @@ fn clean_named_tab(path: &str) -> editpad_core::snapshot::SessionTab {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     }
 }
 
@@ -424,6 +426,8 @@ fn session_restore_rebuilds_tabs_content_active_and_pending_loads() {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     };
     let named = editpad_core::snapshot::SessionTab {
         path: Some("C:/w/notes.md".to_owned()),
@@ -436,6 +440,8 @@ fn session_restore_rebuilds_tabs_content_active_and_pending_loads() {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -559,6 +565,8 @@ fn restored_tabs_carry_global_font_size() {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -586,6 +594,120 @@ fn restored_tabs_carry_global_font_size() {
     editpad_core::snapshot::clear_session(&dir);
 }
 
+/// P260：崩溃恢复之后第一次保存不得**无声**转码。
+///
+/// 改前的形状：`SessionTab` 根本没有编码字段，恢复时把 `encoding_label` 写死
+/// 成 `"UTF-8"`。而 app 的转码知情判据是「原编码为空 **或** 与目标相同 ⇒ 不提示」
+/// （`main.rs::transcode_notice`），于是恢复页上"原编码 == 目标编码"恒成立 ⇒
+/// 那句注释承诺的「知情权随下次保存归一」**结构性放不出来**：一个 GBK 文件崩一次
+/// 再保存就悄悄变成 UTF-8，且没有回退路径。
+#[test]
+fn recovered_named_tab_keeps_its_encoding_so_the_next_save_cannot_silently_transcode() {
+    use editpad_core::SaveEncoding as SE;
+    let dir = snapshot_scratch_dir("p260-encoding-restore");
+    let tab = editpad_core::snapshot::SessionTab {
+        path: Some("C:/w/报表.txt".to_owned()),
+        untitled_num: None,
+        dirty: true,
+        file: None,
+        cursor_line: 0,
+        cursor_col: 0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        wrap_override: None,
+        font_size_override: None,
+        encoding_label: Some("GBK".to_owned()),
+        save_encoding: Some("GBK".to_owned()),
+    };
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab,
+            doc: editpad_core::Document::from_str("未保存的中文改动"),
+        }],
+        0,
+        2,
+    )
+    .unwrap();
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(
+        app.tabs[0].encoding_label, "GBK",
+        "磁盘那份文件的编码必须跟着会话存活，而不是被快照的内存表示覆盖"
+    );
+    assert_eq!(
+        app.tabs[0].save_encoding,
+        Some(SE::Gbk),
+        "用户在编码菜单里显式选过的目标编码也得存活"
+    );
+    // 用户看得见的那一半：知情判据必须"能响"。
+    // 改前 prev 是写死的 "UTF-8"，这一句会静默返回 None。
+    assert!(
+        transcode_notice(
+            editpad_core::Lang::ZhCn,
+            &app.tabs[0].encoding_label,
+            SE::Utf8.label(),
+            false
+        )
+        .is_some(),
+        "恢复页若被存成 UTF-8，必须给出转码提示（原标签 GBK != 目标 UTF-8）"
+    );
+    // 偏好也存活的正面效果：按原编码存回去时什么都没转，不该有提示
+    assert!(
+        transcode_notice(
+            editpad_core::Lang::ZhCn,
+            &app.tabs[0].encoding_label,
+            SE::Gbk.label(),
+            false
+        )
+        .is_none(),
+        "GBK → GBK 不是转码，不该打扰用户"
+    );
+
+    editpad_core::snapshot::clear_session(&dir);
+}
+
+/// P260 的另一半：**改前版本写的清单**（没有这两个字段）恢复出来的页必须
+/// 保持改前的可见行为——标签兜成 `"UTF-8"`（状态栏不能突然变空），偏好为 None。
+#[test]
+fn old_manifest_without_encoding_fields_restores_as_before() {
+    let dir = snapshot_scratch_dir("p260-old-manifest");
+    let tab = editpad_core::snapshot::SessionTab {
+        path: Some("C:/w/doc.txt".to_owned()),
+        untitled_num: None,
+        dirty: true,
+        file: None,
+        cursor_line: 0,
+        cursor_col: 0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        wrap_override: None,
+        font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
+    };
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab,
+            doc: editpad_core::Document::from_str("旧清单里的页"),
+        }],
+        0,
+        2,
+    )
+    .unwrap();
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+    assert_eq!(
+        app.tabs[0].encoding_label, "UTF-8",
+        "清单没记录编码时保持旧可见行为，不引入新的空标签"
+    );
+    assert_eq!(app.tabs[0].save_encoding, None, "没有记录就不臆造偏好");
+    editpad_core::snapshot::clear_session(&dir);
+}
+
 #[test]
 fn dirty_named_tab_restores_snapshot_instead_of_disk_reload() {
     let dir = snapshot_scratch_dir("p30-dirty-named");
@@ -600,6 +722,8 @@ fn dirty_named_tab_restores_snapshot_instead_of_disk_reload() {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -622,7 +746,10 @@ fn dirty_named_tab_restores_snapshot_instead_of_disk_reload() {
         "v1 一律信快照（所见即所得），绝不从磁盘重载覆盖未存改动"
     );
     assert!(app.tabs[0].dirty, "恢复出的置脏页保持置脏");
-    assert_eq!(app.tabs[0].encoding_label, "UTF-8", "快照恒为 UTF-8 落盘");
+    assert_eq!(
+        app.tabs[0].encoding_label, "UTF-8",
+        "本例清单未记录编码（改前形态）⇒ 兜成 UTF-8；记录了的走 P260 那两条用例"
+    );
     assert!(app.active_load.is_none(), "快照同步还原，无需排队加载");
     assert!(app.status.is_empty());
 
@@ -646,6 +773,8 @@ fn restored_dirty_pages_stay_dirty_when_undo_revisits_snapshot_state() {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     };
     let named = editpad_core::snapshot::SessionTab {
         path: Some("C:/w/report.txt".to_owned()),
@@ -658,6 +787,8 @@ fn restored_dirty_pages_stay_dirty_when_undo_revisits_snapshot_state() {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -1581,6 +1712,8 @@ fn heartbeat_result_with_stale_version_does_not_record_account() {
                 scroll_left: 0.0,
                 wrap_override: None,
                 font_size_override: None,
+                encoding_label: None,
+                save_encoding: None,
             }],
             active: 0,
             next_untitled: 2,
@@ -1967,6 +2100,8 @@ fn restore_with_all_pages_over_mem_cap_keeps_app_alive() {
         scroll_left: 0.0,
         wrap_override: None,
         font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,

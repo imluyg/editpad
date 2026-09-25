@@ -800,7 +800,7 @@ impl Editpad {
     }
 }
 
-/// [`status_menu_overlay`] 里卡片容器的内边距。**必须与卡片高度算法共用**：
+/// `Editpad::status_menu_overlay` 里卡片容器的内边距。**必须与卡片高度算法共用**：
 /// 高度按条目数算时漏掉这份内边距，最后一项就会被剪在卡片外。
 pub(crate) const STATUS_MENU_CARD_PAD: f32 = 4.0;
 
@@ -824,7 +824,7 @@ pub(crate) const ENCODING_MENU_ITEMS: &[(&str, editpad_core::SaveEncoding)] = &[
 /// 状态栏弹层卡片的**固定高度**：条目数 × 行高 + (条目数-1) × 间距 + 上下内边距。
 ///
 /// 为什么单列成一个函数：卡片容器是固定 `height` 且**没有** `scrollable`
-/// （见 [`status_menu_overlay`] 的构造），所以"高度写死、条目加多"这一类
+/// （见 `Editpad::status_menu_overlay` 的构造），所以"高度写死、条目加多"这一类
 /// 脱钩不会报错，只会把多出来的条目**剪到卡片外面**——而锚点是
 /// `vh - card_h - 36`，被剪的部分正好压到状态栏和窗口下缘之外，表现为
 /// "点了没反应"。实测踩过一次：编码菜单从 3 项扩到 7 项（P127 补 Big5 /

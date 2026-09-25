@@ -70,6 +70,25 @@ pub enum SaveEncoding {
 }
 
 impl SaveEncoding {
+    /// 全部可选编码目标（P260）：`label` 的反查、会话清单的编解码、以及
+    /// 「编码弹层条目是否覆盖了全集」的对拍都从这里取，三者不再各写一份。
+    pub const ALL: [SaveEncoding; 7] = [
+        SaveEncoding::Utf8,
+        SaveEncoding::Utf8Bom,
+        SaveEncoding::Gbk,
+        SaveEncoding::Big5,
+        SaveEncoding::ShiftJis,
+        SaveEncoding::EucJp,
+        SaveEncoding::EucKr,
+    ];
+
+    /// [`SaveEncoding::label`] 的反查。未知标签返回 `None`——会话清单里的
+    /// 编码名可能来自旧版本或手改过的文件，降级成"没有偏好"比让整份清单
+    /// 解析失败要好（丢的是一次偏好，留的是整个可恢复会话）。
+    pub fn from_label(label: &str) -> Option<SaveEncoding> {
+        Self::ALL.into_iter().find(|e| e.label() == label)
+    }
+
     /// 状态栏/提示用的规范标签（与 loader 嗅探标签同口径）。
     pub fn label(&self) -> &'static str {
         match self {
@@ -288,6 +307,34 @@ mod tests {
             .join(format!("saver-{tag}-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// P260：`from_label` 是 `label` 的**exact 逆**，且标签全集唯一。
+    ///
+    /// 会话清单存的是标签字符串（编解码跨版本稳），恢复时靠这个反查把
+    /// `"GBK"` 变回 `SaveEncoding::Gbk`。若两个函数各写一份、或两个编码共用
+    /// 一个标签，反查就会静默取错编码——所以全集遍历 + 唯一性一起钉。
+    #[test]
+    fn save_encoding_labels_roundtrip_uniquely_over_the_whole_enum() {
+        assert_eq!(SaveEncoding::ALL.len(), 7, "编码全集条目数");
+        let mut labels: Vec<&str> = Vec::new();
+        for e in SaveEncoding::ALL {
+            let l = e.label();
+            assert_eq!(
+                SaveEncoding::from_label(l),
+                Some(e),
+                "标签 {l:?} 反查不回 {e:?}——会话清单恢复会静默取错编码"
+            );
+            assert!(
+                !labels.contains(&l),
+                "标签 {l:?} 重复，反查会取到另一个编码"
+            );
+            labels.push(l);
+        }
+        // 未知/损坏的标签降级成 None（不是 panic、也不是悄悄退回 UTF-8）
+        for bad in ["", "utf-8", "UTF8", "UTF-7", "gbk", "GB2312", "未知编码"] {
+            assert_eq!(SaveEncoding::from_label(bad), None, "{bad:?} 不该被认出来");
+        }
     }
 
     #[test]

@@ -92,6 +92,24 @@ pub struct SessionTab {
     /// P134：本页字号覆盖（None = 跟随全局设置；C7 随会话保存）。
     #[serde(default)]
     pub font_size_override: Option<f32>,
+    /// P260：**退出时该页所对应磁盘文件的编码标签**（与 loader 嗅探标签、
+    /// `SaveEncoding::label` 同口径）。
+    ///
+    /// 为什么必须入清单：app 侧的转码知情判据是
+    /// 「原编码标签为空**或**与原编码相同 ⇒ 不提示」（`main.rs` 的
+    /// `transcode_notice`）。快照内容恒为 UTF-8 落盘，改前恢复链把这个标签
+    /// 写死成 `"UTF-8"` ⇒ 一个 GBK 文件崩一次再保存时"原编码 == 目标编码"
+    /// 恒成立，**那句注释承诺的「知情权随下次保存归一」结构性放不出来**，
+    /// 文件被无声转成 UTF-8 且没有回退路径。
+    ///
+    /// `#[serde(default)]`：旧清单读不出该字段时退回 `None`，行为与改前一致。
+    #[serde(default)]
+    pub encoding_label: Option<String>,
+    /// P260：该页退出时的**保存目标编码**（用户在 P67 编码菜单里显式选过
+    /// 的那个；None = 未选过，落盘按默认 UTF-8）。存在标签字符串而不是枚举，
+    /// 是为了让未知/未来新增的编码名降级成 `None` 而不是让整份清单解析失败。
+    #[serde(default)]
+    pub save_encoding: Option<String>,
 }
 
 /// 会话清单：一次快照的提交点。存在且可解析 = 有会话可恢复（P30 消费）；
@@ -528,6 +546,8 @@ mod tests {
             scroll_left: 0.0,
             wrap_override: None,
             font_size_override: None,
+            encoding_label: None,
+            save_encoding: None,
         }
     }
 
@@ -543,10 +563,45 @@ mod tests {
             scroll_left: 0.0,
             wrap_override: None,
             font_size_override: None,
+            encoding_label: None,
+            save_encoding: None,
         }
     }
 
     // ---------- 快照 roundtrip ----------
+
+    /// P260：编码标签与保存目标编码必须随会话存活；而**改前版本写的清单**
+    /// （整份文件里没有这两个键）仍要能解析——缺字段降级成 `None`，
+    /// 不能把整场可恢复会话判成"清单损坏"。
+    #[test]
+    fn session_manifest_roundtrips_encoding_fields_and_tolerates_old_files() {
+        let dir = scratch_dir("encoding-fields");
+        let mut t = named_tab("C:/work/报表.txt", true);
+        t.encoding_label = Some("GBK".to_owned());
+        t.save_encoding = Some("Shift_JIS".to_owned());
+        let written = write_session(&dir, &[page(t, "中文")], 0, 2).expect("写入应成功");
+        let read = read_manifest(&dir).expect("清单必须可解析");
+        assert_eq!(read, written, "清单 roundtrip 必须连新字段一起回来");
+        assert_eq!(read.tabs[0].encoding_label.as_deref(), Some("GBK"));
+        assert_eq!(read.tabs[0].save_encoding.as_deref(), Some("Shift_JIS"));
+
+        // 手工剥掉这两个键，模拟旧版本写的清单文件
+        let path = dir.join(MANIFEST_NAME);
+        let old_text = std::fs::read_to_string(&path).expect("清单应可读");
+        let stripped: Vec<&str> = old_text
+            .lines()
+            .filter(|l| {
+                let k = l.trim_start();
+                !k.starts_with("encoding_label") && !k.starts_with("save_encoding")
+            })
+            .collect();
+        std::fs::write(&path, stripped.join("\n")).expect("写回应成功");
+        let read = read_manifest(&dir).expect("缺新字段的旧清单必须照旧可解析");
+        assert_eq!(read.tabs.len(), 1, "旧清单的页必须照常恢复出来");
+        assert_eq!(read.tabs[0].encoding_label, None, "缺字段降级成 None");
+        assert_eq!(read.tabs[0].save_encoding, None);
+        assert!(read.tabs[0].dirty, "其余字段不受影响");
+    }
 
     #[test]
     fn session_roundtrip_named_dirty_untitled_and_clean_tabs() {
