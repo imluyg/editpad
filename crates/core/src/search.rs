@@ -950,6 +950,11 @@ pub fn expand_regex_at(
 /// `text[..start].chars().count()` 的 O(命中×文档) 复杂度）。
 /// 行界按 ropey `unicode_lines` 全集（`\r\n` 计 1 字符）；命中内容内
 /// 的换行推进行号、列号回到行首计数。
+///
+/// **行界归属口径（N-09）**：行界单元归属于它**终止**的那一行，故起于单元
+/// 内部或本体的命中（正则 `\n` 打在 CRLF 上是最典型的一种）归上一行、列取
+/// 上一行的行尾列。本函数是字节 → (line,col) 的唯一换算处，`替换当前` 与
+/// 选中两侧共用它，不存在第二份口径可漂。
 fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
     let mut out = Vec::with_capacity(spans.len());
     let mut byte_pos = 0usize;
@@ -962,15 +967,27 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
                       char_pos: &mut usize,
                       line: &mut usize,
                       line_start_char: &mut usize,
-                      target: usize| {
+                      target: usize|
+     -> Option<(usize, usize)> {
         while *byte_pos < target {
             let c = text[*byte_pos..].chars().next().unwrap_or('\0');
+            let unit_line = *line;
+            let unit_col = *char_pos - *line_start_char;
             *byte_pos += c.len_utf8();
             if c == '\r' && text[*byte_pos..].starts_with('\n') {
+                // CRLF 是一个行界单元、占 2 字节计 1 字符。能进到这里说明
+                // target 已在 `\r` 之后，若恰指在那个 `\n` 上（inside）就落在
+                // 单元**内部**：按「行界单元归属于它终止的那一行」交回上一行
+                // 的行尾列，而不是越过单元后的下一行 col 0——core-B。
+                // 游标本身仍整格跨过该单元，故后续命中的归属不受影响。
+                let inside = *byte_pos == target;
                 *byte_pos += 1;
                 *char_pos += 1;
                 *line += 1;
                 *line_start_char = *char_pos;
+                if inside {
+                    return Some((unit_line, unit_col));
+                }
                 continue;
             }
             *char_pos += 1;
@@ -979,10 +996,11 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
                 *line_start_char = *char_pos;
             }
         }
+        None
     };
 
     for &(start, end) in spans {
-        advance_to(
+        let inside_break = advance_to(
             text,
             &mut byte_pos,
             &mut char_pos,
@@ -990,7 +1008,10 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
             &mut line_start_char,
             start,
         );
-        let col = char_pos - line_start_char;
+        let (hit_line, col) = match inside_break {
+            Some(pos) => pos,
+            None => (line, char_pos - line_start_char),
+        };
         // 命中跨度：同口径计数（\r\n 计 1）
         let mut len_chars = 0usize;
         let mut b = start;
@@ -1003,7 +1024,7 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
             len_chars += 1;
         }
         out.push(MatchPos {
-            line,
+            line: hit_line,
             col,
             len_chars,
         });
@@ -2402,5 +2423,89 @@ mod tests {
         let text = "a1\nb2\na3";
         assert_eq!(find_all_regex(text, "^a.", false).unwrap().len(), 1);
         assert_eq!(find_all_regex(text, "(?m)^a.", false).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn regex_hit_inside_a_line_break_unit_belongs_to_the_line_it_ends() {
+        // N-09/core-B 口径：**行界单元归属于它终止的那一行**。`\r\n` 占 2 字节
+        // 却只计 1 字符，于是「命中恰起于该单元的 `\n`」是落在行界**内部**的
+        // 位置——归上一行、列取上一行的行尾列，而不是下一行 col 0。
+        // 为什么要钉：`替换当前` 拿 (line,col,len) 去 ropey 定位字符，行号错一
+        // 行就作用到相邻字符上、却照样回报成功。
+        assert_eq!(
+            find_all_regex("a\r\nb", r"\n", true).unwrap(),
+            vec![MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1
+            }],
+            "命中起于 CRLF 的 \\n：应归上一行的行尾列"
+        );
+        // 同一单元的另一角：命中起于行界本体起始（`\r`）——现状本就归上一行，
+        // 钉住防止改 B 时把它一起改坏。
+        assert_eq!(
+            find_all_regex("a\r\nb", r"\r", true).unwrap(),
+            vec![MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1
+            }],
+            "命中起于 CRLF 的 \\r：仍归上一行"
+        );
+        // 单字节行界本体（`\n` / 孤立 `\r`）同规则。
+        assert_eq!(
+            find_all_regex("a\nb", r"\n", true).unwrap(),
+            vec![MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1
+            }],
+            "命中起于裸 \\n：归上一行"
+        );
+        assert_eq!(
+            find_all_regex("a\rb", r"\r", true).unwrap(),
+            vec![MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1
+            }],
+            "命中起于孤立 \\r：归上一行"
+        );
+        // D 情形（命中跨度内含行界）不动：line = 起点行，`\r\n` 计 1 字符。
+        assert_eq!(
+            find_all_regex("a\r\nb", r"\r?\n", true).unwrap(),
+            vec![MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1
+            }],
+            "跨行命中按起点行归属、CRLF 计 1"
+        );
+        // 游标不得因上述改动作废：多处命中仍各自归对行。
+        assert_eq!(
+            find_all_regex("a\r\nb\r\nc", r"\n", true).unwrap(),
+            vec![
+                MatchPos {
+                    line: 0,
+                    col: 1,
+                    len_chars: 1
+                },
+                MatchPos {
+                    line: 1,
+                    col: 1,
+                    len_chars: 1
+                }
+            ],
+            "两处 CRLF 的 \\n 命中分别归各自行尾"
+        );
+        // 行界之后照常命中：游标跨过单元后不得少算一行。
+        assert_eq!(
+            find_all_regex("a\r\nb\r\nc", "b", true).unwrap(),
+            vec![MatchPos {
+                line: 1,
+                col: 0,
+                len_chars: 1
+            }]
+        );
     }
 }
