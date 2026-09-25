@@ -115,3 +115,7 @@ pub(crate) const GUTTER_FONT_SCALE: f32 = 13.0 / 16.0;
 #[cfg(test)]
 #[path = "wrap_reconcile_tests.rs"]
 mod wrap_reconcile_tests;
+// 软换行 Phase 2：编辑全路径开态回归 fuzz（增量索引 == 整表重建）
+#[cfg(test)]
+#[path = "wrap_fuzz_tests.rs"]
+mod wrap_fuzz_tests;
