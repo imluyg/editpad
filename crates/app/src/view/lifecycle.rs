@@ -27,7 +27,11 @@ impl Editpad {
     ///
     /// `snapshot_dir` 由调用方解析传入——测试注入项目内目录，
     /// 避免触碰真实 %APPDATA%（None = 无目录可用，功能自动降级）。
-    pub(crate) fn handle_close_request(&mut self, id: window::Id, snapshot_dir: Option<PathBuf>) -> Task<Message> {
+    pub(crate) fn handle_close_request(
+        &mut self,
+        id: window::Id,
+        snapshot_dir: Option<PathBuf>,
+    ) -> Task<Message> {
         // 捕获主窗口 id（仅有的窗口），供后续 window::close 使用
         self.main_window = Some(id);
         // P102：窗口几何兜底落盘——最后一次拖动/拉伸可能仍在节流窗内，
@@ -91,7 +95,11 @@ impl Editpad {
                 self.close_window()
             }
             Err(error) => {
-                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StSessionSnapshotFailed, &error.to_string()));
+                self.set_status_error(editpad_core::fmt_suffix(
+                    self.lang(),
+                    editpad_core::Key::StSessionSnapshotFailed,
+                    &error.to_string(),
+                ));
                 self.confirm_or_close()
             }
         }
@@ -135,5 +143,4 @@ impl Editpad {
             .and_then(std::ffi::OsStr::to_str)
             .map(str::to_owned)
     }
-
 }

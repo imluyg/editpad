@@ -103,8 +103,7 @@ impl Editpad {
         if targets.iter().any(|&i| self.tabs[i].dirty) {
             self.close_tab_confirm = None;
             // P213：落存为页 id（下标只在本次 dispatch 内使用）
-            self.batch_close_confirm =
-                Some(targets.iter().map(|&i| self.tabs[i].id).collect());
+            self.batch_close_confirm = Some(targets.iter().map(|&i| self.tabs[i].id).collect());
         } else if self.close_tabs_now(&targets) > 0 {
             self.cancel_find_scan();
         }
@@ -136,10 +135,15 @@ impl Editpad {
                 let path = self.tab().path.clone();
                 match path {
                     Some(path) => match reveal_in_explorer(&path) {
-                        Ok(()) => self.set_status(self.t(editpad_core::Key::StRevealedInExplorer).to_owned()),
-                        Err(e) => self.set_status_error(self.t_suffix(editpad_core::Key::StRevealFailed, &e.to_string())),
+                        Ok(()) => self
+                            .set_status(self.t(editpad_core::Key::StRevealedInExplorer).to_owned()),
+                        Err(e) => self.set_status_error(
+                            self.t_suffix(editpad_core::Key::StRevealFailed, &e.to_string()),
+                        ),
                     },
-                    None => self.set_status(self.t(editpad_core::Key::StRevealNeedsSave).to_owned()),
+                    None => {
+                        self.set_status(self.t(editpad_core::Key::StRevealNeedsSave).to_owned())
+                    }
                 }
                 Task::none()
             }
@@ -277,8 +281,7 @@ impl Editpad {
                         if !queue.contains(&id) {
                             queue.push(id);
                         }
-                        self.status =
-                            self.t(editpad_core::Key::StExternalPaused).to_owned();
+                        self.status = self.t(editpad_core::Key::StExternalPaused).to_owned();
                         return Task::none();
                     }
                 }
@@ -300,8 +303,7 @@ impl Editpad {
                 self.pending_close_tab = Some(tab_id);
                 // P67：按页编码偏好落盘——曾用 `save_document_atomic` 恒按 UTF-8
                 // 写，把用户选的 GBK/BOM 偏好静默转码掉
-                let encoding = self
-                    .tabs[idx]
+                let encoding = self.tabs[idx]
                     .save_encoding
                     .unwrap_or(editpad_core::SaveEncoding::Utf8);
                 Task::perform(
@@ -442,5 +444,4 @@ impl Editpad {
             _ => Task::none(),
         }
     }
-
 }

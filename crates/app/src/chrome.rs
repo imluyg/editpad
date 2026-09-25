@@ -80,7 +80,10 @@ pub(crate) fn popup_card_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(palette.background)),
         border: Border {
-            color: Color { a: 0.35, ..palette.text },
+            color: Color {
+                a: 0.35,
+                ..palette.text
+            },
             width: 1.0,
             radius: Radius::from(6.0),
         },

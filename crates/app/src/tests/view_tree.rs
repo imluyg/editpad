@@ -76,7 +76,9 @@ impl<'a> ViewTree<'a> {
         let mut tree = Tree::new(element.as_widget());
         let renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
         let limits = layout::Limits::new(Size::new(0.0, 0.0), viewport);
-        let root = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let root = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
         Self {
             element,
             tree,
@@ -224,5 +226,4 @@ impl<'a> ViewTree<'a> {
         out.extend(self.click(at));
         out
     }
-
 }

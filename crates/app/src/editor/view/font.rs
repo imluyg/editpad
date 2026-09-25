@@ -3,7 +3,6 @@
 //! （P160 自 view.rs 拆出，纯移动零行为变更。）
 use super::*;
 
-
 /// 正文与 UI 共用的字形族。
 ///
 /// 现状 = `Font::MONOSPACE`，其 CJK 缺口由 `apply_default_cjk_mono_pin`

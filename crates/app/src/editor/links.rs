@@ -170,13 +170,19 @@ mod tests {
         let (_, _, t) = link_at("err C:\\log\\run.txt:10 boom", 5, &resolve).unwrap();
         assert_eq!(
             t,
-            LinkTarget::File { path: PathBuf::from("C:\\log\\run.txt"), line: Some(10) }
+            LinkTarget::File {
+                path: PathBuf::from("C:\\log\\run.txt"),
+                line: Some(10)
+            }
         );
         // 无行号
         let (_, _, t) = link_at("err C:\\log\\run.txt boom", 5, &resolve).unwrap();
         assert_eq!(
             t,
-            LinkTarget::File { path: PathBuf::from("C:\\log\\run.txt"), line: None }
+            LinkTarget::File {
+                path: PathBuf::from("C:\\log\\run.txt"),
+                line: None
+            }
         );
     }
 
@@ -187,7 +193,10 @@ mod tests {
         let (_, _, t) = link_at("at src/main.rs:42 end", 3, &resolve).unwrap();
         assert_eq!(
             t,
-            LinkTarget::File { path: PathBuf::from("src/main.rs"), line: Some(42) }
+            LinkTarget::File {
+                path: PathBuf::from("src/main.rs"),
+                line: Some(42)
+            }
         );
         // 不存在 → None（日期 "2026/09/02" 等假阳性一票否决）
         assert!(link_at("dated 2026/09/02 ok", 6, &NO_PATH).is_none());

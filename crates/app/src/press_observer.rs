@@ -89,12 +89,9 @@ where
         renderer: &Renderer,
         operation: &mut dyn iced::advanced::widget::Operation,
     ) {
-        self.content.as_widget_mut().operate(
-            &mut tree.children[0],
-            layout,
-            renderer,
-            operation,
-        );
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
     }
 
     fn update(
@@ -124,9 +121,7 @@ where
         // ——内容（输入框/按钮）消费了按下事件正是本控件要覆盖的盲区。
         if matches!(
             event,
-            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
-                iced::mouse::Button::Left
-            ))
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
         ) && cursor.is_over(layout.bounds())
         {
             shell.publish(self.on_press.clone());

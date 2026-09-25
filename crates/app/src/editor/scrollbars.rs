@@ -23,8 +23,7 @@ pub(crate) const SCROLLBAR_ZONE_W: f32 = SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET 
 /// P99：软换行折行预算在滚动条需要出现时按它让位——折行文本在滑块
 /// 左侧收尾，行尾字符不再被盖住/显得截断（P95 零预留的贴满右缘
 /// 是「被盖住」的直接成因之一，用户复点单后按需预留）。
-pub(crate) const VERTICAL_SCROLLBAR_RESERVE: f32 =
-    SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET;
+pub(crate) const VERTICAL_SCROLLBAR_RESERVE: f32 = SCROLLBAR_WIDTH + SCROLLBAR_EDGE_INSET;
 
 /// 软换行「为垂直滚动条让位」的滞回判定（P116 续，自 `EditorView::draw`
 /// 抽出为纯函数便于穷尽测试）。内容高度压在视口边界上时直判会让滚动条与
@@ -340,4 +339,3 @@ mod tests {
         );
     }
 }
-

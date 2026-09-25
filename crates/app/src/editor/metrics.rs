@@ -1,7 +1,7 @@
 //! CJK 双宽字符的列宽换算 + 列宽运行时实测（P42）
 //! （P68 自 editor.rs 拆出，纯移动零行为变更）。
 
-use iced::advanced::text::{self as core_text, Renderer as _, Paragraph as _};
+use iced::advanced::text::{self as core_text, Paragraph as _, Renderer as _};
 use iced::{alignment, Color, Font, Pixels, Point, Rectangle, Size};
 
 // ---------- CJK 双宽字符的列宽换算 ----------
@@ -15,7 +15,8 @@ pub(crate) const TAB_STOP_COLS: usize = 4;
 
 /// P45：`max_line_cols` 惰性收敛的冷却窗——缩短编辑后在 500ms 内最多
 /// 全量重算一次（50MB 文档约 50~100ms），连续删除不会每次付出 O(n)。
-pub(crate) const RECOMPUTE_MAX_COLS_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(500);
+pub(crate) const RECOMPUTE_MAX_COLS_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_millis(500);
 
 /// 字符是否按「全宽（2 列）」计。
 ///
@@ -85,7 +86,7 @@ pub(crate) fn leading_indent_cols(text: &str) -> usize {
 }
 
 /// 文本的显示列数（1 列 = `EditorCore::char_width` 像素）。
-    pub(crate) fn display_cols(text: &str) -> f32 {
+pub(crate) fn display_cols(text: &str) -> f32 {
     let mut col = 0usize;
     for c in text.chars() {
         col += char_cols(c, col) as usize;
@@ -94,7 +95,7 @@ pub(crate) fn leading_indent_cols(text: &str) -> usize {
 }
 
 /// 第 `col` 个字符之前的字符所占显示宽度（像素）；`col` 为字符索引。
-    pub(crate) fn prefix_width(text: &str, col: usize) -> f32 {
+pub(crate) fn prefix_width(text: &str, col: usize) -> f32 {
     let mut width = 0f32;
     for (i, c) in text.chars().enumerate() {
         if i >= col {
@@ -108,7 +109,7 @@ pub(crate) fn leading_indent_cols(text: &str) -> usize {
 /// 统计待插入文本的「换行单元数」与末行列数（P9）：
 /// `\r\n` 与孤立 `\r` 也各算一次换行——旧实现 `split('\n')` 只认 `\n`，
 /// CRLF 文本入文后光标列会漂移一个字符。
-    pub(crate) fn measure_insertion(text: &str) -> (usize, usize) {
+pub(crate) fn measure_insertion(text: &str) -> (usize, usize) {
     let mut lines = 0usize;
     let mut tail_cols = 0usize;
     let mut chars = text.chars().peekable();
@@ -178,8 +179,8 @@ pub(crate) fn measure_text_width(font: Font, size: f32, text: &str) -> Option<f3
     if text.is_empty() || !(size.is_finite() && size > 0.0) {
         return None;
     }
-    let paragraph = <iced::Renderer as core_text::Renderer>::Paragraph::with_text(
-        core_text::Text {
+    let paragraph =
+        <iced::Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
             content: text,
             bounds: Size::new(f32::INFINITY, f32::INFINITY),
             size: Pixels(size),
@@ -189,8 +190,7 @@ pub(crate) fn measure_text_width(font: Font, size: f32, text: &str) -> Option<f3
             align_y: alignment::Vertical::Top,
             shaping: core_text::Shaping::Advanced,
             wrapping: core_text::Wrapping::None,
-        },
-    );
+        });
     let total = paragraph.min_bounds().width;
     (total.is_finite() && total > 0.0).then_some(total)
 }
@@ -212,8 +212,8 @@ pub(crate) fn shape_row_xs(font: Font, size: f32, text: &str) -> Option<Vec<f32>
     if text.is_empty() {
         return Some(vec![0.0]);
     }
-    let paragraph = <iced::Renderer as core_text::Renderer>::Paragraph::with_text(
-        core_text::Text {
+    let paragraph =
+        <iced::Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
             content: text,
             bounds: Size::new(f32::INFINITY, f32::INFINITY),
             size: Pixels(size),
@@ -223,8 +223,7 @@ pub(crate) fn shape_row_xs(font: Font, size: f32, text: &str) -> Option<Vec<f32>
             align_y: alignment::Vertical::Top,
             shaping: core_text::Shaping::Advanced,
             wrapping: core_text::Wrapping::None,
-        },
-    );
+        });
     let mut xs = vec![0.0f32];
     for run in paragraph.buffer().layout_runs() {
         for g in run.glyphs.iter() {
@@ -341,4 +340,3 @@ pub(crate) fn measure_ink_box(font: Font, size: f32) -> Option<(f32, f32)> {
     }
     Some((top as f32, (bottom - top + 1) as f32))
 }
-

@@ -49,9 +49,9 @@ pub(crate) async fn drive_load<L>(
     output: &mut iced::futures::channel::mpsc::Sender<Message>,
 ) where
     L: FnOnce(
-        &Path,
-        &mut dyn FnMut(editpad_core::LoadProgress),
-    ) -> Result<editpad_core::LoadedDocument, editpad_core::CoreError>
+            &Path,
+            &mut dyn FnMut(editpad_core::LoadProgress),
+        ) -> Result<editpad_core::LoadedDocument, editpad_core::CoreError>
         + Send
         + 'static,
 {
@@ -88,9 +88,7 @@ pub(crate) async fn drive_load<L>(
             LoadEvent::Progress(p) => Message::LoadProgress(job_id, p.bytes_read, p.total_bytes),
             LoadEvent::Done(result) => Message::Loaded(
                 job_id,
-                result.map(|loaded| {
-                    (loaded.doc, loaded.sample, loaded.encoding.to_string())
-                }),
+                result.map(|loaded| (loaded.doc, loaded.sample, loaded.encoding.to_string())),
             ),
         };
         if output.send(message).await.is_err() {

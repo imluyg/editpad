@@ -378,7 +378,10 @@ pub(crate) fn sequence_lines(
     let mut v = start;
     for _ in 0..rows {
         let s = if v < 0 {
-            format!("-{}", format_seq_digits(v.unsigned_abs(), base, width, upper))
+            format!(
+                "-{}",
+                format_seq_digits(v.unsigned_abs(), base, width, upper)
+            )
         } else {
             format_seq_digits(v as u64, base, width, upper)
         };
@@ -845,9 +848,7 @@ impl EditorCore {
         self.max_row_width_px = 0.0;
         for line in first..=last {
             let cached = match self.row_layout_memo.get(&line) {
-                Some((f, s, e, xs)) if *f == font && *s == size && *e == epoch => {
-                    Some(xs.clone())
-                }
+                Some((f, s, e, xs)) if *f == font && *s == size && *e == epoch => Some(xs.clone()),
                 _ => None,
             };
             let xs = match cached {
@@ -919,13 +920,7 @@ impl EditorCore {
     /// 2~4 次。5MB 单行 + 数十个 run 即每帧百万次字符扫描——而**绝大多数
     /// 调用点在手上已经有 `lens`**。逐分支语义与 `px_of` 完全一致，只是把
     /// 那次计数搬给调用方。
-    pub(crate) fn px_of_len(
-        &self,
-        line: usize,
-        text: &str,
-        col: usize,
-        lens: usize,
-    ) -> f32 {
+    pub(crate) fn px_of_len(&self, line: usize, text: &str, col: usize, lens: usize) -> f32 {
         let col = col.min(lens);
         let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
         match self.row_layouts.get(&line) {
@@ -1399,6 +1394,9 @@ mod tests;
 #[path = "block_tests.rs"]
 mod block_tests;
 #[cfg(test)]
+#[path = "cursors_tests.rs"]
+mod cursors_tests;
+#[cfg(test)]
 #[path = "edit_tests.rs"]
 mod edit_tests;
 #[cfg(test)]
@@ -1410,6 +1408,3 @@ mod motion_tests;
 #[cfg(test)]
 #[path = "undo_tests.rs"]
 mod undo_tests;
-#[cfg(test)]
-#[path = "cursors_tests.rs"]
-mod cursors_tests;

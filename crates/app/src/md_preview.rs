@@ -43,12 +43,10 @@ pub(crate) fn markdown_preview_element(
                 col = col.push(md_spans_row(spans, scaled(15.0), false, base));
             }
             editpad_core::markdown::MdBlock::ListItem { spans } => {
-                let mut line =
-                    row![text("• ").size(scaled(15.0)).font(base)];
+                let mut line = row![text("• ").size(scaled(15.0)).font(base)];
                 for span in spans {
                     let font = md_font(base, span.is_bold(), span.is_italic());
-                    let mut t =
-                        text(span.text.clone()).size(scaled(15.0)).font(font);
+                    let mut t = text(span.text.clone()).size(scaled(15.0)).font(font);
                     if span.is_code() {
                         t = t.color([0.12, 0.36, 0.6]);
                     }
@@ -57,12 +55,10 @@ pub(crate) fn markdown_preview_element(
                 col = col.push(line);
             }
             editpad_core::markdown::MdBlock::Quote { spans } => {
-                let mut line = row![
-                    text("▌ ")
-                        .size(scaled(15.0))
-                        .font(base)
-                        .color([0.55, 0.55, 0.6])
-                ];
+                let mut line = row![text("▌ ")
+                    .size(scaled(15.0))
+                    .font(base)
+                    .color([0.55, 0.55, 0.6])];
                 for span in spans {
                     let font = md_font(base, span.is_bold(), span.is_italic());
                     let t = text(span.text.clone())

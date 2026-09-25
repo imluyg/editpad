@@ -55,7 +55,10 @@ fn p153_dim_styles_dampen_alpha_and_are_identity_when_off() {
     // ②按钮：既有 chrome_button_style → 淡出后底色/文字/描边全部变淡
     let btn_off = find_button_style(&theme, button::Status::Active, find_dim_factor(false));
     let btn_default = chrome_button_style(&theme, button::Status::Active);
-    assert_eq!(btn_off.background, btn_default.background, "不淡出 = 原按钮底色");
+    assert_eq!(
+        btn_off.background, btn_default.background,
+        "不淡出 = 原按钮底色"
+    );
     assert_eq!(btn_off.text_color, btn_default.text_color);
     assert_eq!(btn_off.border.color, btn_default.border.color);
 
@@ -89,8 +92,14 @@ fn p153_dim_styles_dampen_alpha_and_are_identity_when_off() {
     // 禁用态（如扫描在途的「全部替换」）不得漏掉
     let dis_off = find_button_style(&theme, button::Status::Disabled, 1.0);
     let dis_dim = find_button_style(&theme, button::Status::Disabled, FIND_CARD_DIM_ALPHA);
-    assert!(dis_dim.text_color.a < dis_off.text_color.a, "禁用文字同样变淡");
-    assert!(dis_dim.border.color.a < dis_off.border.color.a, "禁用描边同样变淡");
+    assert!(
+        dis_dim.text_color.a < dis_off.text_color.a,
+        "禁用文字同样变淡"
+    );
+    assert!(
+        dis_dim.border.color.a < dis_off.border.color.a,
+        "禁用描边同样变淡"
+    );
 }
 
 /// 复选框（区分大小写 / 正则 / 整词）：选中态点缀色底 + **纯白勾**——
@@ -116,10 +125,7 @@ fn p153_dim_checkbox_dampens_fill_tick_and_label() {
         (dim_bg.a - off_bg.a * FIND_CARD_DIM_ALPHA).abs() < 1e-6,
         "选中底（点缀色）alpha 应按系数压"
     );
-    assert!(
-        dim.icon_color.a < off.icon_color.a,
-        "白色勾必须一起变淡"
-    );
+    assert!(dim.icon_color.a < off.icon_color.a, "白色勾必须一起变淡");
     assert!(dim.border.color.a < off.border.color.a, "描边一并变淡");
     assert!(
         dim.text_color.unwrap().a < off.text_color.unwrap().a,
@@ -155,7 +161,10 @@ fn p153_dim_card_keeps_border_and_shape_only_fades_background() {
     assert!((dim_bg.a - FIND_CARD_DIM_ALPHA).abs() < 1e-6);
     assert!(dim_bg.a < off_bg.a);
     // 色相不变（只改 alpha，不改 RGB）
-    assert_eq!((dim_bg.r, dim_bg.g, dim_bg.b), (off_bg.r, off_bg.g, off_bg.b));
+    assert_eq!(
+        (dim_bg.r, dim_bg.g, dim_bg.b),
+        (off_bg.r, off_bg.g, off_bg.b)
+    );
 }
 
 /// P153：纯文本标签（拖动条文案 / 命中计数「无匹配」/ 目录行 / 扫描进度）
@@ -261,7 +270,9 @@ fn p153_press_observer_reports_press_even_when_content_captures() {
     let mut tree = Tree::new(element.as_widget());
     let renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
     let limits = layout::Limits::new(Size::new(200.0, 100.0), Size::new(200.0, 100.0));
-    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &limits);
     let root = Layout::new(&node);
 
     let mut messages: Vec<Message> = Vec::new();
@@ -369,7 +380,9 @@ fn p153_press_observer_captures_press_so_editor_cannot_steal_ime_focus() {
     let mut tree = Tree::new(element.as_widget());
     let renderer = iced::Renderer::new(Font::MONOSPACE, Pixels(16.0));
     let limits = layout::Limits::new(Size::new(200.0, 100.0), Size::new(200.0, 100.0));
-    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &limits);
     let root = Layout::new(&node);
 
     let mut messages: Vec<Message> = Vec::new();

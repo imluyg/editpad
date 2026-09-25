@@ -151,9 +151,7 @@ impl Editpad {
                 // P70：查询语义切换（字面转义 ↔ 正则语法），必须重扫
                 self.regex_enabled = value;
                 if value {
-                    self.set_status(
-                        self.t(editpad_core::Key::StRegexModeHint).to_owned(),
-                    );
+                    self.set_status(self.t(editpad_core::Key::StRegexModeHint).to_owned());
                 }
                 self.schedule_active_scan()
             }
@@ -213,15 +211,9 @@ impl Editpad {
                     if truncated {
                         self.set_status(format!(
                             "{}{files}{}{hits}{}",
-                            self.t(
-editpad_core::Key::
-StFifTruncatedPrefix),
-                            self.t(
-editpad_core::Key::
-StFifTruncatedMiddle),
-                            self.t(
-editpad_core::Key::
-StFifTruncatedSuffix)
+                            self.t(editpad_core::Key::StFifTruncatedPrefix),
+                            self.t(editpad_core::Key::StFifTruncatedMiddle),
+                            self.t(editpad_core::Key::StFifTruncatedSuffix)
                         ));
                     } else {
                         self.set_status(editpad_core::fmt_fif_summary(self.lang(), files, hits));
@@ -296,11 +288,8 @@ StFifTruncatedSuffix)
                     let expansion = {
                         let ed = self.cur_handle.borrow();
                         let line_text = ed.doc.line_str(pos.line);
-                        let byte_in_line: usize = line_text
-                            .chars()
-                            .take(pos.col)
-                            .map(char::len_utf8)
-                            .sum();
+                        let byte_in_line: usize =
+                            line_text.chars().take(pos.col).map(char::len_utf8).sum();
                         editpad_core::expand_regex_at(
                             &line_text,
                             byte_in_line,
@@ -318,7 +307,9 @@ StFifTruncatedSuffix)
                             self.schedule_find_scan()
                         }
                         Err(e) => {
-                            self.set_status_error(self.t_suffix(editpad_core::Key::StInvalidRegex, &e.to_string()));
+                            self.set_status_error(
+                                self.t_suffix(editpad_core::Key::StInvalidRegex, &e.to_string()),
+                            );
                             Task::none()
                         }
                     };
@@ -335,7 +326,9 @@ StFifTruncatedSuffix)
                         self.schedule_find_scan()
                     }
                     Err(e) => {
-                        self.set_status_error(self.t_suffix(editpad_core::Key::StInvalidRegex, &e.to_string()));
+                        self.set_status_error(
+                            self.t_suffix(editpad_core::Key::StInvalidRegex, &e.to_string()),
+                        );
                         Task::none()
                     }
                 }
@@ -360,15 +353,9 @@ StFifTruncatedSuffix)
                     if chars > REGEX_REPLACE_MAX_CHARS {
                         self.set_status_error(format!(
                             "{}{chars}{}{REGEX_REPLACE_MAX_CHARS}{}",
-                            self.t(
-editpad_core::Key::
-StTooLargeRegexPrefix),
-                            self.t(
-editpad_core::Key::
-StTooLargeRegexMiddle),
-                            self.t(
-editpad_core::Key::
-StTooLargeRegexSuffix)
+                            self.t(editpad_core::Key::StTooLargeRegexPrefix),
+                            self.t(editpad_core::Key::StTooLargeRegexMiddle),
+                            self.t(editpad_core::Key::StTooLargeRegexSuffix)
                         ));
                         return Task::none();
                     }
@@ -380,7 +367,10 @@ StTooLargeRegexSuffix)
                     return Task::perform(
                         async move {
                             editpad_core::replace_all_regex(
-                                &text, &pattern, &replacement, case_sensitive,
+                                &text,
+                                &pattern,
+                                &replacement,
+                                case_sensitive,
                             )
                         },
                         Message::ReplaceAllRegexDone,
@@ -397,15 +387,9 @@ StTooLargeRegexSuffix)
                     if chars > WHOLE_WORD_MAX_CHARS {
                         self.set_status_error(format!(
                             "{}{chars}{}{WHOLE_WORD_MAX_CHARS}{}",
-                            self.t(
-editpad_core::Key::
-StTooLargeWordPrefix),
-                            self.t(
-editpad_core::Key::
-StTooLargeWordMiddle),
-                            self.t(
-editpad_core::Key::
-StTooLargeWordSuffix)
+                            self.t(editpad_core::Key::StTooLargeWordPrefix),
+                            self.t(editpad_core::Key::StTooLargeWordMiddle),
+                            self.t(editpad_core::Key::StTooLargeWordSuffix)
                         ));
                         return Task::none();
                     }
@@ -486,7 +470,9 @@ StTooLargeWordSuffix)
                         }
                     }
                     Err(e) => {
-                        self.set_status_error(self.t_suffix(editpad_core::Key::StRegexReplaceFailed, &e.to_string()));
+                        self.set_status_error(
+                            self.t_suffix(editpad_core::Key::StRegexReplaceFailed, &e.to_string()),
+                        );
                         Task::none()
                     }
                 }
@@ -540,10 +526,7 @@ StTooLargeWordSuffix)
             Message::MonitorTick => {
                 // P149：节拍已改订阅时钟驱动（订阅随「无监视页」自动撤销），
                 // 本臂只做巡检。busy/加载中的拍跳过，下一拍自然重试。
-                if self.tabs.iter().any(|t| t.monitor)
-                    && !self.busy
-                    && self.active_load.is_none()
-                {
+                if self.tabs.iter().any(|t| t.monitor) && !self.busy && self.active_load.is_none() {
                     self.check_external_changes();
                 }
                 Task::none()
@@ -663,5 +646,4 @@ StTooLargeWordSuffix)
             _ => Task::none(),
         }
     }
-
 }

@@ -741,8 +741,14 @@ fn pure_typing_insert_does_not_trigger_full_width_rescan() {
     c.take_line_text_calls();
     c.insert_str("a");
     let n = c.take_line_text_calls();
-    assert!(n < 20, "纯插入一个字符却取串 {n} 次：全量重扫被武装了（O-4）");
-    assert_eq!(c.max_line_cols, 6, "复位标记不得牺牲水位正确性（row299 = 6 列）");
+    assert!(
+        n < 20,
+        "纯插入一个字符却取串 {n} 次：全量重扫被武装了（O-4）"
+    );
+    assert_eq!(
+        c.max_line_cols, 6,
+        "复位标记不得牺牲水位正确性（row299 = 6 列）"
+    );
 }
 
 /// O-4 的反向半条：会**删内容**的两类插入（替换选区、覆写吃字）可能让行净
@@ -2215,9 +2221,21 @@ fn scrollbar_marks_dedupe_by_row_and_skip_dangling_bookmarks() {
     let mut c = core_with("aa\nbb\ncc\ndd\nee\n");
     // 命中表按扫描序（行升序）下发；行 1 两条命中 → 同视觉行去重留首个
     c.set_find_highlights(vec![
-        editpad_core::MatchPos { line: 1, col: 0, len_chars: 1 },
-        editpad_core::MatchPos { line: 1, col: 1, len_chars: 1 },
-        editpad_core::MatchPos { line: 3, col: 0, len_chars: 1 },
+        editpad_core::MatchPos {
+            line: 1,
+            col: 0,
+            len_chars: 1,
+        },
+        editpad_core::MatchPos {
+            line: 1,
+            col: 1,
+            len_chars: 1,
+        },
+        editpad_core::MatchPos {
+            line: 3,
+            col: 0,
+            len_chars: 1,
+        },
     ]);
     assert_eq!(c.scrollbar_hit_marks(), vec![(1, 0), (3, 2)]);
     c.bookmarks.insert(0);
@@ -2232,9 +2250,11 @@ fn scrollbar_hit_marks_follow_visual_rows_when_wrap_on() {
     wrap_converge(&mut c);
     let segs0 = c.line_visual_segments(0);
     assert!(segs0 >= 2, "40 字符行在窄视口应折 ≥2 段，实际 {segs0}");
-    c.set_find_highlights(vec![
-        editpad_core::MatchPos { line: 1, col: 0, len_chars: 1 },
-    ]);
+    c.set_find_highlights(vec![editpad_core::MatchPos {
+        line: 1,
+        col: 0,
+        len_chars: 1,
+    }]);
     let marks = c.scrollbar_hit_marks();
     assert_eq!(marks.len(), 1);
     // 折行开态刻度 = 所在视觉行（行 1 基座 = 行 0 段数），禁逻辑行直乘
@@ -2248,7 +2268,11 @@ fn scrollbar_hit_marks_cap_for_draw_budget() {
     let mut c = core_with(&text);
     c.set_find_highlights(
         (0..3000)
-            .map(|i| editpad_core::MatchPos { line: i, col: 0, len_chars: 1 })
+            .map(|i| editpad_core::MatchPos {
+                line: i,
+                col: 0,
+                len_chars: 1,
+            })
             .collect(),
     );
     assert_eq!(
@@ -2271,15 +2295,25 @@ fn wrap_home_end_operate_on_visual_row_and_logical_variants() {
     c.apply_motion(Motion::End, false);
     assert_eq!(c.cursor.col, mc, "开态 End 应到第一视觉段尾");
     // 开态 Home：段 1 内 → 所在视觉段首
-    c.cursor = CursorPos { line: 0, col: mc + 5 };
+    c.cursor = CursorPos {
+        line: 0,
+        col: mc + 5,
+    };
     c.apply_motion(Motion::Home, false);
     assert_eq!(c.cursor.col, mc, "开态 Home 应到所在视觉段首");
     // Alt+Home/End：穿越折行段直达逻辑行边界
-    c.cursor = CursorPos { line: 0, col: mc + 5 };
+    c.cursor = CursorPos {
+        line: 0,
+        col: mc + 5,
+    };
     c.apply_motion(Motion::LogicalHome, false);
     assert_eq!(c.cursor.col, 0, "LogicalHome 直达逻辑行首");
     c.apply_motion(Motion::LogicalEnd, false);
-    assert_eq!(c.cursor.col, c.line_display_len(0), "LogicalEnd 直达逻辑行尾");
+    assert_eq!(
+        c.cursor.col,
+        c.line_display_len(0),
+        "LogicalEnd 直达逻辑行尾"
+    );
     // 关态恒等退化（与 Home/End 同义）
     c.set_word_wrap(false);
     c.cursor = CursorPos { line: 0, col: 7 };

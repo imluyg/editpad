@@ -42,8 +42,9 @@ fn main() {
         .filter_map(|p| fs::metadata(p).ok()?.modified().ok())
         .max();
     let stamp_path = out_dir.join("app.res.version");
-    let version_ok =
-        fs::read_to_string(&stamp_path).ok().is_some_and(|s| s == version);
+    let version_ok = fs::read_to_string(&stamp_path)
+        .ok()
+        .is_some_and(|s| s == version);
     let up_to_date = version_ok
         && matches!(
             (fs::metadata(&res).ok().and_then(|m| m.modified().ok()), newest_src),

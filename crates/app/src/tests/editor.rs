@@ -97,12 +97,19 @@ fn untitled_tabs_get_unique_sequential_names() {
     // 连开两页：未命名2、未命名3，全局唯一
     dispatch(&mut app, Message::NewTab);
     dispatch(&mut app, Message::NewTab);
-    let names: Vec<String> = app.tabs.iter().map(|t| t.base_name_in(editpad_core::Lang::ZhCn)).collect();
+    let names: Vec<String> = app
+        .tabs
+        .iter()
+        .map(|t| t.base_name_in(editpad_core::Lang::ZhCn))
+        .collect();
     assert_eq!(names, vec!["未命名1", "未命名2", "未命名3"]);
 
     // 置脏前缀进标签名但不进 title 的基础名判断之外重复
     dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-    assert!(app.tab().display_name_in(editpad_core::Lang::ZhCn).starts_with("● 未命名"));
+    assert!(app
+        .tab()
+        .display_name_in(editpad_core::Lang::ZhCn)
+        .starts_with("● 未命名"));
 }
 
 #[test]
@@ -113,24 +120,40 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
     // （旧口径全局单调不复用，序号只增不减——用户复报关 3 出 4、
     // 关 4 出 5 的爬梯）
     dispatch(&mut app, Message::NewTab);
-    assert_eq!(app.tabs[1].base_name_in(editpad_core::Lang::ZhCn), "未命名2");
+    assert_eq!(
+        app.tabs[1].base_name_in(editpad_core::Lang::ZhCn),
+        "未命名2"
+    );
     app.set_active_tab(1);
     dispatch(&mut app, Message::CloseTabRequest);
     assert_eq!(app.tabs.len(), 1);
 
     dispatch(&mut app, Message::NewTab);
-    assert_eq!(app.tabs[1].base_name_in(editpad_core::Lang::ZhCn), "未命名2", "腾出的号码立即复用");
+    assert_eq!(
+        app.tabs[1].base_name_in(editpad_core::Lang::ZhCn),
+        "未命名2",
+        "腾出的号码立即复用"
+    );
 
     // 中段空洞优先填补：开 3 个页关掉中间的 2，新页拿 2 而非 4
     dispatch(&mut app, Message::NewTab);
     dispatch(&mut app, Message::NewTab);
-    assert_eq!(app.tabs[2].base_name_in(editpad_core::Lang::ZhCn), "未命名3");
-    assert_eq!(app.tabs[3].base_name_in(editpad_core::Lang::ZhCn), "未命名4");
+    assert_eq!(
+        app.tabs[2].base_name_in(editpad_core::Lang::ZhCn),
+        "未命名3"
+    );
+    assert_eq!(
+        app.tabs[3].base_name_in(editpad_core::Lang::ZhCn),
+        "未命名4"
+    );
     app.set_active_tab(2); // 激活中间页「未命名3」
     dispatch(&mut app, Message::CloseTabRequest);
     dispatch(&mut app, Message::NewTab);
     assert_eq!(
-        app.tabs.last().unwrap().base_name_in(editpad_core::Lang::ZhCn),
+        app.tabs
+            .last()
+            .unwrap()
+            .base_name_in(editpad_core::Lang::ZhCn),
         "未命名3",
         "优先填补最小空洞"
     );
@@ -146,7 +169,10 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
         Some(Path::new("C:/x/real.txt"))
     );
     assert_eq!(app.tabs[1].untitled_num, None);
-    assert_eq!(app.tabs[1].base_name_in(editpad_core::Lang::ZhCn), "real.txt");
+    assert_eq!(
+        app.tabs[1].base_name_in(editpad_core::Lang::ZhCn),
+        "real.txt"
+    );
 
     // 加载真实文件同样清除序号（Loaded 路径）
     let mut app2 = Editpad::default();
@@ -597,7 +623,8 @@ fn perform_backup_modes_and_guards() {
         "中文文案仍应是「已备份…」"
     );
     assert!(
-        note.text(editpad_core::Lang::En).starts_with("Previous version"),
+        note.text(editpad_core::Lang::En)
+            .starts_with("Previous version"),
         "英文文案应本地化"
     );
     assert_eq!(
@@ -809,10 +836,7 @@ fn column_editor_f6_dispatches() {
         keyboard::Key::Named(Named::F6),
         keyboard::Modifiers::empty(),
     );
-    assert!(matches!(
-        msg,
-        Some(Message::ColumnEditorToggled)
-    ));
+    assert!(matches!(msg, Some(Message::ColumnEditorToggled)));
 }
 
 #[test]
@@ -862,7 +886,10 @@ fn column_editor_dialog_open_guard_and_confirm() {
         head: CursorPos { line: 1, col: 2 },
     });
     dispatch(&mut app, Message::ColumnEditorToggled);
-    assert!(app.column_editor.number_mode, "草稿跨开合保留（序号模式仍在）");
+    assert!(
+        app.column_editor.number_mode,
+        "草稿跨开合保留（序号模式仍在）"
+    );
     dispatch(&mut app, Message::ColumnEditorStartChanged("x".into()));
     dispatch(&mut app, Message::ColumnEditorConfirmed);
     assert!(app.column_editor_visible, "校验失败保持打开");
@@ -921,7 +948,10 @@ fn column_editor_rows_cap_rejected() {
     );
     app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
         anchor: CursorPos { line: 0, col: 0 },
-        head: CursorPos { line: 100_000, col: 0 },
+        head: CursorPos {
+            line: 100_000,
+            col: 0,
+        },
     });
     dispatch(&mut app, Message::ColumnEditorToggled);
     assert!(app.column_editor_visible);
@@ -943,7 +973,10 @@ fn multi_cursor_collapse_matrix() {
         }];
     };
     let mut app = Editpad::default();
-    dispatch(&mut app, Message::Edit(EditOp::InsertText("abcdef\ngh\n".into())));
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("abcdef\ngh\n".into())),
+    );
     let main_line = app.cur_handle.borrow().cursor.line;
 
     // Esc = 折叠（KeyPressed 拦截层），主光标不动
@@ -956,15 +989,14 @@ fn multi_cursor_collapse_matrix() {
         ),
     );
     assert!(!app.cur_handle.borrow().has_multi(), "Esc 折叠多光标");
-    assert_eq!(
-        app.cur_handle.borrow().cursor.line,
-        main_line,
-        "主光标不动"
-    );
+    assert_eq!(app.cur_handle.borrow().cursor.line, main_line, "主光标不动");
 
     // 白名单内先行（文档未被破坏时验证）：行内 Left/Right 存活
     mk(&mut app);
-    dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::Right, false)));
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::Motion(Motion::Right, false)),
+    );
     assert!(app.cur_handle.borrow().has_multi(), "行内 Right 存活");
     mk(&mut app);
     dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::Left, false)));
@@ -1012,7 +1044,10 @@ fn multi_cursor_sync_edit_via_apply_edit_pipeline() {
     assert_eq!(app.cur_handle.borrow().doc.to_text(), "foo bar foo baz\n");
     let h = app.cur_handle.borrow();
     assert_eq!(h.extra_cursors.len(), 1, "undo 恢复附加光标集");
-    assert_eq!(h.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 8 }));
+    assert_eq!(
+        h.extra_cursors[0].anchor,
+        Some(CursorPos { line: 0, col: 8 })
+    );
     assert_eq!(h.cursor, CursorPos { line: 0, col: 3 }, "恢复主光标");
     assert_eq!(h.anchor, Some(CursorPos { line: 0, col: 0 }));
 }
@@ -1040,18 +1075,17 @@ fn add_next_match_hotkey_dispatch_full_chain() {
     {
         let h = app.cur_handle.borrow();
         assert_eq!(h.extra_cursors.len(), 1, "命中开头实例 (0..3)");
-        assert_eq!(h.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 0 }));
+        assert_eq!(
+            h.extra_cursors[0].anchor,
+            Some(CursorPos { line: 0, col: 0 })
+        );
         assert_eq!(h.extra_cursors[0].cursor, CursorPos { line: 0, col: 3 });
     }
     // 再次 Ctrl+M：无更多匹配 → 状态栏提示，集合不动（文档尾部无实例）
     dispatch(&mut app, Message::Edit(EditOp::AddNextMatch));
     assert_eq!(app.cur_handle.borrow().extra_cursors.len(), 1);
     assert!(app.status.contains("匹配"), "无匹配提示上状态栏");
-    assert_eq!(
-        app.tab().dirty,
-        dirty_before,
-        "添加匹配纯光标集操作不置脏"
-    );
+    assert_eq!(app.tab().dirty, dirty_before, "添加匹配纯光标集操作不置脏");
     // 只读页 Ctrl+M 放行（纯导航），同步编辑仍被拒
     dispatch(&mut app, Message::ToggleReadOnly);
     dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
@@ -1596,209 +1630,236 @@ fn enter_and_tab_map_to_smart_indent_ops() {
     ));
 }
 
-    #[test]
-    fn word_motion_and_delete_word_hotkeys_dispatch() {
-        // P122：Ctrl+←/→ 词导航、Ctrl+Backspace/Delete 删词（Backspace
-        // 新入组合键白名单）
-        use iced::keyboard::{self, key::Named};
-        let ctrl = keyboard::Modifiers::CTRL;
-        assert!(matches!(
-            handle_key_defaults(keyboard::Key::Named(Named::ArrowLeft), ctrl),
-            Some(Message::Edit(EditOp::Motion(Motion::WordLeft, false)))
-        ));
-        assert!(matches!(
-            handle_key_defaults(keyboard::Key::Named(Named::ArrowRight), ctrl),
-            Some(Message::Edit(EditOp::Motion(Motion::WordRight, false)))
-        ));
-        assert!(matches!(
-            handle_key_defaults(keyboard::Key::Named(Named::Backspace), ctrl),
-            Some(Message::Edit(EditOp::DeleteWordLeft))
-        ));
-        assert!(matches!(
-            handle_key_defaults(keyboard::Key::Named(Named::Delete), ctrl),
-            Some(Message::Edit(EditOp::DeleteWordRight))
-        ));
-    }
+#[test]
+fn word_motion_and_delete_word_hotkeys_dispatch() {
+    // P122：Ctrl+←/→ 词导航、Ctrl+Backspace/Delete 删词（Backspace
+    // 新入组合键白名单）
+    use iced::keyboard::{self, key::Named};
+    let ctrl = keyboard::Modifiers::CTRL;
+    assert!(matches!(
+        handle_key_defaults(keyboard::Key::Named(Named::ArrowLeft), ctrl),
+        Some(Message::Edit(EditOp::Motion(Motion::WordLeft, false)))
+    ));
+    assert!(matches!(
+        handle_key_defaults(keyboard::Key::Named(Named::ArrowRight), ctrl),
+        Some(Message::Edit(EditOp::Motion(Motion::WordRight, false)))
+    ));
+    assert!(matches!(
+        handle_key_defaults(keyboard::Key::Named(Named::Backspace), ctrl),
+        Some(Message::Edit(EditOp::DeleteWordLeft))
+    ));
+    assert!(matches!(
+        handle_key_defaults(keyboard::Key::Named(Named::Delete), ctrl),
+        Some(Message::Edit(EditOp::DeleteWordRight))
+    ));
+}
 
-    #[test]
-    fn insert_key_toggles_overwrite_mode() {
-        use iced::keyboard::{self, key::Named};
-        assert!(matches!(
-            handle_key_defaults(keyboard::Key::Named(Named::Insert), keyboard::Modifiers::empty()),
-            Some(Message::ToggleOverwrite)
-        ));
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::ToggleOverwrite);
-        assert!(app.cur_handle.borrow().overwrite);
-        dispatch(&mut app, Message::ToggleOverwrite);
-        assert!(!app.cur_handle.borrow().overwrite);
-    }
+#[test]
+fn insert_key_toggles_overwrite_mode() {
+    use iced::keyboard::{self, key::Named};
+    assert!(matches!(
+        handle_key_defaults(
+            keyboard::Key::Named(Named::Insert),
+            keyboard::Modifiers::empty()
+        ),
+        Some(Message::ToggleOverwrite)
+    ));
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::ToggleOverwrite);
+    assert!(app.cur_handle.borrow().overwrite);
+    dispatch(&mut app, Message::ToggleOverwrite);
+    assert!(!app.cur_handle.borrow().overwrite);
+}
 
-    #[test]
-    fn read_only_lock_blocks_edits_but_allows_navigation() {
-        // P126：只读总闸——输入/撤销拒收且不置脏，导航/书签照常
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("abc"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        dispatch(&mut app, Message::ToggleReadOnly);
-        assert!(app.cur_handle.borrow().read_only);
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abc", "只读拒收输入");
-        assert!(!app.tab().dirty, "被拒动作不得置脏");
-        dispatch(&mut app, Message::Edit(EditOp::Undo));
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abc", "只读拒收撤销");
-        // 纯导航照常
-        dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::End, false)));
-        assert_eq!(app.cur_handle.borrow().cursor.col, 3);
-        // 解除后恢复编辑
-        dispatch(&mut app, Message::ToggleReadOnly);
-        assert!(!app.cur_handle.borrow().read_only);
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcX");
-    }
+#[test]
+fn read_only_lock_blocks_edits_but_allows_navigation() {
+    // P126：只读总闸——输入/撤销拒收且不置脏，导航/书签照常
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("abc"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::ToggleReadOnly);
+    assert!(app.cur_handle.borrow().read_only);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "abc", "只读拒收输入");
+    assert!(!app.tab().dirty, "被拒动作不得置脏");
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "abc", "只读拒收撤销");
+    // 纯导航照常
+    dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::End, false)));
+    assert_eq!(app.cur_handle.borrow().cursor.col, 3);
+    // 解除后恢复编辑
+    dispatch(&mut app, Message::ToggleReadOnly);
+    assert!(!app.cur_handle.borrow().read_only);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("X".into())));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcX");
+}
 
-    #[test]
-    fn edit_op_mutates_classification_is_failsafe() {
-        // P126：白名单外默认按可变拒绝（fail-safe）——新变体忘登记时
-        // 只读误伤导航会被本测试的显式断言暴露
-        assert!(crate::update::edit_op_mutates(&EditOp::InsertText("a".into())));
-        assert!(crate::update::edit_op_mutates(&EditOp::Undo));
-        assert!(crate::update::edit_op_mutates(&EditOp::Redo));
-        assert!(crate::update::edit_op_mutates(&EditOp::Enter));
-        assert!(crate::update::edit_op_mutates(&EditOp::DeleteWordLeft));
-        assert!(!crate::update::edit_op_mutates(&EditOp::Motion(Motion::Left, false)));
-        assert!(!crate::update::edit_op_mutates(&EditOp::SelectAll));
-        assert!(!crate::update::edit_op_mutates(&EditOp::ToggleBookmark));
-        assert!(!crate::update::edit_op_mutates(&EditOp::CopyBookmarkedLines));
-        assert!(!crate::update::edit_op_mutates(&EditOp::JumpToMatchingBracket));
-        assert!(!crate::update::edit_op_mutates(&EditOp::CancelBlock));
-        // B10：添加下一匹配只动光标集，不改文档（只读页放行）
-        assert!(!crate::update::edit_op_mutates(&EditOp::AddNextMatch));
-    }
+#[test]
+fn edit_op_mutates_classification_is_failsafe() {
+    // P126：白名单外默认按可变拒绝（fail-safe）——新变体忘登记时
+    // 只读误伤导航会被本测试的显式断言暴露
+    assert!(crate::update::edit_op_mutates(&EditOp::InsertText(
+        "a".into()
+    )));
+    assert!(crate::update::edit_op_mutates(&EditOp::Undo));
+    assert!(crate::update::edit_op_mutates(&EditOp::Redo));
+    assert!(crate::update::edit_op_mutates(&EditOp::Enter));
+    assert!(crate::update::edit_op_mutates(&EditOp::DeleteWordLeft));
+    assert!(!crate::update::edit_op_mutates(&EditOp::Motion(
+        Motion::Left,
+        false
+    )));
+    assert!(!crate::update::edit_op_mutates(&EditOp::SelectAll));
+    assert!(!crate::update::edit_op_mutates(&EditOp::ToggleBookmark));
+    assert!(!crate::update::edit_op_mutates(
+        &EditOp::CopyBookmarkedLines
+    ));
+    assert!(!crate::update::edit_op_mutates(
+        &EditOp::JumpToMatchingBracket
+    ));
+    assert!(!crate::update::edit_op_mutates(&EditOp::CancelBlock));
+    // B10：添加下一匹配只动光标集，不改文档（只读页放行）
+    assert!(!crate::update::edit_op_mutates(&EditOp::AddNextMatch));
+}
 
-    #[test]
-    fn fuzzy_score_ranks_subsequence_and_rejects_missing() {
-        // 子序列命中、连续串加分、词首加分、完全不匹配拒绝
-        assert!(crate::fuzzy_score("切换只读锁定（Ctrl+R 解除）", "只读").is_some());
-        assert!(crate::fuzzy_score("切换只读锁定", "read").is_none(), "中文标题不命中英文");
-        let direct = crate::fuzzy_score("command_palette", "cpal");
-        assert!(direct.is_some());
-        // 连续命中得分高于离散命中（同为子序列）
-        let consecutive = crate::fuzzy_score("abcdef", "abc").unwrap();
-        let discrete = crate::fuzzy_score("aXbXc", "abc").unwrap();
-        assert!(consecutive > discrete);
-        // 空查询全过
-        assert_eq!(crate::fuzzy_score("任意", ""), Some(0));
-    }
+#[test]
+fn fuzzy_score_ranks_subsequence_and_rejects_missing() {
+    // 子序列命中、连续串加分、词首加分、完全不匹配拒绝
+    assert!(crate::fuzzy_score("切换只读锁定（Ctrl+R 解除）", "只读").is_some());
+    assert!(
+        crate::fuzzy_score("切换只读锁定", "read").is_none(),
+        "中文标题不命中英文"
+    );
+    let direct = crate::fuzzy_score("command_palette", "cpal");
+    assert!(direct.is_some());
+    // 连续命中得分高于离散命中（同为子序列）
+    let consecutive = crate::fuzzy_score("abcdef", "abc").unwrap();
+    let discrete = crate::fuzzy_score("aXbXc", "abc").unwrap();
+    assert!(consecutive > discrete);
+    // 空查询全过
+    assert_eq!(crate::fuzzy_score("任意", ""), Some(0));
+}
 
-    #[test]
-    fn palette_open_filter_execute_and_tabs_mode() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("base"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        // 命令模式：打开即列出全部注册表动作，聚焦自动请求
-        dispatch(&mut app, Message::PaletteToggled(crate::state::PaletteMode::Commands));
-        assert!(app.palette_visible);
-        let all = app.palette_filtered().len();
-        assert!(all > 60, "注册表全量命令应入面板，实际 {all}");
-        // 过滤：只读命令可被中文检索
-        dispatch(&mut app, Message::PaletteInputChanged("只读".into()));
-        let filtered = app.palette_filtered();
-        assert!(!filtered.is_empty(), "中文模糊检索应命中只读命令");
-        assert!(filtered.iter().all(|e| e.command_id.is_some()));
-        // 执行选中命令（首个含「只读」的应为 toggle_read_only）
-        dispatch(&mut app, Message::PaletteExecute);
-        assert!(!app.palette_visible, "执行后面板关闭");
-        assert!(
-            app.cur_handle.borrow().read_only,
-            "「只读」首条应执行 toggle_read_only"
-        );
-        // 标签模式：列出当前会话页并执行 SwitchTab
-        dispatch(&mut app, Message::NewTab);
-        dispatch(&mut app, Message::PaletteToggled(crate::state::PaletteMode::Tabs));
-        assert_eq!(app.palette_mode, crate::state::PaletteMode::Tabs);
-        assert_eq!(app.palette_filtered().len(), 2, "两个标签页全部列出");
-        dispatch(&mut app, Message::PaletteInputChanged("a.txt".into()));
-        assert_eq!(app.palette_filtered().len(), 1, "按文件名过滤");
-        dispatch(&mut app, Message::PaletteExecute);
-        assert!(!app.palette_visible);
-        // 选中第 0 页（a.txt 是唯一过滤结果）
-        assert_eq!(app.tabs.len(), 2);
-    }
+#[test]
+fn palette_open_filter_execute_and_tabs_mode() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("base"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 命令模式：打开即列出全部注册表动作，聚焦自动请求
+    dispatch(
+        &mut app,
+        Message::PaletteToggled(crate::state::PaletteMode::Commands),
+    );
+    assert!(app.palette_visible);
+    let all = app.palette_filtered().len();
+    assert!(all > 60, "注册表全量命令应入面板，实际 {all}");
+    // 过滤：只读命令可被中文检索
+    dispatch(&mut app, Message::PaletteInputChanged("只读".into()));
+    let filtered = app.palette_filtered();
+    assert!(!filtered.is_empty(), "中文模糊检索应命中只读命令");
+    assert!(filtered.iter().all(|e| e.command_id.is_some()));
+    // 执行选中命令（首个含「只读」的应为 toggle_read_only）
+    dispatch(&mut app, Message::PaletteExecute);
+    assert!(!app.palette_visible, "执行后面板关闭");
+    assert!(
+        app.cur_handle.borrow().read_only,
+        "「只读」首条应执行 toggle_read_only"
+    );
+    // 标签模式：列出当前会话页并执行 SwitchTab
+    dispatch(&mut app, Message::NewTab);
+    dispatch(
+        &mut app,
+        Message::PaletteToggled(crate::state::PaletteMode::Tabs),
+    );
+    assert_eq!(app.palette_mode, crate::state::PaletteMode::Tabs);
+    assert_eq!(app.palette_filtered().len(), 2, "两个标签页全部列出");
+    dispatch(&mut app, Message::PaletteInputChanged("a.txt".into()));
+    assert_eq!(app.palette_filtered().len(), 1, "按文件名过滤");
+    dispatch(&mut app, Message::PaletteExecute);
+    assert!(!app.palette_visible);
+    // 选中第 0 页（a.txt 是唯一过滤结果）
+    assert_eq!(app.tabs.len(), 2);
+}
 
-    // ---------- P135：拖拽移动/复制选区（路线图 B8） ----------
+// ---------- P135：拖拽移动/复制选区（路线图 B8） ----------
 
-    #[test]
-    fn drop_selection_move_via_apply_edit_marks_dirty_and_single_undo() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dnd.txt")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("abcd\nefgh\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        // 造选区 "bc"（0,1)-(0,3)
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
-            ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
-        }
-        // 拖拽移动到行 1 列 2（"ef" 之后）
-        dispatch(
-            &mut app,
-            Message::Edit(crate::editor::EditOp::DropSelection {
-                line: 1,
-                col: 2,
-                copy: false,
-            }),
-        );
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "ad\nefbcgh\n");
-        assert!(app.tab().dirty, "移动 = 编辑，应置脏");
-        // 单快照：一次撤销整体还原
-        dispatch(&mut app, Message::Edit(crate::editor::EditOp::Undo));
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcd\nefgh\n");
-        // 复制变体：源保留
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
-            ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
-        }
-        dispatch(
-            &mut app,
-            Message::Edit(crate::editor::EditOp::DropSelection {
-                line: 1,
-                col: 2,
-                copy: true,
-            }),
-        );
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcd\nefbcgh\n");
+#[test]
+fn drop_selection_move_via_apply_edit_marks_dirty_and_single_undo() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dnd.txt")));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("abcd\nefgh\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 造选区 "bc"（0,1)-(0,3)
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
     }
+    // 拖拽移动到行 1 列 2（"ef" 之后）
+    dispatch(
+        &mut app,
+        Message::Edit(crate::editor::EditOp::DropSelection {
+            line: 1,
+            col: 2,
+            copy: false,
+        }),
+    );
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "ad\nefbcgh\n");
+    assert!(app.tab().dirty, "移动 = 编辑，应置脏");
+    // 单快照：一次撤销整体还原
+    dispatch(&mut app, Message::Edit(crate::editor::EditOp::Undo));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcd\nefgh\n");
+    // 复制变体：源保留
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+    }
+    dispatch(
+        &mut app,
+        Message::Edit(crate::editor::EditOp::DropSelection {
+            line: 1,
+            col: 2,
+            copy: true,
+        }),
+    );
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcd\nefbcgh\n");
+}

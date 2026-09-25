@@ -276,7 +276,6 @@ pub(crate) fn row_title(key: &str, lang: editpad_core::Lang) -> String {
     key.to_owned()
 }
 
-
 /// 静态设置行清单（P62 起**不含热键行**——热键页为动态行，由
 /// view::rows_for 按动作注册表与当前重映射构建）。顺序 = 分类内
 /// 自上而下的展示顺序；搜索过滤与行渲染都从这里出发。
@@ -380,10 +379,7 @@ pub(crate) fn chrome_nav_button_style(
     if selected {
         style.background = Some(Background::Color(sc.selected_bg));
         style.border.color = sc.control_border;
-    } else if matches!(
-        status,
-        button::Status::Hovered | button::Status::Pressed
-    ) {
+    } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
         style.background = Some(Background::Color(sc.hover));
     }
     style
@@ -524,7 +520,8 @@ pub(crate) fn menubar_text_style(
 /// P56：菜单项 / 下拉列表项样式（右键菜单、最近文件、字体候选共用）——
 /// 常态透明融入卡片、正文字色，悬停淡染，禁用降为次要色。取代 iced
 /// 默认实心蓝（菜单项一度像全选中的高亮条）。
-pub(crate) fn chrome_menu_item_style(theme: &Theme, status: button::Status) -> button::Style {    let sc = settings_colors(theme);
+pub(crate) fn chrome_menu_item_style(theme: &Theme, status: button::Status) -> button::Style {
+    let sc = settings_colors(theme);
     button::Style {
         background: Some(Background::Color(match status {
             button::Status::Hovered | button::Status::Pressed => sc.hover,
@@ -565,7 +562,10 @@ pub(crate) fn settings_input_style(theme: &Theme, status: text_input::Status) ->
         icon: sc.desc,
         placeholder: sc.desc,
         value: sc.text,
-        selection: Color { a: 0.25, ..sc.accent },
+        selection: Color {
+            a: 0.25,
+            ..sc.accent
+        },
     }
 }
 
@@ -600,9 +600,7 @@ pub(crate) fn settings_pick_list_style(
 /// P155：界面语言下拉框的**展开列表**样式——卡片底 + 描边，悬停/选中用
 /// 淡染与点缀色文字（与 [`chrome_menu_item_style`] 同一口径，不用 iced
 /// 默认的实心蓝选中条——P56 用户已明确否掉那种观感）。
-pub(crate) fn settings_pick_list_menu_style(
-    theme: &Theme,
-) -> iced::widget::overlay::menu::Style {
+pub(crate) fn settings_pick_list_menu_style(theme: &Theme) -> iced::widget::overlay::menu::Style {
     use iced::widget::overlay::menu;
     let sc = settings_colors(theme);
     menu::Style {
@@ -628,14 +626,14 @@ pub(crate) fn settings_checkbox_style(theme: &Theme, status: checkbox::Status) -
         | checkbox::Status::Disabled { is_checked } => is_checked,
     };
     checkbox::Style {
-        background: Background::Color(if is_checked {
-            sc.accent
-        } else {
-            sc.control_bg
-        }),
+        background: Background::Color(if is_checked { sc.accent } else { sc.control_bg }),
         icon_color: Color::WHITE,
         border: Border {
-            color: if is_checked { sc.accent } else { sc.control_border },
+            color: if is_checked {
+                sc.accent
+            } else {
+                sc.control_border
+            },
             width: 1.0,
             radius: Radius::from(4.0),
         },
@@ -697,7 +695,11 @@ pub(crate) fn settings_card_size(vw: f32, vh: f32) -> (f32, f32) {
     } else {
         SETTINGS_CARD_W
     };
-    let h = if vh >= 144.0 { (vh - 96.0).min(680.0) } else { 560.0 };
+    let h = if vh >= 144.0 {
+        (vh - 96.0).min(680.0)
+    } else {
+        560.0
+    };
     (w, h)
 }
 
@@ -719,7 +721,9 @@ impl Editpad {
         // 标题行：「设置」+ 右上角 ×（关闭按钮放在标题栏右侧）
         let header = container(
             row![
-                text(self.t(editpad_core::Key::Settings)).size(uipx * 1.25).font(uifont),
+                text(self.t(editpad_core::Key::Settings))
+                    .size(uipx * 1.25)
+                    .font(uifont),
                 container(
                     button(text("×").size(uipx).font(uifont))
                         .padding([2, 9])
@@ -772,20 +776,21 @@ impl Editpad {
                 )
                 .width(Fill)
                 .padding([5, 10])
-                .style(move |theme, status| {
-                    chrome_nav_button_style(theme, status, selected)
-                })
+                .style(move |theme, status| chrome_nav_button_style(theme, status, selected))
                 .on_press(Message::SettingsPageSelected(page)),
             );
         }
 
         column![
-            text_input(self.t(editpad_core::Key::SettingsSearchPlaceholder), &self.settings_search)
-                .size(uipx)
-                .font(uifont)
-                .on_input(Message::SettingsSearchChanged)
-                .style(settings_input_style)
-                .width(Fill),
+            text_input(
+                self.t(editpad_core::Key::SettingsSearchPlaceholder),
+                &self.settings_search
+            )
+            .size(uipx)
+            .font(uifont)
+            .on_input(Message::SettingsSearchChanged)
+            .style(settings_input_style)
+            .width(Fill),
             text(self.t(editpad_core::Key::SettingsOptions))
                 .size(uipx * 0.85)
                 .font(uifont)
@@ -793,7 +798,12 @@ impl Editpad {
             nav,
         ]
         .spacing(10)
-        .padding(Padding { top: 12.0, right: 10.0, bottom: 12.0, left: 12.0 })
+        .padding(Padding {
+            top: 12.0,
+            right: 10.0,
+            bottom: 12.0,
+            left: 12.0,
+        })
         .width(170)
         .into()
     }
@@ -817,7 +827,12 @@ impl Editpad {
                         .size(uipx * 1.25)
                         .font(uifont),
                 )
-                .padding(Padding { top: 4.0, right: 4.0, bottom: 8.0, left: 4.0 }),
+                .padding(Padding {
+                    top: 4.0,
+                    right: 4.0,
+                    bottom: 8.0,
+                    left: 4.0,
+                }),
             );
             // P62：热键页头部带「全部恢复默认」与说明
             if current_page == SettingsPage::Hotkeys {
@@ -829,11 +844,9 @@ impl Editpad {
                                     .size(uipx)
                                     .font(uifont)
                             )
-                                .padding([3, 12])
-                                .style(chrome_button_style)
-                                .on_press_maybe(
-                                    (!self.busy).then_some(Message::HotkeysResetAll)
-                                ),
+                            .padding([3, 12])
+                            .style(chrome_button_style)
+                            .on_press_maybe((!self.busy).then_some(Message::HotkeysResetAll)),
                             text(self.t(editpad_core::Key::SettingsApplyHint))
                                 .size(uipx * 0.85)
                                 .font(uifont)
@@ -842,7 +855,12 @@ impl Editpad {
                         .spacing(8)
                         .align_y(Alignment::Center),
                     )
-                .padding(Padding { top: 0.0, right: 4.0, bottom: 6.0, left: 4.0 }),
+                    .padding(Padding {
+                        top: 0.0,
+                        right: 4.0,
+                        bottom: 6.0,
+                        left: 4.0,
+                    }),
                 );
             }
             for r in self.rows_for(current_page) {
@@ -868,7 +886,12 @@ impl Editpad {
                             .font(uifont)
                             .color(sc.desc),
                     )
-                    .padding(Padding { top: 8.0, right: 4.0, bottom: 2.0, left: 4.0 }),
+                    .padding(Padding {
+                        top: 8.0,
+                        right: 4.0,
+                        bottom: 2.0,
+                        left: 4.0,
+                    }),
                 );
                 for r in hits {
                     list = list.push(self.settings_row_widget(r));
@@ -883,9 +906,9 @@ impl Editpad {
                             query,
                             editpad_core::Key::SettingsNoMatchSuffix,
                         ))
-                            .size(uipx)
-                            .font(uifont)
-                            .color(sc.desc),
+                        .size(uipx)
+                        .font(uifont)
+                        .color(sc.desc),
                     )
                     .padding([12, 4]),
                 );
@@ -893,12 +916,17 @@ impl Editpad {
         }
         scrollable(
             container(list)
-                .padding(Padding { top: 4.0, right: 16.0, bottom: 16.0, left: 16.0 })
+                .padding(Padding {
+                    top: 4.0,
+                    right: 16.0,
+                    bottom: 16.0,
+                    left: 16.0,
+                })
                 .width(Fill),
         )
-            .width(Fill)
-            .height(content_h)
-            .into()
+        .width(Fill)
+        .height(content_h)
+        .into()
     }
 
     /// 某分类页的全部设置行（P62）：热键页为**动态行**——标题 = 动作
@@ -926,7 +954,9 @@ impl Editpad {
                 })
                 .collect();
         }
-        settings_rows(self.lang()).filter(|r| r.page == page).collect()
+        settings_rows(self.lang())
+            .filter(|r| r.page == page)
+            .collect()
     }
 
     /// 单个设置行（P47）：左「标题 + 灰色描述」、右对齐控件，行下 1px
@@ -978,20 +1008,24 @@ impl Editpad {
                 );
             }
             return Some(
-                button(text(self.t(editpad_core::Key::ButtonModify)).size(uipx).font(uifont))
-                    .padding([3, 12])
-                    .style(chrome_button_style)
-                    .on_press_maybe(
-                        (!self.busy)
-                            .then(|| {
-                                HOTKEY_ACTIONS
-                                    .iter()
-                                    .find(|a| a.id == key)
-                                    .map(|a| Message::HotkeyCaptureStarted(a.id))
-                            })
-                            .flatten(),
-                    )
-                    .into(),
+                button(
+                    text(self.t(editpad_core::Key::ButtonModify))
+                        .size(uipx)
+                        .font(uifont),
+                )
+                .padding([3, 12])
+                .style(chrome_button_style)
+                .on_press_maybe(
+                    (!self.busy)
+                        .then(|| {
+                            HOTKEY_ACTIONS
+                                .iter()
+                                .find(|a| a.id == key)
+                                .map(|a| Message::HotkeyCaptureStarted(a.id))
+                        })
+                        .flatten(),
+                )
+                .into(),
             );
         }
 
@@ -1004,7 +1038,10 @@ impl Editpad {
                 let options = editpad_core::LangOption::all(self.lang());
                 iced::widget::pick_list(
                     options,
-                    Some(editpad_core::LangOption { lang: s.language, ui: self.lang() }),
+                    Some(editpad_core::LangOption {
+                        lang: s.language,
+                        ui: self.lang(),
+                    }),
                     Message::LanguageOptionSelected,
                 )
                 .text_size(uipx)
@@ -1020,8 +1057,8 @@ impl Editpad {
                 } else {
                     self.t(editpad_core::Key::ThemeLight)
                 })
-                    .size(uipx)
-                    .font(uifont),
+                .size(uipx)
+                .font(uifont),
             )
             .padding([3, 12])
             .style(chrome_button_style)
@@ -1029,21 +1066,25 @@ impl Editpad {
             .into(),
             ROW_FONT_SIZE => self.settings_stepper(
                 format!("{:.0}", self.display_font_size()),
-                (self.display_font_size()
-                    > editpad_core::settings::MIN_FONT_SIZE)
+                (self.display_font_size() > editpad_core::settings::MIN_FONT_SIZE)
                     .then_some(Message::FontSizeDelta(-editor::FONT_ZOOM_STEP)),
-                (self.display_font_size()
-                    < editpad_core::settings::MAX_FONT_SIZE)
+                (self.display_font_size() < editpad_core::settings::MAX_FONT_SIZE)
                     .then_some(Message::FontSizeDelta(editor::FONT_ZOOM_STEP)),
             ),
             // ---- 字体 ----
-            FONT_ROW_KEY => button(text(self.t(editpad_core::Key::ButtonResetDefault)).size(uipx).font(uifont))
-                .padding([3, 12])
-                .style(chrome_button_style)
-                .on_press_maybe(
-                    s.font_family.is_some().then_some(Message::SettingsFontReset),
-                )
-                .into(),
+            FONT_ROW_KEY => button(
+                text(self.t(editpad_core::Key::ButtonResetDefault))
+                    .size(uipx)
+                    .font(uifont),
+            )
+            .padding([3, 12])
+            .style(chrome_button_style)
+            .on_press_maybe(
+                s.font_family
+                    .is_some()
+                    .then_some(Message::SettingsFontReset),
+            )
+            .into(),
             // ---- 保存 ----
             settings_ui::AUTOSAVE_ROW_KEY => checkbox(s.autosave_enabled)
                 .style(settings_checkbox_style)
@@ -1051,11 +1092,9 @@ impl Editpad {
                 .into(),
             ROW_AUTOSAVE_DELAY => self.settings_stepper(
                 format!("{}s", s.autosave_delay_secs),
-                (s.autosave_delay_secs
-                    > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
+                (s.autosave_delay_secs > editpad_core::settings::MIN_AUTOSAVE_DELAY_SECS)
                     .then_some(Message::SettingsAutosaveDelayDelta(-1)),
-                (s.autosave_delay_secs
-                    < editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS)
+                (s.autosave_delay_secs < editpad_core::settings::MAX_AUTOSAVE_DELAY_SECS)
                     .then_some(Message::SettingsAutosaveDelayDelta(1)),
             ),
             // ---- 第 64 轮 ⑭：保存时备份（三态循环按钮，仿关窗行为） ----
@@ -1118,11 +1157,13 @@ impl Editpad {
                 .on_toggle(Message::SettingsRememberSessionToggled)
                 .into(),
             ROW_EXIT_MODE => button(
-                text(if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
-                    self.t(editpad_core::Key::ExitSnapshot)
-                } else {
-                    self.t(editpad_core::Key::ExitAsk)
-                })
+                text(
+                    if s.exit_mode == editpad_core::settings::EXIT_MODE_SNAPSHOT {
+                        self.t(editpad_core::Key::ExitSnapshot)
+                    } else {
+                        self.t(editpad_core::Key::ExitAsk)
+                    },
+                )
                 .size(uipx)
                 .font(uifont),
             )
@@ -1132,11 +1173,9 @@ impl Editpad {
             .into(),
             ROW_SNAPSHOT_INTERVAL => self.settings_stepper(
                 format!("{}s", s.snapshot_interval_secs),
-                (s.snapshot_interval_secs
-                    > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
+                (s.snapshot_interval_secs > editpad_core::settings::MIN_SNAPSHOT_INTERVAL_SECS)
                     .then_some(Message::SettingsIntervalDelta(-5)),
-                (s.snapshot_interval_secs
-                    < editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS)
+                (s.snapshot_interval_secs < editpad_core::settings::MAX_SNAPSHOT_INTERVAL_SECS)
                     .then_some(Message::SettingsIntervalDelta(5)),
             ),
             // 热键速查 / 关于：纯展示行（标题+描述已完整表达）
@@ -1183,11 +1222,9 @@ impl Editpad {
         let sc = settings_colors(&self.theme());
 
         let current = text(match (&s.font_family, &self.active_font_family) {
-            (Some(cfg), Some(eff)) if cfg.as_str() == *eff => editpad_core::fmt_suffix(
-                self.lang(),
-                editpad_core::Key::FontCurrentPrefix,
-                eff,
-            ),
+            (Some(cfg), Some(eff)) if cfg.as_str() == *eff => {
+                editpad_core::fmt_suffix(self.lang(), editpad_core::Key::FontCurrentPrefix, eff)
+            }
             (Some(cfg), _) => editpad_core::fmt_wrapped(
                 self.lang(),
                 editpad_core::Key::FontCurrentMissingPrefix,
@@ -1200,12 +1237,15 @@ impl Editpad {
         .font(uifont)
         .color(sc.desc);
 
-        let filter = text_input(self.t(editpad_core::Key::FontFilterPlaceholder), &self.font_filter)
-            .size(uipx)
-            .font(uifont)
-            .on_input(Message::FontFilterChanged)
-            .style(settings_input_style)
-            .width(Fill);
+        let filter = text_input(
+            self.t(editpad_core::Key::FontFilterPlaceholder),
+            &self.font_filter,
+        )
+        .size(uipx)
+        .font(uifont)
+        .on_input(Message::FontFilterChanged)
+        .style(settings_input_style)
+        .width(Fill);
 
         // 显式标注：两个分支的 widget 类型不同，靠 Into 目标统一
         let picker: Element<'_, Message> = if self.available_fonts.is_empty() {
@@ -1219,10 +1259,7 @@ impl Editpad {
             let matches: Vec<&String> = self
                 .available_fonts
                 .iter()
-                .filter(|f| {
-                    needle.is_empty()
-                        || editor::normalize_family(f).contains(&needle)
-                })
+                .filter(|f| needle.is_empty() || editor::normalize_family(f).contains(&needle))
                 .collect();
             let total = matches.len();
             let mut list = column![].spacing(2);
@@ -1236,17 +1273,15 @@ impl Editpad {
                     .width(Fill)
                     .padding([4, 8])
                     .style(chrome_menu_item_style)
-                    .on_press(Message::SettingsFontSelected(
-                        (*name).clone(),
-                    )),
+                    .on_press(Message::SettingsFontSelected((*name).clone())),
                 );
             }
             if total > FONT_PICKER_MAX_ROWS {
                 list = list.push(
                     text(editpad_core::fmt_font_picker_more(self.lang(), total))
-                    .size(uipx * 0.85)
-                    .font(uifont)
-                    .color(sc.desc),
+                        .size(uipx * 0.85)
+                        .font(uifont)
+                        .color(sc.desc),
                 );
             }
             scrollable(list).height(180).width(Fill).into()
@@ -1254,11 +1289,14 @@ impl Editpad {
 
         column![current, filter, picker]
             .spacing(6)
-            .padding(Padding { top: 0.0, right: 4.0, bottom: 10.0, left: 4.0 })
+            .padding(Padding {
+                top: 0.0,
+                right: 4.0,
+                bottom: 10.0,
+                left: 4.0,
+            })
             .into()
     }
-
-    
 
     /// P40：设置弹窗浮层——整窗背板（点击关闭）+ 居中卡片。P47 起卡片
     /// 为 两栏布局：侧栏固定、内容区内部滚动，宽 720、
@@ -1266,8 +1304,7 @@ impl Editpad {
     /// 空白处（padding/标题行旁）不误触背板关闭。
     /// 注：第 82 轮 Phase 2a 自 view.rs 迁入，view() 跨模块调用 → pub(crate)。
     pub(crate) fn settings_overlay(&self) -> Element<'_, Message> {
-        let (card_w, content_h) =
-            settings_card_size(self.viewport_size.0, self.viewport_size.1);
+        let (card_w, content_h) = settings_card_size(self.viewport_size.0, self.viewport_size.1);
         let card = opaque(
             container(self.settings_panel(content_h))
                 .width(card_w)
@@ -1284,5 +1321,4 @@ impl Editpad {
         .on_press(Message::SettingsToggled)
         .into()
     }
-
 }

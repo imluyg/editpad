@@ -24,10 +24,7 @@ pub(crate) struct FindScanPayload {
 ///
 /// 保证语义：无论扫描成功、被取消还是 **panic**，都恰好回一条 `FindScanDone`
 /// ——否则查找栏会永久停在「查找中…」。过期结果由 update 按 seq 二次过滤。
-pub(crate) async fn drive_find_scan<F>(
-    payload: FindScanPayload,
-    scan: F,
-) -> Message
+pub(crate) async fn drive_find_scan<F>(payload: FindScanPayload, scan: F) -> Message
 where
     F: FnOnce(&editpad_core::Document, &str, bool, bool) -> Vec<editpad_core::MatchPos>
         + Send
@@ -42,7 +39,12 @@ where
         }
         // P5 同款兜底：扫描崩溃也要回消息（空表），不能让 UI 永久等待
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan(&payload.doc, &payload.query, payload.case_sensitive, payload.regex)
+            scan(
+                &payload.doc,
+                &payload.query,
+                payload.case_sensitive,
+                payload.regex,
+            )
         }))
         .unwrap_or_default()
     })
@@ -204,11 +206,7 @@ pub(crate) fn fif_scan_dir(payload: &FifScanPayload) -> (Vec<FileHits>, bool) {
 /// `for_each_line` 行界全集——find_all 的行号按 `\r\n`/`\r`/`\n`/VT/
 /// FF/NEL/LS/PS 计数，曾自写 `\r\n` 切行，含 VT 等的文件摘录与命中
 /// 行号错位）。
-fn collect_excerpts(
-    text: &str,
-    hits: &[editpad_core::MatchPos],
-    max_cols: usize,
-) -> Vec<String> {
+fn collect_excerpts(text: &str, hits: &[editpad_core::MatchPos], max_cols: usize) -> Vec<String> {
     let mut out = vec![String::new(); hits.len()];
     let mut hit_i = 0usize;
     editpad_core::for_each_line(text, |line_idx, content| {

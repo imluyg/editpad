@@ -37,7 +37,10 @@ fn p154_enter_at_wrapped_tail_keeps_scroll_on_true_total() {
 
     // 光标落最后一行行尾，按回车
     let last = c.doc.line_count() - 1;
-    c.cursor = CursorPos { line: last, col: c.line_display_len(last) };
+    c.cursor = CursorPos {
+        line: last,
+        col: c.line_display_len(last),
+    };
     c.insert_str("\n");
 
     let rows = c.viewport_h / c.line_height();
@@ -80,7 +83,10 @@ fn p154_reconcile_is_idempotent_and_consistent() {
     converge(&mut c);
 
     let last = c.doc.line_count() - 1;
-    c.cursor = CursorPos { line: last, col: c.line_display_len(last) };
+    c.cursor = CursorPos {
+        line: last,
+        col: c.line_display_len(last),
+    };
     c.insert_str("\n");
 
     // 编辑汇点已对账：无需再收敛，总数即真值

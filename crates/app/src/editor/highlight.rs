@@ -81,13 +81,10 @@ impl EditorCore {
             return runs;
         }
         let anchor = self.visible_range().0;
-        hl.borrow_mut().styled_line_approx(
-            line_idx,
-            anchor,
-            target_text,
-            total,
-            &mut |i| doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned(),
-        )
+        hl.borrow_mut()
+            .styled_line_approx(line_idx, anchor, target_text, total, &mut |i| {
+                doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned()
+            })
     }
 
     /// 可见区域是否还有「内联预算外」的缺档（需要安排后台铺建）。
@@ -116,7 +113,9 @@ impl EditorCore {
     /// 检查点数量（测试诊断用；生产路径经 [`Self::needs_paving`] 间接消费）。
     #[cfg(test)]
     pub fn highlight_checkpoints_len(&self) -> Option<usize> {
-        self.highlight.as_ref().map(|h| h.borrow().checkpoints_len())
+        self.highlight
+            .as_ref()
+            .map(|h| h.borrow().checkpoints_len())
     }
 
     /// 后台铺建的起点快照：(代次, 高亮器克隆)。文档克隆由调用方另行完成。

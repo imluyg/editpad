@@ -1,704 +1,785 @@
 use super::*;
 
-    // ---------- 查找/替换转义解析（\n \r \t \\） ----------
+// ---------- 查找/替换转义解析（\n \r \t \\） ----------
 
-    #[test]
-    fn unescape_resolves_known_escapes_and_keeps_unknown_literal() {
-        assert_eq!(unescape_query("\\n"), "\n");
-        assert_eq!(unescape_query("a\\tb"), "a\tb");
-        assert_eq!(unescape_query("\\r"), "\r");
-        assert_eq!(unescape_query("a\\\\b"), "a\\b");
-        // 未知转义保持原样两个字符；孤立反斜杠保持字面
-        assert_eq!(unescape_query("\\q"), "\\q");
-        assert_eq!(unescape_query("trailing\\"), "trailing\\");
-        // 无转义内容不受影响
-        assert_eq!(unescape_query("plain 中文 🚀"), "plain 中文 🚀");
+#[test]
+fn unescape_resolves_known_escapes_and_keeps_unknown_literal() {
+    assert_eq!(unescape_query("\\n"), "\n");
+    assert_eq!(unescape_query("a\\tb"), "a\tb");
+    assert_eq!(unescape_query("\\r"), "\r");
+    assert_eq!(unescape_query("a\\\\b"), "a\\b");
+    // 未知转义保持原样两个字符；孤立反斜杠保持字面
+    assert_eq!(unescape_query("\\q"), "\\q");
+    assert_eq!(unescape_query("trailing\\"), "trailing\\");
+    // 无转义内容不受影响
+    assert_eq!(unescape_query("plain 中文 🚀"), "plain 中文 🚀");
+}
+
+#[test]
+fn find_and_replace_support_escaped_tab_and_newline() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/t/a.txt")));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("a\tb"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    // 查找 \t 并替换为换行：输入框里的字面反斜杠序列被解析成真实控制字符
+    app.find_visible = true;
+    dispatch(&mut app, Message::FindQueryChanged("\\t".into()));
+    dispatch(&mut app, Message::ReplaceQueryChanged("\\n".into()));
+    let raw_query_kept = app.find_query.clone();
+    assert_eq!(raw_query_kept, "\\t", "输入框保留用户原始输入");
+    // 模拟在途扫描已完成（测试中任务被丢弃，不会自动清除）
+    app.find_scan = None;
+
+    dispatch(&mut app, Message::ReplaceAll);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "a\nb",
+        "替换文本中的 \\n 转义应成为真实换行"
+    );
+    assert!(app.tab().dirty);
+}
+
+// ---------- P70 正则查找/替换 ----------
+
+#[test]
+fn p70_regex_toggle_rescans_and_invalid_pattern_surfaces_error() {
+    let mut app = loaded_txt_app();
+    dispatch(&mut app, Message::FindToggled); // 打开查找栏（校验在排扫描时进行）
+    dispatch(&mut app, Message::FindQueryChanged("foo".to_owned()));
+    dispatch(&mut app, Message::RegexToggled(true));
+    assert!(app.regex_enabled);
+    assert!(
+        app.status.contains("$1"),
+        "开启正则应提示替换语法：{:?}",
+        app.status
+    );
+
+    // 无效正则：状态栏报错、不排扫描任务
+    dispatch(&mut app, Message::FindQueryChanged("(unclosed".to_owned()));
+    assert!(
+        app.status.contains("正则无效"),
+        "非法模式应立即报错：{:?}",
+        app.status
+    );
+    assert!(app.find_scan.is_none(), "无效模式不得排队扫描");
+
+    // 关闭开关恢复字面模式
+    dispatch(&mut app, Message::RegexToggled(false));
+    assert!(!app.regex_enabled);
+}
+
+#[test]
+fn p70_regex_replace_all_end_to_end_with_captures() {
+    let (mut app, _path) = loaded_real_file_app("p70-replace-all");
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("a1 b2\na3 c\nend a4"));
     }
+    app.regex_enabled = true;
+    app.find_query = r"a(\d)".to_owned();
+    app.replace_query = "x$1".to_owned();
 
-    #[test]
-    fn find_and_replace_support_escaped_tab_and_newline() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/t/a.txt")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("a\tb"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
+    // P148：替换本体移后台——dispatch 丢弃 Task，手动回报计算结果
+    dispatch(&mut app, Message::ReplaceAll);
+    assert!(app.busy, "正则替换应进入 busy 包裹");
+    let (new_contents, count) =
+        editpad_core::replace_all_regex("a1 b2\na3 c\nend a4", r"a(\d)", "x$1", true)
+            .expect("参照替换应成功");
+    dispatch(
+        &mut app,
+        Message::ReplaceAllRegexDone(Ok((new_contents, count))),
+    );
+    assert!(!app.busy);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "x1 b2\nx3 c\nend x4",
+        "正则替换应展开 $1 组引用"
+    );
+    assert!(app.tab().dirty);
+    assert!(
+        app.status.contains("3"),
+        "应报告替换 3 处：{:?}",
+        app.status
+    );
 
-        // 查找 \t 并替换为换行：输入框里的字面反斜杠序列被解析成真实控制字符
-        app.find_visible = true;
-        dispatch(&mut app, Message::FindQueryChanged("\\t".into()));
-        dispatch(&mut app, Message::ReplaceQueryChanged("\\n".into()));
-        let raw_query_kept = app.find_query.clone();
-        assert_eq!(raw_query_kept, "\\t", "输入框保留用户原始输入");
-        // 模拟在途扫描已完成（测试中任务被丢弃，不会自动清除）
-        app.find_scan = None;
+    // 后台计算失败（如回溯超限）：文档原封不动、busy 收口、错误留痕
+    let before = app.cur_handle.borrow().doc.clone();
+    dispatch(
+        &mut app,
+        Message::ReplaceAllRegexDone(Err("回溯超限".into())),
+    );
+    assert!(!app.busy);
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), before.to_text());
+    assert!(app.status.contains("正则替换失败"), "实际 {:?}", app.status);
+}
 
-        dispatch(&mut app, Message::ReplaceAll);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "a\nb",
-            "替换文本中的 \\n 转义应成为真实换行"
-        );
-        assert!(app.tab().dirty);
+#[test]
+fn p70_regex_replace_current_expands_single_match() {
+    let (mut app, _path) = loaded_real_file_app("p70-replace-current");
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("a1 b2 a3"));
     }
+    app.regex_enabled = true;
+    app.find_query = r"a(\d)".to_owned();
+    app.replace_query = "<$1>".to_owned();
 
-    // ---------- P70 正则查找/替换 ----------
+    // 命中表直接注入（模拟后台扫描完成）：3 处命中
+    let hits = vec![
+        editpad_core::MatchPos {
+            line: 0,
+            col: 0,
+            len_chars: 2,
+        },
+        editpad_core::MatchPos {
+            line: 0,
+            col: 4,
+            len_chars: 2,
+        },
+        editpad_core::MatchPos {
+            line: 0,
+            col: 7,
+            len_chars: 2,
+        },
+    ];
+    let seq = app.find_seq;
+    app.find_scan = Some(seq); // 登记「在途扫描」：FindScanDone 的守卫条件
+    dispatch(&mut app, Message::FindScanDone(seq, hits));
 
-    #[test]
-    fn p70_regex_toggle_rescans_and_invalid_pattern_surfaces_error() {
-        let mut app = loaded_txt_app();
-        dispatch(&mut app, Message::FindToggled); // 打开查找栏（校验在排扫描时进行）
-        dispatch(
-            &mut app,
-            Message::FindQueryChanged("foo".to_owned()),
-        );
-        dispatch(&mut app, Message::RegexToggled(true));
-        assert!(app.regex_enabled);
-        assert!(app.status.contains("$1"), "开启正则应提示替换语法：{:?}", app.status);
+    // 无当前命中：先跳到第一个（step_match 语义）
+    dispatch(&mut app, Message::ReplaceCurrentRegex);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "<1> b2 a3",
+        "仅当前命中被展开替换"
+    );
+    assert!(app.tab().dirty, "替换当前是真实文档编辑");
+}
 
-        // 无效正则：状态栏报错、不排扫描任务
-        dispatch(&mut app, Message::FindQueryChanged("(unclosed".to_owned()));
-        assert!(
-            app.status.contains("正则无效"),
-            "非法模式应立即报错：{:?}",
-            app.status
-        );
-        assert!(app.find_scan.is_none(), "无效模式不得排队扫描");
-
-        // 关闭开关恢复字面模式
-        dispatch(&mut app, Message::RegexToggled(false));
-        assert!(!app.regex_enabled);
+#[test]
+fn step_prev_from_selected_match_jumps_back_in_one_press() {
+    // 光标/选区正落在命中上时，「查找上一个」必须一步跳到上一处——
+    // 旧实现以光标（命中末尾）为原点，第一按会重新选中当前命中
+    let (mut app, _path) = loaded_real_file_app("step-prev");
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("aXbXc"));
     }
+    app.find_visible = true;
+    app.find_query = "X".to_owned();
+    let hits = vec![
+        editpad_core::MatchPos {
+            line: 0,
+            col: 1,
+            len_chars: 1,
+        },
+        editpad_core::MatchPos {
+            line: 0,
+            col: 3,
+            len_chars: 1,
+        },
+    ];
+    let seq = app.find_seq;
+    app.find_scan = Some(seq);
+    dispatch(&mut app, Message::FindScanDone(seq, hits));
 
-    #[test]
-    fn p70_regex_replace_all_end_to_end_with_captures() {
-        let (mut app, _path) = loaded_real_file_app("p70-replace-all");
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.reset_document(editpad_core::Document::from_str(
-                "a1 b2\na3 c\nend a4",
-            ));
+    dispatch(&mut app, Message::FindNext); // 选中第 1 个命中
+    dispatch(&mut app, Message::FindNext); // 选中第 2 个命中
+    dispatch(&mut app, Message::FindPrev);
+    assert_eq!(app.match_idx, Some(0), "从第 2 个命中一步回到第 1 个");
+
+    // 「下一个」语义不变：以命中末尾为原点继续向后
+    dispatch(&mut app, Message::FindNext);
+    assert_eq!(app.match_idx, Some(1));
+}
+
+#[test]
+fn whole_word_replace_all_and_scan_filter() {
+    // 整词模式：全部替换走整词路径（concat 内部的 cat 不动）；
+    // 扫描命中表经 filter_whole_word 过滤词内命中
+    let (mut app, _path) = loaded_real_file_app("whole-word");
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("cat concat cat"));
+    }
+    app.find_visible = true;
+    app.find_query = "cat".to_owned();
+    app.replace_query = "dog".to_owned();
+    dispatch(&mut app, Message::WholeWordToggled(true));
+    assert!(app.whole_word, "开关应置位");
+    // 开关排队的扫描 Task 被 dispatch 丢弃：模拟扫描已完成，
+    // 否则「扫描在途禁全部替换」守卫会拦截下面的 ReplaceAll
+    app.find_scan = None;
+
+    // 全部替换（整词路径）：首尾两个独立 cat 被替换
+    dispatch(&mut app, Message::ReplaceAll);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "dog concat dog",
+        "concat 内部的 cat 不得被替换"
+    );
+    assert!(app.status.contains("已替换 2 处"), "实际 {:?}", app.status);
+
+    // 扫描过滤语义：替换后唯一剩余的 cat 在 concat 内部，
+    // 整词过滤应将其剔除
+    let doc = app.cur_handle.borrow().doc.clone();
+    let hits = editpad_core::find_all_document(&doc, "cat", true);
+    assert_eq!(hits.len(), 1);
+    let filtered = editpad_core::filter_whole_word(&doc, hits);
+    assert!(filtered.is_empty(), "词内命中应被过滤");
+}
+
+#[test]
+fn p70_regex_replace_current_zero_width_expands_not_literal_fallback() {
+    // 零宽命中（如 a*/b* 的空匹配）：旧实现 selected_text() 为 None
+    // 时静默回落字面 replace_current——拿正则串当字面量匹配。钉死：
+    // 按位置展开替换文本（$0 引用）。
+    let (mut app, _path) = loaded_real_file_app("p70-zero-width");
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("abc"));
+    }
+    app.regex_enabled = true;
+    app.find_query = r"b*".to_owned();
+    app.replace_query = "-$0-".to_owned();
+
+    // 命中表直接注入：b* 在 col 1 的零宽匹配（空命中 len_chars=0）
+    let hits = vec![editpad_core::MatchPos {
+        line: 0,
+        col: 1,
+        len_chars: 0,
+    }];
+    let seq = app.find_seq;
+    app.find_scan = Some(seq);
+    dispatch(&mut app, Message::FindScanDone(seq, hits));
+
+    dispatch(&mut app, Message::ReplaceCurrentRegex);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "a-b-bc",
+        "零宽命中应在原位展开替换文本（b 被 $0 引用）"
+    );
+    assert!(app.tab().dirty);
+}
+
+#[test]
+fn p63_autosave_must_skip_contract() {
+    // 写前判定纯函数契约：期望戳缺失不拦截；期望已知时以差异为准
+    let t0 = std::time::SystemTime::UNIX_EPOCH;
+    let t1 = t0 + std::time::Duration::from_secs(1);
+    assert!(!autosave_must_skip(None, Some((t1, 5))), "从未记录无从比对");
+    assert!(
+        !autosave_must_skip(Some((t0, 5)), Some((t0, 5))),
+        "一致放行"
+    );
+    assert!(
+        autosave_must_skip(Some((t0, 5)), Some((t1, 5))),
+        "mtime 变化拒写"
+    );
+    assert!(
+        autosave_must_skip(Some((t0, 5)), Some((t0, 6))),
+        "size 变化拒写"
+    );
+    assert!(
+        autosave_must_skip(Some((t0, 5)), None),
+        "文件被外部删除同样拒写（提示条会给出明确失败提示）"
+    );
+}
+
+// ---------- P10 后台查找扫描 ----------
+
+#[test]
+fn find_scan_stream_emits_exactly_one_done_with_matches() {
+    let payload = FindScanPayload {
+        seq: 42,
+        doc: editpad_core::Document::from_str("foo\nbar foo\n"),
+        query: "foo".to_owned(),
+        case_sensitive: true,
+        regex: false,
+        cancelled: Arc::new(AtomicBool::new(false)),
+        debounce_ms: 10,
+    };
+    // 恰好一条完成消息（函数直接返回它）
+    let message = block_on(drive_find_scan(payload, |doc, q, cs, _rx| {
+        editpad_core::find_all_document(doc, q, cs)
+    }));
+    match &message {
+        Message::FindScanDone(seq, hits) => {
+            assert_eq!(*seq, 42);
+            assert_eq!(
+                hits,
+                &vec![
+                    editpad_core::MatchPos {
+                        line: 0,
+                        col: 0,
+                        len_chars: 3
+                    },
+                    editpad_core::MatchPos {
+                        line: 1,
+                        col: 4,
+                        len_chars: 3
+                    },
+                ]
+            );
         }
-        app.regex_enabled = true;
-        app.find_query = r"a(\d)".to_owned();
-        app.replace_query = "x$1".to_owned();
-
-        // P148：替换本体移后台——dispatch 丢弃 Task，手动回报计算结果
-        dispatch(&mut app, Message::ReplaceAll);
-        assert!(app.busy, "正则替换应进入 busy 包裹");
-        let (new_contents, count) = editpad_core::replace_all_regex(
-            "a1 b2\na3 c\nend a4",
-            r"a(\d)",
-            "x$1",
-            true,
-        )
-        .expect("参照替换应成功");
-        dispatch(
-            &mut app,
-            Message::ReplaceAllRegexDone(Ok((new_contents, count))),
-        );
-        assert!(!app.busy);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "x1 b2\nx3 c\nend x4",
-            "正则替换应展开 $1 组引用"
-        );
-        assert!(app.tab().dirty);
-        assert!(app.status.contains("3"), "应报告替换 3 处：{:?}", app.status);
-
-        // 后台计算失败（如回溯超限）：文档原封不动、busy 收口、错误留痕
-        let before = app.cur_handle.borrow().doc.clone();
-        dispatch(&mut app, Message::ReplaceAllRegexDone(Err("回溯超限".into())));
-        assert!(!app.busy);
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), before.to_text());
-        assert!(
-            app.status.contains("正则替换失败"),
-            "实际 {:?}",
-            app.status
-        );
+        other => panic!("应为 FindScanDone，实际 {other:?}"),
     }
+}
 
-    #[test]
-    fn p70_regex_replace_current_expands_single_match() {
-        let (mut app, _path) = loaded_real_file_app("p70-replace-current");
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.reset_document(editpad_core::Document::from_str("a1 b2 a3"));
+#[test]
+fn find_scan_cancelled_task_skips_scanning_and_replies_empty() {
+    // 新输入排队时会把上一代的取消标志置位；被作废的任务醒来即退出，
+    // 不浪费一次全文扫描，但仍回一条空结果消息保持「恰好一条」语义
+    let flag = Arc::new(AtomicBool::new(false));
+    flag.store(true, Ordering::Relaxed);
+    let payload = FindScanPayload {
+        seq: 3,
+        doc: editpad_core::Document::from_str("target target"),
+        query: "target".to_owned(),
+        case_sensitive: true,
+        regex: false,
+        cancelled: flag,
+        debounce_ms: 10,
+    };
+    let message = block_on(drive_find_scan(payload, |doc, q, cs, _rx| {
+        editpad_core::find_all_document(doc, q, cs)
+    }));
+    match message {
+        Message::FindScanDone(seq, hits) => {
+            assert_eq!(seq, 3);
+            assert!(hits.is_empty(), "被取消的任务不得产出命中");
         }
-        app.regex_enabled = true;
-        app.find_query = r"a(\d)".to_owned();
-        app.replace_query = "<$1>".to_owned();
-
-        // 命中表直接注入（模拟后台扫描完成）：3 处命中
-        let hits = vec![
-            editpad_core::MatchPos { line: 0, col: 0, len_chars: 2 },
-            editpad_core::MatchPos { line: 0, col: 4, len_chars: 2 },
-            editpad_core::MatchPos { line: 0, col: 7, len_chars: 2 },
-        ];
-        let seq = app.find_seq;
-        app.find_scan = Some(seq); // 登记「在途扫描」：FindScanDone 的守卫条件
-        dispatch(&mut app, Message::FindScanDone(seq, hits));
-
-        // 无当前命中：先跳到第一个（step_match 语义）
-        dispatch(&mut app, Message::ReplaceCurrentRegex);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "<1> b2 a3",
-            "仅当前命中被展开替换"
-        );
-        assert!(app.tab().dirty, "替换当前是真实文档编辑");
+        other => panic!("应为 FindScanDone，实际 {other:?}"),
     }
+}
 
-    #[test]
-    fn step_prev_from_selected_match_jumps_back_in_one_press() {
-        // 光标/选区正落在命中上时，「查找上一个」必须一步跳到上一处——
-        // 旧实现以光标（命中末尾）为原点，第一按会重新选中当前命中
-        let (mut app, _path) = loaded_real_file_app("step-prev");
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.reset_document(editpad_core::Document::from_str("aXbXc"));
+#[test]
+fn find_scan_survives_panic_and_still_replies() {
+    // 扫描函数崩溃也必须回消息（空表），否则查找栏永久停在「查找中…」
+    let payload = FindScanPayload {
+        seq: 7,
+        doc: editpad_core::Document::new(),
+        query: "x".to_owned(),
+        case_sensitive: false,
+        regex: false,
+        cancelled: Arc::new(AtomicBool::new(false)),
+        debounce_ms: 10,
+    };
+    let message = block_on(drive_find_scan(
+        payload,
+        |_doc, _q, _cs, _rx| -> Vec<editpad_core::MatchPos> { panic!("模拟扫描崩溃") },
+    ));
+    match &message {
+        Message::FindScanDone(seq, hits) => {
+            assert_eq!(*seq, 7);
+            assert!(hits.is_empty(), "panic 兜底应回空命中表");
         }
-        app.find_visible = true;
-        app.find_query = "X".to_owned();
-        let hits = vec![
-            editpad_core::MatchPos { line: 0, col: 1, len_chars: 1 },
-            editpad_core::MatchPos { line: 0, col: 3, len_chars: 1 },
-        ];
-        let seq = app.find_seq;
-        app.find_scan = Some(seq);
-        dispatch(&mut app, Message::FindScanDone(seq, hits));
-
-        dispatch(&mut app, Message::FindNext); // 选中第 1 个命中
-        dispatch(&mut app, Message::FindNext); // 选中第 2 个命中
-        dispatch(&mut app, Message::FindPrev);
-        assert_eq!(app.match_idx, Some(0), "从第 2 个命中一步回到第 1 个");
-
-        // 「下一个」语义不变：以命中末尾为原点继续向后
-        dispatch(&mut app, Message::FindNext);
-        assert_eq!(app.match_idx, Some(1));
+        other => panic!("应为 FindScanDone，实际 {other:?}"),
     }
+}
 
-    #[test]
-    fn whole_word_replace_all_and_scan_filter() {
-        // 整词模式：全部替换走整词路径（concat 内部的 cat 不动）；
-        // 扫描命中表经 filter_whole_word 过滤词内命中
-        let (mut app, _path) = loaded_real_file_app("whole-word");
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.reset_document(editpad_core::Document::from_str("cat concat cat"));
+/// P211（O-8）：等待扫描结果**不得占住调用线程**。
+///
+/// `Task::perform` 的 future 跑在 futures 线程池（规模 ≈ 逻辑核数）上，
+/// 旧实现用 `std::sync::mpsc::Receiver::recv()` 阻塞等待：查找框每敲一键
+/// 排一条链，12 键/秒就能把 worker 占满，而同一个池还承载加载流/心跳/
+/// 自动保存——表现是大文件加载与心跳提交被排队（第 149 轮记过同病根）。
+///
+/// 判据不测耗时、只测结构：单次 poll 即返回 `Pending`，且**此刻 scan 还
+/// 没被调用**。旧的阻塞实现给不出这个形状——它的 poll 只能等工作线程跑完
+/// （scan 已执行、结果已到手）才返回，那时已经是 `Ready`。
+#[test]
+fn find_scan_future_parks_instead_of_blocking_the_worker() {
+    use iced::futures::task::{noop_waker, Context};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
+    let started = Arc::new(AtomicBool::new(false));
+    let payload = FindScanPayload {
+        seq: 11,
+        doc: editpad_core::Document::new(),
+        query: "x".to_owned(),
+        case_sensitive: false,
+        regex: false,
+        cancelled: Arc::new(AtomicBool::new(false)),
+        debounce_ms: 150,
+    };
+    let probe = started.clone();
+    let mut fut = Box::pin(drive_find_scan(payload, move |_doc, _q, _cs, _rx| {
+        probe.store(true, Ordering::Relaxed);
+        vec![editpad_core::MatchPos {
+            line: 0,
+            col: 0,
+            len_chars: 1,
+        }]
+    }));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let first = fut.as_mut().poll(&mut cx);
+    assert!(
+        matches!(first, Poll::Pending),
+        "首 poll 必须立刻让出线程，实际 {first:?}"
+    );
+    assert!(
+        !started.load(Ordering::Relaxed),
+        "等待期间不得在本线程上跑扫描（旧实现的 recv 会一直堵到扫描结束）"
+    );
+
+    // 结果落地后仍须能收尾（waker 是 no-op，故这里手动续 poll）
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let second = fut.as_mut().poll(&mut cx);
+    match second {
+        Poll::Ready(Message::FindScanDone(seq, hits)) => {
+            assert_eq!(seq, 11);
+            assert_eq!(hits.len(), 1, "扫描结果应原样带回");
         }
-        app.find_visible = true;
-        app.find_query = "cat".to_owned();
-        app.replace_query = "dog".to_owned();
-        dispatch(&mut app, Message::WholeWordToggled(true));
-        assert!(app.whole_word, "开关应置位");
-        // 开关排队的扫描 Task 被 dispatch 丢弃：模拟扫描已完成，
-        // 否则「扫描在途禁全部替换」守卫会拦截下面的 ReplaceAll
-        app.find_scan = None;
+        other => panic!("防抖窗过后应产出 FindScanDone，实际 {other:?}"),
+    }
+}
 
-        // 全部替换（整词路径）：首尾两个独立 cat 被替换
-        dispatch(&mut app, Message::ReplaceAll);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "dog concat dog",
-            "concat 内部的 cat 不得被替换"
-        );
-        assert!(
-            app.status.contains("已替换 2 处"),
-            "实际 {:?}",
-            app.status
-        );
-
-        // 扫描过滤语义：替换后唯一剩余的 cat 在 concat 内部，
-        // 整词过滤应将其剔除
-        let doc = app.cur_handle.borrow().doc.clone();
-        let hits = editpad_core::find_all_document(&doc, "cat", true);
-        assert_eq!(hits.len(), 1);
-        let filtered = editpad_core::filter_whole_word(&doc, hits);
-        assert!(filtered.is_empty(), "词内命中应被过滤");
+#[test]
+fn find_scan_results_are_filtered_by_sequence_number() {
+    let mut app = Editpad::default();
+    // 两份可区分的命中表：过期投递不得覆盖已采纳/待采纳的状态
+    let hit_a = || {
+        vec![editpad_core::MatchPos {
+            line: 0,
+            col: 0,
+            len_chars: 1,
+        }]
+    };
+    let hit_b = || {
+        vec![editpad_core::MatchPos {
+            line: 1,
+            col: 4,
+            len_chars: 1,
+        }]
+    };
+    /// 测试内派发：显式丢弃 Task（update 的返回值仅运行时消费）
+    fn dispatch(app: &mut Editpad, message: Message) {
+        let _ = app.update(message);
     }
 
-    #[test]
-    fn p70_regex_replace_current_zero_width_expands_not_literal_fallback() {
-        // 零宽命中（如 a*/b* 的空匹配）：旧实现 selected_text() 为 None
-        // 时静默回落字面 replace_current——拿正则串当字面量匹配。钉死：
-        // 按位置展开替换文本（$0 引用）。
-        let (mut app, _path) = loaded_real_file_app("p70-zero-width");
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.reset_document(editpad_core::Document::from_str("abc"));
-        }
-        app.regex_enabled = true;
-        app.find_query = r"b*".to_owned();
-        app.replace_query = "-$0-".to_owned();
+    app.find_visible = true;
 
-        // 命中表直接注入：b* 在 col 1 的零宽匹配（空命中 len_chars=0）
-        let hits = vec![editpad_core::MatchPos { line: 0, col: 1, len_chars: 0 }];
-        let seq = app.find_seq;
-        app.find_scan = Some(seq);
-        dispatch(&mut app, Message::FindScanDone(seq, hits));
+    // 排队 → 采纳当前序号的结果
+    dispatch(&mut app, Message::FindQueryChanged("a".into()));
+    assert_eq!(app.find_scan, Some(1), "查询变化应排队一次后台扫描");
+    dispatch(&mut app, Message::FindScanDone(1, hit_a()));
+    assert_eq!(app.matches, hit_a());
+    assert_eq!(app.find_scan, None, "结果采纳后在途标记应清除");
+    assert_eq!(app.match_idx, None, "新结果后跳转游标复位");
 
-        dispatch(&mut app, Message::ReplaceCurrentRegex);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "a-b-bc",
-            "零宽命中应在原位展开替换文本（b 被 $0 引用）"
-        );
-        assert!(app.tab().dirty);
-    }
+    // 已消费的序号再回来（重复投递）不得二次生效
+    dispatch(&mut app, Message::FindScanDone(1, hit_b()));
+    assert_eq!(app.matches, hit_a());
 
-    #[test]
-    fn p63_autosave_must_skip_contract() {
-        // 写前判定纯函数契约：期望戳缺失不拦截；期望已知时以差异为准
-        let t0 = std::time::SystemTime::UNIX_EPOCH;
-        let t1 = t0 + std::time::Duration::from_secs(1);
-        assert!(!autosave_must_skip(None, Some((t1, 5))), "从未记录无从比对");
-        assert!(!autosave_must_skip(Some((t0, 5)), Some((t0, 5))), "一致放行");
-        assert!(autosave_must_skip(Some((t0, 5)), Some((t1, 5))), "mtime 变化拒写");
-        assert!(autosave_must_skip(Some((t0, 5)), Some((t0, 6))), "size 变化拒写");
-        assert!(
-            autosave_must_skip(Some((t0, 5)), None),
-            "文件被外部删除同样拒写（提示条会给出明确失败提示）"
-        );
-    }
+    // 新输入换新序号；重扫期间保留旧命中（防闪烁），但旧序号的迟到结果不许覆盖
+    dispatch(&mut app, Message::FindQueryChanged("ab".into()));
+    assert_eq!(app.find_scan, Some(2));
+    dispatch(&mut app, Message::FindScanDone(1, hit_b()));
+    assert_eq!(app.matches, hit_a(), "过期结果必须被丢弃、不得覆盖");
+    dispatch(&mut app, Message::FindScanDone(2, hit_b()));
+    assert_eq!(app.matches, hit_b());
+    assert_eq!(app.find_scan, None);
 
-    // ---------- P10 后台查找扫描 ----------
+    // 大小写切换同样触发重扫
+    dispatch(&mut app, Message::CaseToggled(true));
+    assert_eq!(app.find_scan, Some(3));
 
-    #[test]
-    fn find_scan_stream_emits_exactly_one_done_with_matches() {
-        let payload = FindScanPayload {
-            seq: 42,
-            doc: editpad_core::Document::from_str("foo\nbar foo\n"),
-            query: "foo".to_owned(),
-            case_sensitive: true,
-            regex: false,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            debounce_ms: 10,
-        };
-        // 恰好一条完成消息（函数直接返回它）
-        let message = block_on(drive_find_scan(payload, |doc, q, cs, _rx| {
-            editpad_core::find_all_document(doc, q, cs)
-        }));
-        match &message {
-            Message::FindScanDone(seq, hits) => {
-                assert_eq!(*seq, 42);
-                assert_eq!(
-                    hits,
-                    &vec![
-                        editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
-                        editpad_core::MatchPos { line: 1, col: 4, len_chars: 3 },
-                    ]
-                );
-            }
-            other => panic!("应为 FindScanDone，实际 {other:?}"),
-        }
-    }
+    // 文档编辑（查找栏开着时）触发重扫
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert_eq!(app.find_scan, Some(4));
 
-    #[test]
-    fn find_scan_cancelled_task_skips_scanning_and_replies_empty() {
-        // 新输入排队时会把上一代的取消标志置位；被作废的任务醒来即退出，
-        // 不浪费一次全文扫描，但仍回一条空结果消息保持「恰好一条」语义
-        let flag = Arc::new(AtomicBool::new(false));
-        flag.store(true, Ordering::Relaxed);
-        let payload = FindScanPayload {
-            seq: 3,
-            doc: editpad_core::Document::from_str("target target"),
-            query: "target".to_owned(),
-            case_sensitive: true,
-            regex: false,
-            cancelled: flag,
-            debounce_ms: 10,
-        };
-        let message = block_on(drive_find_scan(payload, |doc, q, cs, _rx| {
-            editpad_core::find_all_document(doc, q, cs)
-        }));
-        match message {
-            Message::FindScanDone(seq, hits) => {
-                assert_eq!(seq, 3);
-                assert!(hits.is_empty(), "被取消的任务不得产出命中");
-            }
-            other => panic!("应为 FindScanDone，实际 {other:?}"),
-        }
-    }
+    // 关闭查找栏 = 取消：清结果且在途结果作废
+    dispatch(&mut app, Message::FindToggled);
+    assert_eq!(app.find_scan, None);
+    assert!(app.matches.is_empty());
+    dispatch(&mut app, Message::FindScanDone(4, hit_a()));
+    assert!(app.matches.is_empty(), "取消后的迟到结果必须被丢弃");
 
-    #[test]
-    fn find_scan_survives_panic_and_still_replies() {
-        // 扫描函数崩溃也必须回消息（空表），否则查找栏永久停在「查找中…」
-        let payload = FindScanPayload {
-            seq: 7,
-            doc: editpad_core::Document::new(),
-            query: "x".to_owned(),
-            case_sensitive: false,
-            regex: false,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            debounce_ms: 10,
-        };
-        let message = block_on(drive_find_scan(
-            payload,
-            |_doc, _q, _cs, _rx| -> Vec<editpad_core::MatchPos> { panic!("模拟扫描崩溃") },
-        ));
-        match &message {
-            Message::FindScanDone(seq, hits) => {
-                assert_eq!(*seq, 7);
-                assert!(hits.is_empty(), "panic 兜底应回空命中表");
-            }
-            other => panic!("应为 FindScanDone，实际 {other:?}"),
-        }
-    }
+    // Esc 关栏同样取消（注意：上一步关栏的取消已把序号推到 5，本次排队为 6）
+    app.find_visible = true;
+    dispatch(&mut app, Message::FindQueryChanged("abc".into()));
+    assert_eq!(app.find_scan, Some(6));
+    dispatch(&mut app, Message::BarsDismissed);
+    assert_eq!(app.find_scan, None);
+    dispatch(&mut app, Message::FindScanDone(6, hit_a()));
+    assert!(app.matches.is_empty());
 
-    /// P211（O-8）：等待扫描结果**不得占住调用线程**。
-    ///
-    /// `Task::perform` 的 future 跑在 futures 线程池（规模 ≈ 逻辑核数）上，
-    /// 旧实现用 `std::sync::mpsc::Receiver::recv()` 阻塞等待：查找框每敲一键
-    /// 排一条链，12 键/秒就能把 worker 占满，而同一个池还承载加载流/心跳/
-    /// 自动保存——表现是大文件加载与心跳提交被排队（第 149 轮记过同病根）。
-    ///
-    /// 判据不测耗时、只测结构：单次 poll 即返回 `Pending`，且**此刻 scan 还
-    /// 没被调用**。旧的阻塞实现给不出这个形状——它的 poll 只能等工作线程跑完
-    /// （scan 已执行、结果已到手）才返回，那时已经是 `Ready`。
-    #[test]
-    fn find_scan_future_parks_instead_of_blocking_the_worker() {
-        use iced::futures::task::{noop_waker, Context};
-        use std::future::Future;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::task::Poll;
-        let started = Arc::new(AtomicBool::new(false));
-        let payload = FindScanPayload {
-            seq: 11,
-            doc: editpad_core::Document::new(),
-            query: "x".to_owned(),
-            case_sensitive: false,
-            regex: false,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            debounce_ms: 150,
-        };
-        let probe = started.clone();
-        let mut fut = Box::pin(drive_find_scan(payload, move |_doc, _q, _cs, _rx| {
-            probe.store(true, Ordering::Relaxed);
-            vec![editpad_core::MatchPos { line: 0, col: 0, len_chars: 1 }]
-        }));
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let first = fut.as_mut().poll(&mut cx);
-        assert!(
-            matches!(first, Poll::Pending),
-            "首 poll 必须立刻让出线程，实际 {first:?}"
-        );
-        assert!(
-            !started.load(Ordering::Relaxed),
-            "等待期间不得在本线程上跑扫描（旧实现的 recv 会一直堵到扫描结束）"
-        );
+    // 清空查询 = 取消而非空表扫描（BarsDismissed 取消后序号为 7，本次排队 8）
+    app.find_visible = true;
+    dispatch(&mut app, Message::FindQueryChanged("q".into()));
+    assert_eq!(app.find_scan, Some(8));
+    dispatch(&mut app, Message::FindScanDone(8, hit_a()));
+    assert_eq!(app.matches, hit_a());
+    dispatch(&mut app, Message::FindQueryChanged(String::new()));
+    assert_eq!(app.find_scan, None);
+    assert!(app.matches.is_empty());
+    dispatch(&mut app, Message::FindScanDone(8, hit_a()));
+    assert!(
+        app.matches.is_empty(),
+        "清空查询取消后，同号迟到结果也必须被丢弃"
+    );
+}
 
-        // 结果落地后仍须能收尾（waker 是 no-op，故这里手动续 poll）
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        let second = fut.as_mut().poll(&mut cx);
-        match second {
-            Poll::Ready(Message::FindScanDone(seq, hits)) => {
-                assert_eq!(seq, 11);
-                assert_eq!(hits.len(), 1, "扫描结果应原样带回");
-            }
-            other => panic!("防抖窗过后应产出 FindScanDone，实际 {other:?}"),
-        }
-    }
+#[test]
+fn find_next_while_scanning_reports_progress_not_stale_jump() {
+    let mut app = Editpad::default();
+    app.find_visible = true;
+    app.find_query = "zzz".into();
 
-    #[test]
-    fn find_scan_results_are_filtered_by_sequence_number() {
-        let mut app = Editpad::default();
-        // 两份可区分的命中表：过期投递不得覆盖已采纳/待采纳的状态
-        let hit_a = || vec![editpad_core::MatchPos { line: 0, col: 0, len_chars: 1 }];
-        let hit_b = || vec![editpad_core::MatchPos { line: 1, col: 4, len_chars: 1 }];
-        /// 测试内派发：显式丢弃 Task（update 的返回值仅运行时消费）
-        fn dispatch(app: &mut Editpad, message: Message) {
-            let _ = app.update(message);
-        }
+    // 有结果在途：不基于过期命中表跳转
+    app.find_scan = Some(9);
+    app.matches = vec![editpad_core::MatchPos {
+        line: 0,
+        col: 0,
+        len_chars: 3,
+    }];
+    let _ = app.update(Message::FindNext);
+    assert_eq!(app.status, "查找中…", "扫描在途时 Enter 应提示进度");
 
-        app.find_visible = true;
+    // 无结果且无在途扫描：懒补排一次扫描而不是误报「无匹配」
+    let mut fresh = Editpad::default();
+    fresh.find_visible = true;
+    fresh.find_query = "zzz".into();
+    let _ = fresh.update(Message::FindNext);
+    assert!(fresh.find_scan.is_some(), "Enter 应懒触发一次后台扫描");
+}
 
-        // 排队 → 采纳当前序号的结果
-        dispatch(&mut app, Message::FindQueryChanged("a".into()));
-        assert_eq!(app.find_scan, Some(1), "查询变化应排队一次后台扫描");
-        dispatch(&mut app, Message::FindScanDone(1, hit_a()));
-        assert_eq!(app.matches, hit_a());
-        assert_eq!(app.find_scan, None, "结果采纳后在途标记应清除");
-        assert_eq!(app.match_idx, None, "新结果后跳转游标复位");
+// ---------- P26 跨行查询（CRLF 文档上的选区还原与替换当前） ----------
 
-        // 已消费的序号再回来（重复投递）不得二次生效
-        dispatch(&mut app, Message::FindScanDone(1, hit_b()));
-        assert_eq!(app.matches, hit_a());
+/// 构造一个已加载 CRLF 文档的应用，返回 (应用, 文档快照)。
+fn crlf_find_app() -> (Editpad, editpad_core::Document) {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/t/crlf.txt")),
+    );
+    let seq = app.job_seq;
+    let doc = editpad_core::Document::from_str("first\r\nsecond\r\nthird");
+    dispatch(
+        &mut app,
+        Message::Loaded(seq, Ok((doc.clone(), String::new(), "UTF-8".to_owned()))),
+    );
+    (app, doc)
+}
 
-        // 新输入换新序号；重扫期间保留旧命中（防闪烁），但旧序号的迟到结果不许覆盖
-        dispatch(&mut app, Message::FindQueryChanged("ab".into()));
-        assert_eq!(app.find_scan, Some(2));
-        dispatch(&mut app, Message::FindScanDone(1, hit_b()));
-        assert_eq!(app.matches, hit_a(), "过期结果必须被丢弃、不得覆盖");
-        dispatch(&mut app, Message::FindScanDone(2, hit_b()));
-        assert_eq!(app.matches, hit_b());
-        assert_eq!(app.find_scan, None);
+#[test]
+fn multiline_match_selects_across_lines_on_crlf_document() {
+    let (mut app, doc) = crlf_find_app();
+    app.find_visible = true;
+    // 用户输入转义序列：\n 解析为真实换行 → 查询含换行、跨行匹配
+    dispatch(&mut app, Message::FindQueryChanged("st\\nse".into()));
+    assert!(app.find_scan.is_some(), "查询变化应排队后台扫描");
 
-        // 大小写切换同样触发重扫
-        dispatch(&mut app, Message::CaseToggled(true));
-        assert_eq!(app.find_scan, Some(3));
+    // 用与后台线程相同的核心函数产出命中表，再按协议回填
+    let query = unescape_query("st\\nse");
+    let hits = editpad_core::find_all_document(&doc, &query, true);
+    assert_eq!(
+        hits,
+        vec![editpad_core::MatchPos {
+            line: 0,
+            col: 3,
+            len_chars: 5
+        }],
+        "命中跨度应为显示口径 5（2 字符 + 1 次跨行 + 2 字符），不是原始字符数 6"
+    );
+    let seq = app.find_scan.unwrap();
+    dispatch(&mut app, Message::FindScanDone(seq, hits));
+    assert!(app.matches.len() == 1);
 
-        // 文档编辑（查找栏开着时）触发重扫
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert_eq!(app.find_scan, Some(4));
+    // 跳到该命中：选区必须跨行且恰好覆盖「st\r\nse」（\r\n 只算一格）
+    dispatch(&mut app, Message::FindNext);
+    assert_eq!(app.status, "第 1/1 处匹配");
+    let selected = app.cur_handle.borrow().selected_text();
+    assert_eq!(
+        selected.as_deref(),
+        Some("st\r\nse"),
+        "跨行选区应包含文档真实的 \\r\\n，而不是多走/少走一格"
+    );
+}
 
-        // 关闭查找栏 = 取消：清结果且在途结果作废
-        dispatch(&mut app, Message::FindToggled);
-        assert_eq!(app.find_scan, None);
-        assert!(app.matches.is_empty());
-        dispatch(&mut app, Message::FindScanDone(4, hit_a()));
-        assert!(app.matches.is_empty(), "取消后的迟到结果必须被丢弃");
-
-        // Esc 关栏同样取消（注意：上一步关栏的取消已把序号推到 5，本次排队为 6）
-        app.find_visible = true;
-        dispatch(&mut app, Message::FindQueryChanged("abc".into()));
-        assert_eq!(app.find_scan, Some(6));
-        dispatch(&mut app, Message::BarsDismissed);
-        assert_eq!(app.find_scan, None);
-        dispatch(&mut app, Message::FindScanDone(6, hit_a()));
-        assert!(app.matches.is_empty());
-
-        // 清空查询 = 取消而非空表扫描（BarsDismissed 取消后序号为 7，本次排队 8）
-        app.find_visible = true;
-        dispatch(&mut app, Message::FindQueryChanged("q".into()));
-        assert_eq!(app.find_scan, Some(8));
-        dispatch(&mut app, Message::FindScanDone(8, hit_a()));
-        assert_eq!(app.matches, hit_a());
-        dispatch(&mut app, Message::FindQueryChanged(String::new()));
-        assert_eq!(app.find_scan, None);
-        assert!(app.matches.is_empty());
-        dispatch(&mut app, Message::FindScanDone(8, hit_a()));
-        assert!(app.matches.is_empty(), "清空查询取消后，同号迟到结果也必须被丢弃");
-    }
-
-    #[test]
-    fn find_next_while_scanning_reports_progress_not_stale_jump() {
-        let mut app = Editpad::default();
-        app.find_visible = true;
-        app.find_query = "zzz".into();
-
-        // 有结果在途：不基于过期命中表跳转
-        app.find_scan = Some(9);
-        app.matches = vec![editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 }];
-        let _ = app.update(Message::FindNext);
-        assert_eq!(app.status, "查找中…", "扫描在途时 Enter 应提示进度");
-
-        // 无结果且无在途扫描：懒补排一次扫描而不是误报「无匹配」
-        let mut fresh = Editpad::default();
-        fresh.find_visible = true;
-        fresh.find_query = "zzz".into();
-        let _ = fresh.update(Message::FindNext);
-        assert!(fresh.find_scan.is_some(), "Enter 应懒触发一次后台扫描");
-    }
-
-    // ---------- P26 跨行查询（CRLF 文档上的选区还原与替换当前） ----------
-
-    /// 构造一个已加载 CRLF 文档的应用，返回 (应用, 文档快照)。
-    fn crlf_find_app() -> (Editpad, editpad_core::Document) {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/t/crlf.txt")));
-        let seq = app.job_seq;
-        let doc = editpad_core::Document::from_str("first\r\nsecond\r\nthird");
-        dispatch(
-            &mut app,
-            Message::Loaded(seq, Ok((doc.clone(), String::new(), "UTF-8".to_owned()))),
-        );
-        (app, doc)
-    }
-
-    #[test]
-    fn multiline_match_selects_across_lines_on_crlf_document() {
-        let (mut app, doc) = crlf_find_app();
-        app.find_visible = true;
-        // 用户输入转义序列：\n 解析为真实换行 → 查询含换行、跨行匹配
-        dispatch(&mut app, Message::FindQueryChanged("st\\nse".into()));
-        assert!(app.find_scan.is_some(), "查询变化应排队后台扫描");
-
-        // 用与后台线程相同的核心函数产出命中表，再按协议回填
-        let query = unescape_query("st\\nse");
+#[test]
+fn replace_current_replaces_multiline_match_in_crlf_document() {
+    let (mut app, doc) = crlf_find_app();
+    app.find_visible = true;
+    dispatch(&mut app, Message::FindQueryChanged("st\\nse".into()));
+    let query = unescape_query("st\\nse");
+    let seq = {
         let hits = editpad_core::find_all_document(&doc, &query, true);
-        assert_eq!(
-            hits,
-            vec![editpad_core::MatchPos { line: 0, col: 3, len_chars: 5 }],
-            "命中跨度应为显示口径 5（2 字符 + 1 次跨行 + 2 字符），不是原始字符数 6"
-        );
-        let seq = app.find_scan.unwrap();
-        dispatch(&mut app, Message::FindScanDone(seq, hits));
-        assert!(app.matches.len() == 1);
+        let s = app.find_scan.unwrap();
+        dispatch(&mut app, Message::FindScanDone(s, hits));
+        s
+    };
+    let _ = seq;
+    dispatch(&mut app, Message::FindNext);
+    dispatch(&mut app, Message::ReplaceQueryChanged("-".into()));
 
-        // 跳到该命中：选区必须跨行且恰好覆盖「st\r\nse」（\r\n 只算一格）
-        dispatch(&mut app, Message::FindNext);
-        assert_eq!(app.status, "第 1/1 处匹配");
-        let selected = app.cur_handle.borrow().selected_text();
-        assert_eq!(
-            selected.as_deref(),
-            Some("st\r\nse"),
-            "跨行选区应包含文档真实的 \\r\\n，而不是多走/少走一格"
-        );
-    }
+    // 替换当前：选区文本 st\r\nse 与查询 st\nse 行尾归一后判等才可替换。
+    // （P26 前的行为：字面比较判不等 → 误跳下一个、文档不动。）
+    dispatch(&mut app, Message::ReplaceCurrent);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        // "second" 被吃掉开头 "se" 后剩 "cond"，不是 "ond"
+        "fir-cond\r\nthird",
+        "跨行命中应被整体替换为替换文本"
+    );
+    assert!(app.tab().dirty);
 
-    #[test]
-    fn replace_current_replaces_multiline_match_in_crlf_document() {
-        let (mut app, doc) = crlf_find_app();
-        app.find_visible = true;
-        dispatch(&mut app, Message::FindQueryChanged("st\\nse".into()));
-        let query = unescape_query("st\\nse");
-        let seq = {
-            let hits = editpad_core::find_all_document(&doc, &query, true);
-            let s = app.find_scan.unwrap();
-            dispatch(&mut app, Message::FindScanDone(s, hits));
-            s
-        };
-        let _ = seq;
-        dispatch(&mut app, Message::FindNext);
-        dispatch(&mut app, Message::ReplaceQueryChanged("-".into()));
+    // 可撤销：替换走 insert_str 快照链
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "first\r\nsecond\r\nthird"
+    );
+}
 
-        // 替换当前：选区文本 st\r\nse 与查询 st\nse 行尾归一后判等才可替换。
-        // （P26 前的行为：字面比较判不等 → 误跳下一个、文档不动。）
-        dispatch(&mut app, Message::ReplaceCurrent);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            // "second" 被吃掉开头 "se" 后剩 "cond"，不是 "ond"
-            "fir-cond\r\nthird",
-            "跨行命中应被整体替换为替换文本"
-        );
-        assert!(app.tab().dirty);
+// ---------- P11 全部替换（rope 流式路径） ----------
 
-        // 可撤销：替换走 insert_str 快照链
-        dispatch(&mut app, Message::Edit(EditOp::Undo));
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "first\r\nsecond\r\nthird");
-    }
+#[test]
+fn replace_all_swaps_document_and_sets_dirty() {
+    let mut app = Editpad::default();
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("foo bar foo\nfoo"));
+    app.find_visible = true;
+    app.find_query = "foo".into();
+    app.replace_query = "baz".into();
 
-    // ---------- P11 全部替换（rope 流式路径） ----------
+    let _ = app.update(Message::ReplaceAll);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "baz bar baz\nbaz",
+        "全部替换应改写文档内容"
+    );
+    assert!(app.tab().dirty, "全部替换后必须置脏");
+    assert_eq!(app.status, "已替换 3 处");
 
-    #[test]
-    fn replace_all_swaps_document_and_sets_dirty() {
-        let mut app = Editpad::default();
-        app.cur_handle
-            .borrow_mut()
-            .reset_document(editpad_core::Document::from_str("foo bar foo\nfoo"));
-        app.find_visible = true;
-        app.find_query = "foo".into();
-        app.replace_query = "baz".into();
+    // 无命中时不改文档也不置脏
+    let mut app2 = Editpad::default();
+    app2.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("untouched"));
+    app2.find_query = "zzz".into();
+    app2.replace_query = "x".into();
+    let _ = app2.update(Message::ReplaceAll);
+    assert_eq!(app2.cur_handle.borrow().doc.to_text(), "untouched");
+    assert!(!app2.tab().dirty);
+    assert_eq!(app2.status, "已替换 0 处");
+}
 
-        let _ = app.update(Message::ReplaceAll);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "baz bar baz\nbaz",
-            "全部替换应改写文档内容"
-        );
-        assert!(app.tab().dirty, "全部替换后必须置脏");
-        assert_eq!(app.status, "已替换 3 处");
+#[test]
+fn replace_all_is_blocked_while_scan_in_flight() {
+    // P10 守卫在 P11 新路径上仍然生效：扫描在途时的全文快照可能过期
+    let mut app = Editpad::default();
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("keep me"));
+    app.find_query = "me".into();
+    app.replace_query = "you".into();
+    app.find_scan = Some(11);
+    let _ = app.update(Message::ReplaceAll);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "keep me",
+        "后台扫描在途时不得执行全部替换"
+    );
+    assert!(!app.tab().dirty);
+}
 
-        // 无命中时不改文档也不置脏
-        let mut app2 = Editpad::default();
-        app2.cur_handle
-            .borrow_mut()
-            .reset_document(editpad_core::Document::from_str("untouched"));
-        app2.find_query = "zzz".into();
-        app2.replace_query = "x".into();
-        let _ = app2.update(Message::ReplaceAll);
-        assert_eq!(app2.cur_handle.borrow().doc.to_text(), "untouched");
-        assert!(!app2.tab().dirty);
-        assert_eq!(app2.status, "已替换 0 处");
-    }
+// ---------- P123：视口命中高亮与选中带入 ----------
 
-    #[test]
-    fn replace_all_is_blocked_while_scan_in_flight() {
-        // P10 守卫在 P11 新路径上仍然生效：扫描在途时的全文快照可能过期
-        let mut app = Editpad::default();
-        app.cur_handle
-            .borrow_mut()
-            .reset_document(editpad_core::Document::from_str("keep me"));
-        app.find_query = "me".into();
-        app.replace_query = "you".into();
-        app.find_scan = Some(11);
-        let _ = app.update(Message::ReplaceAll);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "keep me",
-            "后台扫描在途时不得执行全部替换"
-        );
-        assert!(!app.tab().dirty);
-    }
+#[test]
+fn find_scan_done_syncs_viewport_highlights_and_close_clears() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("cat concat cat"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::FindToggled);
+    assert!(app.find_visible);
+    dispatch(&mut app, Message::FindQueryChanged("cat".into()));
+    let scan_seq = app.find_scan.expect("查询变化应排队扫描");
+    dispatch(
+        &mut app,
+        Message::FindScanDone(
+            scan_seq,
+            vec![
+                editpad_core::MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 3,
+                },
+                editpad_core::MatchPos {
+                    line: 0,
+                    col: 11,
+                    len_chars: 3,
+                },
+            ],
+        ),
+    );
+    assert_eq!(
+        app.cur_handle.borrow().find_hl.len(),
+        2,
+        "扫描完成后命中表同步进编辑器高亮层"
+    );
+    // 关栏清空（cancel_find_scan 收口）
+    dispatch(&mut app, Message::FindToggled);
+    assert!(app.cur_handle.borrow().find_hl.is_empty());
+}
 
-
-    // ---------- P123：视口命中高亮与选中带入 ----------
-
-    #[test]
-    fn find_scan_done_syncs_viewport_highlights_and_close_clears() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("cat concat cat"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        dispatch(&mut app, Message::FindToggled);
-        assert!(app.find_visible);
-        dispatch(&mut app, Message::FindQueryChanged("cat".into()));
-        let scan_seq = app.find_scan.expect("查询变化应排队扫描");
-        dispatch(
-            &mut app,
-            Message::FindScanDone(
-                scan_seq,
-                vec![
-                    editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
-                    editpad_core::MatchPos { line: 0, col: 11, len_chars: 3 },
-                ],
-            ),
-        );
-        assert_eq!(
-            app.cur_handle.borrow().find_hl.len(),
-            2,
-            "扫描完成后命中表同步进编辑器高亮层"
-        );
-        // 关栏清空（cancel_find_scan 收口）
-        dispatch(&mut app, Message::FindToggled);
-        assert!(app.cur_handle.borrow().find_hl.is_empty());
-    }
-
-    #[test]
-    fn find_bar_open_prefills_selection_as_query() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("hello world"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        app.cur_handle.borrow_mut().select_span(0, 6, 5); // 选中 "world"
-        dispatch(&mut app, Message::FindToggled);
-        assert_eq!(app.find_query, "world", "开栏带入选中文本");
-        // 清掉选区后重开栏：无选区不覆盖已有查询（关栏不清编辑器选区）
-        dispatch(&mut app, Message::FindToggled); // 关
-        app.cur_handle.borrow_mut().anchor = None;
-        dispatch(&mut app, Message::FindToggled); // 开
-        assert_eq!(app.find_query, "world", "无选区开栏保留原查询");
-    }
+#[test]
+fn find_bar_open_prefills_selection_as_query() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("hello world"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    app.cur_handle.borrow_mut().select_span(0, 6, 5); // 选中 "world"
+    dispatch(&mut app, Message::FindToggled);
+    assert_eq!(app.find_query, "world", "开栏带入选中文本");
+    // 清掉选区后重开栏：无选区不覆盖已有查询（关栏不清编辑器选区）
+    dispatch(&mut app, Message::FindToggled); // 关
+    app.cur_handle.borrow_mut().anchor = None;
+    dispatch(&mut app, Message::FindToggled); // 开
+    assert_eq!(app.find_query, "world", "无选区开栏保留原查询");
+}
 
 // ---------- A8：在文件中查找（Phase 2 接线） ----------
 
@@ -734,7 +815,11 @@ fn fif_scan_dir_walks_tree_skips_binary_and_truncates() {
 
     let (results, truncated) = fif_scan_dir(&mk(100, 100));
     assert!(!truncated);
-    assert_eq!(results.len(), 1, "只有 a.txt 命中（隐藏/噪音目录/二进制全跳过）");
+    assert_eq!(
+        results.len(),
+        1,
+        "只有 a.txt 命中（隐藏/噪音目录/二进制全跳过）"
+    );
     assert!(results[0].path.ends_with("a.txt"));
     assert_eq!(results[0].hits.len(), 2);
     assert!(results[0].hits[0].excerpt.contains("needle"), "摘录预计算");
@@ -777,7 +862,11 @@ fn find_in_files_toggle_scan_done_and_seq_guard() {
     let fh = crate::find_scan::FileHits {
         path: PathBuf::from("C:/doc/a.txt"),
         hits: vec![crate::find_scan::FileHit {
-            pos: editpad_core::MatchPos { line: 0, col: 0, len_chars: 3 },
+            pos: editpad_core::MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 3,
+            },
             excerpt: "abc".into(),
         }],
     };
@@ -804,7 +893,10 @@ fn find_in_files_hotkey_f12_and_goto_open_tab() {
 
     // 已开页命中：切换 + select_span 选中命中跨度
     let mut app = Editpad::default();
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
     let seq = app.job_seq;
     dispatch(
         &mut app,
@@ -820,21 +912,34 @@ fn find_in_files_hotkey_f12_and_goto_open_tab() {
     app.fif_results = vec![FileHits {
         path: PathBuf::from("C:/doc/a.txt"),
         hits: vec![FileHit {
-            pos: editpad_core::MatchPos { line: 0, col: 3, len_chars: 2 },
+            pos: editpad_core::MatchPos {
+                line: 0,
+                col: 3,
+                len_chars: 2,
+            },
             excerpt: "ab".into(),
         }],
     }];
     dispatch(&mut app, Message::FifGoto(0, 0));
     {
         let h = app.cur_handle.borrow();
-        assert_eq!(h.ordered_selection().map(|(s, e)| (s.line, s.col, e.line, e.col)), Some((0, 3, 0, 5)), "命中跨度被选中");
+        assert_eq!(
+            h.ordered_selection()
+                .map(|(s, e)| (s.line, s.col, e.line, e.col)),
+            Some((0, 3, 0, 5)),
+            "命中跨度被选中"
+        );
     }
 
     // 未开页：登记待跳转 + 走打开管线，Loaded 结算后选中命中
     app.fif_results = vec![FileHits {
         path: PathBuf::from("C:/doc/other.txt"),
         hits: vec![FileHit {
-            pos: editpad_core::MatchPos { line: 2, col: 4, len_chars: 3 },
+            pos: editpad_core::MatchPos {
+                line: 2,
+                col: 4,
+                len_chars: 3,
+            },
             excerpt: "hit".into(),
         }],
     }];
@@ -856,7 +961,8 @@ fn find_in_files_hotkey_f12_and_goto_open_tab() {
     assert!(app.pending_fif_goto.is_none(), "Loaded 结算一次性消费");
     let h = app.cur_handle.borrow();
     assert_eq!(
-        h.ordered_selection().map(|(s, e)| (s.line, s.col, e.line, e.col)),
+        h.ordered_selection()
+            .map(|(s, e)| (s.line, s.col, e.line, e.col)),
         Some((2, 4, 2, 7)),
         "装载完成后选区落在命中上"
     );
@@ -887,7 +993,10 @@ fn fif_scan_dir_boundary_dirs_encodings_and_regex() {
     let empty = scratch_dir("fif-empty");
     fs_create_dir_all(&empty);
     let (results, truncated) = fif_scan_dir(&mk(empty.clone(), false));
-    assert!(results.is_empty() && !truncated, "空目录 = 空结果不误报截断");
+    assert!(
+        results.is_empty() && !truncated,
+        "空目录 = 空结果不误报截断"
+    );
     let _ = std::fs::remove_dir_all(&empty);
 
     // 全被排除（只有隐藏目录 + 噪音目录）：同样空结果
@@ -962,7 +1071,10 @@ fn fif_handlers_dir_pick_cancel_and_bar_close_teardown() {
 fn fif_scan_touches_neither_document_nor_cursors() {
     use crate::editor::{CursorPos, ExtraCursor};
     let mut app = Editpad::default();
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/a.txt")));
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
     let seq = app.job_seq;
     dispatch(
         &mut app,
@@ -1137,14 +1249,26 @@ fn find_overlay_drags_and_clears_its_status_on_close() {
     );
     dispatch(&mut app, Message::FindCursorMoved(Point::new(700.0, 350.0)));
     let moved = app.find_pos.expect("拖动后应持有显式位置");
-    assert!((moved.x - (default.x + 100.0)).abs() < 0.01, "x 未按增量平移：{moved:?}");
-    assert!((moved.y - (default.y + 50.0)).abs() < 0.01, "y 未按增量平移：{moved:?}");
+    assert!(
+        (moved.x - (default.x + 100.0)).abs() < 0.01,
+        "x 未按增量平移：{moved:?}"
+    );
+    assert!(
+        (moved.y - (default.y + 50.0)).abs() < 0.01,
+        "y 未按增量平移：{moved:?}"
+    );
     dispatch(&mut app, Message::FindDragEnd);
 
     // 拖出视野 → 钳制在窗口内；双击拖动条 → 复位默认
     dispatch(&mut app, Message::FindDragStart);
-    dispatch(&mut app, Message::FindCursorMoved(Point::new(5000.0, 5000.0)));
-    dispatch(&mut app, Message::FindCursorMoved(Point::new(9000.0, 9000.0)));
+    dispatch(
+        &mut app,
+        Message::FindCursorMoved(Point::new(5000.0, 5000.0)),
+    );
+    dispatch(
+        &mut app,
+        Message::FindCursorMoved(Point::new(9000.0, 9000.0)),
+    );
     assert_eq!(
         app.find_pos,
         Some(app.clamp_find_pos(Point::new(9000.0, 9000.0))),
@@ -1170,12 +1294,20 @@ fn find_overlay_drags_and_clears_its_status_on_close() {
     app.set_find_status("第 1/23 处匹配");
     dispatch(&mut app, Message::FindToggled);
     assert!(!app.find_visible);
-    assert!(app.status.is_empty(), "关栏后查找进度应清除，实际 {:?}", app.status);
+    assert!(
+        app.status.is_empty(),
+        "关栏后查找进度应清除，实际 {:?}",
+        app.status
+    );
     // Esc 关栏同样清除
     dispatch(&mut app, Message::FindToggled);
     app.set_find_status("第 1/23 处匹配");
     dispatch(&mut app, Message::BarsDismissed);
-    assert!(app.status.is_empty(), "Esc 关栏后查找进度应清除，实际 {:?}", app.status);
+    assert!(
+        app.status.is_empty(),
+        "Esc 关栏后查找进度应清除，实际 {:?}",
+        app.status
+    );
     // 换过别的状态则不得误清
     dispatch(&mut app, Message::FindToggled);
     app.set_find_status("第 1/23 处匹配");
@@ -1251,7 +1383,10 @@ fn p153_editor_click_dims_find_overlay_and_card_click_restores() {
 fn p153_returning_to_find_box_surrenders_editor_ime_focus() {
     let mut app = app_with_lines(12);
     dispatch(&mut app, Message::FindToggled);
-    assert!(!app.cur_handle.borrow().focused, "开栏即让出正文焦点（P151）");
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "开栏即让出正文焦点（P151）"
+    );
 
     // 点正文：正文控件接管焦点（IME 归属正文）
     app.cur_handle.borrow_mut().pointer_focus(true);
@@ -1299,7 +1434,9 @@ fn find_overlay_listens_to_mouse_moves_only_while_dragging() {
     // 未拖动：移动事件不该出声
     let msgs = ViewTree::layout_default(&app).send(moved(), p);
     assert!(
-        !msgs.iter().any(|m| matches!(m, Message::FindCursorMoved(..))),
+        !msgs
+            .iter()
+            .any(|m| matches!(m, Message::FindCursorMoved(..))),
         "未拖动却收到 FindCursorMoved（整窗 on_move 没被门控）：{msgs:?}"
     );
 
@@ -1307,13 +1444,16 @@ fn find_overlay_listens_to_mouse_moves_only_while_dragging() {
     dispatch(&mut app, Message::FindDragStart);
     let msgs = ViewTree::layout_default(&app).send(moved(), p);
     assert!(
-        msgs.iter().any(|m| matches!(m, Message::FindCursorMoved(..))),
+        msgs.iter()
+            .any(|m| matches!(m, Message::FindCursorMoved(..))),
         "拖动中却收不到 FindCursorMoved：{msgs:?}"
     );
 
     // 松开：监听位常挂，任何时刻都能收尾
     let msgs = ViewTree::layout_default(&app).send(
-        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)),
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+            iced::mouse::Button::Left,
+        )),
         p,
     );
     assert!(
@@ -1339,8 +1479,7 @@ fn find_drag_start_without_prior_move_does_not_jump_the_overlay() {
     dispatch(&mut app, Message::FindDragStart);
     dispatch(&mut app, Message::FindCursorMoved(Point::new(700.0, 300.0)));
     assert_eq!(
-        app.find_pos,
-        None,
+        app.find_pos, None,
         "定锚那一拍不得平移（修前这里会跳到 default+(700,300) 并被钳到窗口角）"
     );
 

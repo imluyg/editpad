@@ -50,8 +50,8 @@ impl EditorCore {
         self.break_typing(); // P37：撤销本身打断组，防后续输入混入历史组
         self.goal_px = None; // 第 73 轮 ⑯：撤销 = 非竖向操作，清 goal
         self.clear_block(); // 第 67 轮：列块不参与快照回滚，一并清除
-        // B10 Phase 2：附加光标随快照整体对换——undo 前的多光标态存入
-        // redo 快照，undo 落点的多光标态从历史快照恢复（设计 §3.5）
+                            // B10 Phase 2：附加光标随快照整体对换——undo 前的多光标态存入
+                            // redo 快照，undo 落点的多光标态从历史快照恢复（设计 §3.5）
         let Some(snap) = self.undo_stack.pop() else {
             return false;
         };
@@ -61,10 +61,7 @@ impl EditorCore {
             anchor: self.anchor,
             // 第 60 轮：书签随快照对换回滚（见 Snapshot::bookmarks 注释）
             bookmarks: std::mem::replace(&mut self.bookmarks, snap.bookmarks),
-            extra_cursors: std::mem::replace(
-                &mut self.extra_cursors,
-                snap.extra_cursors,
-            ),
+            extra_cursors: std::mem::replace(&mut self.extra_cursors, snap.extra_cursors),
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;
@@ -81,7 +78,7 @@ impl EditorCore {
         self.break_typing(); // P37 同上
         self.goal_px = None; // 第 73 轮 ⑯：重做 = 非竖向操作，清 goal
         self.clear_block(); // 第 67 轮：同 undo
-        // B10 Phase 2：附加光标随快照整体对换（同 undo，对称）
+                            // B10 Phase 2：附加光标随快照整体对换（同 undo，对称）
         let Some(snap) = self.redo_stack.pop() else {
             return false;
         };
@@ -91,10 +88,7 @@ impl EditorCore {
             anchor: self.anchor,
             // 第 60 轮：重做对称回滚书签（同 undo）
             bookmarks: std::mem::replace(&mut self.bookmarks, snap.bookmarks),
-            extra_cursors: std::mem::replace(
-                &mut self.extra_cursors,
-                snap.extra_cursors,
-            ),
+            extra_cursors: std::mem::replace(&mut self.extra_cursors, snap.extra_cursors),
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;

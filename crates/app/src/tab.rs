@@ -15,12 +15,12 @@ pub(crate) enum BatchCloseScope {
 pub(crate) fn batch_close_targets(tabs: &[Tab], scope: BatchCloseScope) -> Vec<usize> {
     let len = tabs.len();
     match scope {
-        BatchCloseScope::Others(keep) if keep < len => (0..len)
-            .filter(|&i| i != keep && !tabs[i].pinned)
-            .collect(),
-        BatchCloseScope::RightOf(from) if from < len => ((from + 1)..len)
-            .filter(|&i| !tabs[i].pinned)
-            .collect(),
+        BatchCloseScope::Others(keep) if keep < len => {
+            (0..len).filter(|&i| i != keep && !tabs[i].pinned).collect()
+        }
+        BatchCloseScope::RightOf(from) if from < len => {
+            ((from + 1)..len).filter(|&i| !tabs[i].pinned).collect()
+        }
         _ => Vec::new(),
     }
 }

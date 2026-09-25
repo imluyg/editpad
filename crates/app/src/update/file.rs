@@ -144,12 +144,7 @@ impl Editpad {
                                 // 首行恰为 .LOG 的文件在文末追加当前日期时间。
                                 // 文本照常置脏（默认不自动写盘，落盘仍由用户
                                 // 决定）；会话恢复路径不追加（防快照滚雪球）。
-                                if ed
-                                    .doc
-                                    .line_str(0)
-                                    .trim_end_matches(char::is_control)
-                                    == ".LOG"
-                                {
+                                if ed.doc.line_str(0).trim_end_matches(char::is_control) == ".LOG" {
                                     let last = ed.doc.line_count() - 1;
                                     let tlen = ed.doc.text_len();
                                     let ends_nl = tlen > 0
@@ -235,7 +230,10 @@ impl Editpad {
                                 .jump_to_line(line as usize);
                         }
                         if let Some((line, col, len)) = fif_goto {
-                            self.tabs[target].editor.borrow_mut().select_span(line, col, len);
+                            self.tabs[target]
+                                .editor
+                                .borrow_mut()
+                                .select_span(line, col, len);
                         }
                     }
                     (Ok(_), _) => {
@@ -261,7 +259,9 @@ impl Editpad {
                             self.busy = false;
                         } else {
                             self.busy = false;
-                            self.set_status_error(self.t_suffix(editpad_core::Key::StOpenFailed, &error.to_string()));
+                            self.set_status_error(
+                                self.t_suffix(editpad_core::Key::StOpenFailed, &error.to_string()),
+                            );
                         }
                     }
                 }
@@ -300,8 +300,13 @@ impl Editpad {
             // ---------- P133：链接 Ctrl+点击（路线图 E2） ----------
             Message::LinkClicked(editor::LinkTarget::Url(url)) => {
                 match open_external(&url) {
-                    Ok(()) => self.set_status(format!("{}{url}", self.t(editpad_core::Key::StOpenedExternal))),
-                    Err(e) => self.set_status_error(self.t_suffix(editpad_core::Key::StOpenFailed, &e.to_string())),
+                    Ok(()) => self.set_status(format!(
+                        "{}{url}",
+                        self.t(editpad_core::Key::StOpenedExternal)
+                    )),
+                    Err(e) => self.set_status_error(
+                        self.t_suffix(editpad_core::Key::StOpenFailed, &e.to_string()),
+                    ),
                 }
                 Task::none()
             }
@@ -416,7 +421,8 @@ impl Editpad {
                     let snapshot_exit = session_restore_allowed(
                         self.settings.enable_snapshots,
                         self.settings.remember_session,
-                    ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT;
+                    ) && self.settings.exit_mode
+                        == editpad_core::EXIT_MODE_SNAPSHOT;
                     if !snapshot_exit {
                         if let Some(next) = self.tabs.iter().position(|t| t.dirty) {
                             self.pending_close = true;
@@ -450,7 +456,9 @@ impl Editpad {
                 self.busy = false;
                 // 保存失败不关窗：留在应用里让用户处理
                 self.pending_close = false;
-                self.set_status_error(self.t_suffix(editpad_core::Key::StSaveFailed, &error.to_string()));
+                self.set_status_error(
+                    self.t_suffix(editpad_core::Key::StSaveFailed, &error.to_string()),
+                );
                 // 保存失败时备份已发生（写前备份），但「已备份」提示对
                 // 失败的保存没有意义，弃置防陈旧
                 self.pending_backup_notice = None;
@@ -512,13 +520,17 @@ impl Editpad {
                             if !queue.contains(&tab_id) {
                                 queue.push(tab_id);
                             }
-                            self.status = self.t(editpad_core::Key::StExternallyModifiedSkip).to_owned();
+                            self.status = self
+                                .t(editpad_core::Key::StExternallyModifiedSkip)
+                                .to_owned();
                         }
                     }
                     AutosaveOutcome::Failed(error) => {
                         // 失败必须留痕（不能无声吞掉），但不打断编辑；
                         // 清掉 inflight 后，下一次编辑会重新排队
-                        self.set_status_error(self.t_suffix(editpad_core::Key::StAutosaveFailed, &error.to_string()));
+                        self.set_status_error(
+                            self.t_suffix(editpad_core::Key::StAutosaveFailed, &error.to_string()),
+                        );
                     }
                     AutosaveOutcome::Superseded => {
                         // P146：调度后页被编辑/撤销回基线/改路径作废——本轮
@@ -655,20 +667,18 @@ impl Editpad {
                 if chars > EOL_CONVERT_MAX_CHARS {
                     self.set_status_error(format!(
                         "{}{chars}{}{EOL_CONVERT_MAX_CHARS}{}",
-                        self.t(
-editpad_core::Key::
-StTooLargeEolPrefix),
-                        self.t(
-editpad_core::Key::
-StTooLargeEolMiddle),
-                        self.t(
-editpad_core::Key::
-StTooLargeEolSuffix)
+                        self.t(editpad_core::Key::StTooLargeEolPrefix),
+                        self.t(editpad_core::Key::StTooLargeEolMiddle),
+                        self.t(editpad_core::Key::StTooLargeEolSuffix)
                     ));
                     return Task::none();
                 }
                 if current == target {
-                    self.set_status(format!("{}{}", self.t(editpad_core::Key::StEolAlreadyMiddle), eol_label(target)));
+                    self.set_status(format!(
+                        "{}{}",
+                        self.t(editpad_core::Key::StEolAlreadyMiddle),
+                        eol_label(target)
+                    ));
                     return Task::none();
                 }
                 // P9 的归一函数即行尾转换：CRLF/LF/孤立 CR 全部统一到目标
@@ -683,7 +693,11 @@ StTooLargeEolSuffix)
                     // P18：内容版本与防抖起点同步推进
                     tab.note_mutation();
                 }
-                self.set_status(format!("{}{}", self.t(editpad_core::Key::StEolConverted), eol_label(target)));
+                self.set_status(format!(
+                    "{}{}",
+                    self.t(editpad_core::Key::StEolConverted),
+                    eol_label(target)
+                ));
                 // 内容变了：命中表过期重扫（查找栏开着才扫）+ 排队自动保存
                 if self.find_visible {
                     let find_task = self.schedule_find_scan();
@@ -713,9 +727,7 @@ StTooLargeEolSuffix)
                             // 本页通常随即被移除，此处是 close_tab_now 失败
                             // 等幸存路径的基线兜底
                             self.tabs[idx].editor.borrow_mut().mark_saved();
-                            if self.pending_close_tab == Some(tab_id)
-                                && self.close_tab_now(idx)
-                            {
+                            if self.pending_close_tab == Some(tab_id) && self.close_tab_now(idx) {
                                 self.cancel_find_scan();
                             }
                             self.pending_close_tab = None;
@@ -723,11 +735,15 @@ StTooLargeEolSuffix)
                                 self.set_status(text);
                             }
                         } else {
-                            self.set_status(self.t(editpad_core::Key::StCancelledAutoClose).to_owned());
+                            self.set_status(
+                                self.t(editpad_core::Key::StCancelledAutoClose).to_owned(),
+                            );
                         }
                     }
                     Err(error) => {
-                        self.set_status_error(self.t_suffix(editpad_core::Key::StSaveFailed, &error.to_string()));
+                        self.set_status_error(
+                            self.t_suffix(editpad_core::Key::StSaveFailed, &error.to_string()),
+                        );
                         self.pending_close_tab = None;
                     }
                 }
@@ -786,7 +802,12 @@ StTooLargeEolSuffix)
         let id = self.job_seq;
         // P145：随任务记下目标页稳定 id（0 = 页不存在，归页必走丢弃分支）
         let tab_id = self.tabs.get(tab).map(|t| t.id).unwrap_or(0);
-        self.active_load = Some(LoadJob { id, path, tab, tab_id });
+        self.active_load = Some(LoadJob {
+            id,
+            path,
+            tab,
+            tab_id,
+        });
         self.progress = Some((0, 0));
         self.enter_busy();
         id
@@ -829,8 +850,7 @@ StTooLargeEolSuffix)
                     let total_h = ed.visual_rows_total() as f32 * ed.line_height();
                     let max_scroll = (total_h - ed.viewport_h).max(0.0);
                     let follow = ed.scroll_top >= max_scroll - ed.line_height() * 1.5;
-                    let pre_view =
-                        (ed.cursor.line, ed.cursor.col, ed.scroll_top, ed.scroll_left);
+                    let pre_view = (ed.cursor.line, ed.cursor.col, ed.scroll_top, ed.scroll_left);
                     self.monitor_pending = Some((tab.id, follow, Some(pre_view)));
                 }
                 let path = tab.path.clone().expect("上方已判 Some");
@@ -882,7 +902,11 @@ StTooLargeEolSuffix)
             return Task::none();
         }
         if target.exists() {
-            self.set_status_error(format!("{}{}", self.t(editpad_core::Key::StRenameExists), target.display()));
+            self.set_status_error(format!(
+                "{}{}",
+                self.t(editpad_core::Key::StRenameExists),
+                target.display()
+            ));
             return Task::none(); // 保持输入态
         }
         match fs::rename(&old, &target) {
@@ -921,7 +945,9 @@ StTooLargeEolSuffix)
                 self.set_status(format!("{}{new_key}", self.t(editpad_core::Key::StRenamed)));
             }
             Err(error) => {
-                self.set_status_error(self.t_suffix(editpad_core::Key::StRenameFailed, &error.to_string()));
+                self.set_status_error(
+                    self.t_suffix(editpad_core::Key::StRenameFailed, &error.to_string()),
+                );
             }
         }
         Task::none()
@@ -966,8 +992,7 @@ StTooLargeEolSuffix)
                 if !queue.contains(&id) {
                     queue.push(id);
                 }
-                self.status =
-                    self.t(editpad_core::Key::StExternalPaused).to_owned();
+                self.status = self.t(editpad_core::Key::StExternalPaused).to_owned();
                 self.pending_close = false; // 同上：本拒绝出口也要作废关窗标记
                 return Task::none();
             }
@@ -1097,5 +1122,4 @@ StTooLargeEolSuffix)
             self.persist_settings();
         }
     }
-
 }

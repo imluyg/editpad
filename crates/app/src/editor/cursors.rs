@@ -39,7 +39,8 @@ impl EditorCore {
     fn sort_dedup_cursors(&mut self) {
         self.extra_cursors
             .sort_by_key(|e| (e.cursor.line, e.cursor.col, e.anchor.is_none()));
-        self.extra_cursors.dedup_by_key(|e| (e.cursor.line, e.cursor.col));
+        self.extra_cursors
+            .dedup_by_key(|e| (e.cursor.line, e.cursor.col));
     }
 
     /// Alt+Click：点击处加/移除附加光标。守卫（设计 §3.3/§4）：折行
@@ -53,11 +54,7 @@ impl EditorCore {
         if at == self.cursor {
             return false;
         }
-        if let Some(i) = self
-            .extra_cursors
-            .iter()
-            .position(|e| e.cursor == at)
-        {
+        if let Some(i) = self.extra_cursors.iter().position(|e| e.cursor == at) {
             self.extra_cursors.remove(i);
             self.break_typing();
             return true;
@@ -83,11 +80,7 @@ impl EditorCore {
         while i < self.extra_cursors.len() {
             let len = self.line_display_len(self.extra_cursors[i].cursor.line);
             let col = self.extra_cursors[i].cursor.col;
-            let step_ok = if right {
-                col < len
-            } else {
-                col > 0
-            };
+            let step_ok = if right { col < len } else { col > 0 };
             if step_ok {
                 self.extra_cursors[i].cursor.col = if right { col + 1 } else { col - 1 };
                 i += 1;
@@ -149,7 +142,11 @@ impl EditorCore {
 
     /// 光标的非空选区字符偏移区间（无选区/零宽 = None）。主光标与附加
     /// 光标共用：附加光标的 anchor 语义与主 anchor 相同（anchor..cursor）。
-    fn cursor_selection_offsets(&self, anchor: Option<CursorPos>, cursor: CursorPos) -> Option<(usize, usize)> {
+    fn cursor_selection_offsets(
+        &self,
+        anchor: Option<CursorPos>,
+        cursor: CursorPos,
+    ) -> Option<(usize, usize)> {
         let a = anchor?;
         let (lo, hi) = if (a.line, a.col) <= (cursor.line, cursor.col) {
             (a, cursor)
@@ -198,9 +195,7 @@ impl EditorCore {
         let main_range = self
             .cursor_selection_offsets(self.anchor, self.cursor)
             .or_else(|| match kind {
-                MultiEditKind::Insert(_) => {
-                    Some((self.cursor_offset(), self.cursor_offset()))
-                }
+                MultiEditKind::Insert(_) => Some((self.cursor_offset(), self.cursor_offset())),
                 _ => None,
             });
         match kind {
@@ -310,7 +305,7 @@ impl EditorCore {
             return Some(false); // 全体 no-op（无实编辑），不产快照
         }
         self.snapshot(); // 单快照：一次撤销撤掉整步同步编辑
-        // 从后往前应用（按 (start,end) 降序）；应用后回填各光标落点
+                         // 从后往前应用（按 (start,end) 降序）；应用后回填各光标落点
         edits.sort_by_key(|(s, e, _)| std::cmp::Reverse((*s, *e)));
         let min_start = edits.last().map(|(s, _, _)| *s).unwrap_or(0);
         for (s, e, _) in &edits {
@@ -349,11 +344,7 @@ impl EditorCore {
         for (i, &(s, .., ref owner)) in edits.iter().enumerate() {
             changed = true;
             let final_s = (s as i64
-                + edits[i + 1..]
-                    .iter()
-                    .filter(|ej| ej.0 == s)
-                    .count() as i64
-                    * payload_len
+                + edits[i + 1..].iter().filter(|ej| ej.0 == s).count() as i64 * payload_len
                 + edits
                     .iter()
                     .filter(|ej| ej.0 < s)
@@ -367,10 +358,13 @@ impl EditorCore {
             };
             let line = self.doc.char_to_line(end_off);
             let col = end_off - self.doc.line_to_char(line);
-            landed.push((match owner {
-                PointEdit::Main => PointEdit::Main,
-                PointEdit::Extra(i) => PointEdit::Extra(*i),
-            }, CursorPos { line, col }));
+            landed.push((
+                match owner {
+                    PointEdit::Main => PointEdit::Main,
+                    PointEdit::Extra(i) => PointEdit::Extra(*i),
+                },
+                CursorPos { line, col },
+            ));
         }
         for (owner, pos) in landed {
             match owner {
@@ -443,7 +437,8 @@ impl EditorCore {
                 .word_range_at_cursor()
                 .ok_or(EditErr::CursorNotOnWord)?;
             let line_off = self.doc.line_to_char(self.cursor.line);
-            let needle: String = self.line_text(self.cursor.line)
+            let needle: String = self
+                .line_text(self.cursor.line)
                 .chars()
                 .skip(ws)
                 .take(we - ws)

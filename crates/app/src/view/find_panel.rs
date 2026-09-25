@@ -81,7 +81,11 @@ impl Editpad {
     /// 由装配处的 fif_visible 裁决）。文件头分组行（相对路径 + 命中数）
     /// 与可点命中行（行:列 + 扫描时预计算的摘录）。显示行数与查找全
     /// 部面板同量级封顶，超出明示。
-    pub(super) fn find_in_files_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
+    pub(super) fn find_in_files_panel(
+        &self,
+        uipx: f32,
+        uifont: iced::Font,
+    ) -> Element<'_, Message> {
         let scanning = self.fif_scan.is_some();
         let total_files = self.fif_results.len();
         let total_hits: usize = self.fif_results.iter().map(|f| f.hits.len()).sum();
@@ -116,7 +120,11 @@ impl Editpad {
 
         let mut rows = column![].spacing(0).width(Fill);
         if !scanning && self.find_query.is_empty() {
-            rows = rows.push(text(self.t(editpad_core::Key::FifQueryEmpty)).size(uipx).font(uifont));
+            rows = rows.push(
+                text(self.t(editpad_core::Key::FifQueryEmpty))
+                    .size(uipx)
+                    .font(uifont),
+            );
         } else if !scanning {
             let mut budget = FIND_ALL_MAX_ROWS;
             'outer: for (fi, fh) in self.fif_results.iter().enumerate() {
@@ -127,9 +135,13 @@ impl Editpad {
                     .display()
                     .to_string();
                 rows = rows.push(
-                    text(editpad_core::fmt_file_hits(self.lang(), &rel, fh.hits.len()))
-                        .size(uipx)
-                        .font(uifont),
+                    text(editpad_core::fmt_file_hits(
+                        self.lang(),
+                        &rel,
+                        fh.hits.len(),
+                    ))
+                    .size(uipx)
+                    .font(uifont),
                 );
                 for (hi, h) in fh.hits.iter().enumerate() {
                     if budget == 0 {
@@ -138,10 +150,15 @@ impl Editpad {
                     budget -= 1;
                     rows = rows.push(
                         button(
-                            text(format!("{}:{}  {}", h.pos.line + 1, h.pos.col + 1, h.excerpt))
-                                .size(uipx)
-                                .font(uifont)
-                                .width(Fill),
+                            text(format!(
+                                "{}:{}  {}",
+                                h.pos.line + 1,
+                                h.pos.col + 1,
+                                h.excerpt
+                            ))
+                            .size(uipx)
+                            .font(uifont)
+                            .width(Fill),
                         )
                         .width(Fill)
                         .padding([3, 10])
@@ -158,8 +175,8 @@ impl Editpad {
                         FIND_ALL_MAX_ROWS,
                         self.t(editpad_core::Key::FindAllShownSuffix)
                     ))
-                        .size(uipx)
-                        .font(uifont),
+                    .size(uipx)
+                    .font(uifont),
                 );
             }
         }
@@ -228,20 +245,31 @@ impl Editpad {
 
         // ①查询行：P150 起输入框带 Id（打开查找栏即聚焦，修前焦点留正文）
         let query_row = row![
-            text_input(self.t(editpad_core::Key::FindQueryPlaceholder), &self.find_query)
-                .id(find_input_widget_id())
-                .size(uipx)
-                .font(uifont)
-                .on_input(Message::FindQueryChanged)
-                .on_submit(Message::FindNext)
-                .style(move |theme, status| find_input_style(theme, status, dim))
-                .width(Fill),
-            button(text(self.t(editpad_core::Key::FindPrev)).size(uipx).font(uifont))
-                .style(move |theme, status| find_button_style(theme, status, dim))
-                .on_press_maybe(doc_nav.then_some(Message::FindPrev)),
-            button(text(self.t(editpad_core::Key::FindNext)).size(uipx).font(uifont))
-                .style(move |theme, status| find_button_style(theme, status, dim))
-                .on_press_maybe(doc_nav.then_some(Message::FindNext)),
+            text_input(
+                self.t(editpad_core::Key::FindQueryPlaceholder),
+                &self.find_query
+            )
+            .id(find_input_widget_id())
+            .size(uipx)
+            .font(uifont)
+            .on_input(Message::FindQueryChanged)
+            .on_submit(Message::FindNext)
+            .style(move |theme, status| find_input_style(theme, status, dim))
+            .width(Fill),
+            button(
+                text(self.t(editpad_core::Key::FindPrev))
+                    .size(uipx)
+                    .font(uifont)
+            )
+            .style(move |theme, status| find_button_style(theme, status, dim))
+            .on_press_maybe(doc_nav.then_some(Message::FindPrev)),
+            button(
+                text(self.t(editpad_core::Key::FindNext))
+                    .size(uipx)
+                    .font(uifont)
+            )
+            .style(move |theme, status| find_button_style(theme, status, dim))
+            .on_press_maybe(doc_nav.then_some(Message::FindNext)),
             button(text("×").size(uipx).font(uifont))
                 .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press(Message::FindToggled),
@@ -291,7 +319,9 @@ impl Editpad {
                 Some(d) => d.display().to_string(),
                 None => self.t(editpad_core::Key::FifDirUnnamed).to_owned(),
             };
-            let dir_label = text(self.t(editpad_core::Key::FindDir).to_owned()).size(uipx).font(uifont);
+            let dir_label = text(self.t(editpad_core::Key::FindDir).to_owned())
+                .size(uipx)
+                .font(uifont);
             let dir_label: Element<'_, Message> = match label_color {
                 Some(c) => dir_label.color(c).into(),
                 None => dir_label.into(),
@@ -321,9 +351,13 @@ impl Editpad {
                 dir_label,
                 // 长路径裁剪显示：不撑破定宽卡片（取舍：卡片内不可横向滚动）
                 container(dir_path).width(Fill).clip(true),
-                button(text(self.t(editpad_core::Key::FindBrowse)).size(uipx).font(uifont))
-                    .style(move |theme, status| find_button_style(theme, status, dim))
-                    .on_press(Message::FifBrowseFolder),
+                button(
+                    text(self.t(editpad_core::Key::FindBrowse))
+                        .size(uipx)
+                        .font(uifont)
+                )
+                .style(move |theme, status| find_button_style(theme, status, dim))
+                .on_press(Message::FifBrowseFolder),
                 scan_label,
             ]
             .spacing(8)
@@ -331,24 +365,35 @@ impl Editpad {
             .into()
         } else {
             row![
-                text_input(self.t(editpad_core::Key::ReplaceQueryPlaceholder), &self.replace_query)
-                    .size(uipx)
-                    .font(uifont)
-                    .on_input(Message::ReplaceQueryChanged)
-                    .style(move |theme, status| find_input_style(theme, status, dim))
-                    .width(Fill),
+                text_input(
+                    self.t(editpad_core::Key::ReplaceQueryPlaceholder),
+                    &self.replace_query
+                )
+                .size(uipx)
+                .font(uifont)
+                .on_input(Message::ReplaceQueryChanged)
+                .style(move |theme, status| find_input_style(theme, status, dim))
+                .width(Fill),
                 // P70：正则模式替换当前 = 对命中做 $1 展开替换
-                button(text(self.t(editpad_core::Key::FindReplaceCurrent)).size(uipx).font(uifont))
-                    .style(move |theme, status| find_button_style(theme, status, dim))
-                    .on_press_maybe(has_matches.then_some(if self.regex_enabled {
-                        Message::ReplaceCurrentRegex
-                    } else {
-                        Message::ReplaceCurrent
-                    })),
+                button(
+                    text(self.t(editpad_core::Key::FindReplaceCurrent))
+                        .size(uipx)
+                        .font(uifont)
+                )
+                .style(move |theme, status| find_button_style(theme, status, dim))
+                .on_press_maybe(has_matches.then_some(if self.regex_enabled {
+                    Message::ReplaceCurrentRegex
+                } else {
+                    Message::ReplaceCurrent
+                })),
                 // 扫描在途时禁用：此刻的全文快照可能是过期的
-                button(text(self.t(editpad_core::Key::FindReplaceAll)).size(uipx).font(uifont))
-                    .style(move |theme, status| find_button_style(theme, status, dim))
-                    .on_press_maybe((!scanning).then_some(Message::ReplaceAll)),
+                button(
+                    text(self.t(editpad_core::Key::FindReplaceAll))
+                        .size(uipx)
+                        .font(uifont)
+                )
+                .style(move |theme, status| find_button_style(theme, status, dim))
+                .on_press_maybe((!scanning).then_some(Message::ReplaceAll)),
             ]
             .spacing(8)
             .align_y(Alignment::Center)
@@ -359,19 +404,23 @@ impl Editpad {
         let panel_row = row![
             // 第 62 轮：查找全部结果面板开关（扫描在途/无命中时禁用；
             // A8：FIF 开态禁用——两套面板同槽互斥）
-            button(text(self.t(editpad_core::Key::FindFindAll)).size(uipx).font(uifont))
-                .style(move |theme, status| find_button_style(theme, status, dim))
-                .on_press_maybe(
-                    (has_matches && doc_nav).then_some(Message::FindAllToggled),
-                ),
+            button(
+                text(self.t(editpad_core::Key::FindFindAll))
+                    .size(uipx)
+                    .font(uifont)
+            )
+            .style(move |theme, status| find_button_style(theme, status, dim))
+            .on_press_maybe((has_matches && doc_nav).then_some(Message::FindAllToggled),),
             // A8：在文件中查找模式开关（F12 同义入口）
-            button(text(if self.fif_visible {
-                self.t(editpad_core::Key::FindInFilesExit)
-            } else {
-                self.t(editpad_core::Key::FindInFilesMode)
-            })
-            .size(uipx)
-            .font(uifont))
+            button(
+                text(if self.fif_visible {
+                    self.t(editpad_core::Key::FindInFilesExit)
+                } else {
+                    self.t(editpad_core::Key::FindInFilesMode)
+                })
+                .size(uipx)
+                .font(uifont)
+            )
             .style(move |theme, status| find_button_style(theme, status, dim))
             .on_press(Message::FindInFilesToggled),
         ]
@@ -417,8 +466,7 @@ impl Editpad {
         // 观察层同时**消费**该按下——否则会继续下传给正文自绘控件，正文
         // 重新持焦并请求 IME，拼音组字串在查找框与正文各画一份（P151 症状
         // 复现，用户复报「旧 bug 又回来了」）。
-        let card =
-            PressObserver::new(card, Message::FindBoxPressed).into_element();
+        let card = PressObserver::new(card, Message::FindBoxPressed).into_element();
         // 位置由应用层持有（用户点单：浮层遮住目标行要能拖开）：
         // 默认 = 窗口中间偏上（名义高度参与居中），拖动后 = 钳制过的左上角。
         // 整层挂 `on_move`/`on_release` 追踪拖动：该层**不设 on_press**，
@@ -437,7 +485,12 @@ impl Editpad {
                 .height(Fill)
                 .align_x(iced::alignment::Horizontal::Left)
                 .align_y(iced::alignment::Vertical::Top)
-                .padding(Padding { top: pos.y, right: 0.0, bottom: 0.0, left: pos.x }),
+                .padding(Padding {
+                    top: pos.y,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: pos.x,
+                }),
         )
         .on_release(Message::FindDragEnd);
         if self.find_drag.is_some() {

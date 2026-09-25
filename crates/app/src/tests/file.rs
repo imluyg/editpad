@@ -1,2097 +1,2261 @@
 use super::*;
 
-    // ---------- P35 打开落新页的别名失步（P32 本轮发现） ----------
+// ---------- P35 打开落新页的别名失步（P32 本轮发现） ----------
 
-    #[test]
-    fn opening_into_new_tab_keeps_editor_alias_in_sync() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
-        let seq_a = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq_a,
-                Ok((
-                    editpad_core::Document::from_str("content A"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-
-        // 打开 B：当前页已命名 → 落新页 idx1 并「聚焦」（active_tab 切过去）
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/b.txt")));
-        let seq_b = app.job_seq;
-        assert_eq!(app.active_tab, 1, "打开即聚焦新页");
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq_b,
-                Ok((
-                    editpad_core::Document::from_str("content B"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-
-        // 加载完成后直接输入（无任何显式切换）：必须落在聚焦的新页。
-        // 失步缺陷下 cur_handle 仍指页 0——敲字打进上一个文档。
-        // （打开文件后光标在文首 0:0，插入落在开头是既有正确语义；
-        //  本测试钉住的是「落进哪一页」，不是行内位置。）
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("+X".into())));
-        assert_eq!(
-            app.tabs[1].editor.borrow().doc.to_text(),
-            "+Xcontent B",
-            "输入必须落在聚焦的新页"
-        );
-        assert_eq!(
-            app.tabs[0].editor.borrow().doc.to_text(),
-            "content A",
-            "旧页不得被误改"
-        );
-        // 渲染源与活动页一致
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "+Xcontent B");
-    }
-
-    #[test]
-    fn preview_toggle_only_flips_for_markdown_documents() {
-        // .md 扩展名经别名层得到 Markdown 语法 → 开关生效
-        let mut md = Editpad::default();
-        dispatch(&mut md, Message::FileDropped(PathBuf::from("C:/doc/readme.md")));
-        let seq = md.job_seq;
-        dispatch(
-            &mut md,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("# 标题\n正文"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        assert!(!md.preview_visible);
-        dispatch(&mut md, Message::PreviewToggled);
-        assert!(md.preview_visible);
-        dispatch(&mut md, Message::PreviewToggled);
-        assert!(!md.preview_visible);
-
-        // 非 Markdown 页：不翻转并提示
-        let mut app = json_app("{}");
-        dispatch(&mut app, Message::PreviewToggled);
-        assert!(!app.preview_visible);
-        assert!(app.status.contains("仅支持 Markdown"), "{:?}", app.status);
-    }
-
-    /// O-6：预览的**解析结果**必须按内容签名缓存。
-    ///
-    /// 两条断言各挡一头：
-    /// - 签名不变 → 复用同一份块表。用 `Rc::ptr_eq` 观测「确实没有重解析」，
-    ///   而不是靠耗时断言去猜（耗时在忙机器假红、温热假绿，本仓已两次因此
-    ///   把成本契约改成可观测的计数/同一性）。
-    /// - 内容一变 → 立即重建，且新块表就是新文档的解析结果（预览陈本是用户
-    ///   看得见的错误）。
-    ///
-    /// ⚠️ 未覆盖的岔路（据代码推定，非实测）：**等长**改动靠键里的
-    /// `Tab::version` 分量兜住——真实编辑路径都经 `Tab::note_mutation` 推进
-    /// 版本（`tab.rs:142` 是该字段唯一写入点）。本用例只改文档长度，没有
-    /// 构造「等长且版本未动」的场景。
-    #[test]
-    fn markdown_preview_cache_is_reused_until_content_changes() {
-        fn md_app(text: &str) -> Editpad {
-            let mut app = Editpad::default();
-            dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/x/notes.md")));
-            let seq = app.job_seq;
-            let doc = editpad_core::Document::from_str(text);
-            dispatch(
-                &mut app,
-                Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
-            );
-            dispatch(&mut app, Message::PreviewToggled);
-            assert!(app.preview_visible, ".md 页应能开预览");
-            app
-        }
-        let cached = |app: &Editpad| -> std::rc::Rc<Vec<editpad_core::markdown::MdBlock>> {
-            app.md_preview_cache
-                .borrow()
-                .as_ref()
-                .expect("预览开态走过一次 view() 后应建立解析缓存")
-                .1
-                .clone()
-        };
-
-        let src = "# 标题\n\n正文 alpha\n";
-        let app = md_app(src);
-        let _ = app.view();
-        let first = cached(&app);
-        assert_eq!(
-            &first[..],
-            &editpad_core::markdown::parse_markdown(src)[..],
-            "缓存内容必须就是本页文档的解析结果"
-        );
-
-        // 内容未变：再画 10 帧也不得重解析
-        for _ in 0..10 {
-            let _ = app.view();
-        }
-        assert!(
-            std::rc::Rc::ptr_eq(&first, &cached(&app)),
-            "签名未变却重建了块表：预览缓存在逐帧重解析"
-        );
-
-        // 内容变了：必须换新块表，且换的是新文档的结果
-        app.cur_handle
-            .borrow_mut()
-            .insert_str("\n## 追加章节\n\n尾部内容 beta\n");
-        let _ = app.view();
-        let second = cached(&app);
-        assert!(!std::rc::Rc::ptr_eq(&first, &second), "内容已变仍复用旧块表：预览会陈旧");
-        let now = app.cur_handle.borrow().doc.to_text();
-        assert_eq!(
-            &second[..],
-            &editpad_core::markdown::parse_markdown(&now)[..],
-            "重建后的块表必须对应改动后的正文"
-        );
-        assert!(
-            second.iter().any(|b| matches!(
-                b,
-                editpad_core::markdown::MdBlock::Heading { level: 2, .. }
+#[test]
+fn opening_into_new_tab_keeps_editor_alias_in_sync() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
+    let seq_a = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq_a,
+            Ok((
+                editpad_core::Document::from_str("content A"),
+                String::new(),
+                "UTF-8".to_owned(),
             )),
-            "追加的二级标题应出现在新块表里"
-        );
-    }
+        ),
+    );
 
-    // ---------- P22 第二批：格式化 JSON ----------
+    // 打开 B：当前页已命名 → 落新页 idx1 并「聚焦」（active_tab 切过去）
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/b.txt")));
+    let seq_b = app.job_seq;
+    assert_eq!(app.active_tab, 1, "打开即聚焦新页");
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq_b,
+            Ok((
+                editpad_core::Document::from_str("content B"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
 
-    /// 构造一个已按 .json 加载完成的应用。
-    fn json_app(text: &str) -> Editpad {
+    // 加载完成后直接输入（无任何显式切换）：必须落在聚焦的新页。
+    // 失步缺陷下 cur_handle 仍指页 0——敲字打进上一个文档。
+    // （打开文件后光标在文首 0:0，插入落在开头是既有正确语义；
+    //  本测试钉住的是「落进哪一页」，不是行内位置。）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("+X".into())));
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        "+Xcontent B",
+        "输入必须落在聚焦的新页"
+    );
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "content A",
+        "旧页不得被误改"
+    );
+    // 渲染源与活动页一致
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "+Xcontent B");
+}
+
+#[test]
+fn preview_toggle_only_flips_for_markdown_documents() {
+    // .md 扩展名经别名层得到 Markdown 语法 → 开关生效
+    let mut md = Editpad::default();
+    dispatch(
+        &mut md,
+        Message::FileDropped(PathBuf::from("C:/doc/readme.md")),
+    );
+    let seq = md.job_seq;
+    dispatch(
+        &mut md,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("# 标题\n正文"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(!md.preview_visible);
+    dispatch(&mut md, Message::PreviewToggled);
+    assert!(md.preview_visible);
+    dispatch(&mut md, Message::PreviewToggled);
+    assert!(!md.preview_visible);
+
+    // 非 Markdown 页：不翻转并提示
+    let mut app = json_app("{}");
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(!app.preview_visible);
+    assert!(app.status.contains("仅支持 Markdown"), "{:?}", app.status);
+}
+
+/// O-6：预览的**解析结果**必须按内容签名缓存。
+///
+/// 两条断言各挡一头：
+/// - 签名不变 → 复用同一份块表。用 `Rc::ptr_eq` 观测「确实没有重解析」，
+///   而不是靠耗时断言去猜（耗时在忙机器假红、温热假绿，本仓已两次因此
+///   把成本契约改成可观测的计数/同一性）。
+/// - 内容一变 → 立即重建，且新块表就是新文档的解析结果（预览陈本是用户
+///   看得见的错误）。
+///
+/// ⚠️ 未覆盖的岔路（据代码推定，非实测）：**等长**改动靠键里的
+/// `Tab::version` 分量兜住——真实编辑路径都经 `Tab::note_mutation` 推进
+/// 版本（`tab.rs:142` 是该字段唯一写入点）。本用例只改文档长度，没有
+/// 构造「等长且版本未动」的场景。
+#[test]
+fn markdown_preview_cache_is_reused_until_content_changes() {
+    fn md_app(text: &str) -> Editpad {
         let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/x/data.json")));
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+        );
         let seq = app.job_seq;
         let doc = editpad_core::Document::from_str(text);
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((doc, String::new(), "UTF-8".to_owned())),
-            ),
-        );
-        app
-    }
-
-    #[test]
-    fn format_json_pretty_prints_and_is_revertible() {
-        let mut app = json_app("{\"b\":1,\"a\":[2,3]}");
-        dispatch(&mut app, Message::FormatJson);
-        let expected = "{\n  \"b\": 1,\n  \"a\": [\n    2,\n    3\n  ]\n}";
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), expected);
-        assert!(app.tab().dirty, "格式化属于内容修改，必须置脏");
-        assert_eq!(app.status, "已格式化 JSON");
-
-        // 可撤销：replace_whole_document 走快照链
-        dispatch(&mut app, Message::Edit(EditOp::Undo));
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "{\"b\":1,\"a\":[2,3]}",
-            "撤销应还原到格式化前"
-        );
-    }
-
-    #[test]
-    fn format_json_reports_error_position_and_keeps_document() {
-        let bad = "{\"a\": 1,,}";
-        let mut app = json_app(bad);
-        dispatch(&mut app, Message::FormatJson);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            bad,
-            "校验失败不得改动文档"
-        );
-        assert!(
-            app.status.contains("JSON 格式化失败") && app.status.contains("第"),
-            "状态栏应带出错误行列，实际 {:?}",
-            app.status
-        );
-    }
-
-    #[test]
-    fn format_json_is_noop_for_non_json_documents() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/notes/plain.txt")));
-        let seq = app.job_seq;
-        let doc = editpad_core::Document::from_str("{not:json,but:plain txt}");
         dispatch(
             &mut app,
             Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
         );
-        dispatch(&mut app, Message::FormatJson);
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "{not:json,but:plain txt}",
-            "非 JSON 文档不得被改动"
-        );
-        assert!(app.status.contains("仅对 JSON"), "应提示语法不匹配");
+        dispatch(&mut app, Message::PreviewToggled);
+        assert!(app.preview_visible, ".md 页应能开预览");
+        app
+    }
+    let cached = |app: &Editpad| -> std::rc::Rc<Vec<editpad_core::markdown::MdBlock>> {
+        app.md_preview_cache
+            .borrow()
+            .as_ref()
+            .expect("预览开态走过一次 view() 后应建立解析缓存")
+            .1
+            .clone()
+    };
+
+    let src = "# 标题\n\n正文 alpha\n";
+    let app = md_app(src);
+    let _ = app.view();
+    let first = cached(&app);
+    assert_eq!(
+        &first[..],
+        &editpad_core::markdown::parse_markdown(src)[..],
+        "缓存内容必须就是本页文档的解析结果"
+    );
+
+    // 内容未变：再画 10 帧也不得重解析
+    for _ in 0..10 {
+        let _ = app.view();
+    }
+    assert!(
+        std::rc::Rc::ptr_eq(&first, &cached(&app)),
+        "签名未变却重建了块表：预览缓存在逐帧重解析"
+    );
+
+    // 内容变了：必须换新块表，且换的是新文档的结果
+    app.cur_handle
+        .borrow_mut()
+        .insert_str("\n## 追加章节\n\n尾部内容 beta\n");
+    let _ = app.view();
+    let second = cached(&app);
+    assert!(
+        !std::rc::Rc::ptr_eq(&first, &second),
+        "内容已变仍复用旧块表：预览会陈旧"
+    );
+    let now = app.cur_handle.borrow().doc.to_text();
+    assert_eq!(
+        &second[..],
+        &editpad_core::markdown::parse_markdown(&now)[..],
+        "重建后的块表必须对应改动后的正文"
+    );
+    assert!(
+        second
+            .iter()
+            .any(|b| matches!(b, editpad_core::markdown::MdBlock::Heading { level: 2, .. })),
+        "追加的二级标题应出现在新块表里"
+    );
+}
+
+// ---------- P22 第二批：格式化 JSON ----------
+
+/// 构造一个已按 .json 加载完成的应用。
+fn json_app(text: &str) -> Editpad {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/data.json")),
+    );
+    let seq = app.job_seq;
+    let doc = editpad_core::Document::from_str(text);
+    dispatch(
+        &mut app,
+        Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+    );
+    app
+}
+
+#[test]
+fn format_json_pretty_prints_and_is_revertible() {
+    let mut app = json_app("{\"b\":1,\"a\":[2,3]}");
+    dispatch(&mut app, Message::FormatJson);
+    let expected = "{\n  \"b\": 1,\n  \"a\": [\n    2,\n    3\n  ]\n}";
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), expected);
+    assert!(app.tab().dirty, "格式化属于内容修改，必须置脏");
+    assert_eq!(app.status, "已格式化 JSON");
+
+    // 可撤销：replace_whole_document 走快照链
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "{\"b\":1,\"a\":[2,3]}",
+        "撤销应还原到格式化前"
+    );
+}
+
+#[test]
+fn format_json_reports_error_position_and_keeps_document() {
+    let bad = "{\"a\": 1,,}";
+    let mut app = json_app(bad);
+    dispatch(&mut app, Message::FormatJson);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        bad,
+        "校验失败不得改动文档"
+    );
+    assert!(
+        app.status.contains("JSON 格式化失败") && app.status.contains("第"),
+        "状态栏应带出错误行列，实际 {:?}",
+        app.status
+    );
+}
+
+#[test]
+fn format_json_is_noop_for_non_json_documents() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/notes/plain.txt")),
+    );
+    let seq = app.job_seq;
+    let doc = editpad_core::Document::from_str("{not:json,but:plain txt}");
+    dispatch(
+        &mut app,
+        Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+    );
+    dispatch(&mut app, Message::FormatJson);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "{not:json,but:plain txt}",
+        "非 JSON 文档不得被改动"
+    );
+    assert!(app.status.contains("仅对 JSON"), "应提示语法不匹配");
+}
+
+#[test]
+fn ctrl_shift_f_maps_to_format_json_but_ctrl_f_stays_find() {
+    use iced::keyboard::{self};
+    let shift_ctrl = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
+    assert!(matches!(
+        handle_key_defaults(keyboard::Key::Character("F".into()), shift_ctrl),
+        Some(Message::FormatJson)
+    ));
+    // 普通 Ctrl+F 不受影响
+    assert!(matches!(
+        handle_key_defaults(
+            keyboard::Key::Character("f".into()),
+            keyboard::Modifiers::CTRL
+        ),
+        Some(Message::FindToggled)
+    ));
+}
+
+// ---------- P18 即时保存 ----------
+
+#[test]
+fn edit_schedules_single_inflight_autosave_and_success_clears_dirty() {
+    let mut app = loaded_txt_app();
+    // P63：即时保存改为显式选择——本测试验证的是开启后的机制
+    assert!(!app.settings.autosave_enabled);
+    app.settings.autosave_enabled = true;
+
+    // 编辑置脏并派发防抖任务（版本号在页上推进）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(app.tab().dirty);
+    assert!(app.tabs[0].autosave_inflight, "首次编辑应排队本页防抖任务");
+    let scheduled_version = app.tab().version;
+    let tid = app.tabs[0].id;
+
+    // 连续再编辑：inflight 去重不重复排队；版本继续推进
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+    assert!(app.tabs[0].autosave_inflight);
+    assert_eq!(app.tab().version, scheduled_version + 1);
+
+    // 任务回报且版本一致 → 清脏解除挂起
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            scheduled_version + 1,
+            PathBuf::from("C:/doc/note.txt"),
+            AutosaveOutcome::Written,
+        ),
+    );
+    assert!(!app.tab().dirty, "版本一致时落盘应清脏");
+    assert!(!app.tabs[0].autosave_inflight);
+}
+
+#[test]
+fn autosave_stale_version_keeps_dirty() {
+    // 快照之后又有编辑：迟到的「保存成功」不得清脏（否则丢改动标记）
+    let mut app = loaded_txt_app();
+    app.settings.autosave_enabled = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let stale = app.tab().version;
+    let tid = app.tabs[0].id;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            stale,
+            PathBuf::from("C:/doc/note.txt"),
+            AutosaveOutcome::Written,
+        ),
+    );
+
+    assert!(
+        app.tab().dirty,
+        "版本不符应保持置脏（迟到的成功不得清脏标记）"
+    );
+    // 契约更新（P183）：账目未清时必须重排一轮防抖，所以这里是
+    // `inflight == true` 而不是旧的「解除挂起」——停在未挂起就等于
+    // 「用户不再敲字就永远差最后一笔」。见
+    // autosave_written_with_stale_version_rearms_debounce。
+    assert!(
+        app.tabs[0].autosave_inflight,
+        "保持置脏的同时必须重新排队，不是停摆"
+    );
+}
+
+/// 迟到的「写成功」+ 版本不符 = 磁盘上少最后一次编辑。旧实现在这里
+/// 只是「保持置脏」就结束，**不再重排**：用户停手后没有新的触发点，
+/// 自动保存静默停摆（同一函数里 `Superseded` 分支早就有重排先例）。
+#[test]
+fn autosave_written_with_stale_version_rearms_debounce() {
+    let (mut app, path) = loaded_real_file_app("autosave-rearm");
+    app.settings.autosave_enabled = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let stale = app.tabs[0].version;
+    let tid = app.tabs[0].id;
+    // 写盘窗口内又敲一个字（代次作废在途快照，但内容版本继续推进）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+    app.tabs[0].autosave_inflight = true;
+
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(tid, stale, path, AutosaveOutcome::Written),
+    );
+
+    assert!(app.tabs[0].dirty, "版本不符应保持置脏");
+    assert!(
+        app.tabs[0].autosave_inflight,
+        "账目未清必须重新排上防抖，否则最后一笔永不落盘"
+    );
+}
+
+/// 守卫拦下时**不得**自我重排（否则每 2s 撞同一面墙）；但用户〔忽略〕
+/// 表态之后，仍置脏的页必须重新排上防抖。
+#[test]
+fn acknowledging_external_change_rearms_autosave() {
+    let (mut app, path) = loaded_real_file_app("autosave-ack-rearm");
+    app.settings.autosave_enabled = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let (tid, version) = (app.tabs[0].id, app.tabs[0].version);
+    std::fs::write(&path, "externally replaced").unwrap();
+
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            version,
+            path.clone(),
+            AutosaveOutcome::SkippedExternalChange,
+        ),
+    );
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[0]),
+        "应交给提示条裁决"
+    );
+    assert!(!app.tabs[0].autosave_inflight, "被拦下的一轮不该自我重排");
+
+    let id0 = app.tabs[0].id;
+    dispatch(&mut app, Message::IgnoreExternalChange(id0));
+    assert!(app.external_change.is_none());
+    assert!(
+        app.tabs[0].autosave_inflight,
+        "裁决之后自动保存要重新生效，否则磁盘永远差这一笔"
+    );
+}
+
+#[test]
+fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
+    // 自动保存落盘必须按标签页的保存编码：旧实现恒 UTF-8，会把用户
+    // 选定 GBK 的文件静默转码覆写回磁盘。直击防抖线程体的落盘动作，
+    // 钉死 GBK 形态（磁盘字节 ≠ UTF-8，且能被嗅探加载回原文本）。
+    let dir = scratch_dir("autosave-encoding");
+    let path = dir.join("gbk.txt");
+    let text = "中文内容";
+    let doc = editpad_core::Document::from_str(text);
+    let outcome = write_to_disk(&path, &doc, editpad_core::SaveEncoding::Gbk);
+    assert!(
+        matches!(outcome, AutosaveOutcome::Written),
+        "落盘应成功，实际 {outcome:?}"
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    assert_ne!(bytes, text.as_bytes(), "磁盘不得是 UTF-8 形态");
+    let loaded = editpad_core::load_document_streaming(&path, |_| {}).unwrap();
+    assert_eq!(loaded.doc.to_text(), text, "按 GBK 嗅探读回应无损");
+    assert_eq!(loaded.encoding, "GBK");
+}
+
+#[test]
+fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
+    let mut app = loaded_txt_app();
+    app.settings.autosave_enabled = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(app.tabs[0].autosave_inflight);
+
+    let version = app.tab().version;
+    let tid = app.tabs[0].id;
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            version,
+            PathBuf::from("C:/doc/note.txt"),
+            AutosaveOutcome::Failed("disk full".into()),
+        ),
+    );
+
+    assert!(!app.tabs[0].autosave_inflight, "失败也要解除挂起");
+    assert!(app.tab().dirty, "失败必须保持置脏");
+    assert!(
+        app.status.contains("自动保存失败") && app.status.contains("disk full"),
+        "失败必须留痕不能无声吞掉，实际 {:?}",
+        app.status
+    );
+
+    // 失败解除挂起后，下一次编辑仍可重新排队
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("z".into())));
+    assert!(app.tabs[0].autosave_inflight, "新编辑应重新排队");
+}
+
+#[test]
+fn autosave_skipped_for_untitled_or_disabled() {
+    // 未命名文档（path == None）：绝不自动落盘
+    let mut untitled = Editpad::default();
+    dispatch(&mut untitled, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(untitled.tab().dirty);
+    assert!(
+        !untitled.tabs[0].autosave_inflight,
+        "未命名文档不参与自动保存"
+    );
+
+    // 开关关闭（P63 起即默认状态）：已命名页同样不排队
+    let mut app = loaded_txt_app();
+    assert!(!app.settings.autosave_enabled, "P63：默认关闭");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(app.tab().dirty);
+    assert!(!app.tabs[0].autosave_inflight, "开关关闭时不排队");
+
+    // busy（手动 IO 进行中）时也跳过——显式开启后守卫仍生效
+    let mut busy_app = loaded_txt_app();
+    busy_app.settings.autosave_enabled = true;
+    busy_app.busy = true;
+    dispatch(&mut busy_app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(
+        !busy_app.tabs[0].autosave_inflight,
+        "busy 时不得排队自动保存"
+    );
+}
+
+// ---------- P63 保存策略对标主流编辑器 ----------
+
+#[test]
+fn p63_default_settings_never_autowrite_existing_files() {
+    // 用户点名（对标主流编辑器）：默认设置下编辑已有文件只置脏，
+    // 绝不悄悄排队写盘；● 标记与关窗确认照旧兜底
+    let (mut app, path) = loaded_real_file_app("p63-default-off");
+
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(app.tab().dirty);
+    assert!(
+        !app.tabs[0].autosave_inflight,
+        "默认关闭时编辑不得触发写盘任务"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "base",
+        "默认设置下磁盘必须原封不动"
+    );
+}
+
+#[test]
+fn p63_autosave_skip_on_external_change_queues_prompt_and_keeps_dirty() {
+    // 防抖睡眠期间文件被外部改动 → 写前校验拒写：保持置脏、送入
+    // P52 提示条队列、留痕状态栏，未裁决前不重记戳
+    let (mut app, path) = loaded_real_file_app("p63-skip-ext");
+    app.settings.autosave_enabled = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(app.tabs[0].autosave_inflight);
+    let old_stamp = app.tabs[0].file_stamp;
+    let version = app.tab().version;
+    let tid = app.tabs[0].id;
+
+    fs::write(&path, "external edit made this longer").unwrap();
+
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            version,
+            path.clone(),
+            AutosaveOutcome::SkippedExternalChange,
+        ),
+    );
+    assert!(app.tab().dirty, "拒写必须保持置脏");
+    assert!(!app.tabs[0].autosave_inflight, "挂起照常解除，可重新排队");
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[0]),
+        "拒写应把页送进 P52 提示条队列"
+    );
+    assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
+    assert_eq!(
+        app.tabs[0].file_stamp, old_stamp,
+        "用户裁决前不得按磁盘现状重记戳"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "external edit made this longer",
+        "拒写后磁盘内容必须还是外部版本"
+    );
+}
+
+#[test]
+fn p63_written_outcome_clears_dirty_and_mismatched_path_report_is_dropped() {
+    // 正常路径：路径匹配 + 版本一致 → 清脏（新载荷下的既有语义）
+    let (mut app, path) = loaded_real_file_app("p63-written");
+    app.settings.autosave_enabled = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let v = app.tab().version;
+    let tid = app.tabs[0].id;
+
+    // 先来一条路径不符的回报（另存为/改名竞态）——账目整条丢弃，
+    // 不得清脏；但 inflight 必须解除（P146：曾提前 return 漏清，
+    // 该页本会话永久失去自动保存）；随后正确路径的同版本回报照常生效
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            v,
+            PathBuf::from("C:/other/renamed.txt"),
+            AutosaveOutcome::Written,
+        ),
+    );
+    assert!(
+        app.tab().dirty && !app.tabs[0].autosave_inflight,
+        "路径不符的回报丢弃账目但必须解除挂起"
+    );
+
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(tid, v, path, AutosaveOutcome::Written),
+    );
+    assert!(!app.tab().dirty && !app.tabs[0].autosave_inflight);
+}
+
+#[test]
+fn p63_manual_save_blocked_on_external_change_until_acknowledged() {
+    // 应用聚焦期间文件被外部改（无焦点事件 → P50 巡检不触发），
+    // Ctrl+S 必须拦截而不是无声覆盖；〔忽略〕重记戳后再存 = 有意覆盖
+    let (mut app, path) = loaded_real_file_app("p63-manual-guard");
+    std::fs::write(&path, "externally replaced").unwrap();
+
+    dispatch(&mut app, Message::SaveRequested);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "externally replaced",
+        "拦截期间原文件绝不能被覆盖"
+    );
+    assert!(!app.busy, "拦截不是进入保存流程");
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[0]),
+        "应弹 P52 提示条交裁决"
+    );
+    assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
+
+    // 〔忽略〕= 按磁盘现状重记戳并收条；随后 Ctrl+S 守卫放行进入保存管线
+    let id0 = app.tabs[0].id;
+    dispatch(&mut app, Message::IgnoreExternalChange(id0));
+    assert!(app.external_change.is_none());
+    dispatch(&mut app, Message::SaveRequested);
+    assert!(app.busy, "有意覆盖的第二步应正常走保存");
+}
+
+#[test]
+fn p63_save_as_target_is_restamped_not_blocked() {
+    // 另存为：对话框里显式选中的目标（可能已存在且内容不同）不该被
+    // 自家外部修改守卫拦下——选定目标即按其磁盘现状记戳
+    let target = scratch_dir("p63-saveas").join("existing-target.txt");
+    std::fs::write(&target, "old content on disk").unwrap();
+
+    let mut app = Editpad::default(); // 未命名页，file_stamp = None
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("draft".into())));
+    dispatch(&mut app, Message::SaveTargetChosen(Some(target.clone())));
+
+    assert_eq!(app.tabs[0].path, Some(target.clone()));
+    assert_eq!(
+        app.tabs[0].file_stamp,
+        file_stamp(&target),
+        "选定目标即按其磁盘现状重记戳"
+    );
+    assert!(app.busy, "另存为应直接进入保存管线而不被拦");
+}
+
+// ---------- P67 编码与行尾控制 ----------
+
+#[test]
+fn p67_status_menus_toggle_mutually_and_esc_closes() {
+    let mut app = loaded_txt_app();
+
+    dispatch(&mut app, Message::ToggleEncodingMenu);
+    eprintln!(
+        "[P67] after enc-toggle: enc={} eol={}",
+        app.encoding_menu, app.eol_menu
+    );
+    assert!(app.encoding_menu && !app.eol_menu);
+
+    // 互斥：开行尾关编码
+    dispatch(&mut app, Message::ToggleEolMenu);
+    assert!(!app.encoding_menu && app.eol_menu);
+
+    // busy 时不得「打开」菜单（已开的菜单由各项自身守卫兜底）
+    dispatch(&mut app, Message::ToggleEolMenu); // 再 toggle 一次 = 收起
+    assert!(!app.encoding_menu && !app.eol_menu, "两菜单此时应全关");
+    app.busy = true;
+    dispatch(&mut app, Message::ToggleEncodingMenu);
+    assert!(!app.encoding_menu, "busy 时不得开菜单");
+    app.busy = false;
+
+    // Esc（BarsDismissed）一并收起
+    dispatch(&mut app, Message::ToggleEncodingMenu);
+    assert!(app.encoding_menu);
+    dispatch(&mut app, Message::BarsDismissed);
+    assert!(!app.encoding_menu && !app.eol_menu);
+}
+
+#[test]
+fn p67_save_with_encoding_sets_pref_and_enters_save_pipeline() {
+    let (mut app, _path) = loaded_real_file_app("p67-enc-pref");
+
+    dispatch(
+        &mut app,
+        Message::SaveWithEncoding(editpad_core::SaveEncoding::Gbk),
+    );
+    assert_eq!(
+        app.tabs[0].save_encoding,
+        Some(editpad_core::SaveEncoding::Gbk),
+        "偏好必须记住（此后每次保存沿用）"
+    );
+    assert!(app.busy, "选择编码后应立即走保存管线");
+}
+
+#[test]
+fn p67_save_with_encoding_rejected_for_untitled() {
+    let mut app = Editpad::default(); // 未命名页
+    dispatch(
+        &mut app,
+        Message::SaveWithEncoding(editpad_core::SaveEncoding::Gbk),
+    );
+    assert!(app.tabs[0].save_encoding.is_none(), "无路径不得记偏好");
+    assert!(!app.busy);
+    assert!(app.status.contains("另存为"), "应提示先另存为");
+}
+
+#[test]
+fn p67_saved_reflects_target_label_and_unmappable_warning() {
+    let (mut app, _path) = loaded_real_file_app("p67-saved-label");
+    app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+    // 模拟载入自 GBK 文件（标签为 GBK）
+    app.tabs[0].encoding_label = "GBK".to_owned();
+    let v = app.tab().version;
+    let tid = app.tabs[0].id;
+
+    // 同编码保存：无转码提示
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert_eq!(app.tabs[0].encoding_label, "GBK", "标签反映实际落盘编码");
+    assert!(
+        app.status.is_empty(),
+        "同编码不得提示转码，实际 {:?}",
+        app.status
+    );
+
+    // 不可映射：优先告警
+    app.tabs[0].encoding_label = "GBK".to_owned();
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v, Ok(editpad_core::EncodeNotice { unmappable: true })),
+    );
+    assert!(
+        app.status.contains("&#"),
+        "应提示数值实体写入：{:?}",
+        app.status
+    );
+
+    // 默认（无偏好）保存 GBK 载入的文件 → 转码提示（P6 语义保持）
+    app.tabs[0].save_encoding = None;
+    app.tabs[0].encoding_label = "GBK".to_owned();
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert_eq!(app.tabs[0].encoding_label, "UTF-8");
+    assert!(app.status.contains("GBK"), "应提示原编码：{:?}", app.status);
+}
+
+#[test]
+fn saved_ok_surfaces_stashed_backup_notice() {
+    // 备份提示写在异步落盘完成之前，会被 Saved 分支立即覆盖/抹掉；
+    // 暂存补显机制钉死：无转码补显、转码让位、失败弃置。
+    let (mut app, _path) = loaded_real_file_app("backup-notice");
+    let v = app.tab().version;
+    let tid = app.tabs[0].id;
+    app.pending_backup_notice = Some("已备份旧版 → x.bak".to_owned());
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert!(
+        app.status.contains("已备份"),
+        "落盘成功后补显备份提示，实际 {:?}",
+        app.status
+    );
+    assert!(app.pending_backup_notice.is_none(), "补显即取走");
+
+    // 转码提示优先：备份提示让位且不留存
+    app.pending_backup_notice = Some("已备份旧版 → x.bak".to_owned());
+    app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+    app.tabs[0].encoding_label = "UTF-8".to_owned();
+    let v = app.tab().version;
+    let tid = app.tabs[0].id;
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert!(
+        !app.status.contains("已备份"),
+        "转码知情权优先，实际 {:?}",
+        app.status
+    );
+    assert!(app.pending_backup_notice.is_none());
+}
+
+#[test]
+fn error_status_survives_edit_noise() {
+    // 「保存失败」等错误必须持久：编辑噪声不清除，直到下一条信息
+    // 状态让位。旧实现打一个字就把错误抹掉且无日志可查。
+    let (mut app, _path) = loaded_real_file_app("error-sticky");
+    let v = app.tab().version;
+    let tid = app.tabs[0].id;
+    let err = Err("无法写入文件 x: disk full".to_owned());
+    dispatch(&mut app, Message::Saved(tid, v, err));
+    assert!(app.status.contains("保存失败"));
+    assert!(app.status_is_error, "错误必须带类型标记");
+
+    // 编辑一次：错误仍在（旧实现此处被 status.clear() 抹掉）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(
+        app.status.contains("保存失败"),
+        "错误不得被编辑噪声清除，实际 {:?}",
+        app.status
+    );
+    assert!(app.status_is_error);
+
+    // 下一条信息状态正常让位并复位类型
+    app.set_status("已替换 1 处");
+    assert!(!app.status_is_error);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+    assert!(
+        app.status.is_empty(),
+        "普通信息照旧被编辑清除，实际 {:?}",
+        app.status
+    );
+}
+
+#[test]
+fn recent_selected_prechecks_existence() {
+    // 已删除/移动的最近文件条目：点击直接明示缺失，不进加载管线，
+    // 条目保留（可能是暂时移动）；存在的条目照常走打开管线
+    let (mut app, path) = loaded_real_file_app("recent-precheck");
+    let missing = scratch_dir("recent-missing").join("gone.txt");
+    app.settings
+        .recent_files
+        .push(missing.display().to_string());
+
+    dispatch(
+        &mut app,
+        Message::RecentSelected(missing.display().to_string()),
+    );
+    assert!(
+        app.status.contains("不存在"),
+        "应明示文件缺失，实际 {:?}",
+        app.status
+    );
+    assert!(!app.busy, "缺失文件不得进入加载管线");
+    assert_eq!(
+        app.settings.recent_files.len(),
+        2,
+        "缺失条目保留，不做静默剔除"
+    );
+
+    // 存在的条目照常打开（进入加载管线）
+    dispatch(
+        &mut app,
+        Message::RecentSelected(path.display().to_string()),
+    );
+    assert!(app.busy, "存在的文件应正常进入打开管线");
+}
+
+#[test]
+fn p67_convert_eol_rewrites_document_undoably() {
+    let (mut app, _path) = loaded_real_file_app("p67-eol");
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("a\nb\nc\n"));
+    }
+    let v0 = app.tab().version;
+
+    // LF → CRLF：内容改写、置脏、版本推进
+    dispatch(
+        &mut app,
+        Message::ConvertEol(editpad_core::LineEnding::CrLf),
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "a\r\nb\r\nc\r\n",
+        "行尾应统一为 CRLF"
+    );
+    assert!(app.tab().dirty, "行尾转换是真实文档编辑");
+    assert_eq!(app.tab().version, v0 + 1, "版本应推进（自动保存触发依据）");
+    assert_eq!(
+        app.cur_handle.borrow().doc.line_ending(),
+        editpad_core::LineEnding::CrLf
+    );
+
+    // 已是目标：提示且不动文档
+    dispatch(
+        &mut app,
+        Message::ConvertEol(editpad_core::LineEnding::CrLf),
+    );
+    assert!(app.status.contains("已是"), "实际 {:?}", app.status);
+    assert_eq!(app.tab().version, v0 + 1, "无变化不得推进版本");
+
+    // CRLF → LF：可撤销（撤销回 LF 原文）
+    dispatch(&mut app, Message::ConvertEol(editpad_core::LineEnding::Lf));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "a\nb\nc\n");
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "a\r\nb\r\nc\r\n",
+        "行尾转换必须可撤销"
+    );
+}
+
+#[test]
+fn p67_loaded_and_save_as_reset_encoding_preference() {
+    // 重新载入同一文件：编码偏好重置为默认 UTF-8
+    // （先派发 FileDropped 建新加载任务，否则 Loaded 会被过期守卫丢弃；
+    // 当前页非空净 → 打开落在新页，断言按路径定位而非固定下标）
+    let (mut app, path) = loaded_real_file_app("p67-pref-reset");
+    app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+
+    dispatch(&mut app, Message::FileDropped(path.clone()));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("base"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // start_loading「打开即聚焦」：活动页 = 刚重载完成的那一页
+    assert_eq!(
+        app.tab().path.as_deref(),
+        Some(path.as_path()),
+        "活动页应为重载的文件"
+    );
+    assert!(app.tab().save_encoding.is_none(), "重载必须重置编码偏好");
+
+    // 另存为新路径：同样重置（旧偏好属于旧路径）——先给活动页设偏好
+    app.tab_mut().save_encoding = Some(editpad_core::SaveEncoding::Utf8Bom);
+    let target = scratch_dir("p67-pref-reset2").join("new.txt");
+    dispatch(&mut app, Message::SaveTargetChosen(Some(target)));
+    assert!(app.tab().save_encoding.is_none(), "另存为必须重置编码偏好");
+}
+
+// ---------- P6 编码知情权 ----------
+
+#[test]
+fn transcode_notice_covers_all_encoding_labels() {
+    use editpad_core::SaveEncoding;
+    // P67 口径：提示按「原标签 vs 实际目标」判定
+    // 纯 UTF-8 → UTF-8 / 未打开：无需提示
+    assert_eq!(
+        transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", "UTF-8", false),
+        None
+    );
+    assert_eq!(
+        transcode_notice(editpad_core::Lang::ZhCn, "", "UTF-8", false),
+        None
+    );
+
+    // 用户显式选择 GBK 且原文件就是 GBK：不提示（非意外转码）
+    assert_eq!(
+        transcode_notice(
+            editpad_core::Lang::ZhCn,
+            "GBK",
+            SaveEncoding::Gbk.label(),
+            false
+        ),
+        None
+    );
+
+    // 不可映射字符优先告警
+    let m = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", "GBK", true).expect("应有告警");
+    assert!(m.contains("&#"), "应说明数值实体写入：{m}");
+
+    // BOM 丢失要提示
+    let bom = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8(BOM)", "UTF-8", false)
+        .expect("BOM 丢失应有提示");
+    assert!(bom.contains("BOM"));
+
+    // 转码要提示且带出原编码名与目标
+    for label in ["GBK", "UTF-16LE", "UTF-16BE"] {
+        let notice = transcode_notice(editpad_core::Lang::ZhCn, label, "UTF-8", false)
+            .expect("转码应有提示");
+        assert!(notice.contains(label), "提示需含原编码 {label}: {notice}");
+        assert!(notice.contains("UTF-8"));
     }
 
-    #[test]
-    fn ctrl_shift_f_maps_to_format_json_but_ctrl_f_stays_find() {
-        use iced::keyboard::{self};
-        let shift_ctrl = keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT;
-        assert!(matches!(
-            handle_key_defaults(keyboard::Key::Character("F".into()), shift_ctrl),
-            Some(Message::FormatJson)
-        ));
-        // 普通 Ctrl+F 不受影响
-        assert!(matches!(
-            handle_key_defaults(keyboard::Key::Character("f".into()), keyboard::Modifiers::CTRL),
-            Some(Message::FindToggled)
-        ));
-    }
+    // 反向：UTF-8 → GBK 同样提示
+    let back = transcode_notice(
+        editpad_core::Lang::ZhCn,
+        "UTF-8",
+        SaveEncoding::Gbk.label(),
+        false,
+    )
+    .expect("反向转码应有提示");
+    assert!(back.contains("GBK") && back.contains("UTF-8"));
+}
 
-    // ---------- P18 即时保存 ----------
+#[test]
+fn load_stream_happy_path_emits_progress_then_done() {
+    let dir = scratch_dir("happy");
+    let path = dir.join("note.txt");
+    // 超过单块（64KB）以触发多次进度回调
+    let content = "Editpad 加载流测试\n".repeat(8_000);
+    std::fs::write(&path, &content).unwrap();
 
-    #[test]
-    fn edit_schedules_single_inflight_autosave_and_success_clears_dirty() {
-        let mut app = loaded_txt_app();
-        // P63：即时保存改为显式选择——本测试验证的是开启后的机制
-        assert!(!app.settings.autosave_enabled);
-        app.settings.autosave_enabled = true;
-
-        // 编辑置脏并派发防抖任务（版本号在页上推进）
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.tab().dirty);
-        assert!(
-            app.tabs[0].autosave_inflight,
-            "首次编辑应排队本页防抖任务"
-        );
-        let scheduled_version = app.tab().version;
-        let tid = app.tabs[0].id;
-
-        // 连续再编辑：inflight 去重不重复排队；版本继续推进
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
-        assert!(app.tabs[0].autosave_inflight);
-        assert_eq!(app.tab().version, scheduled_version + 1);
-
-        // 任务回报且版本一致 → 清脏解除挂起
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(
-                tid,
-                scheduled_version + 1,
-                PathBuf::from("C:/doc/note.txt"),
-                AutosaveOutcome::Written,
-            ),
-        );
-        assert!(!app.tab().dirty, "版本一致时落盘应清脏");
-        assert!(!app.tabs[0].autosave_inflight);
-    }
-
-    #[test]
-    fn autosave_stale_version_keeps_dirty() {
-        // 快照之后又有编辑：迟到的「保存成功」不得清脏（否则丢改动标记）
-        let mut app = loaded_txt_app();
-        app.settings.autosave_enabled = true;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        let stale = app.tab().version;
-        let tid = app.tabs[0].id;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
-
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(tid, stale, PathBuf::from("C:/doc/note.txt"), AutosaveOutcome::Written),
-        );
-
-        assert!(
-            app.tab().dirty,
-            "版本不符应保持置脏（迟到的成功不得清脏标记）"
-        );
-        // 契约更新（P183）：账目未清时必须重排一轮防抖，所以这里是
-        // `inflight == true` 而不是旧的「解除挂起」——停在未挂起就等于
-        // 「用户不再敲字就永远差最后一笔」。见
-        // autosave_written_with_stale_version_rearms_debounce。
-        assert!(
-            app.tabs[0].autosave_inflight,
-            "保持置脏的同时必须重新排队，不是停摆"
-        );
-    }
-
-    /// 迟到的「写成功」+ 版本不符 = 磁盘上少最后一次编辑。旧实现在这里
-    /// 只是「保持置脏」就结束，**不再重排**：用户停手后没有新的触发点，
-    /// 自动保存静默停摆（同一函数里 `Superseded` 分支早就有重排先例）。
-    #[test]
-    fn autosave_written_with_stale_version_rearms_debounce() {
-        let (mut app, path) = loaded_real_file_app("autosave-rearm");
-        app.settings.autosave_enabled = true;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        let stale = app.tabs[0].version;
-        let tid = app.tabs[0].id;
-        // 写盘窗口内又敲一个字（代次作废在途快照，但内容版本继续推进）
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
-        app.tabs[0].autosave_inflight = true;
-
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(tid, stale, path, AutosaveOutcome::Written),
-        );
-
-        assert!(app.tabs[0].dirty, "版本不符应保持置脏");
-        assert!(
-            app.tabs[0].autosave_inflight,
-            "账目未清必须重新排上防抖，否则最后一笔永不落盘"
-        );
-    }
-
-    /// 守卫拦下时**不得**自我重排（否则每 2s 撞同一面墙）；但用户〔忽略〕
-    /// 表态之后，仍置脏的页必须重新排上防抖。
-    #[test]
-    fn acknowledging_external_change_rearms_autosave() {
-        let (mut app, path) = loaded_real_file_app("autosave-ack-rearm");
-        app.settings.autosave_enabled = true;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        let (tid, version) = (app.tabs[0].id, app.tabs[0].version);
-        std::fs::write(&path, "externally replaced").unwrap();
-
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(tid, version, path.clone(), AutosaveOutcome::SkippedExternalChange),
-        );
-        assert_eq!(app.external_change, prompt_ids(&app, &[0]), "应交给提示条裁决");
-        assert!(
-            !app.tabs[0].autosave_inflight,
-            "被拦下的一轮不该自我重排"
-        );
-
-        let id0 = app.tabs[0].id;
-        dispatch(&mut app, Message::IgnoreExternalChange(id0));
-        assert!(app.external_change.is_none());
-        assert!(
-            app.tabs[0].autosave_inflight,
-            "裁决之后自动保存要重新生效，否则磁盘永远差这一笔"
-        );
-    }
-
-    #[test]
-    fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
-        // 自动保存落盘必须按标签页的保存编码：旧实现恒 UTF-8，会把用户
-        // 选定 GBK 的文件静默转码覆写回磁盘。直击防抖线程体的落盘动作，
-        // 钉死 GBK 形态（磁盘字节 ≠ UTF-8，且能被嗅探加载回原文本）。
-        let dir = scratch_dir("autosave-encoding");
-        let path = dir.join("gbk.txt");
-        let text = "中文内容";
-        let doc = editpad_core::Document::from_str(text);
-        let outcome = write_to_disk(&path, &doc, editpad_core::SaveEncoding::Gbk);
-        assert!(
-            matches!(outcome, AutosaveOutcome::Written),
-            "落盘应成功，实际 {outcome:?}"
-        );
-        let bytes = std::fs::read(&path).unwrap();
-        assert_ne!(bytes, text.as_bytes(), "磁盘不得是 UTF-8 形态");
-        let loaded = editpad_core::load_document_streaming(&path, |_| {}).unwrap();
-        assert_eq!(loaded.doc.to_text(), text, "按 GBK 嗅探读回应无损");
-        assert_eq!(loaded.encoding, "GBK");
-    }
-
-    #[test]
-    fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
-        let mut app = loaded_txt_app();
-        app.settings.autosave_enabled = true;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.tabs[0].autosave_inflight);
-
-        let version = app.tab().version;
-        let tid = app.tabs[0].id;
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(
-                tid,
-                version,
-                PathBuf::from("C:/doc/note.txt"),
-                AutosaveOutcome::Failed("disk full".into()),
-            ),
-        );
-
-        assert!(!app.tabs[0].autosave_inflight, "失败也要解除挂起");
-        assert!(app.tab().dirty, "失败必须保持置脏");
-        assert!(
-            app.status.contains("自动保存失败") && app.status.contains("disk full"),
-            "失败必须留痕不能无声吞掉，实际 {:?}",
-            app.status
-        );
-
-        // 失败解除挂起后，下一次编辑仍可重新排队
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("z".into())));
-        assert!(app.tabs[0].autosave_inflight, "新编辑应重新排队");
-    }
-
-    #[test]
-    fn autosave_skipped_for_untitled_or_disabled() {
-        // 未命名文档（path == None）：绝不自动落盘
-        let mut untitled = Editpad::default();
-        dispatch(&mut untitled, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(untitled.tab().dirty);
-        assert!(
-            !untitled.tabs[0].autosave_inflight,
-            "未命名文档不参与自动保存"
-        );
-
-        // 开关关闭（P63 起即默认状态）：已命名页同样不排队
-        let mut app = loaded_txt_app();
-        assert!(!app.settings.autosave_enabled, "P63：默认关闭");
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.tab().dirty);
-        assert!(!app.tabs[0].autosave_inflight, "开关关闭时不排队");
-
-        // busy（手动 IO 进行中）时也跳过——显式开启后守卫仍生效
-        let mut busy_app = loaded_txt_app();
-        busy_app.settings.autosave_enabled = true;
-        busy_app.busy = true;
-        dispatch(&mut busy_app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(!busy_app.tabs[0].autosave_inflight, "busy 时不得排队自动保存");
-    }
-
-    // ---------- P63 保存策略对标主流编辑器 ----------
-
-    #[test]
-    fn p63_default_settings_never_autowrite_existing_files() {
-        // 用户点名（对标主流编辑器）：默认设置下编辑已有文件只置脏，
-        // 绝不悄悄排队写盘；● 标记与关窗确认照旧兜底
-        let (mut app, path) = loaded_real_file_app("p63-default-off");
-
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.tab().dirty);
-        assert!(
-            !app.tabs[0].autosave_inflight,
-            "默认关闭时编辑不得触发写盘任务"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "base",
-            "默认设置下磁盘必须原封不动"
-        );
-    }
-
-    #[test]
-    fn p63_autosave_skip_on_external_change_queues_prompt_and_keeps_dirty() {
-        // 防抖睡眠期间文件被外部改动 → 写前校验拒写：保持置脏、送入
-        // P52 提示条队列、留痕状态栏，未裁决前不重记戳
-        let (mut app, path) = loaded_real_file_app("p63-skip-ext");
-        app.settings.autosave_enabled = true;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.tabs[0].autosave_inflight);
-        let old_stamp = app.tabs[0].file_stamp;
-        let version = app.tab().version;
-        let tid = app.tabs[0].id;
-
-        fs::write(&path, "external edit made this longer").unwrap();
-
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(
-                tid,
-                version,
-                path.clone(),
-                AutosaveOutcome::SkippedExternalChange,
-            ),
-        );
-        assert!(app.tab().dirty, "拒写必须保持置脏");
-        assert!(!app.tabs[0].autosave_inflight, "挂起照常解除，可重新排队");
-        assert_eq!(
-            app.external_change,
-            prompt_ids(&app, &[0]),
-            "拒写应把页送进 P52 提示条队列"
-        );
-        assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
-        assert_eq!(
-            app.tabs[0].file_stamp, old_stamp,
-            "用户裁决前不得按磁盘现状重记戳"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "external edit made this longer",
-            "拒写后磁盘内容必须还是外部版本"
-        );
-    }
-
-    #[test]
-    fn p63_written_outcome_clears_dirty_and_mismatched_path_report_is_dropped() {
-        // 正常路径：路径匹配 + 版本一致 → 清脏（新载荷下的既有语义）
-        let (mut app, path) = loaded_real_file_app("p63-written");
-        app.settings.autosave_enabled = true;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        let v = app.tab().version;
-        let tid = app.tabs[0].id;
-
-        // 先来一条路径不符的回报（另存为/改名竞态）——账目整条丢弃，
-        // 不得清脏；但 inflight 必须解除（P146：曾提前 return 漏清，
-        // 该页本会话永久失去自动保存）；随后正确路径的同版本回报照常生效
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(
-                tid,
-                v,
-                PathBuf::from("C:/other/renamed.txt"),
-                AutosaveOutcome::Written,
-            ),
-        );
-        assert!(
-            app.tab().dirty && !app.tabs[0].autosave_inflight,
-            "路径不符的回报丢弃账目但必须解除挂起"
-        );
-
-        dispatch(
-            &mut app,
-            Message::TabAutosaved(tid, v, path, AutosaveOutcome::Written),
-        );
-        assert!(!app.tab().dirty && !app.tabs[0].autosave_inflight);
-    }
-
-    #[test]
-    fn p63_manual_save_blocked_on_external_change_until_acknowledged() {
-        // 应用聚焦期间文件被外部改（无焦点事件 → P50 巡检不触发），
-        // Ctrl+S 必须拦截而不是无声覆盖；〔忽略〕重记戳后再存 = 有意覆盖
-        let (mut app, path) = loaded_real_file_app("p63-manual-guard");
-        std::fs::write(&path, "externally replaced").unwrap();
-
-        dispatch(&mut app, Message::SaveRequested);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "externally replaced",
-            "拦截期间原文件绝不能被覆盖"
-        );
-        assert!(!app.busy, "拦截不是进入保存流程");
-        assert_eq!(app.external_change, prompt_ids(&app, &[0]), "应弹 P52 提示条交裁决");
-        assert!(app.status.contains("外部修改"), "实际 {:?}", app.status);
-
-        // 〔忽略〕= 按磁盘现状重记戳并收条；随后 Ctrl+S 守卫放行进入保存管线
-        let id0 = app.tabs[0].id;
-        dispatch(&mut app, Message::IgnoreExternalChange(id0));
-        assert!(app.external_change.is_none());
-        dispatch(&mut app, Message::SaveRequested);
-        assert!(app.busy, "有意覆盖的第二步应正常走保存");
-    }
-
-    #[test]
-    fn p63_save_as_target_is_restamped_not_blocked() {
-        // 另存为：对话框里显式选中的目标（可能已存在且内容不同）不该被
-        // 自家外部修改守卫拦下——选定目标即按其磁盘现状记戳
-        let target = scratch_dir("p63-saveas").join("existing-target.txt");
-        std::fs::write(&target, "old content on disk").unwrap();
-
-        let mut app = Editpad::default(); // 未命名页，file_stamp = None
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("draft".into())));
-        dispatch(&mut app, Message::SaveTargetChosen(Some(target.clone())));
-
-        assert_eq!(app.tabs[0].path, Some(target.clone()));
-        assert_eq!(
-            app.tabs[0].file_stamp,
-            file_stamp(&target),
-            "选定目标即按其磁盘现状重记戳"
-        );
-        assert!(app.busy, "另存为应直接进入保存管线而不被拦");
-    }
-
-    // ---------- P67 编码与行尾控制 ----------
-
-    #[test]
-    fn p67_status_menus_toggle_mutually_and_esc_closes() {
-        let mut app = loaded_txt_app();
-
-        dispatch(&mut app, Message::ToggleEncodingMenu);
-        eprintln!("[P67] after enc-toggle: enc={} eol={}", app.encoding_menu, app.eol_menu);
-        assert!(app.encoding_menu && !app.eol_menu);
-
-        // 互斥：开行尾关编码
-        dispatch(&mut app, Message::ToggleEolMenu);
-        assert!(!app.encoding_menu && app.eol_menu);
-
-        // busy 时不得「打开」菜单（已开的菜单由各项自身守卫兜底）
-        dispatch(&mut app, Message::ToggleEolMenu); // 再 toggle 一次 = 收起
-        assert!(!app.encoding_menu && !app.eol_menu, "两菜单此时应全关");
-        app.busy = true;
-        dispatch(&mut app, Message::ToggleEncodingMenu);
-        assert!(!app.encoding_menu, "busy 时不得开菜单");
-        app.busy = false;
-
-        // Esc（BarsDismissed）一并收起
-        dispatch(&mut app, Message::ToggleEncodingMenu);
-        assert!(app.encoding_menu);
-        dispatch(&mut app, Message::BarsDismissed);
-        assert!(!app.encoding_menu && !app.eol_menu);
-    }
-
-    #[test]
-    fn p67_save_with_encoding_sets_pref_and_enters_save_pipeline() {
-        let (mut app, _path) = loaded_real_file_app("p67-enc-pref");
-
-        dispatch(&mut app, Message::SaveWithEncoding(editpad_core::SaveEncoding::Gbk));
-        assert_eq!(
-            app.tabs[0].save_encoding,
-            Some(editpad_core::SaveEncoding::Gbk),
-            "偏好必须记住（此后每次保存沿用）"
-        );
-        assert!(app.busy, "选择编码后应立即走保存管线");
-    }
-
-    #[test]
-    fn p67_save_with_encoding_rejected_for_untitled() {
-        let mut app = Editpad::default(); // 未命名页
-        dispatch(&mut app, Message::SaveWithEncoding(editpad_core::SaveEncoding::Gbk));
-        assert!(app.tabs[0].save_encoding.is_none(), "无路径不得记偏好");
-        assert!(!app.busy);
-        assert!(app.status.contains("另存为"), "应提示先另存为");
-    }
-
-    #[test]
-    fn p67_saved_reflects_target_label_and_unmappable_warning() {
-        let (mut app, _path) = loaded_real_file_app("p67-saved-label");
-        app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
-        // 模拟载入自 GBK 文件（标签为 GBK）
-        app.tabs[0].encoding_label = "GBK".to_owned();
-        let v = app.tab().version;
-        let tid = app.tabs[0].id;
-
-        // 同编码保存：无转码提示
-        dispatch(
-            &mut app,
-            Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
-        );
-        assert_eq!(app.tabs[0].encoding_label, "GBK", "标签反映实际落盘编码");
-        assert!(app.status.is_empty(), "同编码不得提示转码，实际 {:?}", app.status);
-
-        // 不可映射：优先告警
-        app.tabs[0].encoding_label = "GBK".to_owned();
-        dispatch(
-            &mut app,
-            Message::Saved(
-                tid,
-                v,
-                Ok(editpad_core::EncodeNotice { unmappable: true }),
-            ),
-        );
-        assert!(app.status.contains("&#"), "应提示数值实体写入：{:?}", app.status);
-
-        // 默认（无偏好）保存 GBK 载入的文件 → 转码提示（P6 语义保持）
-        app.tabs[0].save_encoding = None;
-        app.tabs[0].encoding_label = "GBK".to_owned();
-        dispatch(
-            &mut app,
-            Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
-        );
-        assert_eq!(app.tabs[0].encoding_label, "UTF-8");
-        assert!(app.status.contains("GBK"), "应提示原编码：{:?}", app.status);
-    }
-
-    #[test]
-    fn saved_ok_surfaces_stashed_backup_notice() {
-        // 备份提示写在异步落盘完成之前，会被 Saved 分支立即覆盖/抹掉；
-        // 暂存补显机制钉死：无转码补显、转码让位、失败弃置。
-        let (mut app, _path) = loaded_real_file_app("backup-notice");
-        let v = app.tab().version;
-        let tid = app.tabs[0].id;
-        app.pending_backup_notice = Some("已备份旧版 → x.bak".to_owned());
-        dispatch(&mut app, Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())));
-        assert!(
-            app.status.contains("已备份"),
-            "落盘成功后补显备份提示，实际 {:?}",
-            app.status
-        );
-        assert!(app.pending_backup_notice.is_none(), "补显即取走");
-
-        // 转码提示优先：备份提示让位且不留存
-        app.pending_backup_notice = Some("已备份旧版 → x.bak".to_owned());
-        app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
-        app.tabs[0].encoding_label = "UTF-8".to_owned();
-        let v = app.tab().version;
-        let tid = app.tabs[0].id;
-        dispatch(&mut app, Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())));
-        assert!(!app.status.contains("已备份"), "转码知情权优先，实际 {:?}", app.status);
-        assert!(app.pending_backup_notice.is_none());
-    }
-
-    #[test]
-    fn error_status_survives_edit_noise() {
-        // 「保存失败」等错误必须持久：编辑噪声不清除，直到下一条信息
-        // 状态让位。旧实现打一个字就把错误抹掉且无日志可查。
-        let (mut app, _path) = loaded_real_file_app("error-sticky");
-        let v = app.tab().version;
-        let tid = app.tabs[0].id;
-        let err = Err("无法写入文件 x: disk full".to_owned());
-        dispatch(&mut app, Message::Saved(tid, v, err));
-        assert!(app.status.contains("保存失败"));
-        assert!(app.status_is_error, "错误必须带类型标记");
-
-        // 编辑一次：错误仍在（旧实现此处被 status.clear() 抹掉）
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(
-            app.status.contains("保存失败"),
-            "错误不得被编辑噪声清除，实际 {:?}",
-            app.status
-        );
-        assert!(app.status_is_error);
-
-        // 下一条信息状态正常让位并复位类型
-        app.set_status("已替换 1 处");
-        assert!(!app.status_is_error);
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
-        assert!(app.status.is_empty(), "普通信息照旧被编辑清除，实际 {:?}", app.status);
-    }
-
-    #[test]
-    fn recent_selected_prechecks_existence() {
-        // 已删除/移动的最近文件条目：点击直接明示缺失，不进加载管线，
-        // 条目保留（可能是暂时移动）；存在的条目照常走打开管线
-        let (mut app, path) = loaded_real_file_app("recent-precheck");
-        let missing = scratch_dir("recent-missing").join("gone.txt");
-        app.settings.recent_files.push(missing.display().to_string());
-
-        dispatch(&mut app, Message::RecentSelected(missing.display().to_string()));
-        assert!(
-            app.status.contains("不存在"),
-            "应明示文件缺失，实际 {:?}",
-            app.status
-        );
-        assert!(!app.busy, "缺失文件不得进入加载管线");
-        assert_eq!(
-            app.settings.recent_files.len(),
-            2,
-            "缺失条目保留，不做静默剔除"
-        );
-
-        // 存在的条目照常打开（进入加载管线）
-        dispatch(&mut app, Message::RecentSelected(path.display().to_string()));
-        assert!(app.busy, "存在的文件应正常进入打开管线");
-    }
-
-    #[test]
-    fn p67_convert_eol_rewrites_document_undoably() {
-        let (mut app, _path) = loaded_real_file_app("p67-eol");
-        {
-            let mut ed = app.cur_handle.borrow_mut();
-            ed.reset_document(editpad_core::Document::from_str("a\nb\nc\n"));
+    let messages = block_on(async {
+        let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
+        drive_load(
+            7,
+            path.clone(),
+            |p, cb| editpad_core::load_document_streaming(p, cb),
+            &mut tx,
+        )
+        .await;
+        drop(tx);
+        let mut collected = Vec::new();
+        while let Some(message) = rx.next().await {
+            collected.push(message);
         }
-        let v0 = app.tab().version;
+        collected
+    });
 
-        // LF → CRLF：内容改写、置脏、版本推进
-        dispatch(&mut app, Message::ConvertEol(editpad_core::LineEnding::CrLf));
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "a\r\nb\r\nc\r\n",
-            "行尾应统一为 CRLF"
-        );
-        assert!(app.tab().dirty, "行尾转换是真实文档编辑");
-        assert_eq!(app.tab().version, v0 + 1, "版本应推进（自动保存触发依据）");
-        assert_eq!(
-            app.cur_handle.borrow().doc.line_ending(),
-            editpad_core::LineEnding::CrLf
-        );
+    let progress_count = messages
+        .iter()
+        .filter(|m| matches!(m, Message::LoadProgress(7, _, _)))
+        .count();
+    assert!(
+        progress_count >= 2,
+        "应有多条进度消息，实际 {progress_count}"
+    );
 
-        // 已是目标：提示且不动文档
-        dispatch(&mut app, Message::ConvertEol(editpad_core::LineEnding::CrLf));
-        assert!(app.status.contains("已是"), "实际 {:?}", app.status);
-        assert_eq!(app.tab().version, v0 + 1, "无变化不得推进版本");
+    let dones: Vec<_> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Loaded(id, result) => Some((*id, result)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dones.len(), 1, "恰好一条 Loaded");
+    let (id, Ok((doc, _sample, encoding))) = dones[0] else {
+        panic!("应为成功加载，实际 {:?}", dones[0]);
+    };
+    assert_eq!(id, 7);
+    // P19：消息携带的是 rope 文档本体
+    assert_eq!(doc.to_text(), content);
+    assert_eq!(encoding.as_str(), "UTF-8");
 
-        // CRLF → LF：可撤销（撤销回 LF 原文）
-        dispatch(&mut app, Message::ConvertEol(editpad_core::LineEnding::Lf));
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "a\nb\nc\n");
-        dispatch(&mut app, Message::Edit(EditOp::Undo));
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "a\r\nb\r\nc\r\n",
-            "行尾转换必须可撤销"
-        );
-    }
+    std::fs::remove_dir_all(&dir).ok();
+}
 
-    #[test]
-    fn p67_loaded_and_save_as_reset_encoding_preference() {
-        // 重新载入同一文件：编码偏好重置为默认 UTF-8
-        // （先派发 FileDropped 建新加载任务，否则 Loaded 会被过期守卫丢弃；
-        // 当前页非空净 → 打开落在新页，断言按路径定位而非固定下标）
-        let (mut app, path) = loaded_real_file_app("p67-pref-reset");
-        app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+#[test]
+fn load_stream_reports_failure_when_loader_panics() {
+    // P5 回归：加载线程崩溃也必须让 UI 收到 Loaded(Err)，busy 才能解除
+    let dir = scratch_dir("panic");
+    let path = dir.join("boom.txt");
+    std::fs::write(&path, b"data").unwrap();
 
-        dispatch(&mut app, Message::FileDropped(path.clone()));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("base"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        // start_loading「打开即聚焦」：活动页 = 刚重载完成的那一页
-        assert_eq!(
-            app.tab().path.as_deref(),
-            Some(path.as_path()),
-            "活动页应为重载的文件"
-        );
-        assert!(
-            app.tab().save_encoding.is_none(),
-            "重载必须重置编码偏好"
-        );
-
-        // 另存为新路径：同样重置（旧偏好属于旧路径）——先给活动页设偏好
-        app.tab_mut().save_encoding = Some(editpad_core::SaveEncoding::Utf8Bom);
-        let target = scratch_dir("p67-pref-reset2").join("new.txt");
-        dispatch(&mut app, Message::SaveTargetChosen(Some(target)));
-        assert!(
-            app.tab().save_encoding.is_none(),
-            "另存为必须重置编码偏好"
-        );
-    }
-
-    // ---------- P6 编码知情权 ----------
-
-    #[test]
-    fn transcode_notice_covers_all_encoding_labels() {
-        use editpad_core::SaveEncoding;
-        // P67 口径：提示按「原标签 vs 实际目标」判定
-        // 纯 UTF-8 → UTF-8 / 未打开：无需提示
-        assert_eq!(transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", "UTF-8", false), None);
-        assert_eq!(transcode_notice(editpad_core::Lang::ZhCn, "", "UTF-8", false), None);
-
-        // 用户显式选择 GBK 且原文件就是 GBK：不提示（非意外转码）
-        assert_eq!(
-            transcode_notice(editpad_core::Lang::ZhCn, "GBK", SaveEncoding::Gbk.label(), false),
-            None
-        );
-
-        // 不可映射字符优先告警
-        let m = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", "GBK", true).expect("应有告警");
-        assert!(m.contains("&#"), "应说明数值实体写入：{m}");
-
-        // BOM 丢失要提示
-        let bom = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8(BOM)", "UTF-8", false).expect("BOM 丢失应有提示");
-        assert!(bom.contains("BOM"));
-
-        // 转码要提示且带出原编码名与目标
-        for label in ["GBK", "UTF-16LE", "UTF-16BE"] {
-            let notice =
-                transcode_notice(editpad_core::Lang::ZhCn, label, "UTF-8", false).expect("转码应有提示");
-            assert!(notice.contains(label), "提示需含原编码 {label}: {notice}");
-            assert!(notice.contains("UTF-8"));
+    let messages = block_on(async {
+        let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
+        drive_load(
+            9,
+            path.clone(),
+            |_p, _cb| -> Result<editpad_core::LoadedDocument, editpad_core::CoreError> {
+                panic!("模拟加载线程崩溃");
+            },
+            &mut tx,
+        )
+        .await;
+        drop(tx);
+        let mut collected = Vec::new();
+        while let Some(message) = rx.next().await {
+            collected.push(message);
         }
+        collected
+    });
 
-        // 反向：UTF-8 → GBK 同样提示
-        let back = transcode_notice(editpad_core::Lang::ZhCn, "UTF-8", SaveEncoding::Gbk.label(), false)
-            .expect("反向转码应有提示");
-        assert!(back.contains("GBK") && back.contains("UTF-8"));
-    }
+    let failures: Vec<_> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Loaded(_, Err(text)) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "panic 后应恰好一条失败 Loaded，实际 {messages:?}"
+    );
+    assert!(
+        failures[0].contains("加载线程崩溃"),
+        "错误需含兜底前缀: {}",
+        failures[0]
+    );
+    assert!(
+        failures[0].contains("模拟加载线程崩溃"),
+        "错误需含 panic 信息: {}",
+        failures[0]
+    );
 
-    #[test]
-    fn load_stream_happy_path_emits_progress_then_done() {
-        let dir = scratch_dir("happy");
-        let path = dir.join("note.txt");
-        // 超过单块（64KB）以触发多次进度回调
-        let content = "Editpad 加载流测试\n".repeat(8_000);
-        std::fs::write(&path, &content).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+}
 
-        let messages = block_on(async {
-            let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
-            drive_load(
-                7,
-                path.clone(),
-                |p, cb| editpad_core::load_document_streaming(p, cb),
-                &mut tx,
-            )
-            .await;
-            drop(tx);
-            let mut collected = Vec::new();
-            while let Some(message) = rx.next().await {
-                collected.push(message);
-            }
-            collected
-        });
+// ---------- P103：命令行参数打开（双击文件 / 「打开方式」） ----------
 
-        let progress_count = messages
-            .iter()
-            .filter(|m| matches!(m, Message::LoadProgress(7, _, _)))
-            .count();
-        assert!(progress_count >= 2, "应有多条进度消息，实际 {progress_count}");
-
-        let dones: Vec<_> = messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::Loaded(id, result) => Some((*id, result)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(dones.len(), 1, "恰好一条 Loaded");
-        let (id, Ok((doc, _sample, encoding))) = dones[0] else {
-            panic!("应为成功加载，实际 {:?}", dones[0]);
-        };
-        assert_eq!(id, 7);
-        // P19：消息携带的是 rope 文档本体
-        assert_eq!(doc.to_text(), content);
-        assert_eq!(encoding.as_str(), "UTF-8");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn load_stream_reports_failure_when_loader_panics() {
-        // P5 回归：加载线程崩溃也必须让 UI 收到 Loaded(Err)，busy 才能解除
-        let dir = scratch_dir("panic");
-        let path = dir.join("boom.txt");
-        std::fs::write(&path, b"data").unwrap();
-
-        let messages = block_on(async {
-            let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
-            drive_load(
-                9,
-                path.clone(),
-                |_p, _cb| -> Result<editpad_core::LoadedDocument, editpad_core::CoreError> {
-                    panic!("模拟加载线程崩溃");
-                },
-                &mut tx,
-            )
-            .await;
-            drop(tx);
-            let mut collected = Vec::new();
-            while let Some(message) = rx.next().await {
-                collected.push(message);
-            }
-            collected
-        });
-
-        let failures: Vec<_> = messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::Loaded(_, Err(text)) => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(failures.len(), 1, "panic 后应恰好一条失败 Loaded，实际 {messages:?}");
-        assert!(failures[0].contains("加载线程崩溃"), "错误需含兜底前缀: {}", failures[0]);
-        assert!(failures[0].contains("模拟加载线程崩溃"), "错误需含 panic 信息: {}", failures[0]);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // ---------- P103：命令行参数打开（双击文件 / 「打开方式」） ----------
-
-    #[test]
-    fn cli_file_args_skips_exe_and_options_honors_dashdash() {
-        use std::ffi::OsString;
-        // 模拟资源管理器调用：exe 路径 + 两个真实文件 + 一个未知选项 +
-        // `--` 后以 `-` 开头的合法文件名
-        let args: Vec<OsString> = [
-            "E:\\Tools\\editpad.exe",
-            "C:/notes/a.txt",
-            "-fullscreen",
-            "--",
-            "-dash-name.md",
-            "D:/logs/app.log",
+#[test]
+fn cli_file_args_skips_exe_and_options_honors_dashdash() {
+    use std::ffi::OsString;
+    // 模拟资源管理器调用：exe 路径 + 两个真实文件 + 一个未知选项 +
+    // `--` 后以 `-` 开头的合法文件名
+    let args: Vec<OsString> = [
+        "E:\\Tools\\editpad.exe",
+        "C:/notes/a.txt",
+        "-fullscreen",
+        "--",
+        "-dash-name.md",
+        "D:/logs/app.log",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    assert_eq!(
+        parse_cli_file_args(args),
+        vec![
+            PathBuf::from("C:/notes/a.txt"),
+            PathBuf::from("-dash-name.md"),
+            PathBuf::from("D:/logs/app.log"),
         ]
+    );
+}
+
+#[test]
+fn cli_file_args_without_files_is_empty() {
+    use std::ffi::OsString;
+    // 无参数（直接双击 exe）：空清单 = 走会话恢复原行为
+    assert!(
+        parse_cli_file_args(vec![OsString::from("editpad.exe")]).is_empty(),
+        "仅有程序自身参数时应无可打开文件"
+    );
+    // 纯选项启动（未来预留）：同样不开文件
+    assert!(
+        parse_cli_file_args(vec![
+            OsString::from("editpad.exe"),
+            OsString::from("--help"),
+        ])
+        .is_empty(),
+        "未知选项一律忽略"
+    );
+}
+
+/// `--help` / `--version` 识别：修前这两个选项被当未知选项静默忽略，
+/// `editpad --help` 的结果是打开一个空白窗口。
+#[test]
+fn cli_help_and_version_options_are_recognized() {
+    use std::ffi::OsString;
+    let args = |xs: &[&str]| -> Vec<OsString> {
+        std::iter::once("editpad.exe")
+            .chain(xs.iter().copied())
+            .map(OsString::from)
+            .collect()
+    };
+    assert_eq!(parse_cli_option(args(&["--help"])), Some(CliOption::Help));
+    assert_eq!(parse_cli_option(args(&["-h"])), Some(CliOption::Help));
+    assert_eq!(
+        parse_cli_option(args(&["--version"])),
+        Some(CliOption::Version)
+    );
+    assert_eq!(parse_cli_option(args(&["-V"])), Some(CliOption::Version));
+    // 文件与选项混排：选项优先（此刻用户要看帮助，不是打开文件）
+    assert_eq!(
+        parse_cli_option(args(&["C:/a.txt", "--help"])),
+        Some(CliOption::Help)
+    );
+    // 无选项 = 照旧打开文件 / 恢复会话
+    assert_eq!(parse_cli_option(args(&[])), None);
+    assert_eq!(parse_cli_option(args(&["C:/a.txt"])), None);
+    assert_eq!(parse_cli_option(args(&["-fullscreen"])), None);
+}
+
+/// `--` 之后一律按文件路径处理：`editpad -- --help` 要打开一个叫
+/// `--help` 的文件，而不是打印帮助。
+#[test]
+fn cli_option_scan_stops_after_double_dash() {
+    use std::ffi::OsString;
+    let args: Vec<OsString> = ["editpad.exe", "--", "--help", "-V"]
         .iter()
         .map(OsString::from)
         .collect();
-        assert_eq!(
-            parse_cli_file_args(args),
-            vec![
-                PathBuf::from("C:/notes/a.txt"),
-                PathBuf::from("-dash-name.md"),
-                PathBuf::from("D:/logs/app.log"),
-            ]
-        );
-    }
+    assert_eq!(
+        parse_cli_option(args.clone()),
+        None,
+        "`--` 之后的 --help / -V 是文件名，不得被当选项"
+    );
+    assert_eq!(
+        parse_cli_file_args(args),
+        vec![PathBuf::from("--help"), PathBuf::from("-V")],
+        "同一份参数的另一半口径：两个都当文件"
+    );
+}
 
-    #[test]
-    fn cli_file_args_without_files_is_empty() {
-        use std::ffi::OsString;
-        // 无参数（直接双击 exe）：空清单 = 走会话恢复原行为
-        assert!(
-            parse_cli_file_args(vec![OsString::from("editpad.exe")]).is_empty(),
-            "仅有程序自身参数时应无可打开文件"
-        );
-        // 纯选项启动（未来预留）：同样不开文件
-        assert!(
-            parse_cli_file_args(vec![
-                OsString::from("editpad.exe"),
-                OsString::from("--help"),
-            ])
-            .is_empty(),
-            "未知选项一律忽略"
-        );
-    }
-
-    /// `--help` / `--version` 识别：修前这两个选项被当未知选项静默忽略，
-    /// `editpad --help` 的结果是打开一个空白窗口。
-    #[test]
-    fn cli_help_and_version_options_are_recognized() {
-        use std::ffi::OsString;
-        let args = |xs: &[&str]| -> Vec<OsString> {
-            std::iter::once("editpad.exe")
-                .chain(xs.iter().copied())
-                .map(OsString::from)
-                .collect()
-        };
-        assert_eq!(parse_cli_option(args(&["--help"])), Some(CliOption::Help));
-        assert_eq!(parse_cli_option(args(&["-h"])), Some(CliOption::Help));
-        assert_eq!(parse_cli_option(args(&["--version"])), Some(CliOption::Version));
-        assert_eq!(parse_cli_option(args(&["-V"])), Some(CliOption::Version));
-        // 文件与选项混排：选项优先（此刻用户要看帮助，不是打开文件）
-        assert_eq!(
-            parse_cli_option(args(&["C:/a.txt", "--help"])),
-            Some(CliOption::Help)
-        );
-        // 无选项 = 照旧打开文件 / 恢复会话
-        assert_eq!(parse_cli_option(args(&[])), None);
-        assert_eq!(parse_cli_option(args(&["C:/a.txt"])), None);
-        assert_eq!(parse_cli_option(args(&["-fullscreen"])), None);
-    }
-
-    /// `--` 之后一律按文件路径处理：`editpad -- --help` 要打开一个叫
-    /// `--help` 的文件，而不是打印帮助。
-    #[test]
-    fn cli_option_scan_stops_after_double_dash() {
-        use std::ffi::OsString;
-        let args: Vec<OsString> = ["editpad.exe", "--", "--help", "-V"]
-            .iter()
-            .map(OsString::from)
-            .collect();
-        assert_eq!(
-            parse_cli_option(args.clone()),
-            None,
-            "`--` 之后的 --help / -V 是文件名，不得被当选项"
-        );
-        assert_eq!(
-            parse_cli_file_args(args),
-            vec![PathBuf::from("--help"), PathBuf::from("-V")],
-            "同一份参数的另一半口径：两个都当文件"
-        );
-    }
-
-    #[test]
-    fn boot_cli_kickoff_registers_first_file_and_queues_rest() {
-        let mut app = Editpad::default();
-        // boot 分支语义：首个文件同步登记加载任务（状态变更），其余排队
-        app.boot_cli_kickoff(vec![
-            PathBuf::from("C:/cli/a.txt"),
+#[test]
+fn boot_cli_kickoff_registers_first_file_and_queues_rest() {
+    let mut app = Editpad::default();
+    // boot 分支语义：首个文件同步登记加载任务（状态变更），其余排队
+    app.boot_cli_kickoff(vec![
+        PathBuf::from("C:/cli/a.txt"),
+        PathBuf::from("C:/cli/b.txt"),
+        PathBuf::from("C:/cli/c.txt"),
+    ]);
+    assert_eq!(app.job_seq, 1, "首个文件应立即登记加载任务");
+    assert_eq!(app.active_tab, 0, "首个文件落入初始空净页（打开即聚焦）");
+    assert!(app.busy, "登记后应置 busy（单任务承接）");
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.path.clone()),
+        Some(PathBuf::from("C:/cli/a.txt")),
+        "在途任务必须是首个文件"
+    );
+    assert_eq!(app.pending_cli.len(), 2, "其余文件应留在队列串行续排");
+    assert_eq!(
+        app.pending_cli,
+        VecDeque::from(vec![
             PathBuf::from("C:/cli/b.txt"),
             PathBuf::from("C:/cli/c.txt"),
-        ]);
-        assert_eq!(app.job_seq, 1, "首个文件应立即登记加载任务");
-        assert_eq!(app.active_tab, 0, "首个文件落入初始空净页（打开即聚焦）");
-        assert!(app.busy, "登记后应置 busy（单任务承接）");
-        assert_eq!(
-            app.active_load.as_ref().map(|j| j.path.clone()),
-            Some(PathBuf::from("C:/cli/a.txt")),
-            "在途任务必须是首个文件"
-        );
-        assert_eq!(app.pending_cli.len(), 2, "其余文件应留在队列串行续排");
-        assert_eq!(
-            app.pending_cli,
-            VecDeque::from(vec![
-                PathBuf::from("C:/cli/b.txt"),
-                PathBuf::from("C:/cli/c.txt"),
-            ]),
-            "队列顺序必须保持命令行顺序"
-        );
-    }
+        ]),
+        "队列顺序必须保持命令行顺序"
+    );
+}
 
-    #[test]
-    fn cli_files_open_sequentially_via_pending_queue() {
-        let mut app = Editpad::default();
-        // 模拟 boot 注入的待开文件清单（无参数时该队列为空）
-        app.pending_cli =
-            vec![PathBuf::from("C:/cli/a.txt"), PathBuf::from("C:/cli/b.md")].into();
+#[test]
+fn cli_files_open_sequentially_via_pending_queue() {
+    let mut app = Editpad::default();
+    // 模拟 boot 注入的待开文件清单（无参数时该队列为空）
+    app.pending_cli = vec![PathBuf::from("C:/cli/a.txt"), PathBuf::from("C:/cli/b.md")].into();
 
-        // 首发（boot 的 OpenNextCliFile 任务）：弹出第一个 → 登记加载任务
-        dispatch(&mut app, Message::OpenNextCliFile);
-        assert_eq!(app.job_seq, 1, "首发应登记第一个文件的加载任务");
-        assert_eq!(app.pending_cli.len(), 1, "队列应弹出第一个文件");
-        assert!(app.busy, "加载进行中应置 busy，防止并发任务");
+    // 首发（boot 的 OpenNextCliFile 任务）：弹出第一个 → 登记加载任务
+    dispatch(&mut app, Message::OpenNextCliFile);
+    assert_eq!(app.job_seq, 1, "首发应登记第一个文件的加载任务");
+    assert_eq!(app.pending_cli.len(), 1, "队列应弹出第一个文件");
+    assert!(app.busy, "加载进行中应置 busy，防止并发任务");
 
-        // 第一个加载完成 → busy 结算、队列非空 → 自动续排第二个
-        let seq1 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq1,
-                Ok((
-                    editpad_core::Document::from_str("first"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        assert_eq!(app.job_seq, 2, "Loaded 结算后应自动弹出下一个 CLI 文件");
-        assert_eq!(app.active_tab, 1, "第二个文件应落新页并聚焦（打开即聚焦）");
-        assert!(
-            app.pending_cli.is_empty(),
-            "第二个文件已弹出在途，队列应清空"
-        );
-        assert!(app.busy, "第二个文件加载中");
-
-        // 第二个加载完成：两页内容各自就位，队列清空
-        let seq2 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq2,
-                Ok((
-                    editpad_core::Document::from_str("second"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        assert!(app.pending_cli.is_empty(), "队列应随最后一个文件清空");
-        assert_eq!(app.tabs.len(), 2);
-        assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "first");
-        assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "second");
-    }
-
-    #[test]
-    fn cli_open_failure_does_not_block_the_rest_of_queue() {
-        let mut app = Editpad::default();
-        // 第一个文件不存在：加载失败应只提示，不阻断后续文件
-        app.pending_cli = vec![
-            PathBuf::from("C:/cli/missing.txt"),
-            PathBuf::from("C:/cli/ok.txt"),
-        ]
-        .into();
-        dispatch(&mut app, Message::OpenNextCliFile);
-        let seq1 = app.job_seq;
-        dispatch(&mut app, Message::Loaded(seq1, Err("文件不存在".to_owned())));
-        assert_eq!(
-            app.job_seq, 2,
-            "单个文件打开失败不得阻断队列里后续文件"
-        );
-        assert!(
-            app.pending_cli.is_empty(),
-            "失败结算后队列应继续弹出下一个文件"
-        );
-        assert!(app.busy, "下一个文件已开始加载（失败不中断排队链）");
-    }
-
-
-    // ---------- P126：.LOG 首行自动时间戳 ----------
-
-    #[test]
-    fn log_file_open_appends_timestamp_at_end() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/log/app.LOG")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str(".LOG\nentry"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        let text = app.cur_handle.borrow().doc.to_text();
-        assert!(text.starts_with(".LOG\nentry\n"), "无行尾先补一行");
-        assert!(text.len() > ".LOG\nentry\n".len(), "时间戳已追加");
-        assert!(app.tab().dirty, "追加是普通编辑：置脏（默认不自动写盘）");
-    }
-
-    #[test]
-    fn non_log_file_open_is_untouched() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/doc/note.txt")));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("hello"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        assert_eq!(app.cur_handle.borrow().doc.to_text(), "hello", "非 .LOG 不追加");
-    }
-
-    // ---------- P130：文件监视（tail 跟随） ----------
-
-    #[test]
-    fn monitor_toggle_and_tick_reload_with_tail_follow() {
-        let dir = std::env::temp_dir().join("editpad-p130-test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("monitor.log");
-        std::fs::write(&path, "line1
-line2
-").unwrap();
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(path.clone()));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("line1
-line2
-"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        // 开启监视
-        dispatch(&mut app, Message::ToggleMonitorFile);
-        assert!(app.tab().monitor);
-        // 外部改写文件（size+mtime 均变）
-        std::fs::write(&path, "line1
-line2
-line3
-line4
-").unwrap();
-        // 用户在底部 → tail 跟随：巡检发起重载，归页后光标落文末
-        dispatch(&mut app, Message::MonitorTick);
-        assert!(app.active_load.is_some(), "巡检应发现变化并发起重载");
-        let job = app.active_load.clone().unwrap();
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                job.id,
-                Ok((
-                    editpad_core::Document::from_str("line1
-line2
-line3
-line4
-"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        {
-            let ed = app.cur_handle.borrow();
-            assert_eq!(ed.doc.to_text(), "line1
-line2
-line3
-line4
-");
-            assert_eq!(ed.cursor.line, 4, "tail 跟随：光标落文末（幻影行首=最后换行之后）");
-        }
-        // 关闭监视后巡检不再触发
-        dispatch(&mut app, Message::ToggleMonitorFile);
-        std::fs::write(&path, "line1
-").unwrap();
-        dispatch(&mut app, Message::MonitorTick);
-        assert!(app.active_load.is_none(), "监视关闭后巡检不动");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// P221：tail 跟随是**一次性**意图，加载失败/结果被丢弃时必须作废，
-    /// 不得留给下一份文档。
-    #[test]
-    fn monitor_tail_follow_does_not_leak_into_the_next_load() {
-        let dir = std::env::temp_dir().join("editpad-p221-test");
-        let _ = std::fs::create_dir_all(&dir);
-        let watched = dir.join("watch.log");
-        let other = dir.join("other.txt");
-        std::fs::write(&watched, "line1\nline2\n").unwrap();
-        std::fs::write(&other, "a\nb\nc\nd\n").unwrap();
-
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(watched.clone()));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("line1\nline2\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        dispatch(&mut app, Message::ToggleMonitorFile);
-        std::fs::write(&watched, "line1\nline2\nline3\nline4\n").unwrap();
-        dispatch(&mut app, Message::MonitorTick);
-        let job = app.active_load.clone().expect("巡检应发起监视重载");
-        assert!(
-            app.monitor_pending.is_some(),
-            "夹具：应已记下待归页的 tail 跟随"
-        );
-
-        // 重载失败：日志被轮转/删除正是 tail 跟随场景的日常
-        dispatch(&mut app, Message::Loaded(job.id, Err("文件不存在".to_owned())));
-        assert!(
-            app.monitor_pending.is_none(),
-            "失败出口必须作废这份一次性意图（旧实现留着它）"
-        );
-
-        // 关掉那一页 → 空净无名页补回同一槽位 → 再打开另一个文件
-        dispatch(&mut app, Message::CloseTabAt(0));
-        assert_eq!(app.tabs.len(), 1, "关最后一页会补一个空页（不变式）");
-        dispatch(&mut app, Message::FileDropped(other.clone()));
-        let s2 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s2,
-                Ok((
-                    editpad_core::Document::from_str("a\nb\nc\nd\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        {
-            let ed = app.cur_handle.borrow();
-            assert_eq!(ed.doc.to_text(), "a\nb\nc\nd\n", "夹具：新文件落在同一槽位");
-            assert_eq!(
-                ed.cursor.line, 0,
-                "陈旧的 tail 跟随不得把刚打开文档的光标打到文末（旧实现在这里是 4）"
-            );
-            assert_eq!(ed.scroll_top, 0.0, "同理不得顺手滚动这份无关文档");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn monitor_skips_dirty_page() {
-        let dir = std::env::temp_dir().join("editpad-p130-test");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("dirty.log");
-        std::fs::write(&path, "a
-").unwrap();
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(path.clone()));
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("a
-"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        dispatch(&mut app, Message::ToggleMonitorFile);
-        // 置脏 + 外部修改：巡检绝不能静默重载丢用户工作
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("user edit".into())));
-        assert!(app.tab().dirty);
-        std::fs::write(&path, "a
-external
-").unwrap();
-        dispatch(&mut app, Message::MonitorTick);
-        assert!(app.active_load.is_none(), "置脏页不得被监视重载");
-        assert_eq!(
-            app.cur_handle.borrow().doc.to_text(),
-            "user edita
-",
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    // ---------- P133：链接 Ctrl+点击（路线图 E2） ----------
-
-    #[test]
-    fn link_clicked_url_reports_and_keeps_tabs() {
-        let mut app = loaded_txt_app();
-        let tabs = app.tabs.len();
-        dispatch(
-            &mut app,
-            Message::LinkClicked(crate::editor::LinkTarget::Url(
-                "https://example.com/a".to_string(),
+    // 第一个加载完成 → busy 结算、队列非空 → 自动续排第二个
+    let seq1 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq1,
+            Ok((
+                editpad_core::Document::from_str("first"),
+                String::new(),
+                "UTF-8".to_owned(),
             )),
-        );
-        assert_eq!(app.tabs.len(), tabs, "URL 外开不改标签页");
-        assert!(
-            app.status.contains("example.com"),
-            "状态栏应反馈打开动作，实际：{}",
-            app.status
-        );
-    }
+        ),
+    );
+    assert_eq!(app.job_seq, 2, "Loaded 结算后应自动弹出下一个 CLI 文件");
+    assert_eq!(app.active_tab, 1, "第二个文件应落新页并聚焦（打开即聚焦）");
+    assert!(
+        app.pending_cli.is_empty(),
+        "第二个文件已弹出在途，队列应清空"
+    );
+    assert!(app.busy, "第二个文件加载中");
 
-    #[test]
-    fn link_clicked_file_opens_then_jumps_to_line() {
-        let path = scratch_dir("p133-link").join("target.txt");
-        std::fs::write(&path, "first\nsecond\nthird\n").unwrap();
-        let mut app = loaded_txt_app();
-        dispatch(
-            &mut app,
-            Message::LinkClicked(crate::editor::LinkTarget::File {
-                path: path.clone(),
-                line: Some(3),
-            }),
-        );
-        assert_eq!(app.pending_link_goto, Some(3), "行号应暂存待装载结算");
-        let seq = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                seq,
-                Ok((
-                    editpad_core::Document::from_str("first\nsecond\nthird\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        assert_eq!(app.pending_link_goto, None, "装载结算后应一次性消费");
-        let cursor = app.cur_handle.borrow().cursor;
-        assert_eq!((cursor.line, cursor.col), (2, 0), "应跳到第 3 行行首（1 起）");
-        // base_dir 随装载下发 = 文件所在目录（相对路径链接的解析基准）
+    // 第二个加载完成：两页内容各自就位，队列清空
+    let seq2 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq2,
+            Ok((
+                editpad_core::Document::from_str("second"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(app.pending_cli.is_empty(), "队列应随最后一个文件清空");
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "first");
+    assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "second");
+}
+
+#[test]
+fn cli_open_failure_does_not_block_the_rest_of_queue() {
+    let mut app = Editpad::default();
+    // 第一个文件不存在：加载失败应只提示，不阻断后续文件
+    app.pending_cli = vec![
+        PathBuf::from("C:/cli/missing.txt"),
+        PathBuf::from("C:/cli/ok.txt"),
+    ]
+    .into();
+    dispatch(&mut app, Message::OpenNextCliFile);
+    let seq1 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(seq1, Err("文件不存在".to_owned())),
+    );
+    assert_eq!(app.job_seq, 2, "单个文件打开失败不得阻断队列里后续文件");
+    assert!(
+        app.pending_cli.is_empty(),
+        "失败结算后队列应继续弹出下一个文件"
+    );
+    assert!(app.busy, "下一个文件已开始加载（失败不中断排队链）");
+}
+
+// ---------- P126：.LOG 首行自动时间戳 ----------
+
+#[test]
+fn log_file_open_appends_timestamp_at_end() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/log/app.LOG")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str(".LOG\nentry"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    let text = app.cur_handle.borrow().doc.to_text();
+    assert!(text.starts_with(".LOG\nentry\n"), "无行尾先补一行");
+    assert!(text.len() > ".LOG\nentry\n".len(), "时间戳已追加");
+    assert!(app.tab().dirty, "追加是普通编辑：置脏（默认不自动写盘）");
+}
+
+#[test]
+fn non_log_file_open_is_untouched() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/note.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("hello"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "hello",
+        "非 .LOG 不追加"
+    );
+}
+
+// ---------- P130：文件监视（tail 跟随） ----------
+
+#[test]
+fn monitor_toggle_and_tick_reload_with_tail_follow() {
+    let dir = std::env::temp_dir().join("editpad-p130-test");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("monitor.log");
+    std::fs::write(
+        &path,
+        "line1
+line2
+",
+    )
+    .unwrap();
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(path.clone()));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str(
+                    "line1
+line2
+",
+                ),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 开启监视
+    dispatch(&mut app, Message::ToggleMonitorFile);
+    assert!(app.tab().monitor);
+    // 外部改写文件（size+mtime 均变）
+    std::fs::write(
+        &path,
+        "line1
+line2
+line3
+line4
+",
+    )
+    .unwrap();
+    // 用户在底部 → tail 跟随：巡检发起重载，归页后光标落文末
+    dispatch(&mut app, Message::MonitorTick);
+    assert!(app.active_load.is_some(), "巡检应发现变化并发起重载");
+    let job = app.active_load.clone().unwrap();
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job.id,
+            Ok((
+                editpad_core::Document::from_str(
+                    "line1
+line2
+line3
+line4
+",
+                ),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    {
+        let ed = app.cur_handle.borrow();
         assert_eq!(
-            app.cur_handle.borrow().base_dir,
-            path.parent().map(|p| p.to_path_buf())
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    // ---------- P146：自动保存代次作废 / Saved 按页 id 归账 ----------
-
-    #[test]
-    fn autosave_superseded_by_generation_bump_skips_write() {
-        // 调度后页被编辑（代次推进）→ 睡醒的任务必须作废：曾只认磁盘戳，
-        // 已作废快照照写不误（撤销回基线/「放弃更改并关闭」后磁盘与 UI
-        // 双向失真）
-        let dir = scratch_dir("autosave-superseded");
-        let path = dir.join("note.txt");
-        let gen = Arc::new(std::sync::atomic::AtomicU64::new(7));
-        let task = AutosaveTask {
-            encoding: editpad_core::SaveEncoding::Utf8,
-            expected_stamp: None,
-            delay: std::time::Duration::from_millis(50),
-        };
-        let fut = drive_autosave_once(
-            1,
-            path.clone(),
-            editpad_core::Document::from_str("x"),
-            1,
-            gen.clone(),
-            7,
-            task,
-        );
-        gen.store(8, std::sync::atomic::Ordering::Relaxed);
-        match block_on(fut) {
-            Message::TabAutosaved(_, _, _, AutosaveOutcome::Superseded) => {}
-            other => panic!("应回报 Superseded，实际 {other:?}"),
-        }
-        assert!(!path.exists(), "作废任务不得写盘");
-
-        // 对照：代次未变 → 照常落盘
-        let task = AutosaveTask {
-            encoding: editpad_core::SaveEncoding::Utf8,
-            expected_stamp: None,
-            delay: std::time::Duration::from_millis(50),
-        };
-        let fut = drive_autosave_once(
-            1,
-            path.clone(),
-            editpad_core::Document::from_str("x"),
-            1,
-            gen.clone(),
-            8,
-            task,
-        );
-        match block_on(fut) {
-            Message::TabAutosaved(_, _, _, AutosaveOutcome::Written) => {}
-            other => panic!("代次一致应照常落盘，实际 {other:?}"),
-        }
-        assert!(path.exists());
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn saved_report_accounts_to_origin_tab_after_switch() {
-        // 保存期间切页（版本号巧合）曾把账目记到「完成时刻的活动页」——
-        // 错清别页置脏标记 → 关页不再弹确认 → 未保存内容无声丢失。
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
-        dispatch(&mut app, Message::NewTab);
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
-        let v0 = app.tabs[0].version;
-        let id0 = app.tabs[0].id;
-        // 页0 发起的保存回报，在活动页已切到页1 之后才到达
-        dispatch(&mut app, Message::SwitchTab(0));
-        dispatch(&mut app, Message::SwitchTab(1));
-        dispatch(
-            &mut app,
-            Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
-        );
-        // 账目必须落到发起页0：页0 清脏，页1 的置脏标记不得被错清
-        assert!(!app.tabs[0].dirty, "发起页应按版本守卫清脏");
-        assert!(app.tabs[1].dirty, "不得错清活动页的置脏标记");
-    }
-
-    /// 「保存并关闭」必须与 Ctrl+S 走同一条落盘管线：按页编码偏好、写前备份、
-    /// 外部改动守卫一个都不能少（旧版直接 `save_document_atomic` 按 UTF-8 写）。
-    #[test]
-    fn close_tab_save_backs_up_before_overwrite() {
-        let (mut app, path) = loaded_real_file_app("close-tab-backup");
-        app.settings.backup_mode = editpad_core::settings::BACKUP_MODE_SIMPLE.to_owned();
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        assert!(app.tabs[0].dirty);
-
-        dispatch(&mut app, Message::CloseTabSave(0));
-
-        let bak = path.with_file_name("note.txt.bak");
-        assert!(
-            bak.is_file(),
-            "保存并关闭必须先做写前备份（磁盘旧内容留档），实际未见 {:?}",
-            bak
-        );
-        assert_eq!(
-            std::fs::read_to_string(&bak).unwrap(),
-            "base",
-            "备份的必须是覆写前的磁盘旧内容"
-        );
-    }
-
-    #[test]
-    fn close_tab_save_blocked_by_external_change_guard() {
-        let (mut app, path) = loaded_real_file_app("close-tab-guard");
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
-        std::fs::write(&path, "externally replaced").unwrap();
-
-        dispatch(&mut app, Message::CloseTabSave(0));
-
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "externally replaced",
-            "拦截期间原文件绝不能被覆盖"
-        );
-        assert!(!app.busy, "拦截不是进入保存流程");
-        assert_eq!(app.external_change, prompt_ids(&app, &[0]), "应交外部改动提示条裁决");
-        assert_eq!(app.pending_close_tab, None, "被拦下时不得登记待关页");
-        assert_eq!(app.tabs.len(), 1, "内容没存就不该关页");
-    }
-
-    /// 逐页关窗链的两个停摆出口：未命名置脏页要交给另存为对话框接管；
-    /// 被 P63 守卫拦下的页必须作废关窗标记——留着的后果是用户随后任何一次
-    /// 成功的 Ctrl+S 都会把窗口突然关掉。
-    #[test]
-    fn save_and_close_chain_routes_unnamed_dirty_page_to_save_as() {
-        let mut app = Editpad::default();
-        app.settings.enable_snapshots = false; // 走逐页链而非快照直退
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
-        app.tabs[0].path = Some(PathBuf::from("C:/w/a.txt"));
-        dispatch(&mut app, Message::NewTab);
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
-        assert!(app.tabs[1].path.is_none(), "用例前提：页 1 未命名且置脏");
-        let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
-
-        app.pending_close = true;
-        dispatch(&mut app, Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())));
-
-        assert_eq!(app.active_tab, 1, "链应切到下一个置脏页");
-        assert!(app.pending_close, "关窗意图尚未完成，标记该保留");
-        assert!(
-            app.busy,
-            "未命名页必须弹另存为对话框接管本链，不能既不推进也不留提示"
-        );
-    }
-
-    #[test]
-    fn save_and_close_chain_voids_pending_flag_when_guard_blocks() {
-        let dir = scratch_dir("close-chain-guard");
-        let (pa, pb) = (dir.join("a.txt"), dir.join("b.txt"));
-        std::fs::write(&pa, "a").unwrap();
-        std::fs::write(&pb, "b").unwrap();
-        let mut app = Editpad::default();
-        app.settings.enable_snapshots = false;
-        dispatch(&mut app, Message::FileDropped(pa.clone()));
-        let s1 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s1,
-                Ok((
-                    editpad_core::Document::from_str("a"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        dispatch(&mut app, Message::NewTab);
-        dispatch(&mut app, Message::FileDropped(pb.clone()));
-        let s2 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s2,
-                Ok((
-                    editpad_core::Document::from_str("b"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        // 页 0 置脏（它的落盘回报由下面手工构造），页 1 真敲一个字
-        app.tabs[0].dirty = true;
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
-        // 页 1 的磁盘被外部改写 → P63 守卫必须拦下这一页的落盘
-        std::fs::write(&pb, "externally replaced").unwrap();
-        let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
-
-        app.pending_close = true;
-        dispatch(&mut app, Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())));
-
-        assert_eq!(app.active_tab, 1, "链切到了页 1");
-        assert_eq!(
-            app.external_change,
-            prompt_ids(&app, &[1]),
-            "守卫应把覆写裁决交给外部改动提示条"
-        );
-        assert!(!app.busy, "拦截不是进入保存流程");
-        assert!(
-            !app.pending_close,
-            "守卫拦下时关窗标记必须作废——否则下一次 Ctrl+S 成功即突然关窗"
-        );
-    }
-
-    /// 多选文件转发给已运行实例 → 首个进「放弃更改并打开」确认、其余留在
-    /// `pending_cli`。用户点「取消」只收走了确认条，队列悬挂 → 之后任意一次
-    /// 无关的 Loaded 收尾续排会把被放弃的文件接二连三开出来。
-    #[test]
-    fn cancelling_open_confirm_voids_remaining_cli_queue() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
-        app.pending_cli =
-            VecDeque::from(vec![PathBuf::from("C:/cli/b.txt"), PathBuf::from("C:/cli/c.txt")]);
-        app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
-
-        dispatch(&mut app, Message::ConfirmOpenCancel);
-
-        assert!(app.open_confirm.is_none(), "确认条应收起");
-        assert!(
-            app.pending_cli.is_empty(),
-            "放弃打开 = 整批作废，不得留下悬挂队列：实际 {:?}",
-            app.pending_cli
-        );
-    }
-
-    #[test]
-    fn esc_on_open_confirm_also_voids_cli_queue() {
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
-        app.pending_cli = VecDeque::from(vec![PathBuf::from("C:/cli/b.txt")]);
-        app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
-
-        // Esc 在 BarsDismissed 里本就等价于「放弃打开确认」
-        dispatch(&mut app, Message::BarsDismissed);
-
-        assert!(app.open_confirm.is_none());
-        assert!(!app.pending_close);
-        assert!(
-            app.pending_cli.is_empty(),
-            "Esc 既然视作取消，队列也要一并作废：实际 {:?}",
-            app.pending_cli
-        );
-    }
-
-    /// 一次性跳转意图只能由**它所属的那次装载**兑现。旧实现把消费写在
-    /// `match (result, target)` 之外、且作用在「当时的活动页」上，于是取消一次
-    /// 打开确认后意图悬挂，下一次无关装载的收尾替它跳了行。
-    #[test]
-    fn cancelled_open_voids_link_goto_and_later_loads_do_not_honor_it() {
-        let dir = scratch_dir("link-goto-cancel");
-        let (cur, target) = (dir.join("cur.txt"), dir.join("t.txt"));
-        std::fs::write(&cur, "c1\nc2\nc3\n").unwrap();
-        std::fs::write(&target, "a\nb\nc\nd\ne\n").unwrap();
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(cur.clone()));
-        let s0 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s0,
-                Ok((
-                    editpad_core::Document::from_str("c1\nc2\nc3\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        // 当前页置脏 → 链接打开要先过「放弃更改并打开」确认
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
-        dispatch(
-            &mut app,
-            Message::LinkClicked(crate::editor::LinkTarget::File {
-                path: target,
-                line: Some(5),
-            }),
-        );
-        assert!(app.open_confirm.is_some(), "用例前提：确认条已弹出");
-        assert_eq!(app.pending_link_goto, Some(5), "行号暂存等待裁决");
-
-        dispatch(&mut app, Message::ConfirmOpenCancel);
-        assert!(
-            app.pending_link_goto.is_none(),
-            "用户取消打开 = 该跳转意图一并作废，不得悬挂"
-        );
-
-        // 之后用户自己正常打开另一个文件并结算：被取消的那次跳行不得借这次
-        // 收尾续排复活（旧实现正是如此——当前文档光标被凭空打跑到第 5 行）
-        let later = dir.join("later.txt");
-        std::fs::write(&later, "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
-        dispatch(&mut app, Message::FileDropped(later));
-        let s1 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s1,
-                Ok((
-                    editpad_core::Document::from_str("l1\nl2\nl3\nl4\nl5\nl6\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
+            ed.doc.to_text(),
+            "line1
+line2
+line3
+line4
+"
         );
         assert_eq!(
-            app.cur_handle.borrow().cursor.line,
-            0,
-            "无关装载不得替被取消的点击跳行"
+            ed.cursor.line, 4,
+            "tail 跟随：光标落文末（幻影行首=最后换行之后）"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
+    // 关闭监视后巡检不再触发
+    dispatch(&mut app, Message::ToggleMonitorFile);
+    std::fs::write(
+        &path, "line1
+",
+    )
+    .unwrap();
+    dispatch(&mut app, Message::MonitorTick);
+    assert!(app.active_load.is_none(), "监视关闭后巡检不动");
+    let _ = std::fs::remove_file(&path);
+}
 
-    /// P215：busy 期间的 Ctrl+点击既不该静默失效，更不该把行号「存」给
-    /// 下一次装载。
-    ///
-    /// 旧顺序是无条件写 `pending_link_goto` 再 `request_open`，而后者在 busy
-    /// 下直接 `Task::none()` 返回：用户点完什么都没发生（无提示、无打开），
-    /// 那个行号却一直留在状态里，等**下一次任意一次装载**结算时被消费，把
-    /// 无关文档的光标/滚动打到第 N 行。
-    #[test]
-    fn link_click_while_busy_opens_nothing_and_banks_no_goto() {
-        let dir = scratch_dir("p215-link-busy");
-        let (inflight, target) = (dir.join("inflight.txt"), dir.join("target.txt"));
-        std::fs::write(&inflight, "1\n2\n3\n").unwrap();
-        std::fs::write(&target, "t\n").unwrap();
+/// P221：tail 跟随是**一次性**意图，加载失败/结果被丢弃时必须作废，
+/// 不得留给下一份文档。
+#[test]
+fn monitor_tail_follow_does_not_leak_into_the_next_load() {
+    let dir = std::env::temp_dir().join("editpad-p221-test");
+    let _ = std::fs::create_dir_all(&dir);
+    let watched = dir.join("watch.log");
+    let other = dir.join("other.txt");
+    std::fs::write(&watched, "line1\nline2\n").unwrap();
+    std::fs::write(&other, "a\nb\nc\nd\n").unwrap();
 
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(inflight.clone()));
-        let s1 = app.job_seq;
-        assert!(
-            app.busy && app.active_load.is_some(),
-            "夹具：应有一次在途加载未结算"
-        );
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(watched.clone()));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("line1\nline2\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::ToggleMonitorFile);
+    std::fs::write(&watched, "line1\nline2\nline3\nline4\n").unwrap();
+    dispatch(&mut app, Message::MonitorTick);
+    let job = app.active_load.clone().expect("巡检应发起监视重载");
+    assert!(
+        app.monitor_pending.is_some(),
+        "夹具：应已记下待归页的 tail 跟随"
+    );
 
-        dispatch(
-            &mut app,
-            Message::LinkClicked(crate::editor::LinkTarget::File {
-                path: target.clone(),
-                line: Some(7),
-            }),
-        );
-        assert!(app.pending_link_goto.is_none(), "busy 时不得登记跳转意图");
-        assert_eq!(app.job_seq, s1, "busy 时不得再登记第二个加载任务");
-        assert!(
-            !app.status.is_empty(),
-            "点击被守卫挡下必须留一句提示，不能静默吞掉"
-        );
+    // 重载失败：日志被轮转/删除正是 tail 跟随场景的日常
+    dispatch(
+        &mut app,
+        Message::Loaded(job.id, Err("文件不存在".to_owned())),
+    );
+    assert!(
+        app.monitor_pending.is_none(),
+        "失败出口必须作废这份一次性意图（旧实现留着它）"
+    );
 
-        // 在途那次装载结算：不得顺手把 7 兑现到它自己的页上
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s1,
-                Ok((
-                    editpad_core::Document::from_str("1\n2\n3\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
-        let ed = app.tabs[app.active_tab].editor.borrow();
+    // 关掉那一页 → 空净无名页补回同一槽位 → 再打开另一个文件
+    dispatch(&mut app, Message::CloseTabAt(0));
+    assert_eq!(app.tabs.len(), 1, "关最后一页会补一个空页（不变式）");
+    dispatch(&mut app, Message::FileDropped(other.clone()));
+    let s2 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s2,
+            Ok((
+                editpad_core::Document::from_str("a\nb\nc\nd\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    {
+        let ed = app.cur_handle.borrow();
+        assert_eq!(ed.doc.to_text(), "a\nb\nc\nd\n", "夹具：新文件落在同一槽位");
         assert_eq!(
             ed.cursor.line, 0,
-            "无关文档的光标不得被陈旧跳转意图打跑（旧实现在这里会跳到末行）"
+            "陈旧的 tail 跟随不得把刚打开文档的光标打到文末（旧实现在这里是 4）"
         );
+        assert_eq!(ed.scroll_top, 0.0, "同理不得顺手滚动这份无关文档");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
-    #[test]
-    fn link_goto_applies_to_the_tab_that_received_the_file() {
-        let dir = scratch_dir("link-goto-bg-tab");
-        let (first, target) = (dir.join("first.txt"), dir.join("t.txt"));
-        std::fs::write(&first, "x\n").unwrap();
-        std::fs::write(&target, "a\nb\nc\nd\ne\n").unwrap();
-        let mut app = Editpad::default();
-        dispatch(&mut app, Message::FileDropped(first));
-        let s0 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s0,
-                Ok((
-                    editpad_core::Document::from_str("x\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
+#[test]
+fn monitor_skips_dirty_page() {
+    let dir = std::env::temp_dir().join("editpad-p130-test");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("dirty.log");
+    std::fs::write(
+        &path, "a
+",
+    )
+    .unwrap();
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(path.clone()));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str(
+                    "a
+",
+                ),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::ToggleMonitorFile);
+    // 置脏 + 外部修改：巡检绝不能静默重载丢用户工作
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("user edit".into())),
+    );
+    assert!(app.tab().dirty);
+    std::fs::write(
+        &path,
+        "a
+external
+",
+    )
+    .unwrap();
+    dispatch(&mut app, Message::MonitorTick);
+    assert!(app.active_load.is_none(), "置脏页不得被监视重载");
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "user edita
+",
+    );
+    let _ = std::fs::remove_file(&path);
+}
 
-        dispatch(
-            &mut app,
-            Message::LinkClicked(crate::editor::LinkTarget::File {
-                path: target.clone(),
-                line: Some(4),
-            }),
-        );
-        let landing = app
-            .active_load
-            .as_ref()
-            .map(|j| j.tab_id)
-            .expect("链接目标应已登记加载任务");
-        // 加载在途期间用户切回页 0：结算时活动页 ≠ 接收文件的那一页
-        dispatch(&mut app, Message::SwitchTab(0));
-        let s1 = app.job_seq;
-        dispatch(
-            &mut app,
-            Message::Loaded(
-                s1,
-                Ok((
-                    editpad_core::Document::from_str("a\nb\nc\nd\ne\n"),
-                    String::new(),
-                    "UTF-8".to_owned(),
-                )),
-            ),
-        );
+// ---------- P133：链接 Ctrl+点击（路线图 E2） ----------
 
-        assert!(app.pending_link_goto.is_none(), "一次性消费");
-        let landed_tab = app
-            .tabs
-            .iter()
-            .position(|t| t.id == landing)
-            .expect("目标页应仍在");
-        assert_eq!(
-            app.tabs[landed_tab].editor.borrow().cursor.line,
-            3,
-            "跳行必须落在接收该文件的页上"
-        );
-        assert_eq!(
-            app.tabs[0].editor.borrow().cursor.line, 0,
-            "活动页不是接收页时不得被误跳"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+#[test]
+fn link_clicked_url_reports_and_keeps_tabs() {
+    let mut app = loaded_txt_app();
+    let tabs = app.tabs.len();
+    dispatch(
+        &mut app,
+        Message::LinkClicked(crate::editor::LinkTarget::Url(
+            "https://example.com/a".to_string(),
+        )),
+    );
+    assert_eq!(app.tabs.len(), tabs, "URL 外开不改标签页");
+    assert!(
+        app.status.contains("example.com"),
+        "状态栏应反馈打开动作，实际：{}",
+        app.status
+    );
+}
+
+#[test]
+fn link_clicked_file_opens_then_jumps_to_line() {
+    let path = scratch_dir("p133-link").join("target.txt");
+    std::fs::write(&path, "first\nsecond\nthird\n").unwrap();
+    let mut app = loaded_txt_app();
+    dispatch(
+        &mut app,
+        Message::LinkClicked(crate::editor::LinkTarget::File {
+            path: path.clone(),
+            line: Some(3),
+        }),
+    );
+    assert_eq!(app.pending_link_goto, Some(3), "行号应暂存待装载结算");
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("first\nsecond\nthird\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert_eq!(app.pending_link_goto, None, "装载结算后应一次性消费");
+    let cursor = app.cur_handle.borrow().cursor;
+    assert_eq!(
+        (cursor.line, cursor.col),
+        (2, 0),
+        "应跳到第 3 行行首（1 起）"
+    );
+    // base_dir 随装载下发 = 文件所在目录（相对路径链接的解析基准）
+    assert_eq!(
+        app.cur_handle.borrow().base_dir,
+        path.parent().map(|p| p.to_path_buf())
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------- P146：自动保存代次作废 / Saved 按页 id 归账 ----------
+
+#[test]
+fn autosave_superseded_by_generation_bump_skips_write() {
+    // 调度后页被编辑（代次推进）→ 睡醒的任务必须作废：曾只认磁盘戳，
+    // 已作废快照照写不误（撤销回基线/「放弃更改并关闭」后磁盘与 UI
+    // 双向失真）
+    let dir = scratch_dir("autosave-superseded");
+    let path = dir.join("note.txt");
+    let gen = Arc::new(std::sync::atomic::AtomicU64::new(7));
+    let task = AutosaveTask {
+        encoding: editpad_core::SaveEncoding::Utf8,
+        expected_stamp: None,
+        delay: std::time::Duration::from_millis(50),
+    };
+    let fut = drive_autosave_once(
+        1,
+        path.clone(),
+        editpad_core::Document::from_str("x"),
+        1,
+        gen.clone(),
+        7,
+        task,
+    );
+    gen.store(8, std::sync::atomic::Ordering::Relaxed);
+    match block_on(fut) {
+        Message::TabAutosaved(_, _, _, AutosaveOutcome::Superseded) => {}
+        other => panic!("应回报 Superseded，实际 {other:?}"),
     }
+    assert!(!path.exists(), "作废任务不得写盘");
 
-    #[test]
-    fn confirm_save_and_close_chains_through_all_dirty_pages() {
-        // P147 回归：ASK（非快照直退）模式「保存并关闭」曾只存活动页即
-        // 关窗，后台置脏页未存改动无声丢失。现逐页链式存完才关窗。
-        let mut app = Editpad::default();
-        app.settings.enable_snapshots = false; // session_restore_allowed=false → 走逐页链
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
-        app.tabs[0].path = Some(PathBuf::from("C:/w/a.txt"));
-        dispatch(&mut app, Message::NewTab);
-        dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
-        app.tabs[1].path = Some(PathBuf::from("C:/w/b.txt"));
-        let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
-
-        dispatch(&mut app, Message::ConfirmSaveAndClose);
-        assert!(app.pending_close && app.busy);
-
-        // 页0 的保存回报到达：仍有置脏页 → 切到页1 继续存
-        dispatch(
-            &mut app,
-            Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
-        );
-        assert_eq!(app.active_tab, 1, "应切到下一个置脏页继续存");
-        assert!(app.pending_close, "关窗意图必须保持到全部存完");
-        assert!(!app.tabs[0].dirty);
-
-        // 页1 的保存回报到达：无置脏页 → 消费关窗意图
-        let (v1, id1) = (app.tabs[1].version, app.tabs[1].id);
-        dispatch(
-            &mut app,
-            Message::Saved(id1, v1, Ok(editpad_core::EncodeNotice::default())),
-        );
-        assert!(!app.pending_close, "全部存完后消费关窗意图");
-        assert!(!app.tabs[1].dirty);
+    // 对照：代次未变 → 照常落盘
+    let task = AutosaveTask {
+        encoding: editpad_core::SaveEncoding::Utf8,
+        expected_stamp: None,
+        delay: std::time::Duration::from_millis(50),
+    };
+    let fut = drive_autosave_once(
+        1,
+        path.clone(),
+        editpad_core::Document::from_str("x"),
+        1,
+        gen.clone(),
+        8,
+        task,
+    );
+    match block_on(fut) {
+        Message::TabAutosaved(_, _, _, AutosaveOutcome::Written) => {}
+        other => panic!("代次一致应照常落盘，实际 {other:?}"),
     }
+    assert!(path.exists());
+    fs::remove_dir_all(&dir).ok();
+}
 
-    #[test]
-    fn tick_stream_emits_periodic_message() {
-        // P149：节拍订阅桥接语义——桥接线程睡满间隔后经 async channel
-        // 投递，首拍按间隔到达（此前 Task 睡眠链占用执行器 worker 整段
-        // 睡眠时长，四条链常驻占死 2~3 个 worker）。
-        // P210 起改用 Monitor 作探针：转发轮询那条流现在刻意**不产空拍**
-        // （见下方 pending_open_stream_* 两条用例），已经不是「周期性出声」
-        // 的代表样本了。
-        let mut stream = Box::pin(crate::update::tick_stream(&crate::update::TickKind::Monitor));
-        let first = block_on(stream.as_mut().next());
-        assert!(
-            matches!(first, Some(Message::MonitorTick)),
-            "首拍应产出节拍消息，实际 {first:?}"
-        );
+#[test]
+fn saved_report_accounts_to_origin_tab_after_switch() {
+    // 保存期间切页（版本号巧合）曾把账目记到「完成时刻的活动页」——
+    // 错清别页置脏标记 → 关页不再弹确认 → 未保存内容无声丢失。
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
+    let v0 = app.tabs[0].version;
+    let id0 = app.tabs[0].id;
+    // 页0 发起的保存回报，在活动页已切到页1 之后才到达
+    dispatch(&mut app, Message::SwitchTab(0));
+    dispatch(&mut app, Message::SwitchTab(1));
+    dispatch(
+        &mut app,
+        Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
+    );
+    // 账目必须落到发起页0：页0 清脏，页1 的置脏标记不得被错清
+    assert!(!app.tabs[0].dirty, "发起页应按版本守卫清脏");
+    assert!(app.tabs[1].dirty, "不得错清活动页的置脏标记");
+}
+
+/// 「保存并关闭」必须与 Ctrl+S 走同一条落盘管线：按页编码偏好、写前备份、
+/// 外部改动守卫一个都不能少（旧版直接 `save_document_atomic` 按 UTF-8 写）。
+#[test]
+fn close_tab_save_backs_up_before_overwrite() {
+    let (mut app, path) = loaded_real_file_app("close-tab-backup");
+    app.settings.backup_mode = editpad_core::settings::BACKUP_MODE_SIMPLE.to_owned();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(app.tabs[0].dirty);
+
+    dispatch(&mut app, Message::CloseTabSave(0));
+
+    let bak = path.with_file_name("note.txt.bak");
+    assert!(
+        bak.is_file(),
+        "保存并关闭必须先做写前备份（磁盘旧内容留档），实际未见 {:?}",
+        bak
+    );
+    assert_eq!(
+        std::fs::read_to_string(&bak).unwrap(),
+        "base",
+        "备份的必须是覆写前的磁盘旧内容"
+    );
+}
+
+#[test]
+fn close_tab_save_blocked_by_external_change_guard() {
+    let (mut app, path) = loaded_real_file_app("close-tab-guard");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    std::fs::write(&path, "externally replaced").unwrap();
+
+    dispatch(&mut app, Message::CloseTabSave(0));
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "externally replaced",
+        "拦截期间原文件绝不能被覆盖"
+    );
+    assert!(!app.busy, "拦截不是进入保存流程");
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[0]),
+        "应交外部改动提示条裁决"
+    );
+    assert_eq!(app.pending_close_tab, None, "被拦下时不得登记待关页");
+    assert_eq!(app.tabs.len(), 1, "内容没存就不该关页");
+}
+
+/// 逐页关窗链的两个停摆出口：未命名置脏页要交给另存为对话框接管；
+/// 被 P63 守卫拦下的页必须作废关窗标记——留着的后果是用户随后任何一次
+/// 成功的 Ctrl+S 都会把窗口突然关掉。
+#[test]
+fn save_and_close_chain_routes_unnamed_dirty_page_to_save_as() {
+    let mut app = Editpad::default();
+    app.settings.enable_snapshots = false; // 走逐页链而非快照直退
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
+    app.tabs[0].path = Some(PathBuf::from("C:/w/a.txt"));
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
+    assert!(app.tabs[1].path.is_none(), "用例前提：页 1 未命名且置脏");
+    let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
+
+    app.pending_close = true;
+    dispatch(
+        &mut app,
+        Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
+    );
+
+    assert_eq!(app.active_tab, 1, "链应切到下一个置脏页");
+    assert!(app.pending_close, "关窗意图尚未完成，标记该保留");
+    assert!(
+        app.busy,
+        "未命名页必须弹另存为对话框接管本链，不能既不推进也不留提示"
+    );
+}
+
+#[test]
+fn save_and_close_chain_voids_pending_flag_when_guard_blocks() {
+    let dir = scratch_dir("close-chain-guard");
+    let (pa, pb) = (dir.join("a.txt"), dir.join("b.txt"));
+    std::fs::write(&pa, "a").unwrap();
+    std::fs::write(&pb, "b").unwrap();
+    let mut app = Editpad::default();
+    app.settings.enable_snapshots = false;
+    dispatch(&mut app, Message::FileDropped(pa.clone()));
+    let s1 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s1,
+            Ok((
+                editpad_core::Document::from_str("a"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::FileDropped(pb.clone()));
+    let s2 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s2,
+            Ok((
+                editpad_core::Document::from_str("b"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 页 0 置脏（它的落盘回报由下面手工构造），页 1 真敲一个字
+    app.tabs[0].dirty = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+    // 页 1 的磁盘被外部改写 → P63 守卫必须拦下这一页的落盘
+    std::fs::write(&pb, "externally replaced").unwrap();
+    let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
+
+    app.pending_close = true;
+    dispatch(
+        &mut app,
+        Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
+    );
+
+    assert_eq!(app.active_tab, 1, "链切到了页 1");
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[1]),
+        "守卫应把覆写裁决交给外部改动提示条"
+    );
+    assert!(!app.busy, "拦截不是进入保存流程");
+    assert!(
+        !app.pending_close,
+        "守卫拦下时关窗标记必须作废——否则下一次 Ctrl+S 成功即突然关窗"
+    );
+}
+
+/// 多选文件转发给已运行实例 → 首个进「放弃更改并打开」确认、其余留在
+/// `pending_cli`。用户点「取消」只收走了确认条，队列悬挂 → 之后任意一次
+/// 无关的 Loaded 收尾续排会把被放弃的文件接二连三开出来。
+#[test]
+fn cancelling_open_confirm_voids_remaining_cli_queue() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
+    app.pending_cli = VecDeque::from(vec![
+        PathBuf::from("C:/cli/b.txt"),
+        PathBuf::from("C:/cli/c.txt"),
+    ]);
+    app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
+
+    dispatch(&mut app, Message::ConfirmOpenCancel);
+
+    assert!(app.open_confirm.is_none(), "确认条应收起");
+    assert!(
+        app.pending_cli.is_empty(),
+        "放弃打开 = 整批作废，不得留下悬挂队列：实际 {:?}",
+        app.pending_cli
+    );
+}
+
+#[test]
+fn esc_on_open_confirm_also_voids_cli_queue() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
+    app.pending_cli = VecDeque::from(vec![PathBuf::from("C:/cli/b.txt")]);
+    app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
+
+    // Esc 在 BarsDismissed 里本就等价于「放弃打开确认」
+    dispatch(&mut app, Message::BarsDismissed);
+
+    assert!(app.open_confirm.is_none());
+    assert!(!app.pending_close);
+    assert!(
+        app.pending_cli.is_empty(),
+        "Esc 既然视作取消，队列也要一并作废：实际 {:?}",
+        app.pending_cli
+    );
+}
+
+/// 一次性跳转意图只能由**它所属的那次装载**兑现。旧实现把消费写在
+/// `match (result, target)` 之外、且作用在「当时的活动页」上，于是取消一次
+/// 打开确认后意图悬挂，下一次无关装载的收尾替它跳了行。
+#[test]
+fn cancelled_open_voids_link_goto_and_later_loads_do_not_honor_it() {
+    let dir = scratch_dir("link-goto-cancel");
+    let (cur, target) = (dir.join("cur.txt"), dir.join("t.txt"));
+    std::fs::write(&cur, "c1\nc2\nc3\n").unwrap();
+    std::fs::write(&target, "a\nb\nc\nd\ne\n").unwrap();
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(cur.clone()));
+    let s0 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s0,
+            Ok((
+                editpad_core::Document::from_str("c1\nc2\nc3\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 当前页置脏 → 链接打开要先过「放弃更改并打开」确认
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+    dispatch(
+        &mut app,
+        Message::LinkClicked(crate::editor::LinkTarget::File {
+            path: target,
+            line: Some(5),
+        }),
+    );
+    assert!(app.open_confirm.is_some(), "用例前提：确认条已弹出");
+    assert_eq!(app.pending_link_goto, Some(5), "行号暂存等待裁决");
+
+    dispatch(&mut app, Message::ConfirmOpenCancel);
+    assert!(
+        app.pending_link_goto.is_none(),
+        "用户取消打开 = 该跳转意图一并作废，不得悬挂"
+    );
+
+    // 之后用户自己正常打开另一个文件并结算：被取消的那次跳行不得借这次
+    // 收尾续排复活（旧实现正是如此——当前文档光标被凭空打跑到第 5 行）
+    let later = dir.join("later.txt");
+    std::fs::write(&later, "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
+    dispatch(&mut app, Message::FileDropped(later));
+    let s1 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s1,
+            Ok((
+                editpad_core::Document::from_str("l1\nl2\nl3\nl4\nl5\nl6\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert_eq!(
+        app.cur_handle.borrow().cursor.line,
+        0,
+        "无关装载不得替被取消的点击跳行"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P215：busy 期间的 Ctrl+点击既不该静默失效，更不该把行号「存」给
+/// 下一次装载。
+///
+/// 旧顺序是无条件写 `pending_link_goto` 再 `request_open`，而后者在 busy
+/// 下直接 `Task::none()` 返回：用户点完什么都没发生（无提示、无打开），
+/// 那个行号却一直留在状态里，等**下一次任意一次装载**结算时被消费，把
+/// 无关文档的光标/滚动打到第 N 行。
+#[test]
+fn link_click_while_busy_opens_nothing_and_banks_no_goto() {
+    let dir = scratch_dir("p215-link-busy");
+    let (inflight, target) = (dir.join("inflight.txt"), dir.join("target.txt"));
+    std::fs::write(&inflight, "1\n2\n3\n").unwrap();
+    std::fs::write(&target, "t\n").unwrap();
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(inflight.clone()));
+    let s1 = app.job_seq;
+    assert!(
+        app.busy && app.active_load.is_some(),
+        "夹具：应有一次在途加载未结算"
+    );
+
+    dispatch(
+        &mut app,
+        Message::LinkClicked(crate::editor::LinkTarget::File {
+            path: target.clone(),
+            line: Some(7),
+        }),
+    );
+    assert!(app.pending_link_goto.is_none(), "busy 时不得登记跳转意图");
+    assert_eq!(app.job_seq, s1, "busy 时不得再登记第二个加载任务");
+    assert!(
+        !app.status.is_empty(),
+        "点击被守卫挡下必须留一句提示，不能静默吞掉"
+    );
+
+    // 在途那次装载结算：不得顺手把 7 兑现到它自己的页上
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s1,
+            Ok((
+                editpad_core::Document::from_str("1\n2\n3\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    let ed = app.tabs[app.active_tab].editor.borrow();
+    assert_eq!(
+        ed.cursor.line, 0,
+        "无关文档的光标不得被陈旧跳转意图打跑（旧实现在这里会跳到末行）"
+    );
+}
+
+#[test]
+fn link_goto_applies_to_the_tab_that_received_the_file() {
+    let dir = scratch_dir("link-goto-bg-tab");
+    let (first, target) = (dir.join("first.txt"), dir.join("t.txt"));
+    std::fs::write(&first, "x\n").unwrap();
+    std::fs::write(&target, "a\nb\nc\nd\ne\n").unwrap();
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(first));
+    let s0 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s0,
+            Ok((
+                editpad_core::Document::from_str("x\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    dispatch(
+        &mut app,
+        Message::LinkClicked(crate::editor::LinkTarget::File {
+            path: target.clone(),
+            line: Some(4),
+        }),
+    );
+    let landing = app
+        .active_load
+        .as_ref()
+        .map(|j| j.tab_id)
+        .expect("链接目标应已登记加载任务");
+    // 加载在途期间用户切回页 0：结算时活动页 ≠ 接收文件的那一页
+    dispatch(&mut app, Message::SwitchTab(0));
+    let s1 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s1,
+            Ok((
+                editpad_core::Document::from_str("a\nb\nc\nd\ne\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    assert!(app.pending_link_goto.is_none(), "一次性消费");
+    let landed_tab = app
+        .tabs
+        .iter()
+        .position(|t| t.id == landing)
+        .expect("目标页应仍在");
+    assert_eq!(
+        app.tabs[landed_tab].editor.borrow().cursor.line,
+        3,
+        "跳行必须落在接收该文件的页上"
+    );
+    assert_eq!(
+        app.tabs[0].editor.borrow().cursor.line,
+        0,
+        "活动页不是接收页时不得被误跳"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn confirm_save_and_close_chains_through_all_dirty_pages() {
+    // P147 回归：ASK（非快照直退）模式「保存并关闭」曾只存活动页即
+    // 关窗，后台置脏页未存改动无声丢失。现逐页链式存完才关窗。
+    let mut app = Editpad::default();
+    app.settings.enable_snapshots = false; // session_restore_allowed=false → 走逐页链
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("A".into())));
+    app.tabs[0].path = Some(PathBuf::from("C:/w/a.txt"));
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("B".into())));
+    app.tabs[1].path = Some(PathBuf::from("C:/w/b.txt"));
+    let (v0, id0) = (app.tabs[0].version, app.tabs[0].id);
+
+    dispatch(&mut app, Message::ConfirmSaveAndClose);
+    assert!(app.pending_close && app.busy);
+
+    // 页0 的保存回报到达：仍有置脏页 → 切到页1 继续存
+    dispatch(
+        &mut app,
+        Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert_eq!(app.active_tab, 1, "应切到下一个置脏页继续存");
+    assert!(app.pending_close, "关窗意图必须保持到全部存完");
+    assert!(!app.tabs[0].dirty);
+
+    // 页1 的保存回报到达：无置脏页 → 消费关窗意图
+    let (v1, id1) = (app.tabs[1].version, app.tabs[1].id);
+    dispatch(
+        &mut app,
+        Message::Saved(id1, v1, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert!(!app.pending_close, "全部存完后消费关窗意图");
+    assert!(!app.tabs[1].dirty);
+}
+
+#[test]
+fn tick_stream_emits_periodic_message() {
+    // P149：节拍订阅桥接语义——桥接线程睡满间隔后经 async channel
+    // 投递，首拍按间隔到达（此前 Task 睡眠链占用执行器 worker 整段
+    // 睡眠时长，四条链常驻占死 2~3 个 worker）。
+    // P210 起改用 Monitor 作探针：转发轮询那条流现在刻意**不产空拍**
+    // （见下方 pending_open_stream_* 两条用例），已经不是「周期性出声」
+    // 的代表样本了。
+    let mut stream = Box::pin(crate::update::tick_stream(
+        &crate::update::TickKind::Monitor,
+    ));
+    let first = block_on(stream.as_mut().next());
+    assert!(
+        matches!(first, Some(Message::MonitorTick)),
+        "首拍应产出节拍消息，实际 {first:?}"
+    );
+}
+
+/// P210（O-7②）：转发轮询的空拍**不得产出消息**。
+///
+/// 修前每 400ms 无条件一条 `PendingOpenTick`，每条消息 = 一次全窗
+/// tiny-skia 重绘 ≈ 2.5 次/秒的常驻开销（而握手目录绝大多数时候是空的），
+/// 且「读目录 → rename 抢占 → 读 → 删」四步跑在 UI 线程上。
+///
+/// P212 起取货函数由订阅身份注入，故本用例**一次都不碰真实实例目录**
+/// （真机若开着另一个 Editpad 实例，往 %APPDATA 写批次文件会被它抢走，
+/// 既脏了用户会话也让用例互斥不掉）。判据不用耗时：先起流、跨过 ≥7 拍，
+/// 再单趟抽缓冲——空拍若发过消息，此刻必然已在缓冲里（容量 1）。
+#[test]
+fn pending_open_stream_stays_silent_while_nothing_arrived() {
+    use iced::futures::task::{noop_waker, Context};
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+    let key = crate::update::PendingOpenPoll {
+        interval_ms: 20,
+        poll: || Vec::new(),
+    };
+    let mut stream = Box::pin(crate::update::pending_open_stream(&key));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    // ⚠️ 必须先 poll 一次：`stream::channel` 的建流闭包（含拉起桥接线程）
+    // 到**首次 poll** 才执行。漏了这一步，下面睡的是「还没开始的线程」，
+    // 用例空转恒绿——本条第一次就写成那样，靠「拆掉守卫看会不会转红」
+    // 才抓出来。
+    let started = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
+    assert!(matches!(started, Poll::Pending), "刚建流时不该有产出");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(150) {
+        std::thread::sleep(Duration::from_millis(10));
     }
+    let polled = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
+    assert!(
+        matches!(polled, Poll::Pending),
+        "取货函数一直空时，跑满 150ms（≥7 拍）也不该发一条消息，实际 {polled:?}"
+    );
+}
 
-    /// P210（O-7②）：转发轮询的空拍**不得产出消息**。
-    ///
-    /// 修前每 400ms 无条件一条 `PendingOpenTick`，每条消息 = 一次全窗
-    /// tiny-skia 重绘 ≈ 2.5 次/秒的常驻开销（而握手目录绝大多数时候是空的），
-    /// 且「读目录 → rename 抢占 → 读 → 删」四步跑在 UI 线程上。
-    ///
-    /// P212 起取货函数由订阅身份注入，故本用例**一次都不碰真实实例目录**
-    /// （真机若开着另一个 Editpad 实例，往 %APPDATA 写批次文件会被它抢走，
-    /// 既脏了用户会话也让用例互斥不掉）。判据不用耗时：先起流、跨过 ≥7 拍，
-    /// 再单趟抽缓冲——空拍若发过消息，此刻必然已在缓冲里（容量 1）。
-    #[test]
-    fn pending_open_stream_stays_silent_while_nothing_arrived() {
-        use iced::futures::task::{noop_waker, Context};
-        use std::task::Poll;
-        use std::time::{Duration, Instant};
-        let key = crate::update::PendingOpenPoll {
-            interval_ms: 20,
-            poll: || Vec::new(),
-        };
-        let mut stream = Box::pin(crate::update::pending_open_stream(&key));
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        // ⚠️ 必须先 poll 一次：`stream::channel` 的建流闭包（含拉起桥接线程）
-        // 到**首次 poll** 才执行。漏了这一步，下面睡的是「还没开始的线程」，
-        // 用例空转恒绿——本条第一次就写成那样，靠「拆掉守卫看会不会转红」
-        // 才抓出来。
-        let started = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
-        assert!(matches!(started, Poll::Pending), "刚建流时不该有产出");
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_millis(150) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let polled = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx);
-        assert!(
-            matches!(polled, Poll::Pending),
-            "取货函数一直空时，跑满 150ms（≥7 拍）也不该发一条消息，实际 {polled:?}"
-        );
-    }
-
-    /// P212：与上一条对偶——**到货必须发声**。只测「空拍不发声」不够，
-    /// 「整条流永不产出」的错误实现能同时骗过那一条。
-    #[test]
-    fn pending_open_stream_delivers_arrived_paths() {
-        use iced::futures::task::{noop_waker, Context};
-        use std::task::Poll;
-        use std::time::{Duration, Instant};
-        let key = crate::update::PendingOpenPoll {
-            interval_ms: 20,
-            poll: || vec![PathBuf::from("C:/p212/a.txt")],
-        };
-        let mut stream = Box::pin(crate::update::pending_open_stream(&key));
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let _ = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx); // 起线程
-        let start = Instant::now();
-        loop {
-            if let Poll::Ready(Some(msg)) =
-                iced::futures::Stream::poll_next(stream.as_mut(), &mut cx)
-            {
-                match msg {
-                    Message::PendingOpenPaths(p) => assert_eq!(
-                        p,
-                        vec![PathBuf::from("C:/p212/a.txt")],
-                        "取到的路径必须原样带在消息里"
-                    ),
-                    other => panic!("应产出 PendingOpenPaths，实际 {other:?}"),
-                }
-                break;
+/// P212：与上一条对偶——**到货必须发声**。只测「空拍不发声」不够，
+/// 「整条流永不产出」的错误实现能同时骗过那一条。
+#[test]
+fn pending_open_stream_delivers_arrived_paths() {
+    use iced::futures::task::{noop_waker, Context};
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+    let key = crate::update::PendingOpenPoll {
+        interval_ms: 20,
+        poll: || vec![PathBuf::from("C:/p212/a.txt")],
+    };
+    let mut stream = Box::pin(crate::update::pending_open_stream(&key));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let _ = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx); // 起线程
+    let start = Instant::now();
+    loop {
+        if let Poll::Ready(Some(msg)) = iced::futures::Stream::poll_next(stream.as_mut(), &mut cx) {
+            match msg {
+                Message::PendingOpenPaths(p) => assert_eq!(
+                    p,
+                    vec![PathBuf::from("C:/p212/a.txt")],
+                    "取到的路径必须原样带在消息里"
+                ),
+                other => panic!("应产出 PendingOpenPaths，实际 {other:?}"),
             }
-            assert!(
-                start.elapsed() < Duration::from_millis(3000),
-                "取货函数一直有货，3 秒内必须出声"
-            );
-            std::thread::sleep(Duration::from_millis(10));
+            break;
         }
-    }
-
-    /// P210：busy 期间到货的转发路径改存暂存位，不混进 `pending_cli`。
-    /// 依据是 N-07 的既有口径——`ConfirmOpenCancel` / `BarsDismissed` 会整条
-    /// 清空 `pending_cli`（那批本就是用户主动取消的对象），而转发路径此刻已经
-    /// 从磁盘抢走、无处重试：混进去就是「取消一次确认条，第二实例双击的文件
-    /// 全丢」。旧实现靠「busy 时干脆不读盘」回避，读盘挪到桥接线程后改暂存，
-    /// 下一拍（400ms）自愈合。
-    #[test]
-    fn pending_open_paths_stash_while_busy_and_merge_in_order_when_idle() {
-        let mut app = Editpad::default();
-        app.busy = true;
-        dispatch(
-            &mut app,
-            Message::PendingOpenPaths(vec![PathBuf::from("C:/pf/a.txt")]),
-        );
         assert!(
-            app.pending_cli.is_empty(),
-            "busy 时不得混进 CLI 队列（会被取消分支连带作废）"
+            start.elapsed() < Duration::from_millis(3000),
+            "取货函数一直有货，3 秒内必须出声"
         );
-        assert_eq!(app.pending_open_stash, vec![PathBuf::from("C:/pf/a.txt")]);
-
-        // 不忙后的下一拍：暂存按原顺序并入，再走既有的串行续排
-        app.busy = false;
-        dispatch(
-            &mut app,
-            Message::PendingOpenPaths(vec![PathBuf::from("C:/pf/b.txt")]),
-        );
-        assert!(app.pending_open_stash.is_empty(), "暂存应已并入并清空");
-        assert_eq!(
-            app.active_load.as_ref().map(|j| j.path.clone()),
-            Some(PathBuf::from("C:/pf/a.txt")),
-            "先到的路径先加载"
-        );
-        assert_eq!(
-            app.pending_cli,
-            VecDeque::from(vec![PathBuf::from("C:/pf/b.txt")]),
-            "余下按原顺序排队"
-        );
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
 
-    /// P210：抢占读取内核的首批用例。P148 那段「rename 原子抢占 + 读后即删」
-    /// 守着的是「用户双击的文件会不会被静默吞掉」，此前**一条用例都没有**。
-    #[test]
-    fn pending_open_claim_reads_and_removes_each_batch() {
-        let dir = scratch_dir("p210-claim");
-        // 两批（pid 命名，P148 的并发口径）+ 一堆非批次名
-        std::fs::write(dir.join("pending_open.111.txt"), "C:/a.txt\n  C:/b.txt  \n\n").unwrap();
-        std::fs::write(dir.join("pending_open.222.txt"), "C:/c.txt").unwrap();
-        std::fs::write(dir.join("session.toml"), "C:/noise.txt").unwrap();
-        std::fs::write(dir.join("pending_open.333.bak"), "C:/noise2.txt").unwrap();
+/// P210：busy 期间到货的转发路径改存暂存位，不混进 `pending_cli`。
+/// 依据是 N-07 的既有口径——`ConfirmOpenCancel` / `BarsDismissed` 会整条
+/// 清空 `pending_cli`（那批本就是用户主动取消的对象），而转发路径此刻已经
+/// 从磁盘抢走、无处重试：混进去就是「取消一次确认条，第二实例双击的文件
+/// 全丢」。旧实现靠「busy 时干脆不读盘」回避，读盘挪到桥接线程后改暂存，
+/// 下一拍（400ms）自愈合。
+#[test]
+fn pending_open_paths_stash_while_busy_and_merge_in_order_when_idle() {
+    let mut app = Editpad::default();
+    app.busy = true;
+    dispatch(
+        &mut app,
+        Message::PendingOpenPaths(vec![PathBuf::from("C:/pf/a.txt")]),
+    );
+    assert!(
+        app.pending_cli.is_empty(),
+        "busy 时不得混进 CLI 队列（会被取消分支连带作废）"
+    );
+    assert_eq!(app.pending_open_stash, vec![PathBuf::from("C:/pf/a.txt")]);
 
-        let mut got = crate::single_instance::take_pending_open_in(&dir);
-        got.sort();
-        assert_eq!(
-            got,
-            vec![
-                PathBuf::from("C:/a.txt"),
-                PathBuf::from("C:/b.txt"),
-                PathBuf::from("C:/c.txt")
-            ],
-            "批次路径应逐行取出（两端空白与空行剔除），非批次名不得认领"
-        );
-        // 取后即删：同目录再取必须是空表——这正是「空拍不发消息」的判据源
-        assert!(
-            crate::single_instance::take_pending_open_in(&dir).is_empty(),
-            "批次文件应已被认领并删除，且噪音文件不得被吞"
-        );
-        assert!(dir.join("session.toml").exists(), "非批次文件一律不碰");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // 不忙后的下一拍：暂存按原顺序并入，再走既有的串行续排
+    app.busy = false;
+    dispatch(
+        &mut app,
+        Message::PendingOpenPaths(vec![PathBuf::from("C:/pf/b.txt")]),
+    );
+    assert!(app.pending_open_stash.is_empty(), "暂存应已并入并清空");
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.path.clone()),
+        Some(PathBuf::from("C:/pf/a.txt")),
+        "先到的路径先加载"
+    );
+    assert_eq!(
+        app.pending_cli,
+        VecDeque::from(vec![PathBuf::from("C:/pf/b.txt")]),
+        "余下按原顺序排队"
+    );
+}
 
-    /// P210：上一轮认领后崩溃留下的 `.taking-` 半途文件，下一轮照常读（P148
-    /// 注释里承诺的自愈路径）。它同样匹配 `pending_open.*.txt`，靠的是命名
-    /// 前缀而非运气——本用例把这条承诺钉住。
-    #[test]
-    fn pending_open_claim_recovers_leftover_taking_file() {
-        let dir = scratch_dir("p210-taking");
-        std::fs::write(dir.join("pending_open.taking-999.txt"), "C:/x.txt").unwrap();
-        assert_eq!(
-            crate::single_instance::take_pending_open_in(&dir),
-            vec![PathBuf::from("C:/x.txt")],
-            "半途文件应被下一轮认领"
-        );
-        assert!(
-            crate::single_instance::take_pending_open_in(&dir).is_empty(),
-            "认领后不留残骸"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+/// P210：抢占读取内核的首批用例。P148 那段「rename 原子抢占 + 读后即删」
+/// 守着的是「用户双击的文件会不会被静默吞掉」，此前**一条用例都没有**。
+#[test]
+fn pending_open_claim_reads_and_removes_each_batch() {
+    let dir = scratch_dir("p210-claim");
+    // 两批（pid 命名，P148 的并发口径）+ 一堆非批次名
+    std::fs::write(
+        dir.join("pending_open.111.txt"),
+        "C:/a.txt\n  C:/b.txt  \n\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("pending_open.222.txt"), "C:/c.txt").unwrap();
+    std::fs::write(dir.join("session.toml"), "C:/noise.txt").unwrap();
+    std::fs::write(dir.join("pending_open.333.bak"), "C:/noise2.txt").unwrap();
+
+    let mut got = crate::single_instance::take_pending_open_in(&dir);
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            PathBuf::from("C:/a.txt"),
+            PathBuf::from("C:/b.txt"),
+            PathBuf::from("C:/c.txt")
+        ],
+        "批次路径应逐行取出（两端空白与空行剔除），非批次名不得认领"
+    );
+    // 取后即删：同目录再取必须是空表——这正是「空拍不发消息」的判据源
+    assert!(
+        crate::single_instance::take_pending_open_in(&dir).is_empty(),
+        "批次文件应已被认领并删除，且噪音文件不得被吞"
+    );
+    assert!(dir.join("session.toml").exists(), "非批次文件一律不碰");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P210：上一轮认领后崩溃留下的 `.taking-` 半途文件，下一轮照常读（P148
+/// 注释里承诺的自愈路径）。它同样匹配 `pending_open.*.txt`，靠的是命名
+/// 前缀而非运气——本用例把这条承诺钉住。
+#[test]
+fn pending_open_claim_recovers_leftover_taking_file() {
+    let dir = scratch_dir("p210-taking");
+    std::fs::write(dir.join("pending_open.taking-999.txt"), "C:/x.txt").unwrap();
+    assert_eq!(
+        crate::single_instance::take_pending_open_in(&dir),
+        vec![PathBuf::from("C:/x.txt")],
+        "半途文件应被下一轮认领"
+    );
+    assert!(
+        crate::single_instance::take_pending_open_in(&dir).is_empty(),
+        "认领后不留残骸"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

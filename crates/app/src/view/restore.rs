@@ -58,8 +58,7 @@ impl Editpad {
         dir: &Path,
         manifest: &editpad_core::snapshot::SessionManifest,
     ) -> Task<Message> {
-        let (kept, dropped) =
-            plan_restore_order(manifest, dir, MULTI_TAB_MEM_CAP_BYTES);
+        let (kept, dropped) = plan_restore_order(manifest, dir, MULTI_TAB_MEM_CAP_BYTES);
         self.restore_dropped = dropped;
         self.restore_failed = 0;
 
@@ -108,8 +107,7 @@ impl Editpad {
                                     // 内容嗅探让未命名草稿同样享受配色
                                     let sample = head_sample(&ed.doc);
                                     ed.set_language_by_name(
-                                        editpad_core::resolve_language(None, &sample)
-                                            .as_deref(),
+                                        editpad_core::resolve_language(None, &sample).as_deref(),
                                     );
                                 }
                                 tab.dirty = true;
@@ -140,11 +138,8 @@ impl Editpad {
                                 );
                                 let sample = head_sample(&ed.doc);
                                 ed.set_language_by_name(
-                                    editpad_core::resolve_language(
-                                        Some(Path::new(path)),
-                                        &sample,
-                                    )
-                                    .as_deref(),
+                                    editpad_core::resolve_language(Some(Path::new(path)), &sample)
+                                        .as_deref(),
                                 );
                             }
                             tab.path = Some(PathBuf::from(path));
@@ -226,8 +221,15 @@ impl Editpad {
             return Task::none();
         }
         let id = self.register_load_job(entry.path, entry.tab);
-        self.restore_views
-            .insert(id, (entry.cursor_line, entry.cursor_col, entry.scroll_top, entry.scroll_left));
+        self.restore_views.insert(
+            id,
+            (
+                entry.cursor_line,
+                entry.cursor_col,
+                entry.scroll_top,
+                entry.scroll_left,
+            ),
+        );
         Task::none()
     }
 
@@ -248,13 +250,25 @@ impl Editpad {
     pub(super) fn finish_restore_summary(&mut self) {
         let mut notes: Vec<String> = Vec::new();
         if self.restore_failed > 0 {
-            notes.push(editpad_core::fmt_restore_note(self.lang(), self.restore_failed, false));
+            notes.push(editpad_core::fmt_restore_note(
+                self.lang(),
+                self.restore_failed,
+                false,
+            ));
         }
         if self.restore_dropped > 0 {
-            notes.push(editpad_core::fmt_restore_note(self.lang(), self.restore_dropped, true));
+            notes.push(editpad_core::fmt_restore_note(
+                self.lang(),
+                self.restore_dropped,
+                true,
+            ));
         }
         if !notes.is_empty() {
-            self.set_status(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StSessionRestored, &notes.join(self.t(editpad_core::Key::ListSeparator))));
+            self.set_status(editpad_core::fmt_suffix(
+                self.lang(),
+                editpad_core::Key::StSessionRestored,
+                &notes.join(self.t(editpad_core::Key::ListSeparator)),
+            ));
         }
         self.restore_failed = 0;
         self.restore_dropped = 0;
@@ -321,5 +335,4 @@ impl Editpad {
         }
         Task::none()
     }
-
 }

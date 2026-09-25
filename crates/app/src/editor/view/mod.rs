@@ -20,10 +20,13 @@ use iced::advanced::{
     widget::Tree,
     Clipboard, Shell, Widget,
 };
-use iced::{alignment, border::Radius, mouse, window, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
+use iced::{
+    alignment, border::Radius, mouse, window, Color, Element, Font, Length, Pixels, Point,
+    Rectangle, Size, Theme,
+};
 
 use super::core::{
-    luminance, lighten, CursorPos, EditOp, EditorHandle, ImeCommit, CARET_WIDTH,
+    lighten, luminance, CursorPos, EditOp, EditorHandle, ImeCommit, CARET_WIDTH,
     SCROLL_LINES_PER_NOTCH, WRAP_SB_RESERVE_HYSTERESIS_LINES,
 };
 use super::metrics::{
@@ -31,16 +34,12 @@ use super::metrics::{
     shape_row_xs, TAB_STOP_COLS,
 };
 use super::scrollbars::{
-    mark_y_for_row, resolve_mark_click, wrap_sb_reserve_needed, HScrollbar, MarkTarget,
+    mark_y_for_row, resolve_mark_click, wrap_sb_reserve_needed, HScrollbar, MarkTarget, VScrollbar,
     MARK_HEIGHT, MARK_WIDTH, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
-    VScrollbar,
 };
-use super::wrap::segment_index as wrap_segment_index;
 use super::wrap::pixel_breaks;
-use super::{
-    BOOKMARK_DOT, BOOKMARK_STRIP, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET,
-};
-
+use super::wrap::segment_index as wrap_segment_index;
+use super::{BOOKMARK_DOT, BOOKMARK_STRIP, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET};
 
 // P160：按域拆出的自由项（纯移动零行为变更）。font 的项经 `pub use` 再导出，
 // 以维持 `editor::view::*` 对外路径不变（editor/mod.rs 有 `pub use view::*`）。
@@ -59,7 +58,11 @@ impl super::core::EditorHandle {
     /// 的反面教材：能靠每帧传参的状态就不要落库）。
     /// 默认语义 = [`BODY_FONT`]（P33 的 CJK 钉字仍生效）。
     pub fn view(&self, font: Font) -> Element<'_, crate::Message> {
-        Element::new(EditorView { core: self.clone(), font, zoom_accum: 0.0 })
+        Element::new(EditorView {
+            core: self.clone(),
+            font,
+            zoom_accum: 0.0,
+        })
     }
 }
 
@@ -68,20 +71,7 @@ impl super::core::EditorHandle {
 // 正文与 UI 的单一换装点：画布、行号栏、UI 控件全部引用 BODY_FONT，
 // 字号全部从正文字号推导——P34（字体选择设置）落地时只需替换常量。
 
-
-
-
-
-
-
-
 // ---------- 控件实现 ----------
-
-
-
-
-
-
 
 struct EditorView {
     core: EditorHandle,
@@ -148,10 +138,6 @@ impl EditorView {
         core.refresh_visible_row_layouts(self.font);
     }
 }
-
-
-
-
 
 impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
     fn size(&self) -> Size<Length> {
@@ -225,17 +211,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             (0.0, (bounds.width - gutter_w).max(0.0))
         } else {
             // 关态 = 既有口径（列模型 ∪ 真实行宽）
-            (
-                core.content_width_px(),
-                (bounds.width - gutter_w).max(0.0),
-            )
+            (core.content_width_px(), (bounds.width - gutter_w).max(0.0))
         };
-        let hsb = HScrollbar::measure(
-            hcontent_px,
-            hview_px,
-            bounds.width,
-            core.scroll_left,
-        );
+        let hsb = HScrollbar::measure(hcontent_px, hview_px, bounds.width, core.scroll_left);
 
         // P99：软换行折行预算跟随垂直滚动条 needed——内容超出视口
         // （滚动条必然出现）时按滚动条可视带宽让位，折行文本在滑块
@@ -316,9 +294,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             let lens = text.chars().count();
             let (c0, c1) = (c0.min(lens), c1.min(lens));
             if c0 < c1 {
-                let underline_y = |row: f32| -> f32 {
-                    bounds.y + (row - core.scroll_top) * lh + lh - 3.0
-                };
+                let underline_y =
+                    |row: f32| -> f32 { bounds.y + (row - core.scroll_top) * lh + lh - 3.0 };
                 let mut draw_piece = |x: f32, w: f32, row: f32| {
                     let Some(rect) = Rectangle {
                         x: bounds.x + gutter_w + x - scroll_left,
@@ -326,12 +303,14 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         width: w.max(char_w * 0.4),
                         height: 1.5,
                     }
-                    .intersection(&bounds)
-                    else {
+                    .intersection(&bounds) else {
                         return;
                     };
                     renderer.fill_quad(
-                        renderer::Quad { bounds: rect, ..renderer::Quad::default() },
+                        renderer::Quad {
+                            bounds: rect,
+                            ..renderer::Quad::default()
+                        },
                         colors.link_underline,
                     );
                 };
@@ -346,9 +325,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             continue;
                         }
                         let row = base_v as f32 + s as f32;
-                        if row < core.scroll_top
-                            || row > core.scroll_top + core.viewport_h / lh
-                        {
+                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
                             continue;
                         }
                         let seg_base = core.px_of(line, &text, seg_start);
@@ -358,9 +335,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     }
                 } else {
                     let row = line as f32;
-                    if row >= core.scroll_top
-                        && row <= core.scroll_top + core.viewport_h / lh
-                    {
+                    if row >= core.scroll_top && row <= core.scroll_top + core.viewport_h / lh {
                         draw_piece(
                             core.px_of(line, &text, c0),
                             core.px_of(line, &text, c1) - core.px_of(line, &text, c0),
@@ -397,7 +372,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         // 不画进行号栏（参考线属正文区）
                         renderer.fill_quad(
                             renderer::Quad {
-                                bounds: Rectangle { x, y, width: 1.0, height: lh },
+                                bounds: Rectangle {
+                                    x,
+                                    y,
+                                    width: 1.0,
+                                    height: lh,
+                                },
                                 ..renderer::Quad::default()
                             },
                             colors.indent_guide,
@@ -478,8 +458,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                                 continue;
                             }
                             let row = base + s as f32;
-                            if row < core.scroll_top
-                                || row > core.scroll_top + core.viewport_h / lh
+                            if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh
                             {
                                 continue;
                             }
@@ -488,42 +467,44 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             let x1 = core.px_of_len(line, &text, ce, lens) - seg_base;
                             let Some(rect) = Rectangle {
                                 x: bounds.x + gutter_w + x0 - scroll_left,
-                                y: bounds.y + (row - core.scroll_top) * lh
+                                y: bounds.y
+                                    + (row - core.scroll_top) * lh
                                     + core.decoration_inset(),
                                 width: (x1 - x0).max(char_w * 0.4),
                                 height: lh,
                             }
-                            .intersection(&bounds)
-                            else {
+                            .intersection(&bounds) else {
                                 continue;
                             };
                             renderer.fill_quad(
-                                renderer::Quad { bounds: rect, ..renderer::Quad::default() },
+                                renderer::Quad {
+                                    bounds: rect,
+                                    ..renderer::Quad::default()
+                                },
                                 colors.find,
                             );
                         }
                     } else {
                         let row = line as f32;
-                        if row < core.scroll_top
-                            || row > core.scroll_top + core.viewport_h / lh
-                        {
+                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
                             continue;
                         }
                         let x0 = core.px_of_len(line, &text, c0, lens);
                         let x1 = core.px_of_len(line, &text, c1, lens);
                         let Some(rect) = Rectangle {
                             x: bounds.x + gutter_w + x0 - scroll_left,
-                            y: bounds.y + (row - core.scroll_top) * lh
-                                + core.decoration_inset(),
+                            y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
                             width: (x1 - x0).max(char_w * 0.4),
                             height: lh,
                         }
-                        .intersection(&bounds)
-                        else {
+                        .intersection(&bounds) else {
                             continue;
                         };
                         renderer.fill_quad(
-                            renderer::Quad { bounds: rect, ..renderer::Quad::default() },
+                            renderer::Quad {
+                                bounds: rect,
+                                ..renderer::Quad::default()
+                            },
                             colors.find,
                         );
                     }
@@ -560,8 +541,16 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             for line in lo..=hi {
                 let text = core.line_text(line);
                 let lens = text.chars().count();
-                let start_col = if line == sel_start.line { sel_start.col } else { 0 };
-                let end_col = if line == sel_end.line { sel_end.col } else { lens };
+                let start_col = if line == sel_start.line {
+                    sel_start.col
+                } else {
+                    0
+                };
+                let end_col = if line == sel_end.line {
+                    sel_end.col
+                } else {
+                    lens
+                };
                 if end_col <= start_col {
                     continue;
                 }
@@ -576,9 +565,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             continue;
                         }
                         let row = base + s as f32;
-                        if row < core.scroll_top
-                            || row > core.scroll_top + core.viewport_h / lh
-                        {
+                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
                             continue;
                         }
                         // 段相对：续行从文本区左缘起排
@@ -597,8 +584,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             width: (x1 - x0).max(char_w),
                             height: lh,
                         }
-                        .intersection(&bounds)
-                        else {
+                        .intersection(&bounds) else {
                             continue;
                         };
                         renderer.fill_quad(
@@ -615,10 +601,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
                     continue;
                 }
-                let x0 = core
-                    .px_of_len(line, &text, start_col.min(lens), lens);
-                let x1 = core
-                    .px_of_len(line, &text, end_col.min(lens), lens);
+                let x0 = core.px_of_len(line, &text, start_col.min(lens), lens);
+                let x1 = core.px_of_len(line, &text, end_col.min(lens), lens);
                 // P59：选区矩形与控件边界求交——部分可见行的高亮不再越界
                 // （quad 无任何裁剪，越界部分会压标签条/状态栏）
                 // P88/P89：与折行分支同款——y 从墨迹上边距改为按墨迹
@@ -629,8 +613,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     width: (x1 - x0).max(char_w),
                     height: lh,
                 }
-                .intersection(&bounds)
-                else {
+                .intersection(&bounds) else {
                     continue;
                 };
                 renderer.fill_quad(
@@ -651,8 +634,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 列宽 min(c1) 的像素。P89：y 与选区同款按墨迹盒居中。
         if let Some((r0, r1, c0, c1)) = core.active_block() {
             for line in r0..=r1 {
-                let y =
-                    bounds.y + (line as f32 - core.scroll_top) * lh + core.decoration_inset();
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh + core.decoration_inset();
                 if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                     continue;
                 }
@@ -732,12 +714,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         if core.show_whitespace || core.show_line_endings {
             let mark = colors.invisibles;
             // 空白标记绘制（闭包收纳 A 层 quad 分支，两态共用）
-            let draw_ws_mark = |renderer: &mut iced::Renderer,
-                                y: f32,
-                                cx: f32,
-                                ch: char,
-                                adv: usize| {
-                match ch {
+            let draw_ws_mark =
+                |renderer: &mut iced::Renderer, y: f32, cx: f32, ch: char, adv: usize| match ch {
                     ' ' => renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
@@ -766,8 +744,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         )
                     }
                     _ => {}
-                }
-            };
+                };
             let (iv_first, iv_last) = core.visible_range();
             for line in iv_first..=iv_last {
                 let text = core.line_text(line);
@@ -781,7 +758,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         for (s, _) in breaks.iter().enumerate() {
                             // ⚠️ `<` 必须与左操作数同行（换行会被解析器
                             // 当成 f32 的泛型参数开始）
-                            if ((base + s as u32) as f32) < (core.scroll_top + core.viewport_h / lh + 1.0) {
+                            if ((base + s as u32) as f32)
+                                < (core.scroll_top + core.viewport_h / lh + 1.0)
+                            {
                                 m = s;
                             } else {
                                 break;
@@ -799,13 +778,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                                 let cols = core.line_display_len(line);
                                 if let Some(x) = core.row_x(line, cols) {
                                     // 段相对：x 减末段起点像素（续行左缘）
-                                    let x_rel =
-                                        x - core.px_of(line, &text, breaks[last_seg]);
+                                    let x_rel = x - core.px_of(line, &text, breaks[last_seg]);
                                     renderer.fill_quad(
                                         renderer::Quad {
                                             bounds: Rectangle {
-                                                x: bounds.x + gutter_w + x_rel
-                                                    - scroll_left
+                                                x: bounds.x + gutter_w + x_rel - scroll_left
                                                     + char_w * 0.25,
                                                 y: y + lh * 0.25,
                                                 width: 2.0,
@@ -832,13 +809,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             if seg > max_vis_seg {
                                 break;
                             }
-                            let y = bounds.y
-                                + ((base + seg as u32) as f32 - core.scroll_top) * lh;
+                            let y = bounds.y + ((base + seg as u32) as f32 - core.scroll_top) * lh;
                             if y + lh > bounds.y && y < bounds.y + bounds.height {
                                 if let Some(x) = core.row_x(line, col) {
                                     // 段相对：续行字符标记从段起点起排
-                                    let cx = bounds.x + gutter_w
-                                        + x
+                                    let cx = bounds.x + gutter_w + x
                                         - core.px_of(line, &text, breaks[seg])
                                         - scroll_left;
                                     draw_ws_mark(renderer, y, cx, ch, adv);
@@ -874,8 +849,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         renderer.fill_quad(
                             renderer::Quad {
                                 bounds: Rectangle {
-                                    x: bounds.x + gutter_w + x - scroll_left
-                                        + char_w * 0.25,
+                                    x: bounds.x + gutter_w + x - scroll_left + char_w * 0.25,
                                     y: y + lh * 0.25,
                                     width: 2.0,
                                     height: lh * 0.45,
@@ -998,9 +972,13 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     let (line, seg, seg_start, seg_end) = core.locate_visual(v);
                     // 后续逻辑行整体下移：该行原首段之前的一切（含组字
                     // 行本身的旧表段）不动；组字行由首段全量重排绘制
-                    let y_off = reflow
-                        .as_ref()
-                        .map_or(0.0f32, |r| if line > r.line { r.k as f32 } else { 0.0 });
+                    let y_off = reflow.as_ref().map_or(0.0f32, |r| {
+                        if line > r.line {
+                            r.k as f32
+                        } else {
+                            0.0
+                        }
+                    });
                     let y = bounds.y + (v as f32 + y_off - core.scroll_top) * lh;
                     if y + lh <= bounds.y || y >= bounds.y + bounds.height {
                         continue;
@@ -1050,17 +1028,27 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                                     if be <= bs {
                                         continue;
                                     }
-                                    let yv = bounds.y
-                                        + (r.v0 as f32 + bi as f32 - core.scroll_top) * lh;
-                                    if yv + lh <= bounds.y
-                                        || yv >= bounds.y + bounds.height
-                                    {
+                                    let yv =
+                                        bounds.y + (r.v0 as f32 + bi as f32 - core.scroll_top) * lh;
+                                    if yv + lh <= bounds.y || yv >= bounds.y + bounds.height {
                                         continue;
                                     }
                                     paint_composed_segment(
-                                        renderer, &core, body_font, text_x0, yv, &r.s,
-                                        &r.s_xs, bs, be, r.col_p, r.pel, palette.text,
-                                        colors.preedit_text, &rruns, bounds,
+                                        renderer,
+                                        &core,
+                                        body_font,
+                                        text_x0,
+                                        yv,
+                                        &r.s,
+                                        &r.s_xs,
+                                        bs,
+                                        be,
+                                        r.col_p,
+                                        r.pel,
+                                        palette.text,
+                                        colors.preedit_text,
+                                        &rruns,
+                                        bounds,
                                     );
                                 }
                             }
@@ -1073,12 +1061,13 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     // （新文档/空白行输入）与行尾组字是老浮层实现本可
                     // 显示、三段式嵌入行绘制后会被整行跳过（用户复报
                     // 「组字直接没了」）；空行只有段 0 且无正文
-                    let pre_slot: Option<(&str, usize, f32)> = preedit_text
-                        .as_deref()
-                        .zip(preedit_w)
-                        .and_then(|(p, w)| {
-                            (core.cursor.line == line && core.cursor.col <= lens)
-                                .then_some((p, core.cursor.col, w))
+                    let pre_slot: Option<(&str, usize, f32)> =
+                        preedit_text.as_deref().zip(preedit_w).and_then(|(p, w)| {
+                            (core.cursor.line == line && core.cursor.col <= lens).then_some((
+                                p,
+                                core.cursor.col,
+                                w,
+                            ))
                         });
                     if seg_start >= lens {
                         // 空行/幻影行：仅首段且无正文——组字画在段首，
@@ -1128,8 +1117,20 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             let remain = (display_right_edge - text_x0 - rel).max(0.0);
                             let vis = w.min(remain);
                             paint_text_slice(
-                                renderer, &core, body_font, text_x0, y, line, seg_start, &text,
-                                seg_start, col_p, 0.0, palette.text, &runs, bounds,
+                                renderer,
+                                &core,
+                                body_font,
+                                text_x0,
+                                y,
+                                line,
+                                seg_start,
+                                &text,
+                                seg_start,
+                                col_p,
+                                0.0,
+                                palette.text,
+                                &runs,
+                                bounds,
                             );
                             // 组字 + 被挤出的后文放进「组字插入区」子层：
                             // fill_text 的 clip 参数受 iced 文本缓存「首次
@@ -1163,135 +1164,196 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                                 );
                             }
                             paint_text_slice(
-                                renderer, &core, body_font, text_x0, y, line, seg_start, &text,
-                                col_p, seg_end, rel + vis, palette.text, &runs, bounds,
+                                renderer,
+                                &core,
+                                body_font,
+                                text_x0,
+                                y,
+                                line,
+                                seg_start,
+                                &text,
+                                col_p,
+                                seg_end,
+                                rel + vis,
+                                palette.text,
+                                &runs,
+                                bounds,
                             );
                             renderer.end_layer();
                             continue;
                         }
                     }
                     paint_text_slice(
-                        renderer, &core, body_font, text_x0, y, line, seg_start, &text,
-                        seg_start, seg_end, 0.0, palette.text, &runs, bounds,
+                        renderer,
+                        &core,
+                        body_font,
+                        text_x0,
+                        y,
+                        line,
+                        seg_start,
+                        &text,
+                        seg_start,
+                        seg_end,
+                        0.0,
+                        palette.text,
+                        &runs,
+                        bounds,
                     );
                 }
             }
         } else {
-        let (first, last) = core.visible_range();
-        for line in first..=last {
-            let y = bounds.y + (line as f32 - core.scroll_top) * lh;
-            // P66：只跳过完全在视口外的行；上下缘的半可见行照常绘制，
-            // 越界部分由图层掩码裁掉（P59 时代的「不完整行跳过」退役——
-            // 那是整行对齐的前提，也是行号钉死的共谋）
-            if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                continue;
-            }
-
-            // 行号数字：P66附 改「计算左缘 + Default 对齐」。上游把 Cached
-            // 文本的损伤矩形存为 Rectangle::new(position, size)——Right 对齐
-            // 时 position 是右缘、矩形向右展开，而字形实际向左展开 → 损伤区
-            // 永远错位到字形右侧空白带，部分重绘时数字不被重绘（用户截图：
-            // 滚动后行号滞后一帧/序号重复，内容却总是新鲜——Default 对齐的
-            // 内容矩形方向正确）。数字是 ASCII 等宽（P42 实测 char_w，行号
-            // 字号按 GUTTER_FONT_SCALE 线性折算），左缘可精确计算：
-            // num_x + num_w = 行号栏右缘 − GUTTER_MIN，视觉仍是右对齐。
-            // P150：盒宽改用「行号字号实测字宽 × 位数 + GUTTER_NUM_SLACK」
-            // ——线性折算与盒宽等于文本宽度都会让上游丢掉末位字形
-            //（用户复现：自定义比例字体 + 24px 下 10/11/12 只画出首位）。
-            let num = (line + 1).to_string();
-            let digits = num.chars().count();
-            let num_w = digits as f32 * core.gutter_char_width();
-            let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
-            renderer.fill_text(
-                core_text::Text {
-                    content: num,
-                    bounds: Size::new(core.gutter_number_box_w(digits), lh),
-                    size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
-                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                    // P154：行号用行号族（未下发 = 正文字体）
-                    font: gutter_font,
-                    align_x: core_text::Alignment::Default,
-                    align_y: alignment::Vertical::Top,
-                    shaping: core_text::Shaping::Basic,
-                    wrapping: core_text::Wrapping::None,
-                },
-                Point::new(num_x, y),
-                colors.gutter_text,
-                bounds,
-            );
-
-            let text = core.line_text(line);
-            let lens = text.chars().count();
-            // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
-            // 同款注释——新文档/空白行输入是老浮层的常见场景）
-            let pre_slot: Option<(&str, usize, f32)> = preedit_text
-                .as_deref()
-                .zip(preedit_w)
-                .and_then(|(p, w)| {
-                    (core.cursor.line == line && core.cursor.col <= lens)
-                        .then_some((p, core.cursor.col, w))
-                });
-            if text.is_empty() {
-                // 空行：组字画在行首（col 必 0；clip = 控件右缘，关态
-                // 无折行边界，超视口部分由掩码硬裁、可水平滚动）
-                if let Some((p, _, w)) = pre_slot {
-                    if w > 0.0 {
-                        renderer.fill_text(
-                            core_text::Text {
-                                content: p.to_owned(),
-                                bounds: Size::new(f32::INFINITY, lh),
-                                size: Pixels(core.font_size()),
-                                line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                font: body_font,
-                                align_x: core_text::Alignment::Default,
-                                align_y: alignment::Vertical::Top,
-                                shaping: core_text::Shaping::Advanced,
-                                wrapping: core_text::Wrapping::None,
-                            },
-                            Point::new(text_x0, y),
-                            colors.preedit_text,
-                            preedit_clip,
-                        );
-                    }
+            let (first, last) = core.visible_range();
+            for line in first..=last {
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh;
+                // P66：只跳过完全在视口外的行；上下缘的半可见行照常绘制，
+                // 越界部分由图层掩码裁掉（P59 时代的「不完整行跳过」退役——
+                // 那是整行对齐的前提，也是行号钉死的共谋）
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
                 }
-                continue;
-            }
-            let runs = core.highlight_runs(line, &text);
-            // P115：本行含组字插入点 → 三段式（关态无折行约束，后文整体
-            // 右移组字实测宽；超视口部分由 B 层掩码硬裁，可水平滚动查看）
-            if let Some((p, col_p, w)) = pre_slot {
-                let rel = core.px_of(line, &text, col_p);
-                paint_text_slice(
-                    renderer, &core, body_font, text_x0, y, line, 0, &text, 0, col_p, 0.0,
-                    palette.text, &runs, bounds,
-                );
+
+                // 行号数字：P66附 改「计算左缘 + Default 对齐」。上游把 Cached
+                // 文本的损伤矩形存为 Rectangle::new(position, size)——Right 对齐
+                // 时 position 是右缘、矩形向右展开，而字形实际向左展开 → 损伤区
+                // 永远错位到字形右侧空白带，部分重绘时数字不被重绘（用户截图：
+                // 滚动后行号滞后一帧/序号重复，内容却总是新鲜——Default 对齐的
+                // 内容矩形方向正确）。数字是 ASCII 等宽（P42 实测 char_w，行号
+                // 字号按 GUTTER_FONT_SCALE 线性折算），左缘可精确计算：
+                // num_x + num_w = 行号栏右缘 − GUTTER_MIN，视觉仍是右对齐。
+                // P150：盒宽改用「行号字号实测字宽 × 位数 + GUTTER_NUM_SLACK」
+                // ——线性折算与盒宽等于文本宽度都会让上游丢掉末位字形
+                //（用户复现：自定义比例字体 + 24px 下 10/11/12 只画出首位）。
+                let num = (line + 1).to_string();
+                let digits = num.chars().count();
+                let num_w = digits as f32 * core.gutter_char_width();
+                let num_x = bounds.x + gutter_w - GUTTER_MIN - num_w;
                 renderer.fill_text(
                     core_text::Text {
-                        content: p.to_owned(),
-                        bounds: Size::new(f32::INFINITY, lh),
-                        size: Pixels(core.font_size()),
+                        content: num,
+                        bounds: Size::new(core.gutter_number_box_w(digits), lh),
+                        size: Pixels(core.font_size() * GUTTER_FONT_SCALE),
                         line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                        font: body_font,
+                        // P154：行号用行号族（未下发 = 正文字体）
+                        font: gutter_font,
                         align_x: core_text::Alignment::Default,
                         align_y: alignment::Vertical::Top,
-                        shaping: core_text::Shaping::Advanced,
+                        shaping: core_text::Shaping::Basic,
                         wrapping: core_text::Wrapping::None,
                     },
-                    Point::new(text_x0 + rel, y),
-                    colors.preedit_text,
-                    preedit_clip,
+                    Point::new(num_x, y),
+                    colors.gutter_text,
+                    bounds,
                 );
+
+                let text = core.line_text(line);
+                let lens = text.chars().count();
+                // P115 勘误：插槽判断先在空行检查前（空行组字须画，见开态
+                // 同款注释——新文档/空白行输入是老浮层的常见场景）
+                let pre_slot: Option<(&str, usize, f32)> =
+                    preedit_text.as_deref().zip(preedit_w).and_then(|(p, w)| {
+                        (core.cursor.line == line && core.cursor.col <= lens).then_some((
+                            p,
+                            core.cursor.col,
+                            w,
+                        ))
+                    });
+                if text.is_empty() {
+                    // 空行：组字画在行首（col 必 0；clip = 控件右缘，关态
+                    // 无折行边界，超视口部分由掩码硬裁、可水平滚动）
+                    if let Some((p, _, w)) = pre_slot {
+                        if w > 0.0 {
+                            renderer.fill_text(
+                                core_text::Text {
+                                    content: p.to_owned(),
+                                    bounds: Size::new(f32::INFINITY, lh),
+                                    size: Pixels(core.font_size()),
+                                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                    font: body_font,
+                                    align_x: core_text::Alignment::Default,
+                                    align_y: alignment::Vertical::Top,
+                                    shaping: core_text::Shaping::Advanced,
+                                    wrapping: core_text::Wrapping::None,
+                                },
+                                Point::new(text_x0, y),
+                                colors.preedit_text,
+                                preedit_clip,
+                            );
+                        }
+                    }
+                    continue;
+                }
+                let runs = core.highlight_runs(line, &text);
+                // P115：本行含组字插入点 → 三段式（关态无折行约束，后文整体
+                // 右移组字实测宽；超视口部分由 B 层掩码硬裁，可水平滚动查看）
+                if let Some((p, col_p, w)) = pre_slot {
+                    let rel = core.px_of(line, &text, col_p);
+                    paint_text_slice(
+                        renderer,
+                        &core,
+                        body_font,
+                        text_x0,
+                        y,
+                        line,
+                        0,
+                        &text,
+                        0,
+                        col_p,
+                        0.0,
+                        palette.text,
+                        &runs,
+                        bounds,
+                    );
+                    renderer.fill_text(
+                        core_text::Text {
+                            content: p.to_owned(),
+                            bounds: Size::new(f32::INFINITY, lh),
+                            size: Pixels(core.font_size()),
+                            line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                            font: body_font,
+                            align_x: core_text::Alignment::Default,
+                            align_y: alignment::Vertical::Top,
+                            shaping: core_text::Shaping::Advanced,
+                            wrapping: core_text::Wrapping::None,
+                        },
+                        Point::new(text_x0 + rel, y),
+                        colors.preedit_text,
+                        preedit_clip,
+                    );
+                    paint_text_slice(
+                        renderer,
+                        &core,
+                        body_font,
+                        text_x0,
+                        y,
+                        line,
+                        0,
+                        &text,
+                        col_p,
+                        lens,
+                        rel + w,
+                        palette.text,
+                        &runs,
+                        preedit_clip,
+                    );
+                    continue;
+                }
                 paint_text_slice(
-                    renderer, &core, body_font, text_x0, y, line, 0, &text, col_p, lens,
-                    rel + w, palette.text, &runs, preedit_clip,
+                    renderer,
+                    &core,
+                    body_font,
+                    text_x0,
+                    y,
+                    line,
+                    0,
+                    &text,
+                    0,
+                    lens,
+                    0.0,
+                    palette.text,
+                    &runs,
+                    bounds,
                 );
-                continue;
             }
-            paint_text_slice(
-                renderer, &core, body_font, text_x0, y, line, 0, &text, 0, lens, 0.0,
-                palette.text, &runs, bounds,
-            );
-        }
         }
 
         // 组字串文字已并入 B 层正文三段式绘制（P115）：前文 + 组字（正文
@@ -1346,8 +1408,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             } else {
                 let caret = core.caret_rect_relative();
                 let row_top_y = caret.y - core.ink_offset;
-                let in_view =
-                    caret.y + lh > 0.0 && caret.y < core.viewport_h;
+                let in_view = caret.y + lh > 0.0 && caret.y < core.viewport_h;
                 if in_view {
                     let vis = core.preedit_visual_w(core.cursor.col, w);
                     if vis > 0.0 {
@@ -1391,9 +1452,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 }
             } else {
                 // P164：帧首已实测，直接消费
-                let pre_dx = preedit_w.map_or(0.0f32, |w| {
-                    core.preedit_visual_w(core.cursor.col, w)
-                });
+                let pre_dx =
+                    preedit_w.map_or(0.0f32, |w| core.preedit_visual_w(core.cursor.col, w));
                 (bounds.x + caret.x + pre_dx, bounds.y + caret.y)
             };
             renderer.fill_quad(
@@ -1524,7 +1584,10 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             bounds.y + mark_y_for_row(row, &sb) - MARK_HEIGHT * 0.5;
                         renderer.fill_quad(
                             mark_quad,
-                            Color { a: colors.bookmark.a * sb_alpha, ..colors.bookmark },
+                            Color {
+                                a: colors.bookmark.a * sb_alpha,
+                                ..colors.bookmark
+                            },
                         );
                     }
                     for &(row, _) in &hit_marks {
@@ -1532,7 +1595,10 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             bounds.y + mark_y_for_row(row, &sb) - MARK_HEIGHT * 0.5;
                         renderer.fill_quad(
                             mark_quad,
-                            Color { a: FIND_MARK_COLOR.a * sb_alpha, ..FIND_MARK_COLOR },
+                            Color {
+                                a: FIND_MARK_COLOR.a * sb_alpha,
+                                ..FIND_MARK_COLOR
+                            },
                         );
                     }
                 }
@@ -1665,8 +1731,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         core.scroll_top,
                     );
                     let (local_x, local_y) = (pos.x - bounds.x, pos.y - bounds.y);
-                    if sb.hits(local_x, local_y, bounds.width)
-                        && core.scrollbar_visibility() > 0.05
+                    if sb.hits(local_x, local_y, bounds.width) && core.scrollbar_visibility() > 0.05
                     {
                         // P131：刻度解析只在「非滑块」时才需要——滑块抓取
                         // 仍最优先；命中/书签刻度是精确目标，优先于轨道
@@ -1677,7 +1742,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             } else {
                                 // 视觉行 → 轨道 y（与绘制同源换算）
                                 let to_ys = |marks: &[(u32, usize)]| {
-                                    marks.iter()
+                                    marks
+                                        .iter()
                                         .map(|&(row, i)| (mark_y_for_row(row, &sb), i))
                                         .collect::<Vec<_>>()
                                 };
@@ -1944,9 +2010,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
 
                 // P135：拖拽移动/复制选区——候选态超阈值成拖拽，拖拽中
                 // 更新落点 + 贴缘自动推进（阈值内仍是候选，走后续路径）
-                if core.dnd.is_some()
-                    && core.update_dnd(pos.x - bounds.x, pos.y - bounds.y)
-                {
+                if core.dnd.is_some() && core.update_dnd(pos.x - bounds.x, pos.y - bounds.y) {
                     drop(core);
                     shell.request_redraw();
                     shell.capture_event();
@@ -2036,8 +2100,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         mouse::ScrollDelta::Lines { y, .. } => (*y, false),
                         mouse::ScrollDelta::Pixels { y, .. } => (*y / lh, true),
                     };
-                    let (accum, step) =
-                        wheel_zoom_step(self.zoom_accum, lines, is_pixels);
+                    let (accum, step) = wheel_zoom_step(self.zoom_accum, lines, is_pixels);
                     self.zoom_accum = accum;
                     if step != 0.0 {
                         // P134（C7）：Ctrl+滚轮改走「当前页覆盖」语义——
@@ -2174,7 +2237,6 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
 fn iced_mods_alt_shift() -> iced::keyboard::Modifiers {
     iced::keyboard::Modifiers::ALT | iced::keyboard::Modifiers::SHIFT
 }
-
 
 #[cfg(test)]
 mod tests;

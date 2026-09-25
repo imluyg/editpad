@@ -313,7 +313,10 @@ mod tests {
             &editpad_core::Document::from_str("disk v2"),
             editpad_core::SaveEncoding::Utf8,
         );
-        assert!(matches!(outcome, AutosaveOutcome::Written), "实际 {outcome:?}");
+        assert!(
+            matches!(outcome, AutosaveOutcome::Written),
+            "实际 {outcome:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "disk v2",

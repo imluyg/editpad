@@ -16,7 +16,11 @@ fn p154_gutter_font_change_remeasures_gutter_width_only() {
     };
     core.borrow_mut().set_gutter_font(Some(gutter_font));
 
-    let view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let view = EditorView {
+        core: core.clone(),
+        font: BODY_FONT,
+        zoom_accum: 0.0,
+    };
     view.ensure_measured_char_width();
     {
         let c = core.borrow();
@@ -30,9 +34,7 @@ fn p154_gutter_font_change_remeasures_gutter_width_only() {
             Some((BODY_FONT, 24.0, Some(gutter_font))),
             "度量键必须含行号字体（只换行号字体也要重测）"
         );
-        let gw = c
-            .gutter_char_w
-            .expect("行号字宽应按行号族实测注入");
+        let gw = c.gutter_char_w.expect("行号字宽应按行号族实测注入");
         // 行号字号 = 正文字号 × GUTTER_FONT_SCALE（19.5px）
         let expect = super::super::metrics::measure_char_width(
             gutter_font,
@@ -48,7 +50,11 @@ fn p154_gutter_font_change_remeasures_gutter_width_only() {
     // 再下发同名族：键不变 → 不重测（幂等，避免每帧空转）
     let before = core.borrow().metric_key;
     core.borrow_mut().set_gutter_font(Some(gutter_font));
-    assert_eq!(core.borrow().metric_key, before, "同族重复下发不得作废度量键");
+    assert_eq!(
+        core.borrow().metric_key,
+        before,
+        "同族重复下发不得作废度量键"
+    );
 
     // 清空行号族（回落正文字体）：换键 + 字宽按正文字体重测
     core.borrow_mut().set_gutter_font(None);
@@ -59,11 +65,8 @@ fn p154_gutter_font_change_remeasures_gutter_width_only() {
     view.ensure_measured_char_width();
     let c = core.borrow();
     assert_eq!(c.metric_key, Some((BODY_FONT, 24.0, None)), "回落正文字体");
-    let body_only = super::super::metrics::measure_char_width(
-        BODY_FONT,
-        24.0 * GUTTER_FONT_SCALE,
-    )
-    .expect("正文字体字宽应可测");
+    let body_only = super::super::metrics::measure_char_width(BODY_FONT, 24.0 * GUTTER_FONT_SCALE)
+        .expect("正文字体字宽应可测");
     let gw = c.gutter_char_w.expect("应已重测");
     assert!(
         (gw - body_only).abs() < 0.01,
@@ -99,7 +102,11 @@ fn headless_caret_and_selection_never_ink_above_first_row() {
         c.cursor = CursorPos { line: 0, col: 0 };
         c.set_word_wrap(true);
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -121,7 +128,13 @@ fn headless_caret_and_selection_never_ink_above_first_row() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let gutter = {
         let c = core.borrow();
         c.gutter_width()
@@ -190,7 +203,13 @@ fn headless_caret_and_selection_never_ink_above_first_row() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer2.draw(&mut pixels2.as_mut(), &mut mask2, &viewport, &damage, Color::WHITE);
+    renderer2.draw(
+        &mut pixels2.as_mut(),
+        &mut mask2,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let mut sel_strip = 0u32;
     for y in ey as i32..first_ink_row {
         for x in (ex + gutter) as i32..(ex + ew) as i32 {
@@ -230,7 +249,11 @@ fn headless_single_char_selection_band_centered_on_glyph_ink() {
         c.anchor = Some(CursorPos { line: 0, col: 0 });
         c.cursor = CursorPos { line: 0, col: 1 };
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -252,7 +275,13 @@ fn headless_single_char_selection_band_centered_on_glyph_ink() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let (gutter, lh, io, ih, inset) = {
         let c = core.borrow();
         (
@@ -345,7 +374,11 @@ fn headless_preedit_text_same_vertical_band_as_body_text() {
         c.cursor = CursorPos { line: 0, col: 1 };
         assert!(c.ime_preedit("中".to_owned()));
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -367,7 +400,13 @@ fn headless_preedit_text_same_vertical_band_as_body_text() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let lh = core.borrow().line_height();
     let gutter = core.borrow().gutter_width();
     // P115：组字与正文同色（黑）——按 x 分区统计深墨行：
@@ -458,7 +497,11 @@ fn headless_preedit_clipped_at_wrap_right_edge_when_wrap_on() {
         // 深灰 thumb 会误判黑墨——强制不画，界外判据只认组字墨迹
         c.sb_activity = None;
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -505,7 +548,13 @@ fn headless_preedit_clipped_at_wrap_right_edge_when_wrap_on() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     // P115：组字与正文同色（黑）——界外判据 = 深墨（avg < 230；正文
     // 在该 x 区无字：段 0 右缘 ≤ 预算 < right_edge，第二视觉行从
     // 文本区左缘起排；滚动条已禁画）。光标随组字停到折行边界
@@ -580,7 +629,11 @@ fn headless_preedit_reflow_paints_line_when_first_segment_scrolled_out() {
         // 行尾组字（等价 Preedit 事件；focused 默认真）
         assert!(c.ime_preedit("此时".to_owned()));
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -602,7 +655,13 @@ fn headless_preedit_reflow_paints_line_when_first_segment_scrolled_out() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let (gutter, lh) = {
         let c = core.borrow();
         (c.gutter_width(), c.line_height())
@@ -660,7 +719,11 @@ fn headless_mid_line_preedit_pushes_tail_text() {
         c.cursor = CursorPos { line: 0, col: 3 };
         assert!(c.ime_preedit("mn".to_owned()));
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -682,7 +745,13 @@ fn headless_mid_line_preedit_pushes_tail_text() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let gutter = core.borrow().gutter_width();
     let (px3, px8, px9, ch_w, pre_w) = {
         let c = core.borrow();
@@ -760,7 +829,11 @@ fn headless_preedit_on_empty_line_renders() {
             c.cursor = CursorPos { line: 0, col: 0 };
             assert!(c.ime_preedit("zhongguo".to_owned()));
         }
-        let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: core.clone(),
+            font,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(font, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -782,7 +855,13 @@ fn headless_preedit_on_empty_line_renders() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         let gutter = core.borrow().gutter_width();
         let x0 = (ex + gutter) as i32;
         let mut ink = 0u32;
@@ -795,9 +874,7 @@ fn headless_preedit_on_empty_line_renders() {
                 }
             }
         }
-        eprintln!(
-            "[P115勘误] wrap={wrap} 空行组字区墨px={ink} (pre_w={pre_w:.1})"
-        );
+        eprintln!("[P115勘误] wrap={wrap} 空行组字区墨px={ink} (pre_w={pre_w:.1})");
         assert!(ink > 0, "空行组字未渲染（wrap={wrap}）：修前整行跳过必挂");
     }
 }
@@ -827,7 +904,11 @@ fn headless_preedit_at_wrapped_line_end_renders() {
         c.cursor = CursorPos { line: 0, col: 20 };
         assert!(c.ime_preedit("zhongguo".to_owned()));
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -849,7 +930,13 @@ fn headless_preedit_at_wrapped_line_end_renders() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let gutter = core.borrow().gutter_width();
     let pre_w = shape_row_xs(font, 16.0, "zhongguo")
         .expect("shape 失败")
@@ -876,9 +963,7 @@ fn headless_preedit_at_wrapped_line_end_renders() {
             }
         }
     }
-    eprintln!(
-        "[P115勘误] 行尾组字：rel={rel:.0} budget={budget:.1} vis={vis:.1} 墨px={ink}"
-    );
+    eprintln!("[P115勘误] 行尾组字：rel={rel:.0} budget={budget:.1} vis={vis:.1} 墨px={ink}");
     assert!(ink > 0, "折行开态行尾组字未渲染（修前段条件排除行尾必挂）");
 }
 
@@ -911,7 +996,11 @@ fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
         c.cursor = CursorPos { line: 0, col: 8 };
         assert!(c.ime_preedit(preedit.to_owned()));
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -933,9 +1022,16 @@ fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     // 合成串与断点（与实现同口径，动态）
-    let s: String = "中".repeat(8)
+    let s: String = "中"
+        .repeat(8)
         .chars()
         .chain(preedit.chars())
         .chain("中".repeat(12).chars())
@@ -1025,8 +1121,7 @@ fn headless_preedit_reflow_wraps_tail_and_shifts_following_lines() {
     );
 }
 
-
-    /// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
+/// P46 根治验证（headless 像素级）：完整绘制链路（renderer.fill_text →
 /// tiny-skia 光栅化）下，41 汉字行 + 水平滚动（scroll_left=80），
 /// 「第 40/41 字」区域必须有墨迹。视口宽 bounds（旧版形态）与
 /// INFINITY bounds（新版）对照，定位「41 字封顶」的真实截断点：
@@ -1104,24 +1199,24 @@ fn headless_fractional_scroll_paints_no_ink_outside_bounds() {
     let core = EditorHandle::default();
     {
         let mut c = core.borrow_mut();
-        let doc_text: String =
-            (1..=20).map(|i| format!("第{i}行内容\n")).collect();
+        let doc_text: String = (1..=20).map(|i| format!("第{i}行内容\n")).collect();
         c.reset_document(editpad_core::Document::from_str(&doc_text));
         c.set_viewport_width(ew);
         c.set_viewport_height(eh);
         // 平滑滚动到小数行位：首行半可见（顶部越界带）+ 末行半可见（底部）
         c.scroll_by_lines(-2.5);
     }
-    let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core,
+        font: BODY_FONT,
+        zoom_accum: 0.0,
+    };
 
     let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
     let mut tree = Tree::empty();
     // 控件尺寸 = 600×300（limits 收紧到目标尺寸，Fill 才解析成 600×300
     // 而非整个画布——首版脚手架此处给错，"越界"多为合法绘制）
-    let limits = layout::Limits::new(
-        Size::new(ew, eh),
-        Size::new(ew, eh),
-    );
+    let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
     let node = view.layout(&mut tree, &renderer, &limits);
     // 平移到 (50, 60)：四周留出可检测的越界带（原点渲染无法检测上方越界）
     let node = node.translate(iced::Vector::new(ex, ey));
@@ -1159,20 +1254,14 @@ fn headless_fractional_scroll_paints_no_ink_outside_bounds() {
     let grow = |box_: &mut Option<(u32, u32, u32, u32)>, x: u32, y: u32| {
         *box_ = match *box_ {
             None => Some((x, y, x, y)),
-            Some((x_min, y_min, x_max, y_max)) => Some((
-                x_min.min(x),
-                y_min.min(y),
-                x_max.max(x),
-                y_max.max(y),
-            )),
+            Some((x_min, y_min, x_max, y_max)) => {
+                Some((x_min.min(x), y_min.min(y), x_max.max(x), y_max.max(y)))
+            }
         };
     };
     for y in 0..h {
         for x in 0..w {
-            let inside = x >= x0
-                && x < x0 + ew as u32
-                && y >= y0
-                && y < y0 + eh as u32;
+            let inside = x >= x0 && x < x0 + ew as u32 && y >= y0 && y < y0 + eh as u32;
             if inside {
                 continue;
             }
@@ -1213,10 +1302,7 @@ fn headless_fractional_scroll_paints_no_ink_outside_bounds() {
     let mut bbox: Option<(u32, u32, u32, u32)> = None; // (min_x, min_y, max_x, max_y)
     for y in 0..h {
         for x in 0..w {
-            let inside = x >= x0
-                && x < x0 + ew as u32
-                && y >= y0
-                && y < y0 + eh as u32;
+            let inside = x >= x0 && x < x0 + ew as u32 && y >= y0 && y < y0 + eh as u32;
             if inside {
                 continue;
             }
@@ -1224,12 +1310,9 @@ fn headless_fractional_scroll_paints_no_ink_outside_bounds() {
                 if px.red() < 200 {
                     bbox = match bbox {
                         None => Some((x, y, x, y)),
-                        Some((x_min, y_min, x_max, y_max)) => Some((
-                            x_min.min(x),
-                            y_min.min(y),
-                            x_max.max(x),
-                            y_max.max(y),
-                        )),
+                        Some((x_min, y_min, x_max, y_max)) => {
+                            Some((x_min.min(x), y_min.min(y), x_max.max(x), y_max.max(y)))
+                        }
                     };
                 }
             }
@@ -1251,14 +1334,15 @@ fn p66_render_frame(core: &EditorHandle, scroll_top: f32) -> tiny_skia::Pixmap {
         c.scroll_top = scroll_top;
         c.clamp_scroll();
     }
-    let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font: BODY_FONT,
+        zoom_accum: 0.0,
+    };
 
     let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
     let mut tree = Tree::empty();
-    let limits = layout::Limits::new(
-        Size::new(600.0, 300.0),
-        Size::new(600.0, 300.0),
-    );
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
     let node = view.layout(&mut tree, &renderer, &limits);
     let node = node.translate(iced::Vector::new(50.0, 60.0));
     let lyt = Layout::new(&node);
@@ -1296,8 +1380,7 @@ fn p66_gutter_ink_moves_with_smooth_scroll() {
     let core = EditorHandle::default();
     {
         let mut c = core.borrow_mut();
-        let doc_text: String =
-            (1..=40).map(|i| format!("第{i}行内容\n")).collect();
+        let doc_text: String = (1..=40).map(|i| format!("第{i}行内容\n")).collect();
         c.reset_document(editpad_core::Document::from_str(&doc_text));
         c.set_viewport_width(600.0);
         c.set_viewport_height(300.0);
@@ -1324,11 +1407,7 @@ fn p66_gutter_ink_moves_with_smooth_scroll() {
     let dark = |px: tiny_skia::PremultipliedColorU8| px.red() < 200;
     let gutter_ink_rows = |frame: &tiny_skia::Pixmap| -> Vec<bool> {
         (0..500u32)
-            .map(|y| {
-                (gx0..gx1).any(|x| {
-                    frame.pixel(x, y).map(dark).unwrap_or(false)
-                })
-            })
+            .map(|y| (gx0..gx1).any(|x| frame.pixel(x, y).map(dark).unwrap_or(false)))
             .collect()
     };
     let ga = gutter_ink_rows(&frame_a);
@@ -1338,7 +1417,10 @@ fn p66_gutter_ink_moves_with_smooth_scroll() {
     eprintln!("[P66] gutter 墨迹行 A={ink_a} B={ink_b}");
     let diff_rows = ga.iter().zip(&gb).filter(|(a, b)| a != b).count();
     eprintln!("[P66] gutter 行墨迹差异行数 = {diff_rows}");
-    assert!(diff_rows >= 10, "两帧行号栏墨迹几乎相同？行号没有随滚动移动");
+    assert!(
+        diff_rows >= 10,
+        "两帧行号栏墨迹几乎相同？行号没有随滚动移动"
+    );
 
     // P66附 护栏：行号右缘必须贴在「gutter 右缘 − GUTTER_MIN」处（±3px）
     // ——左对齐位置由 num_w 估算，估算漂移会在这里暴露（损伤矩形依赖
@@ -1397,7 +1479,13 @@ fn fill_text_clip_bounds_is_not_reliable_upstream() {
     let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
     let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
     let damage = vec![Rectangle::with_size(Size::new(w as f32, h as f32))];
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
 
     // 裁剪区外（y < 100）的墨迹
     let mut escaped = 0u32;
@@ -1431,9 +1519,7 @@ fn ensure_measured_char_width_measures_and_dedups() {
     view.ensure_measured_char_width();
     let core = view.core.borrow();
     assert_eq!(core.metric_key, Some((BODY_FONT, 16.0, None)));
-    let w = core
-        .measured_char_w
-        .expect("系统字体可用时实测不应失败");
+    let w = core.measured_char_w.expect("系统字体可用时实测不应失败");
     assert!(
         (0.3..=0.9).contains(&(w / core.font_size())),
         "实测列宽 {w} 超出合理倍率"
@@ -1483,7 +1569,11 @@ fn render_frame_cost_is_bounded_on_large_document() {
 
     // 冷启动帧：全新 Renderer（字形缓存全冷），只打印不设限
     {
-        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut tree = Tree::empty();
         let node = view.layout(&mut tree, &renderer, &limits);
         let lyt = Layout::new(&node);
@@ -1493,10 +1583,22 @@ fn render_frame_cost_is_bounded_on_large_document() {
         let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
         let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
         let t = std::time::Instant::now();
-        view.draw(&tree, &mut renderer, &Theme::Light,
-            &iced::advanced::renderer::Style::default(), lyt,
-            mouse::Cursor::Unavailable, &viewport_rect);
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &[viewport_rect], Color::WHITE);
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[viewport_rect],
+            Color::WHITE,
+        );
         eprintln!(
             "[P69] 冷启动帧（全新 Renderer）= {:.2} ms（参考值，不设限）",
             t.elapsed().as_secs_f64() * 1000.0
@@ -1504,7 +1606,11 @@ fn render_frame_cost_is_bounded_on_large_document() {
     }
 
     // 稳态帧：同一 Renderer/Tree/视图连续滚动渲染（真实渲染循环同构）
-    let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font: BODY_FONT,
+        zoom_accum: 0.0,
+    };
     let mut tree = Tree::empty();
     let node = view.layout(&mut tree, &renderer, &limits);
     let lyt = Layout::new(&node);
@@ -1519,10 +1625,22 @@ fn render_frame_cost_is_bounded_on_large_document() {
     for k in 0..2 {
         renderer.reset(viewport_rect);
         core.borrow_mut().scroll_top = 50_000.0 + k as f32;
-        view.draw(&tree, &mut renderer, &Theme::Light,
-            &iced::advanced::renderer::Style::default(), lyt,
-            mouse::Cursor::Unavailable, &viewport_rect);
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
     }
 
     let mut samples = Vec::new();
@@ -1532,11 +1650,23 @@ fn render_frame_cost_is_bounded_on_large_document() {
         renderer.reset(viewport_rect);
         core.borrow_mut().scroll_top = 50_100.0 + k as f32 * 7.5;
         let t = std::time::Instant::now();
-        view.draw(&tree, &mut renderer, &Theme::Light,
-            &iced::advanced::renderer::Style::default(), lyt,
-            mouse::Cursor::Unavailable, &viewport_rect);
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
         let draw = t.elapsed();
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         draw_times.push(draw);
         raster_times.push(t.elapsed() - draw);
         samples.push(t.elapsed());
@@ -1550,8 +1680,14 @@ fn render_frame_cost_is_bounded_on_large_document() {
     );
     eprintln!(
         "[P69] 分解：view.draw 中位 {:.2} ms / 光栅中位 {:.2} ms",
-        draw_times.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::MAX, f64::min),
-        raster_times.iter().map(|d| d.as_secs_f64() * 1000.0).fold(f64::MAX, f64::min),
+        draw_times
+            .iter()
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .fold(f64::MAX, f64::min),
+        raster_times
+            .iter()
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .fold(f64::MAX, f64::min),
     );
     // 虚拟化契约钉住：我们控制的 view.draw 必须 O(可见行)——10 万行文档
     // 上仍应为亚毫秒级。光栅（renderer.draw）成本在上游 tiny-skia/swash
@@ -1576,7 +1712,11 @@ fn render_frame_cost_is_bounded_on_large_document() {
     // 判别实验：空文档（1 空行）同管线光栅成本——若与 10 万行相近，
     // 则成本为每帧结构开销（层/掩码/背景）而非文档规模
     let tiny = EditorHandle::default();
-    let mut tiny_view = EditorView { core: tiny.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let mut tiny_view = EditorView {
+        core: tiny.clone(),
+        font: BODY_FONT,
+        zoom_accum: 0.0,
+    };
     let mut tiny_tree = Tree::empty();
     let tiny_node = tiny_view.layout(&mut tiny_tree, &renderer, &limits);
     let tiny_lyt = Layout::new(&tiny_node);
@@ -1584,10 +1724,22 @@ fn render_frame_cost_is_bounded_on_large_document() {
     for _ in 0..5 {
         renderer.reset(viewport_rect);
         let t = std::time::Instant::now();
-        tiny_view.draw(&tiny_tree, &mut renderer, &Theme::Light,
-            &iced::advanced::renderer::Style::default(), tiny_lyt,
-            mouse::Cursor::Unavailable, &viewport_rect);
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        tiny_view.draw(
+            &tiny_tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            tiny_lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         tiny_raster.push(t.elapsed());
     }
     tiny_raster.sort();
@@ -1631,7 +1783,11 @@ fn draw_once_and_count_line_text(lines: usize, select_all: bool, hits: usize) ->
         c.scroll_top = (lines / 2) as f32;
         c.take_line_text_calls();
     }
-    let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font: BODY_FONT,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
@@ -1722,7 +1878,11 @@ fn o1_every_visible_line_keeps_its_selection_band() {
             c.select_all();
             c.scroll_top = 50.0;
         }
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
@@ -1791,7 +1951,6 @@ fn o1_every_visible_line_keeps_its_selection_band() {
     assert!(rows >= 8, "可视行数过少（{rows}），护栏形同虚设");
 }
 
-
 /// 第 60 轮（headless 像素级）：书签圆点必须画在行号栏左侧条带内——
 /// 标记行在条带采样区出现琥珀墨迹，摘除后同区归零；且圆点不得污染
 /// 条带右侧的行号数字区（越界即条带几何漂移）。
@@ -1818,7 +1977,11 @@ fn headless_bookmark_dot_ink_lives_in_gutter_strip() {
                 c.toggle_bookmark();
             }
         }
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -1840,7 +2003,13 @@ fn headless_bookmark_dot_ink_lives_in_gutter_strip() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -1910,7 +2079,11 @@ fn headless_bracket_underline_ink_at_matched_pair() {
             c.cursor = cursor;
             c.line_height()
         };
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -1932,7 +2105,13 @@ fn headless_bracket_underline_ink_at_matched_pair() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         (pixels, lh)
     };
 
@@ -1990,7 +2169,11 @@ fn headless_invisibles_marks_toggle_frame_diff() {
             c.cursor = CursorPos { line: 5, col: 0 }; // 远离首行，光标不参与差分
             c.set_invisibles(show, show);
         }
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(360.0, 260.0), Size::new(360.0, 260.0));
@@ -2012,7 +2195,13 @@ fn headless_invisibles_marks_toggle_frame_diff() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -2032,7 +2221,10 @@ fn headless_invisibles_marks_toggle_frame_diff() {
         }
     }
     eprintln!("[P84] 不可见标记差异墨迹 = {diff}px");
-    assert!(diff >= 12, "开/关两帧差异墨迹不足（仅 {diff}px），标记未画出");
+    assert!(
+        diff >= 12,
+        "开/关两帧差异墨迹不足（仅 {diff}px），标记未画出"
+    );
 }
 
 /// 第 66 轮 主线 A 手段 4：滚动×字号×主题 组合批——任意组合下，
@@ -2063,11 +2255,14 @@ fn headless_combo_scroll_size_theme_ink_stays_in_bounds() {
             c.scroll_top = scroll;
             c.clamp_scroll();
         }
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(font_px));
         let mut tree = Tree::empty();
-        let limits =
-            layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
         let node = view.layout(&mut tree, &renderer, &limits);
         let node = node.translate(iced::Vector::new(ex, ey));
         let lyt = Layout::new(&node);
@@ -2086,7 +2281,13 @@ fn headless_combo_scroll_size_theme_ink_stays_in_bounds() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -2154,7 +2355,11 @@ fn headless_block_selection_highlight_frame_diff() {
                 });
             }
         }
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -2176,7 +2381,13 @@ fn headless_block_selection_highlight_frame_diff() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -2191,8 +2402,10 @@ fn headless_block_selection_highlight_frame_diff() {
                     + (a.green() as i32 - b.green() as i32).abs()
                     + (a.blue() as i32 - b.blue() as i32).abs();
                 if d > 8 {
-                    let inside =
-                        x >= ex as u32 && x < (ex + ew) as u32 && y >= ey as u32 && y < (ey + eh) as u32;
+                    let inside = x >= ex as u32
+                        && x < (ex + ew) as u32
+                        && y >= ey as u32
+                        && y < (ey + eh) as u32;
                     if inside {
                         diff_in += 1;
                     } else {
@@ -2229,7 +2442,11 @@ fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
             c.set_word_wrap(wrap);
             c.line_height()
         };
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -2251,7 +2468,13 @@ fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         (pixels, lh)
     };
 
@@ -2276,20 +2499,28 @@ fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
     let (off, lh) = render(false);
     let (on, _) = render(true);
     let gutter = 49.0f32; // 行号栏宽随行数/列宽（3 位数字 × 9px + 常量）
-    // 关态：行 0 只占视觉行 0；行 1 = 空幻影 → 第 1 段带无墨迹
-    assert_eq!(band_ink(&off, 1, lh, gutter), 0, "关态首行下方不应有正文墨迹");
+                          // 关态：行 0 只占视觉行 0；行 1 = 空幻影 → 第 1 段带无墨迹
+    assert_eq!(
+        band_ink(&off, 1, lh, gutter),
+        0,
+        "关态首行下方不应有正文墨迹"
+    );
     // 开态：折行段出现在视觉行 1、2（80 字符 ≈ 3 段）；段 3 起始
     // x 必须从文本区左缘起（左缘 ~= gutter 处有墨迹）
-    assert!(band_ink(&on, 1, lh, gutter) > 100, "开态视觉行 1 缺折行段墨迹");
-    assert!(band_ink(&on, 2, lh, gutter) > 100, "开态视觉行 2 缺折行段墨迹");
+    assert!(
+        band_ink(&on, 1, lh, gutter) > 100,
+        "开态视觉行 1 缺折行段墨迹"
+    );
+    assert!(
+        band_ink(&on, 2, lh, gutter) > 100,
+        "开态视觉行 2 缺折行段墨迹"
+    );
     // 开态越界检查：控件矩形之外零墨迹
     let mut oob = 0u32;
     for y in 0..h {
         for x in 0..w {
-            let inside = x >= ex as u32
-                && x < (ex + ew) as u32
-                && y >= ey as u32
-                && y < (ey + eh) as u32;
+            let inside =
+                x >= ex as u32 && x < (ex + ew) as u32 && y >= ey as u32 && y < (ey + eh) as u32;
             if inside {
                 continue;
             }
@@ -2303,7 +2534,11 @@ fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
             }
         }
     }
-    eprintln!("[P93] 折行段墨迹带 1={} 带 2={} 越界={oob}", band_ink(&on, 1, lh, gutter), band_ink(&on, 2, lh, gutter));
+    eprintln!(
+        "[P93] 折行段墨迹带 1={} 带 2={} 越界={oob}",
+        band_ink(&on, 1, lh, gutter),
+        band_ink(&on, 2, lh, gutter)
+    );
     assert_eq!(oob, 0, "开态折行墨迹越出控件矩形 {oob}px");
 }
 
@@ -2334,7 +2569,11 @@ fn headless_wrap_on_combo_ink_stays_in_bounds() {
             c.scroll_top = scroll;
             c.clamp_scroll();
         }
-        let mut view = EditorView { core, font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(font_px));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -2356,7 +2595,13 @@ fn headless_wrap_on_combo_ink_stays_in_bounds() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -2418,7 +2663,11 @@ fn headless_wrap_reaments_after_viewport_grow() {
     let render = |ew: f32| -> tiny_skia::Pixmap {
         core.borrow_mut().set_viewport_width(ew);
         core.borrow_mut().set_word_wrap(true);
-        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -2440,7 +2689,13 @@ fn headless_wrap_reaments_after_viewport_grow() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -2449,10 +2704,9 @@ fn headless_wrap_reaments_after_viewport_grow() {
         for y in 0..h {
             for x in 0..w {
                 if let Some(p) = px.pixel(x, y) {
-                    if (p.red() < 245 || p.green() < 245 || p.blue() < 245)
-                        && x > max_x {
-                            max_x = x;
-                        }
+                    if (p.red() < 245 || p.green() < 245 || p.blue() < 245) && x > max_x {
+                        max_x = x;
+                    }
                 }
             }
         }
@@ -2468,7 +2722,11 @@ fn headless_wrap_reaments_after_viewport_grow() {
     let p1200 = render(1200.0);
     {
         let c = core.borrow();
-        assert_eq!(c.line_visual_segments(0), 2, "1200 宽应折 2 段——断点已随宽度重算");
+        assert_eq!(
+            c.line_visual_segments(0),
+            2,
+            "1200 宽应折 2 段——断点已随宽度重算"
+        );
     }
     let gap1 = (ew1 as u32).saturating_sub(ink_right(&p800) + 1);
     let gap2 = (1200u32).saturating_sub(ink_right(&p1200) + 1);
@@ -2494,8 +2752,8 @@ fn headless_wrap_reaments_after_viewport_grow() {
 /// 行程（v1 模型），次帧 needed 判定生效。
 #[test]
 fn headless_wrap_reserves_scrollbar_band_no_text_ink_under_thumb() {
-    use super::super::CursorPos;
     use super::super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
+    use super::super::CursorPos;
     let (w, h) = (400u32, 300u32);
     let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
     // 800 字符：折 ~23 段 ≈ 506px > 260px 视口 → 垂直滚动条需要出现
@@ -2512,7 +2770,11 @@ fn headless_wrap_reserves_scrollbar_band_no_text_ink_under_thumb() {
     }
 
     let render = || -> tiny_skia::Pixmap {
-        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -2534,7 +2796,13 @@ fn headless_wrap_reserves_scrollbar_band_no_text_ink_under_thumb() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -2588,7 +2856,11 @@ fn headless_no_frame_oscillation_after_font_zoom() {
     let lines: Vec<String> = (0..36)
         .map(|i| {
             if i % 3 == 0 {
-                format!("中文长文本段落第{ }行{}", i + 1, "abcdefghijklmnopqrstuvwxyz".repeat(4))
+                format!(
+                    "中文长文本段落第{ }行{}",
+                    i + 1,
+                    "abcdefghijklmnopqrstuvwxyz".repeat(4)
+                )
             } else {
                 format!("line {} with some english {}", i + 1, "word ".repeat(8))
             }
@@ -2611,7 +2883,11 @@ fn headless_no_frame_oscillation_after_font_zoom() {
             let (w, h) = (1300u32, 640u32);
             let (ex, ey) = (10.0f32, 10.0f32);
             let render = || -> tiny_skia::Pixmap {
-                let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+                let mut view = EditorView {
+                    core: core.clone(),
+                    font,
+                    zoom_accum: 0.0,
+                };
                 let mut renderer = iced::Renderer::new(font, Pixels(size));
                 let mut tree = Tree::empty();
                 let limits = layout::Limits::new(Size::new(ew, 600.0), Size::new(ew, 600.0));
@@ -2622,8 +2898,7 @@ fn headless_no_frame_oscillation_after_font_zoom() {
                 pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
                 let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
                 let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
-                let viewport =
-                    iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+                let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
                 let damage = vec![viewport_rect];
                 view.draw(
                     &tree,
@@ -2634,8 +2909,13 @@ fn headless_no_frame_oscillation_after_font_zoom() {
                     mouse::Cursor::Unavailable,
                     &viewport_rect,
                 );
-                renderer
-                    .draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+                renderer.draw(
+                    &mut pixels.as_mut(),
+                    &mut mask,
+                    &viewport,
+                    &damage,
+                    Color::WHITE,
+                );
                 pixels
             };
             let a = render();
@@ -2675,10 +2955,7 @@ fn probe_wrap_sb_reserve_no_flip_at_viewport_edge() {
     // 24px（lh=33）：视口 600px = 18.18 行；构造单行长文折 ~18 段
     // （内容高度贴 600 边缘），needed 判定处临界
     let scenarios: Vec<(&str, String)> = vec![
-        (
-            "单行长文",
-            "中文长文本段落内容内容内容".repeat(60),
-        ),
+        ("单行长文", "中文长文本段落内容内容内容".repeat(60)),
         (
             "两行长文",
             format!(
@@ -2689,11 +2966,17 @@ fn probe_wrap_sb_reserve_no_flip_at_viewport_edge() {
         ),
         (
             "17短行",
-            (0..17).map(|_| "short line xxxx".to_string()).collect::<Vec<_>>().join("\n"),
+            (0..17)
+                .map(|_| "short line xxxx".to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
         ),
         (
             "19短行",
-            (0..19).map(|_| "short line xxxx".to_string()).collect::<Vec<_>>().join("\n"),
+            (0..19)
+                .map(|_| "short line xxxx".to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
         ),
         // 翻转带探索：总行数略超视口（18 行 @33px = 594 < 600）+ 长行
         // （不可见行按 1 段低估行程）+ 混合
@@ -2701,9 +2984,7 @@ fn probe_wrap_sb_reserve_no_flip_at_viewport_edge() {
             "18行+长行尾",
             (0..17)
                 .map(|_| "short line xxxx".to_string())
-                .chain(std::iter::once(
-                    "中文长篇尾部段落".repeat(30),
-                ))
+                .chain(std::iter::once("中文长篇尾部段落".repeat(30)))
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
@@ -2743,11 +3024,14 @@ fn probe_wrap_sb_reserve_no_flip_at_viewport_edge() {
         for _ in 0..8 {
             // 完整 layout+draw（P99 的 needed 判定与 set_wrap_sb_reserve
             // 在 draw 内执行——layout 只注入度量，不触发翻转）
-            let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+            let mut view = EditorView {
+                core: core.clone(),
+                font,
+                zoom_accum: 0.0,
+            };
             let mut renderer = iced::Renderer::new(font, Pixels(24.0));
             let mut tree = Tree::empty();
-            let limits =
-                layout::Limits::new(Size::new(760.0, 600.0), Size::new(760.0, 600.0));
+            let limits = layout::Limits::new(Size::new(760.0, 600.0), Size::new(760.0, 600.0));
             let node = view.layout(&mut tree, &renderer, &limits);
             let node = node.translate(iced::Vector::new(0.0, 0.0));
             let lyt = Layout::new(&node);
@@ -2755,10 +3039,7 @@ fn probe_wrap_sb_reserve_no_flip_at_viewport_edge() {
             pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
             let mut mask = tiny_skia::Mask::new(760, 640).expect("mask");
             let viewport_rect = Rectangle::with_size(Size::new(760.0f32, 640.0f32));
-            let viewport = iced_graphics::Viewport::with_physical_size(
-                Size::new(760, 640),
-                1.0,
-            );
+            let viewport = iced_graphics::Viewport::with_physical_size(Size::new(760, 640), 1.0);
             let damage = vec![viewport_rect];
             view.draw(
                 &tree,
@@ -2769,8 +3050,13 @@ fn probe_wrap_sb_reserve_no_flip_at_viewport_edge() {
                 mouse::Cursor::Unavailable,
                 &viewport_rect,
             );
-            renderer
-                .draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+            renderer.draw(
+                &mut pixels.as_mut(),
+                &mut mask,
+                &viewport,
+                &damage,
+                Color::WHITE,
+            );
             let c = core.borrow();
             let (reserve, mpx, segs) = (
                 c.wrap_sb_reserve,
@@ -2816,7 +3102,11 @@ fn headless_wrap_reflows_after_viewport_shrink() {
     let render = |ew: f32| -> tiny_skia::Pixmap {
         core.borrow_mut().set_viewport_width(ew);
         core.borrow_mut().set_word_wrap(true);
-        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -2838,7 +3128,13 @@ fn headless_wrap_reflows_after_viewport_shrink() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
     let _ = render(800.0);
@@ -2851,7 +3147,10 @@ fn headless_wrap_reflows_after_viewport_shrink() {
     let budget = core.borrow().wrap_max_px();
     let gutter = core.borrow().gutter_width();
     eprintln!("[P116] 450 宽段数 = {segs}（预算 {budget:.1}）");
-    assert!(segs >= 6, "拉窄后折行未按新预算重排（段数 {segs}，应 ≥6 段）");
+    assert!(
+        segs >= 6,
+        "拉窄后折行未按新预算重排（段数 {segs}，应 ≥6 段）"
+    );
     // 行尾余量 = 一个汉字宽：最右正文墨迹 ≤ 控件右缘 − 14px（文本区
     // 右缘 = 控件右缘，P95 贴边口径；预算已内收余量）
     let x0 = (ex + gutter) as u32;
@@ -2867,7 +3166,10 @@ fn headless_wrap_reflows_after_viewport_shrink() {
         }
     }
     eprintln!("[P116] 最右正文墨 x={max_x}（控件右缘 {text_right}）");
-    assert!(max_x <= text_right, "折行墨迹越过右缘（max_x={max_x} > {text_right}）");
+    assert!(
+        max_x <= text_right,
+        "折行墨迹越过右缘（max_x={max_x} > {text_right}）"
+    );
     assert!(
         max_x >= x0 && text_right.saturating_sub(max_x) >= 14,
         "行尾距右缘不足一个汉字宽（余 {}px）",
@@ -2897,7 +3199,11 @@ fn headless_large_font_48_wrap_keeps_right_margin() {
         c.set_word_wrap(true);
         c.cursor = CursorPos { line: 0, col: 0 };
     }
-    let mut view = EditorView { core: core.clone(), font, zoom_accum: 0.0 };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
     let mut renderer = iced::Renderer::new(font, Pixels(48.0));
     let mut tree = Tree::empty();
     let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -2919,7 +3225,13 @@ fn headless_large_font_48_wrap_keeps_right_margin() {
         mouse::Cursor::Unavailable,
         &viewport_rect,
     );
-    renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &damage,
+        Color::WHITE,
+    );
     let segs = core.borrow().line_visual_segments(0);
     let budget = core.borrow().wrap_max_px();
     let gutter = core.borrow().gutter_width();
@@ -2978,11 +3290,20 @@ fn resolve_mark_click_nearest_within_tolerance_hit_wins_ties() {
     let hits = [(100.0f32, 3usize), (200.0, 7)];
     let bms = [(102.0f32, 5usize)];
     // 命中更近
-    assert_eq!(resolve_mark_click(&hits, &bms, 100.5), Some(MarkTarget::Hit(3)));
+    assert_eq!(
+        resolve_mark_click(&hits, &bms, 100.5),
+        Some(MarkTarget::Hit(3))
+    );
     // 书签更近
-    assert_eq!(resolve_mark_click(&hits, &bms, 102.0), Some(MarkTarget::Bookmark(5)));
+    assert_eq!(
+        resolve_mark_click(&hits, &bms, 102.0),
+        Some(MarkTarget::Bookmark(5))
+    );
     // 同距（两刻度中点）→ 命中优先
-    assert_eq!(resolve_mark_click(&hits, &bms, 101.0), Some(MarkTarget::Hit(3)));
+    assert_eq!(
+        resolve_mark_click(&hits, &bms, 101.0),
+        Some(MarkTarget::Hit(3))
+    );
     // 容差外 → None
     assert_eq!(resolve_mark_click(&hits, &bms, 120.0), None);
     // 空表恒 None
@@ -3010,9 +3331,21 @@ fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
             c.set_viewport_height(eh);
             // 命中：行 10 两条（同视觉行 → 一枚刻度）+ 行 40 一条
             c.set_find_highlights(vec![
-                editpad_core::MatchPos { line: 10, col: 0, len_chars: 4 },
-                editpad_core::MatchPos { line: 10, col: 6, len_chars: 3 },
-                editpad_core::MatchPos { line: 40, col: 0, len_chars: 4 },
+                editpad_core::MatchPos {
+                    line: 10,
+                    col: 0,
+                    len_chars: 4,
+                },
+                editpad_core::MatchPos {
+                    line: 10,
+                    col: 6,
+                    len_chars: 3,
+                },
+                editpad_core::MatchPos {
+                    line: 40,
+                    col: 0,
+                    len_chars: 4,
+                },
             ]);
             c.bookmarks.insert(3);
             c.bookmarks.insert(60);
@@ -3024,7 +3357,11 @@ fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
                     Some(std::time::Instant::now() - std::time::Duration::from_secs(60));
             }
         }
-        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -3046,7 +3383,13 @@ fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -3072,7 +3415,9 @@ fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
     let mut orange_groups: Vec<(i32, i32)> = Vec::new();
     let mut amber_groups: Vec<(i32, i32)> = Vec::new();
     for y in (ey as u32)..(ey + eh) as u32 {
-        let Some(p) = frame.pixel(mark_cx, y) else { continue };
+        let Some(p) = frame.pixel(mark_cx, y) else {
+            continue;
+        };
         let (bch, gch, rch) = (p.blue(), p.green(), p.red());
         // 全不透明像素判定；抗锯齿半透边缘混白底后 green 上浮——橙 ≈90
         // 的边缘会落入 115~135 中性带之外，故意留空挡防两类互串
@@ -3094,7 +3439,11 @@ fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
         }
     }
     let center = |g: (i32, i32)| (g.0 + g.1) as f32 / 2.0;
-    assert_eq!(orange_groups.len(), 2, "橙色命中刻度应有 2 枚（行 10 同视觉行去重为一枚）");
+    assert_eq!(
+        orange_groups.len(),
+        2,
+        "橙色命中刻度应有 2 枚（行 10 同视觉行去重为一枚）"
+    );
     for (g, line) in orange_groups.iter().zip([10usize, 40]) {
         assert!(
             (center(*g) - expected_y(line)).abs() <= 3.0,
@@ -3158,7 +3507,11 @@ fn headless_indent_guides_ink_at_tab_stops_and_toggle_off() {
             c.set_viewport_height(eh);
             c.set_indent_guides(guides);
         }
-        let mut view = EditorView { core: handle.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: handle.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -3180,7 +3533,13 @@ fn headless_indent_guides_ink_at_tab_stops_and_toggle_off() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -3237,7 +3596,11 @@ fn headless_edge_ruler_ink_at_column_and_toggle_off() {
             c.set_viewport_height(eh);
             c.set_edge_column(col);
         }
-        let mut view = EditorView { core: handle.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: handle.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -3259,7 +3622,13 @@ fn headless_edge_ruler_ink_at_column_and_toggle_off() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -3318,7 +3687,11 @@ fn headless_link_hover_underline_ink_under_token() {
             c.set_viewport_height(eh);
             c.link_hover = hover;
         }
-        let mut view = EditorView { core: handle.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: handle.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
@@ -3340,7 +3713,13 @@ fn headless_link_hover_underline_ink_under_token() {
             mouse::Cursor::Unavailable,
             &viewport_rect,
         );
-        renderer.draw(&mut pixels.as_mut(), &mut mask, &viewport, &damage, Color::WHITE);
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
         pixels
     };
 
@@ -3350,11 +3729,7 @@ fn headless_link_hover_underline_ink_under_token() {
     let (c0, c1) = (6usize, 19usize); // "https://x.io/a"
     let (gutter_w, x0, x1) = {
         let c = handle.borrow();
-        (
-            c.gutter_width(),
-            c.px_of(0, text, c0),
-            c.px_of(0, text, c1),
-        )
+        (c.gutter_width(), c.px_of(0, text, c0), c.px_of(0, text, c1))
     };
     assert!(x1 > x0, "测试前提：URL 区间有像素宽度");
     let blue_ink = |px: &tiny_skia::Pixmap| -> u32 {
@@ -3362,8 +3737,8 @@ fn headless_link_hover_underline_ink_under_token() {
         // 下划线 y = 行盒底 − 3px（lh=22）±3 容差；x 与 draw 同源
         //（正文原点 = 控件左缘 + 行号栏宽）
         for y in (ey as u32 + 16)..=(ey as u32 + 24) {
-            for x in (ex as u32 + gutter_w as u32 + x0 as u32)
-                ..(ex as u32 + gutter_w as u32 + x1 as u32)
+            for x in
+                (ex as u32 + gutter_w as u32 + x0 as u32)..(ex as u32 + gutter_w as u32 + x1 as u32)
             {
                 if let Some(p) = px.pixel(x, y) {
                     if p.red() > 180 && (80..140).contains(&p.green()) && p.blue() < 120 {
@@ -3403,12 +3778,15 @@ fn p150_gutter_number_box_leaves_room_for_last_glyph() {
         {
             let mut c = core.borrow_mut();
             c.set_font_size(size);
-            assert!(c.set_gutter_char_width(gw), "字号 {size}：行号字宽注入应通过校验");
+            assert!(
+                c.set_gutter_char_width(gw),
+                "字号 {size}：行号字宽注入应通过校验"
+            );
         }
         let c = core.borrow();
         for digits in 1..=4usize {
-            let real = measure_text_width(font, gsize, &"0".repeat(digits))
-                .expect("文本宽度应可测");
+            let real =
+                measure_text_width(font, gsize, &"0".repeat(digits)).expect("文本宽度应可测");
             let box_w = c.gutter_number_box_w(digits);
             assert!(
                 box_w > real,
@@ -3456,7 +3834,11 @@ fn p150_two_digit_line_number_keeps_last_glyph() {
             assert!(c.set_measured_char_width(body_w));
         }
 
-        let mut view = EditorView { core: core.clone(), font: BODY_FONT, zoom_accum: 0.0 };
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
         let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(600.0, 600.0), Size::new(600.0, 600.0));
@@ -3496,12 +3878,8 @@ fn p150_two_digit_line_number_keeps_last_glyph() {
             let y1 = ((line as f32 + 1.0) * lh) as u32;
             let (mut min_x, mut max_x) = (u32::MAX, 0u32);
             for x in 0..gutter as u32 {
-                let has = (y0..y1).any(|y| {
-                    pixels
-                        .pixel(x, y)
-                        .map(|p| p.red() < 200)
-                        .unwrap_or(false)
-                });
+                let has =
+                    (y0..y1).any(|y| pixels.pixel(x, y).map(|p| p.red() < 200).unwrap_or(false));
                 if has {
                     min_x = min_x.min(x);
                     max_x = max_x.max(x);
@@ -3515,9 +3893,7 @@ fn p150_two_digit_line_number_keeps_last_glyph() {
         };
         let (_, _, span1) = ink_span(0); // 第 1 行「1」
         let (_, _, span2) = ink_span(9); // 第 10 行「10」
-        eprintln!(
-            "[P150] wrap={wrap} gsize={gsize:.2} 单位数跨度={span1} 两位数跨度={span2}"
-        );
+        eprintln!("[P150] wrap={wrap} gsize={gsize:.2} 单位数跨度={span1} 两位数跨度={span2}");
         assert!(span1 > 0, "wrap={wrap}：第 1 行行号必须有墨迹");
         assert!(
             span2 as f32 > span1 as f32 * 1.2,

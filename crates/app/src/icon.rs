@@ -22,14 +22,23 @@ pub(crate) fn parse_app_ico_entries(raw: &'static [u8]) -> Vec<IcoEntry> {
             break;
         }
         let width = if raw[o] == 0 { 256 } else { raw[o] as u32 };
-        let height = if raw[o + 1] == 0 { 256 } else { raw[o + 1] as u32 };
+        let height = if raw[o + 1] == 0 {
+            256
+        } else {
+            raw[o + 1] as u32
+        };
         let bytes = u32::from_le_bytes([raw[o + 8], raw[o + 9], raw[o + 10], raw[o + 11]]) as usize;
         let off = u32::from_le_bytes([raw[o + 12], raw[o + 13], raw[o + 14], raw[o + 15]]) as usize;
         if off + bytes > raw.len() || bytes < 40 {
             continue;
         }
         let bit_count = u16::from_le_bytes([raw[off + 14], raw[off + 15]]);
-        out.push(IcoEntry { width, height, bit_count, data: &raw[off..off + bytes] });
+        out.push(IcoEntry {
+            width,
+            height,
+            bit_count,
+            data: &raw[off..off + bytes],
+        });
     }
     out
 }
@@ -84,7 +93,9 @@ pub(crate) fn window_title_icon() -> Option<iced::window::Icon> {
                 if let Some((w, h, rgba)) = dib_bgra32_to_rgba(e.data) {
                     // sRGB → 预乘 alpha（winit/windows 标题栏渲染要求）
                     let premul: Vec<u8> = rgba
-                        .as_chunks::<4>().0.iter()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .flat_map(|px| {
                             let a = px[3] as u32;
                             [

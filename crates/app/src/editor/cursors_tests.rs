@@ -14,10 +14,7 @@ fn extra_cursor_toggle_add_remove_and_invariants() {
     assert!(c.has_multi());
     assert_eq!(
         c.extra_cursors.iter().map(|e| e.cursor).collect::<Vec<_>>(),
-        vec![
-            CursorPos { line: 0, col: 3 },
-            CursorPos { line: 2, col: 1 },
-        ],
+        vec![CursorPos { line: 0, col: 3 }, CursorPos { line: 2, col: 1 },],
         "附加光标恒按文档位序升序"
     );
     assert_eq!(
@@ -101,10 +98,7 @@ fn multi_motion_horizontal_steps_and_boundary_collapse() {
     assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
     assert_eq!(
         c.extra_cursors.iter().map(|e| e.cursor).collect::<Vec<_>>(),
-        vec![
-            CursorPos { line: 1, col: 1 },
-            CursorPos { line: 2, col: 4 },
-        ]
+        vec![CursorPos { line: 1, col: 1 }, CursorPos { line: 2, col: 4 },]
     );
 
     // 行 1 光标步进到行尾再 Right = 该光标折叠；主光标与行 2 光标保持
@@ -182,13 +176,14 @@ fn multi_edit_inserts_at_all_cursors_single_snapshot() {
 
     assert_eq!(c.multi_edit(MultiEditKind::Insert("X")), Some(true));
     assert_eq!(doc_text(&c), "abcX\nabcX\nabcX", "三点同步插入");
-    assert_eq!(c.cursor, CursorPos { line: 0, col: 4 }, "主光标落插入文本尾");
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 0, col: 4 },
+        "主光标落插入文本尾"
+    );
     assert_eq!(
         c.extra_cursors.iter().map(|e| e.cursor).collect::<Vec<_>>(),
-        vec![
-            CursorPos { line: 1, col: 4 },
-            CursorPos { line: 2, col: 4 },
-        ],
+        vec![CursorPos { line: 1, col: 4 }, CursorPos { line: 2, col: 4 },],
         "附加光标各自落插入文本尾（位序不变量保持）"
     );
     assert_eq!(
@@ -203,10 +198,7 @@ fn multi_edit_inserts_at_all_cursors_single_snapshot() {
     assert_eq!(c.cursor, CursorPos { line: 0, col: 3 });
     assert_eq!(
         c.extra_cursors.iter().map(|e| e.cursor).collect::<Vec<_>>(),
-        vec![
-            CursorPos { line: 1, col: 3 },
-            CursorPos { line: 2, col: 3 },
-        ],
+        vec![CursorPos { line: 1, col: 3 }, CursorPos { line: 2, col: 3 },],
         "undo 恢复附加光标集"
     );
     assert!(c.redo());
@@ -311,10 +303,7 @@ fn multi_edit_multi_line_insert_shifts_bookmarks_below() {
     assert!(c.toggle_extra_cursor(CursorPos { line: 1, col: 2 }));
     assert_eq!(c.multi_edit(MultiEditKind::Insert("\n")), Some(true));
     assert_eq!(doc_text(&c), "aa\n\nbb\n\ncc\ndd", "两点各插一个换行");
-    assert!(
-        c.bookmarks.contains(&5),
-        "dd 行书签随两次插入累计下移 3→5"
-    );
+    assert!(c.bookmarks.contains(&5), "dd 行书签随两次插入累计下移 3→5");
 }
 
 // ---------- B10 Phase 2：添加下一匹配（Ctrl+M） ----------
@@ -327,13 +316,19 @@ fn add_next_match_word_cycle_skips_occupied() {
     // 第 1 次：加 offset 8 的实例（词选区 anchor=8, cursor=11）
     assert_eq!(c.add_next_match(), Ok(true));
     assert_eq!(c.extra_cursors.len(), 1);
-    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 8 }));
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 0, col: 8 })
+    );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 11 });
 
     // 第 2 次：offset 8 已被占用 → 跳过，加 offset 16
     assert_eq!(c.add_next_match(), Ok(true));
     assert_eq!(c.extra_cursors.len(), 2);
-    assert_eq!(c.extra_cursors[1].anchor, Some(CursorPos { line: 0, col: 16 }));
+    assert_eq!(
+        c.extra_cursors[1].anchor,
+        Some(CursorPos { line: 0, col: 16 })
+    );
     assert_eq!(c.extra_cursors[1].cursor, CursorPos { line: 0, col: 19 });
 
     // 第 3 次：无更多匹配 → Err，集合不动
@@ -352,14 +347,20 @@ fn add_next_match_selection_text_and_word_end() {
     c.anchor = Some(CursorPos { line: 0, col: 0 });
     c.cursor = CursorPos { line: 0, col: 2 }; // 选区 "ab"
     assert_eq!(c.add_next_match(), Ok(true));
-    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 6 }));
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 0, col: 6 })
+    );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 8 });
 
     // 光标在词尾（无选区）= 向左扩展取词；下一实例在后面
     let mut c = core_with("xx yy xx");
     c.cursor = CursorPos { line: 0, col: 2 }; // 词 "xx" 尾
     assert_eq!(c.add_next_match(), Ok(true));
-    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 6 }));
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 0, col: 6 })
+    );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 8 });
 }
 
@@ -368,7 +369,9 @@ fn add_next_match_guards() {
     // 光标不在词上 → Err
     let mut c = core_with("foo , bar");
     c.cursor = CursorPos { line: 0, col: 5 }; // 空白处
-    assert!(c.add_next_match().is_err_and(|e| e == EditErr::CursorNotOnWord));
+    assert!(c
+        .add_next_match()
+        .is_err_and(|e| e == EditErr::CursorNotOnWord));
 
     // 折行开态拒绝（Ok(false) 静默）
     let mut c = core_with("foo foo");
@@ -494,7 +497,11 @@ fn multi_edit_boundary_same_start_zero_width_inserts() {
     }];
     assert_eq!(c.multi_edit(MultiEditKind::Insert("XY")), Some(true));
     assert_eq!(doc_text(&c), "aXYXYb", "同点两次插入：后应用者在下");
-    assert_eq!(c.cursor, CursorPos { line: 0, col: 5 }, "主光标（先应用）落上方 payload 尾");
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 0, col: 5 },
+        "主光标（先应用）落上方 payload 尾"
+    );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 3 });
 }
 
@@ -537,8 +544,14 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
     // 模型偏移 → (行, 列)：行 = 前置 '\n' 数，列 = 行内偏移
     let to_pos = |text: &[char], off: usize| -> CursorPos {
         let line = text[..off].iter().filter(|&&c| c == '\n').count();
-        let line_start = text[..off].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
-        CursorPos { line, col: off - line_start }
+        let line_start = text[..off]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |p| p + 1);
+        CursorPos {
+            line,
+            col: off - line_start,
+        }
     };
     for seed in [7u64, 0xB10_C0DE, 0x5EED_9999] {
         let mut rng = XorShift64(seed);
@@ -559,15 +572,22 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
 
         // 放置主光标 + 2~3 附加：各占一行、列 ∈ [1, 行长]（退格合法），
         // 位置两两不同。行数不足可用（全空行）时放满即止。
-        let usable: Vec<usize> =
-            lf_line_bodies(&init).iter().enumerate().filter(|(_, b)| !b.is_empty()).map(|(i, _)| i).collect();
+        let usable: Vec<usize> = lf_line_bodies(&init)
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.is_empty())
+            .map(|(i, _)| i)
+            .collect();
         assert!(usable.len() >= 2, "种子 {seed} 初始文档应有可用行");
         let bodies = lf_line_bodies(&init);
         let mut placed: Vec<(usize, usize)> = Vec::new();
         let main_line = usable[rng.below(usable.len())];
         let main_col = rng.below(bodies[main_line].len()) + 1;
         placed.push((main_line, main_col));
-        c.cursor = CursorPos { line: main_line, col: main_col };
+        c.cursor = CursorPos {
+            line: main_line,
+            col: main_col,
+        };
         for _ in 0..2 + rng.below(2) {
             let line = usable[rng.below(usable.len())];
             let col = rng.below(bodies[line].len()) + 1;
@@ -602,15 +622,10 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
             // - 删除要求全体光标处有非换行字符（模型：off < len 且非 '\n'）
             // - 两者都要求无相邻光标：相邻双退格/双删除会并位（core 侧
             //   附加光标去重、模型两侧数量失配），属构造外退化，门控避开
-            let occupied: std::collections::HashSet<usize> =
-                cursors.iter().copied().collect();
+            let occupied: std::collections::HashSet<usize> = cursors.iter().copied().collect();
             let non_adjacent = !cursors.iter().any(|&o| occupied.contains(&(o - 1)));
-            let back_ok = non_adjacent
-                && cursors.iter().all(|&o| o > 0 && text[o - 1] != '\n');
-            let del_ok = non_adjacent
-                && cursors
-                    .iter()
-                    .all(|&o| o < text.len() && text[o] != '\n');
+            let back_ok = non_adjacent && cursors.iter().all(|&o| o > 0 && text[o - 1] != '\n');
+            let del_ok = non_adjacent && cursors.iter().all(|&o| o < text.len() && text[o] != '\n');
             let pick = rng.below(100);
             let mut payload = String::new();
             payload.push(CHARS[rng.below(CHARS.len())]);
@@ -636,7 +651,10 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
                 MultiEditKind::Delete
             };
             let r = c.multi_edit(kind);
-            assert!(matches!(r, Some(true)), "seed={seed} step={step} 应为实编辑");
+            assert!(
+                matches!(r, Some(true)),
+                "seed={seed} step={step} 应为实编辑"
+            );
 
             // oracle 重放：偏移降序逐点 splice。门控已保证全体行内合法；
             // payload 归一在 LF 文档为恒等
@@ -670,8 +688,7 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
             let delta: isize = if is_ins { pchars.len() as isize } else { -1 };
             let old: Vec<usize> = cursors.clone();
             for (i, o) in cursors.iter_mut().enumerate() {
-                let shift: isize =
-                    old.iter().filter(|&&o2| o2 < old[i]).count() as isize * delta;
+                let shift: isize = old.iter().filter(|&&o2| o2 < old[i]).count() as isize * delta;
                 *o = (*o as isize + own + shift) as usize;
             }
 
@@ -741,7 +758,10 @@ fn add_next_match_multibyte_locates_by_char_offsets() {
     let mut c = core_with("中文 foo 日文 foo");
     c.cursor = CursorPos { line: 0, col: 5 }; // 首 "foo" 词尾
     assert_eq!(c.add_next_match(), Ok(true));
-    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 10 }));
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 0, col: 10 })
+    );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 13 });
 }
 
@@ -752,6 +772,9 @@ fn add_next_match_multibyte_wrap_scan_stays_in_bounds() {
     let mut c = core_with("foo 中文 foo");
     c.cursor = CursorPos { line: 0, col: 10 }; // 第二个 "foo" 词尾
     assert_eq!(c.add_next_match(), Ok(true));
-    assert_eq!(c.extra_cursors[0].anchor, Some(CursorPos { line: 0, col: 0 }));
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 0, col: 0 })
+    );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 3 });
 }

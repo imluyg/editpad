@@ -118,9 +118,7 @@ impl Editpad {
                     if !(tab.dirty && tab.version == version) {
                         continue;
                     }
-                    if let Some(name) =
-                        manifest.tabs.get(man_idx).and_then(|t| t.file.clone())
-                    {
+                    if let Some(name) = manifest.tabs.get(man_idx).and_then(|t| t.file.clone()) {
                         tab.heartbeat_snap = Some((version, name));
                     }
                 }
@@ -129,7 +127,11 @@ impl Editpad {
                 for tab in &mut self.tabs {
                     tab.heartbeat_snap = None;
                 }
-                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StSnapshotHeartbeatFailed, &error.to_string()));
+                self.set_status_error(editpad_core::fmt_suffix(
+                    self.lang(),
+                    editpad_core::Key::StSnapshotHeartbeatFailed,
+                    &error.to_string(),
+                ));
             }
         }
     }
@@ -155,5 +157,4 @@ impl Editpad {
         self.heartbeat_apply(outcome.clone());
         Some(outcome)
     }
-
 }

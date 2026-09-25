@@ -229,15 +229,9 @@ impl Editpad {
                     // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
                     self.status = format!(
                         "{}{chars}{}{FORMAT_JSON_MAX_CHARS}{}",
-                        self.t(
-editpad_core::Key::
-StTooLargeJsonPrefix),
-                        self.t(
-editpad_core::Key::
-StTooLargeJsonMiddle),
-                        self.t(
-editpad_core::Key::
-StTooLargeJsonSuffix)
+                        self.t(editpad_core::Key::StTooLargeJsonPrefix),
+                        self.t(editpad_core::Key::StTooLargeJsonMiddle),
+                        self.t(editpad_core::Key::StTooLargeJsonSuffix)
                     );
                     return Task::none();
                 }
@@ -259,7 +253,9 @@ StTooLargeJsonSuffix)
                         self.maybe_schedule_autosave()
                     }
                     Err(error) => {
-                        self.set_status_error(self.t_suffix(editpad_core::Key::StJsonFailed, &error.to_string()));
+                        self.set_status_error(
+                            self.t_suffix(editpad_core::Key::StJsonFailed, &error.to_string()),
+                        );
                         Task::none()
                     }
                 }
@@ -274,7 +270,11 @@ StTooLargeJsonSuffix)
                         / editpad_core::highlight::STRIDE)
                         .max(1);
                     let pct = (strides_done as usize).min(total_strides) * 100 / total_strides;
-                    self.set_status(format!("{}{pct}{}", self.t(editpad_core::Key::StSyntaxAnalyzing), self.t(editpad_core::Key::StSyntaxAnalyzingMiddle)));
+                    self.set_status(format!(
+                        "{}{pct}{}",
+                        self.t(editpad_core::Key::StSyntaxAnalyzing),
+                        self.t(editpad_core::Key::StSyntaxAnalyzingMiddle)
+                    ));
                 }
                 Task::none()
             }
@@ -285,20 +285,19 @@ StTooLargeJsonSuffix)
                     // 页」：A 页大文件铺建中切到 B 页（同语言小文件、代次
                     // 同为 0），A 的检查点状态被装进 B，B 全文按 A 的语法
                     // 状态错色。页已被关则结果整体丢弃。
-                    let installed = self
-                        .tabs
-                        .iter()
-                        .position(|t| t.id == tab_id)
-                        .map(|idx| {
-                            self.tabs[idx]
-                                .editor
-                                .borrow_mut()
-                                .install_highlighter_if_current(gen, *paved)
-                        });
+                    let installed = self.tabs.iter().position(|t| t.id == tab_id).map(|idx| {
+                        self.tabs[idx]
+                            .editor
+                            .borrow_mut()
+                            .install_highlighter_if_current(gen, *paved)
+                    });
                     // 代次一致才安装；期间编辑过则整体丢弃——缺口由下一帧
                     // needs_paving 重新评估并续排（从存活检查点出发，代价小）
                     let _ = installed;
-                    if self.status.starts_with(self.t(editpad_core::Key::StSyntaxAnalyzing)) {
+                    if self
+                        .status
+                        .starts_with(self.t(editpad_core::Key::StSyntaxAnalyzing))
+                    {
                         self.status.clear();
                     }
                 }
@@ -380,23 +379,26 @@ StTooLargeJsonSuffix)
     /// 序号模式校验与生成：数值解析 + 块行数检查 + 封顶拒绝，文本由
     /// `sequence_lines` 纯函数生成（多行拼接后与文本模式共用插入路径）。
     pub(super) fn column_editor_sequence(&self, d: &ColumnEditorDraft) -> Result<String, String> {
-        let start: i64 = d
-            .start
-            .trim()
-            .parse()
-            .map_err(|_| self.t(editpad_core::Key::ColumnEditorStartInteger).to_owned())?;
-        let step: i64 = d
-            .step
-            .trim()
-            .parse()
-            .map_err(|_| self.t(editpad_core::Key::ColumnEditorStepInteger).to_owned())?;
+        let start: i64 = d.start.trim().parse().map_err(|_| {
+            self.t(editpad_core::Key::ColumnEditorStartInteger)
+                .to_owned()
+        })?;
+        let step: i64 = d.step.trim().parse().map_err(|_| {
+            self.t(editpad_core::Key::ColumnEditorStepInteger)
+                .to_owned()
+        })?;
         let width: usize = d
             .pad_width
             .trim()
             .parse()
             .map_err(|_| self.t(editpad_core::Key::ColumnEditorPadInteger).to_owned())?;
         if width > editor::MAX_COLUMN_SEQ_WIDTH {
-            return Err(format!("{}{}{}", self.t(editpad_core::Key::StColumnEditorPadCapPrefix), editor::MAX_COLUMN_SEQ_WIDTH, self.t(editpad_core::Key::StColumnEditorPadCapSuffix)));
+            return Err(format!(
+                "{}{}{}",
+                self.t(editpad_core::Key::StColumnEditorPadCapPrefix),
+                editor::MAX_COLUMN_SEQ_WIDTH,
+                self.t(editpad_core::Key::StColumnEditorPadCapSuffix)
+            ));
         }
         let rows = match self.cur_handle.borrow().active_block() {
             Some((r0, r1, _, _)) => r1 - r0 + 1,
@@ -405,12 +407,8 @@ StTooLargeJsonSuffix)
         if rows > editor::MAX_COLUMN_SEQ_ROWS {
             return Err(format!(
                 "{}{rows}{}{}",
-                self.t(
-editpad_core::Key::
-StColumnEditorRowsPrefix),
-                self.t(
-editpad_core::Key::
-StColumnEditorRowsMiddle),
+                self.t(editpad_core::Key::StColumnEditorRowsPrefix),
+                self.t(editpad_core::Key::StColumnEditorRowsMiddle),
                 editor::MAX_COLUMN_SEQ_ROWS
             ));
         }
@@ -495,7 +493,9 @@ StColumnEditorRowsMiddle),
                 // 第 67 轮 ⑮：列块态下输入 = 逐行替换块内容（v1 单行文本）
                 if editor.has_block() {
                     editor.insert_into_block(&text)
-                } else if let Some(changed) = editor.multi_edit(editor::MultiEditKind::Insert(&text)) {
+                } else if let Some(changed) =
+                    editor.multi_edit(editor::MultiEditKind::Insert(&text))
+                {
                     // B10 Phase 2：多光标同步插入（None = 触发折叠回退，
                     // 落回普通单光标路径）
                     changed
@@ -543,10 +543,9 @@ StColumnEditorRowsMiddle),
             }
             // P135（路线图 B8）：拖拽释放——移动/复制当前选区到落点
             //（busy/只读守卫已在本函数头部把关）
-            E::DropSelection { line, col, copy } => editor.finish_drop_selection(
-                crate::editor::CursorPos { line, col },
-                copy,
-            ),
+            E::DropSelection { line, col, copy } => {
+                editor.finish_drop_selection(crate::editor::CursorPos { line, col }, copy)
+            }
             // ---------- 行操作套件（第 57 轮） ----------
             E::DeleteLines => editor.delete_current_lines(),
             E::DuplicateLines => editor.duplicate_current_lines(),
@@ -626,7 +625,10 @@ StColumnEditorRowsMiddle),
             // changed 驱动）；时间戳文本给状态栏反馈
             E::InsertDateTime => {
                 let stamp = editor.insert_date_time();
-                hint = Some(format!("{}{stamp}", self.t(editpad_core::Key::StInsertedStampPrefix)));
+                hint = Some(format!(
+                    "{}{stamp}",
+                    self.t(editpad_core::Key::StInsertedStampPrefix)
+                ));
                 true
             }
             // ---------- P128：选区文本工具（无选区/解码失败给状态栏提示） ----------
@@ -733,5 +735,4 @@ StColumnEditorRowsMiddle),
             .or_else(|| default_combo_of(id))
             == Some(combo)
     }
-
 }

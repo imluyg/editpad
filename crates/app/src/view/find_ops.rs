@@ -16,13 +16,21 @@ impl Editpad {
         self.cur_handle
             .borrow_mut()
             .select_span(pos.line, pos.col, pos.len_chars);
-        self.set_find_status(editpad_core::fmt_match_counter(self.lang(), index + 1, self.matches.len()));
+        self.set_find_status(editpad_core::fmt_match_counter(
+            self.lang(),
+            index + 1,
+            self.matches.len(),
+        ));
     }
 
     /// 第 63 轮：复制某页的完整路径或文件名到剪贴板。
     /// `target`：None = 活动页（热键），Some(i) = 指定页（右键菜单）；
     /// 未命名页无路径可写，给状态栏提示不产生剪贴板写入。
-    pub(crate) fn copy_tab_ident(&mut self, target: Option<usize>, full_path: bool) -> Task<Message> {
+    pub(crate) fn copy_tab_ident(
+        &mut self,
+        target: Option<usize>,
+        full_path: bool,
+    ) -> Task<Message> {
         let idx = target.unwrap_or(self.active_tab);
         let Some(tab) = self.tabs.get(idx) else {
             return Task::none();
@@ -38,7 +46,11 @@ impl Editpad {
                 .map(|n| n.display().to_string())
                 .unwrap_or_else(|| path.display().to_string())
         };
-        self.set_status(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StCopied, &payload));
+        self.set_status(editpad_core::fmt_suffix(
+            self.lang(),
+            editpad_core::Key::StCopied,
+            &payload,
+        ));
         iced::clipboard::write(payload)
     }
 
@@ -75,9 +87,7 @@ impl Editpad {
         };
         self.match_idx = index;
 
-        if let (Some(i), Some(pos)) =
-            (index, index.and_then(|i| self.matches.get(i).copied()))
-        {
+        if let (Some(i), Some(pos)) = (index, index.and_then(|i| self.matches.get(i).copied())) {
             // P26：选区跨度直接用命中自带的 len_chars（扫描器产出的
             // 「选区显示跨度」口径），不再按当前输入现算查询长度——
             // 单行命中两者相等，跨行命中的正确性由数据自身保证，
@@ -85,7 +95,11 @@ impl Editpad {
             self.cur_handle
                 .borrow_mut()
                 .select_span(pos.line, pos.col, pos.len_chars);
-            self.set_find_status(editpad_core::fmt_match_counter(self.lang(), i + 1, self.matches.len()));
+            self.set_find_status(editpad_core::fmt_match_counter(
+                self.lang(),
+                i + 1,
+                self.matches.len(),
+            ));
         }
         Task::none()
     }
@@ -99,18 +113,16 @@ impl Editpad {
         let hit_selected = {
             let editor = self.cur_handle.borrow();
             let eol = editor.doc.line_ending();
-            editor
-                .selected_text()
-                .is_some_and(|selected| {
-                    // P26：两侧行尾归一后再比（复用 P9 口径）——CRLF 文档上
-                    // 跨行命中的选区文本含 \r\n，而查询是 \n；不归一会让
-                    // 「替换当前」永远判不等、退化为「跳下一个」
-                    strings_equal(
-                        &eol.normalize(&selected),
-                        &eol.normalize(&effective_query),
-                        self.case_sensitive,
-                    )
-                })
+            editor.selected_text().is_some_and(|selected| {
+                // P26：两侧行尾归一后再比（复用 P9 口径）——CRLF 文档上
+                // 跨行命中的选区文本含 \r\n，而查询是 \n；不归一会让
+                // 「替换当前」永远判不等、退化为「跳下一个」
+                strings_equal(
+                    &eol.normalize(&selected),
+                    &eol.normalize(&effective_query),
+                    self.case_sensitive,
+                )
+            })
         };
 
         if hit_selected {
@@ -125,5 +137,4 @@ impl Editpad {
         // 没有可替换的选区：行为不变——跳到下一个匹配
         self.step_match(true)
     }
-
 }

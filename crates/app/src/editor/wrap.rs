@@ -349,7 +349,8 @@ impl WrapCache {
         body: &str,
         real_xs: Option<&[f32]>,
     ) -> Rc<Vec<usize>> {
-        self.index.set_line(line, body, self.max_cols, self.max_px, real_xs)
+        self.index
+            .set_line(line, body, self.max_cols, self.max_px, real_xs)
     }
 }
 
@@ -379,7 +380,11 @@ mod tests {
         assert_eq!(wrap_breaks("ab", 0), vec![0, 1]);
         // Tab 推进制表位（与渲染同源）：col0 的 Tab 占满 4 列，其后 X 放不下
         assert_eq!(wrap_breaks("\tX", 4), vec![0, 1], "Tab 满段，X 另起一段");
-        assert_eq!(wrap_breaks("\tXX", 4), vec![0, 1], "第二段 XX 共 2 列放得下");
+        assert_eq!(
+            wrap_breaks("\tXX", 4),
+            vec![0, 1],
+            "第二段 XX 共 2 列放得下"
+        );
     }
 
     #[test]

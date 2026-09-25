@@ -1,6 +1,9 @@
 // P24：发布版隐藏随 GUI 一起弹出的控制台黑窗（Windows 子系统属性）；
 // 调试构建保留控制台，便于直接 cargo run 看日志输出。
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 //! Editpad —— 轻量文本编辑器。
 //!
@@ -16,19 +19,25 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc as std_mpsc};
+use std::sync::{mpsc as std_mpsc, Arc};
 
 use iced::futures::SinkExt;
 use iced::keyboard::{self, key::Named};
 // Phase 2b：以下两组为各子模块（load/find_scan/.../settings_ui/update/view/tests）
 // 经 `use super::*` 消费的共享导入枢纽——main.rs 自身不再直接使用，故显式
 // pub(crate) 再导出（子模块的 unqualified 引用经由 glob 链解析）。
-pub(crate) use iced::widget::{button, checkbox, container, mouse_area, opaque, progress_bar, row, rule,
-    scrollable, text, text_input, Stack};
-pub(crate) use iced::{border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill,
-    Font, Padding, Point, Shadow, Subscription, Task, Theme};
+pub(crate) use iced::widget::{
+    button, checkbox, container, mouse_area, opaque, progress_bar, row, rule, scrollable, text,
+    text_input, Stack,
+};
+pub(crate) use iced::{
+    border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill, Font,
+    Padding, Point, Shadow, Subscription, Task, Theme,
+};
 
-use editor::{BlankKind, CaseKind, EditorHandle, EditOp, Motion, SortOrder, TabSpaceKind, ToolKind, TrimMode};
+use editor::{
+    BlankKind, CaseKind, EditOp, EditorHandle, Motion, SortOrder, TabSpaceKind, ToolKind, TrimMode,
+};
 
 fn main() -> iced::Result {
     // `--help` / `--version` 必须在单实例判定与 iced 初始化之前处理：
@@ -70,20 +79,24 @@ fn main() -> iced::Result {
     let (window_size, window_position) = restore_window_geometry(&geometry);
     // boot 函数不收参数，用闭包捕获文件清单传入——boot 仅在事件循环
     // 启动时调用一次，clone 开销可忽略。
-    iced::application(move || Editpad::new(cli_files.clone()), Editpad::update, Editpad::view)
-        .title(Editpad::title)
-        .theme(Editpad::theme)
-        .subscription(Editpad::subscription)
-        .window(window::Settings {
-            icon: window_title_icon(),
-            size: window_size,
-            position: window_position,
-            ..window::Settings::default()
-        })
-        // 关闭请求必须以事件流转到 subscription（exit_on_close_request 默认 true，
-        // 不显式关掉的话点 X 会直接退进程，永远轮不到未保存确认）
-        .exit_on_close_request(false)
-        .run()
+    iced::application(
+        move || Editpad::new(cli_files.clone()),
+        Editpad::update,
+        Editpad::view,
+    )
+    .title(Editpad::title)
+    .theme(Editpad::theme)
+    .subscription(Editpad::subscription)
+    .window(window::Settings {
+        icon: window_title_icon(),
+        size: window_size,
+        position: window_position,
+        ..window::Settings::default()
+    })
+    // 关闭请求必须以事件流转到 subscription（exit_on_close_request 默认 true，
+    // 不显式关掉的话点 X 会直接退进程，永远轮不到未保存确认）
+    .exit_on_close_request(false)
+    .run()
 }
 
 /// `--version` 输出（单行）。
@@ -190,9 +203,7 @@ where
 fn restore_window_geometry(s: &editpad_core::Settings) -> (iced::Size, window::Position) {
     const MAX_GEOM: f32 = 16384.0;
     let size = match (s.window_width, s.window_height) {
-        (Some(w), Some(h))
-            if w.is_finite() && h.is_finite() && w >= 400.0 && h >= 300.0 =>
-        {
+        (Some(w), Some(h)) if w.is_finite() && h.is_finite() && w >= 400.0 && h >= 300.0 => {
             iced::Size::new(w.min(MAX_GEOM), h.min(MAX_GEOM))
         }
         _ => iced::Size::new(1024.0, 768.0),
@@ -714,9 +725,10 @@ fn rename_target_path(old: &Path, new_name: &str) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
     }
-    if name.chars().any(|c| {
-        matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
-    }) {
+    if name
+        .chars()
+        .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
         return None;
     }
     Some(old.with_file_name(name))
@@ -811,10 +823,10 @@ mod icon;
 use icon::*;
 
 mod settings_ui;
-mod update;
-mod view;
 mod single_instance;
 #[cfg(test)]
 mod tests;
+mod update;
+mod view;
 
 use settings_ui::SettingsPage;

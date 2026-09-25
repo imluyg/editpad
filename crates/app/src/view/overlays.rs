@@ -15,12 +15,7 @@ impl Editpad {
     pub(super) fn context_menu_overlay(&self, idx: usize) -> Element<'_, Message> {
         let vh = self.viewport_size.1;
         let card_h = ctx_menu_card_h(vh);
-        let (ax, ay) = clamp_menu_anchor(
-            self.menu_anchor,
-            self.viewport_size,
-            CTX_MENU_W,
-            card_h,
-        );
+        let (ax, ay) = clamp_menu_anchor(self.menu_anchor, self.viewport_size, CTX_MENU_W, card_h);
         let card = opaque(
             // P56：宽度必须定宽 CTX_MENU_W——P46 的 Shrink 修法在 iced
             // 布局下不成立（Fill 子控件在 Shrink 测量中会撑到窗口宽，
@@ -40,7 +35,12 @@ impl Editpad {
                 .height(Fill)
                 .align_x(iced::alignment::Horizontal::Left)
                 .align_y(iced::alignment::Vertical::Top)
-                .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
+                .padding(Padding {
+                    top: ay,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: ax,
+                }),
         )
         .on_press(Message::TabContextMenuClosed)
         .on_right_press(Message::TabContextMenuClosed)
@@ -61,21 +61,12 @@ impl Editpad {
         // 来自同一个锚点）时退回本菜单自身的槽位
         let slot = menubar_slot_idx(self.menubar_anchor.0).unwrap_or(idx);
         let slot_x = MENU_BAR_LEFT + slot as f32 * MENU_SLOT_W;
-        let (ax, ay) = clamp_menu_anchor(
-            (slot_x, MENU_BAR_H),
-            self.viewport_size,
-            W,
-            card_h,
-        );
+        let (ax, ay) = clamp_menu_anchor((slot_x, MENU_BAR_H), self.viewport_size, W, card_h);
         let ay = ay.max(MENU_BAR_H); // 永不遮住菜单栏本身
         let card = opaque(
-            container(
-                scrollable(self.menubar_panel(idx))
-                    .width(W)
-                    .height(card_h),
-            )
-            .padding(4)
-            .style(popup_card_style),
+            container(scrollable(self.menubar_panel(idx)).width(W).height(card_h))
+                .padding(4)
+                .style(popup_card_style),
         );
         mouse_area(
             container(card)
@@ -83,7 +74,12 @@ impl Editpad {
                 .height(Fill)
                 .align_x(iced::alignment::Horizontal::Left)
                 .align_y(iced::alignment::Vertical::Top)
-                .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
+                .padding(Padding {
+                    top: ay,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: ax,
+                }),
         )
         .on_move(Message::MenubarHovered)
         .on_press(Message::MenubarPressed)
@@ -126,12 +122,8 @@ impl Editpad {
         }
         let lang = self.lang();
         let sep = || rule::horizontal(1);
-        let is_markdown = self
-            .cur_handle
-            .borrow()
-            .highlight_syntax_name()
-            .as_deref()
-            == Some("Markdown");
+        let is_markdown =
+            self.cur_handle.borrow().highlight_syntax_name().as_deref() == Some("Markdown");
         let mut panel = column![].spacing(2).padding([4, 6]);
         match idx {
             // ---------- 文件 ----------
@@ -198,7 +190,12 @@ impl Editpad {
                         interactive.then_some(Message::PasteRequested),
                     ))
                     .push(item(
-                        item_label(lang, editpad_core::Key::MenuSelectAll, false, Some("Ctrl+A")),
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuSelectAll,
+                            false,
+                            Some("Ctrl+A"),
+                        ),
                         interactive.then_some(Message::Edit(EditOp::SelectAll)),
                     ))
                     .push(sep())
@@ -212,11 +209,21 @@ impl Editpad {
                     ))
                     .push(sep())
                     .push(item(
-                        item_label(lang, editpad_core::Key::MenuInsertDateTime, false, Some("F5")),
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuInsertDateTime,
+                            false,
+                            Some("F5"),
+                        ),
                         interactive.then_some(Message::Edit(EditOp::InsertDateTime)),
                     ))
                     .push(item(
-                        item_label(lang, editpad_core::Key::MenuToggleComment, false, Some("Ctrl+Q")),
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuToggleComment,
+                            false,
+                            Some("Ctrl+Q"),
+                        ),
                         interactive.then_some(Message::Edit(EditOp::ToggleLineComment)),
                     ))
                     .push(sep())
@@ -249,9 +256,8 @@ impl Editpad {
                     ))
                     .push(item(
                         item_label(lang, editpad_core::Key::MenuZoomReset, false, None),
-                        interactive.then_some(Message::FontSizeDelta(
-                            16.0 - self.display_font_size(),
-                        )),
+                        interactive
+                            .then_some(Message::FontSizeDelta(16.0 - self.display_font_size())),
                     ))
                     .push(item(
                         item_label(lang, editpad_core::Key::MenuThemeToggle, false, None),
@@ -288,32 +294,22 @@ impl Editpad {
                             self.settings.word_wrap,
                             None,
                         ),
-                        interactive.then_some(Message::SettingsWordWrapToggled(
-                            !self.settings.word_wrap,
-                        )),
+                        interactive
+                            .then_some(Message::SettingsWordWrapToggled(!self.settings.word_wrap)),
                     ))
                     // P134（C7）：本页自动换行三态循环——跟随全局/本页开/
                     // 本页关；有覆盖时全局项旁标注（标签条目自身即状态显示）
                     .push(item(
                         match self.tab().wrap_override {
-                            None => item_label(
-                                lang,
-                                editpad_core::Key::MenuTabWrapFollow,
-                                false,
-                                None,
-                            ),
-                            Some(true) => item_label(
-                                lang,
-                                editpad_core::Key::MenuTabWrapOn,
-                                true,
-                                None,
-                            ),
-                            Some(false) => item_label(
-                                lang,
-                                editpad_core::Key::MenuTabWrapOff,
-                                false,
-                                None,
-                            ),
+                            None => {
+                                item_label(lang, editpad_core::Key::MenuTabWrapFollow, false, None)
+                            }
+                            Some(true) => {
+                                item_label(lang, editpad_core::Key::MenuTabWrapOn, true, None)
+                            }
+                            Some(false) => {
+                                item_label(lang, editpad_core::Key::MenuTabWrapOff, false, None)
+                            }
                         },
                         interactive.then_some(Message::TabWrapOverrideToggled),
                     ))
@@ -444,7 +440,10 @@ impl Editpad {
         let mut rows = column![].spacing(0).width(Fill);
         if total == 0 {
             rows = rows.push(
-                text(self.t(editpad_core::Key::PaletteNoMatch)).size(uipx).font(uifont).width(Fill),
+                text(self.t(editpad_core::Key::PaletteNoMatch))
+                    .size(uipx)
+                    .font(uifont)
+                    .width(Fill),
             );
         }
         for (i, e) in entries.iter().enumerate().skip(win_start).take(12) {
@@ -468,34 +467,44 @@ impl Editpad {
                 .on_press(Message::PalettePick(i)),
             );
         }
-        let card = opaque(container(
-            column![
-                text_input(self.t(editpad_core::Key::PalettePlaceholder), &self.palette_input)
+        let card = opaque(
+            container(
+                column![
+                    text_input(
+                        self.t(editpad_core::Key::PalettePlaceholder),
+                        &self.palette_input
+                    )
                     .id(palette_input_id())
                     .size(uipx)
                     .font(uifont)
                     .on_input(Message::PaletteInputChanged)
                     .on_submit(Message::PaletteExecute)
                     .padding([4, 8]),
-                rule::horizontal(1),
-                scrollable(rows).height(360.0),
-            ]
-            .spacing(4)
-            .padding(6)
-            .width(Fill)
-        )
-        .width(560)
-        .style(popup_card_style));
+                    rule::horizontal(1),
+                    scrollable(rows).height(360.0),
+                ]
+                .spacing(4)
+                .padding(6)
+                .width(Fill),
+            )
+            .width(560)
+            .style(popup_card_style),
+        );
         mouse_area(
             container(card)
                 .width(Fill)
                 .height(Fill)
                 .align_x(iced::alignment::Horizontal::Center)
                 .align_y(iced::alignment::Vertical::Top)
-                .padding(Padding { top: 64.0, right: 0.0, bottom: 0.0, left: 0.0 }),
+                .padding(Padding {
+                    top: 64.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
         )
         .on_press(Message::PaletteToggled(self.palette_mode))
-            .into()
+        .into()
     }
     /// B9：列编辑器对话框——整窗背板（点击关闭）+ 居中卡片（设置弹窗
     /// P40 同款结构、命令面板同款 opaque 防穿透）。文本/序号两模式；
@@ -541,7 +550,10 @@ impl Editpad {
         let mut body = column![].spacing(8).width(Fill);
         body = body.push(
             row![
-                text(self.t(editpad_core::Key::ColumnEditorTitle)).size(uipx).font(uifont).width(Fill),
+                text(self.t(editpad_core::Key::ColumnEditorTitle))
+                    .size(uipx)
+                    .font(uifont)
+                    .width(Fill),
                 button(text("×").size(uipx).font(uifont))
                     .padding([1, 6])
                     .style(chrome_button_style)
@@ -555,19 +567,27 @@ impl Editpad {
                 mode_btn(self.t(editpad_core::Key::CeModeText), !d.number_mode),
                 mode_btn(self.t(editpad_core::Key::CeModeNumber), d.number_mode)
             ]
-                .spacing(6),
+            .spacing(6),
         );
         if d.number_mode {
             body = body
                 .push(labeled(
                     self.t(editpad_core::Key::CeStart),
-                    text_input_w(self.t(editpad_core::Key::CeStartHint), &d.start, Message::ColumnEditorStartChanged),
+                    text_input_w(
+                        self.t(editpad_core::Key::CeStartHint),
+                        &d.start,
+                        Message::ColumnEditorStartChanged,
+                    ),
                     uipx,
                     uifont,
                 ))
                 .push(labeled(
                     self.t(editpad_core::Key::CeStep),
-                    text_input_w(self.t(editpad_core::Key::CeStepHint), &d.step, Message::ColumnEditorStepChanged),
+                    text_input_w(
+                        self.t(editpad_core::Key::CeStepHint),
+                        &d.step,
+                        Message::ColumnEditorStepChanged,
+                    ),
                     uipx,
                     uifont,
                 ))
@@ -591,7 +611,11 @@ impl Editpad {
                 ))
                 .push(labeled(
                     self.t(editpad_core::Key::CePadWidth),
-                    text_input_w(self.t(editpad_core::Key::CePadHint), &d.pad_width, Message::ColumnEditorWidthChanged),
+                    text_input_w(
+                        self.t(editpad_core::Key::CePadHint),
+                        &d.pad_width,
+                        Message::ColumnEditorWidthChanged,
+                    ),
                     uipx,
                     uifont,
                 ));
@@ -619,28 +643,41 @@ impl Editpad {
         // 目标块实时反馈：行数提示替代打开守卫的二次检查
         let rows_info = match self.cur_handle.borrow().active_block() {
             Some((r0, r1, _, _)) => format!(
-                    "{}{}{}",
-                    self.t(editpad_core::Key::CeTargetBlockPrefix),
-                    r1 - r0 + 1,
-                    self.t(editpad_core::Key::CeTargetBlockSuffix)
-                ),
+                "{}{}{}",
+                self.t(editpad_core::Key::CeTargetBlockPrefix),
+                r1 - r0 + 1,
+                self.t(editpad_core::Key::CeTargetBlockSuffix)
+            ),
             None => self.t(editpad_core::Key::CeNoBlockWarn).to_owned(),
         };
         body = body.push(text(rows_info).size(uipx).font(uifont));
         body = body.push(
             row![
-                button(text(self.t(editpad_core::Key::ButtonOk)).size(uipx).font(uifont))
-                    .padding([3, 14])
-                    .style(chrome_button_style)
-                    .on_press(Message::ColumnEditorConfirmed),
-                button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
-                    .padding([3, 14])
-                    .style(chrome_button_style)
-                    .on_press(Message::ColumnEditorToggled),
+                button(
+                    text(self.t(editpad_core::Key::ButtonOk))
+                        .size(uipx)
+                        .font(uifont)
+                )
+                .padding([3, 14])
+                .style(chrome_button_style)
+                .on_press(Message::ColumnEditorConfirmed),
+                button(
+                    text(self.t(editpad_core::Key::ButtonCancel))
+                        .size(uipx)
+                        .font(uifont)
+                )
+                .padding([3, 14])
+                .style(chrome_button_style)
+                .on_press(Message::ColumnEditorToggled),
             ]
             .spacing(8),
         );
-        let card = opaque(container(body).padding(14).width(420).style(popup_card_style));
+        let card = opaque(
+            container(body)
+                .padding(14)
+                .width(420)
+                .style(popup_card_style),
+        );
         mouse_area(
             container(card)
                 .width(Fill)
@@ -676,7 +713,12 @@ impl Editpad {
                 .height(Fill)
                 .align_x(iced::alignment::Horizontal::Left)
                 .align_y(iced::alignment::Vertical::Top)
-                .padding(Padding { top: ay, right: 0.0, bottom: 0.0, left: ax }),
+                .padding(Padding {
+                    top: ay,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: ax,
+                }),
         )
         .on_press(Message::BarsDismissed)
         .into()
@@ -689,26 +731,42 @@ impl Editpad {
         let uifont = self.ui_font();
         let named = self.tab().path.is_some();
         let item = |label: &str, enc: editpad_core::SaveEncoding| {
-            button(
-                text(label.to_owned())
-                    .size(uipx)
-                    .font(uifont)
-                    .width(Fill),
-            )
-            .width(Fill)
-            .padding([6, 10])
-            .style(chrome_menu_item_style)
-            .on_press_maybe(named.then_some(Message::SaveWithEncoding(enc)))
+            button(text(label.to_owned()).size(uipx).font(uifont).width(Fill))
+                .width(Fill)
+                .padding([6, 10])
+                .style(chrome_menu_item_style)
+                .on_press_maybe(named.then_some(Message::SaveWithEncoding(enc)))
         };
         let panel = column![
-            item(&enc_label(self.lang(), "UTF-8"), editpad_core::SaveEncoding::Utf8),
-            item(&enc_label(self.lang(), "UTF-8(BOM)"), editpad_core::SaveEncoding::Utf8Bom),
-            item(&enc_label(self.lang(), "GBK"), editpad_core::SaveEncoding::Gbk),
+            item(
+                &enc_label(self.lang(), "UTF-8"),
+                editpad_core::SaveEncoding::Utf8
+            ),
+            item(
+                &enc_label(self.lang(), "UTF-8(BOM)"),
+                editpad_core::SaveEncoding::Utf8Bom
+            ),
+            item(
+                &enc_label(self.lang(), "GBK"),
+                editpad_core::SaveEncoding::Gbk
+            ),
             // P127：CJK 传统编码扩展（无法映射字符照旧按数值实体写入）
-            item(&enc_label(self.lang(), "Big5"), editpad_core::SaveEncoding::Big5),
-            item(&enc_label(self.lang(), "Shift_JIS"), editpad_core::SaveEncoding::ShiftJis),
-            item(&enc_label(self.lang(), "EUC-JP"), editpad_core::SaveEncoding::EucJp),
-            item(&enc_label(self.lang(), "EUC-KR"), editpad_core::SaveEncoding::EucKr),
+            item(
+                &enc_label(self.lang(), "Big5"),
+                editpad_core::SaveEncoding::Big5
+            ),
+            item(
+                &enc_label(self.lang(), "Shift_JIS"),
+                editpad_core::SaveEncoding::ShiftJis
+            ),
+            item(
+                &enc_label(self.lang(), "EUC-JP"),
+                editpad_core::SaveEncoding::EucJp
+            ),
+            item(
+                &enc_label(self.lang(), "EUC-KR"),
+                editpad_core::SaveEncoding::EucKr
+            ),
         ]
         .spacing(2);
         self.status_menu_overlay(W, ITEM_H * 3.0 + 12.0, panel.into())
@@ -723,21 +781,20 @@ impl Editpad {
         let current = self.cur_handle.borrow().doc.line_ending();
         let item = |label: &str, target: editpad_core::LineEnding| {
             let disabled = current == target;
-            button(
-                text(label.to_owned())
-                    .size(uipx)
-                    .font(uifont)
-                    .width(Fill),
-            )
-            .width(Fill)
-            .padding([6, 10])
-            .style(chrome_menu_item_style)
-            .on_press_maybe((!disabled).then_some(Message::ConvertEol(target)))
+            button(text(label.to_owned()).size(uipx).font(uifont).width(Fill))
+                .width(Fill)
+                .padding([6, 10])
+                .style(chrome_menu_item_style)
+                .on_press_maybe((!disabled).then_some(Message::ConvertEol(target)))
         };
         let panel = column![
-            text(format!("{}{}", self.t(editpad_core::Key::EolCurrentPrefix), eol_label(current)))
-                .size(uipx)
-                .font(uifont),
+            text(format!(
+                "{}{}",
+                self.t(editpad_core::Key::EolCurrentPrefix),
+                eol_label(current)
+            ))
+            .size(uipx)
+            .font(uifont),
             item(
                 &format!(
                     "{}{}{}",

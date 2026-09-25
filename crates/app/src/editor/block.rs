@@ -1470,7 +1470,13 @@ pub(crate) fn extract_leading_int(line: &str) -> Option<i128> {
         let start = if matches!(cs[i], '-' | '+') { i + 1 } else { i };
         if start < n && cs[start].is_ascii_digit() {
             // 带符号累积：负数走饱和减法，溢出时正负各自钳到 MAX/MIN
-            let (mut acc, step) = (0i128, |a: i128, d: i128| if neg { a.saturating_mul(10).saturating_sub(d) } else { a.saturating_mul(10).saturating_add(d) });
+            let (mut acc, step) = (0i128, |a: i128, d: i128| {
+                if neg {
+                    a.saturating_mul(10).saturating_sub(d)
+                } else {
+                    a.saturating_mul(10).saturating_add(d)
+                }
+            });
             let mut j = start;
             while j < n && cs[j].is_ascii_digit() {
                 acc = step(acc, (cs[j] as u8 - b'0') as i128);

@@ -58,10 +58,8 @@ impl EditorCore {
         let Some((s, e)) = self.selection_offsets() else {
             return false;
         };
-        let hit_off = self
-            .doc
-            .line_to_char(hit.line)
-            + hit.col.min(self.line_display_len(hit.line));
+        let hit_off =
+            self.doc.line_to_char(hit.line) + hit.col.min(self.line_display_len(hit.line));
         if hit_off < s || hit_off > e {
             return false;
         }
@@ -121,8 +119,8 @@ impl EditorCore {
         if start_off >= end_off {
             return false;
         }
-        let drop_off = self.doc.line_to_char(drop.line)
-            + drop.col.min(self.line_display_len(drop.line));
+        let drop_off =
+            self.doc.line_to_char(drop.line) + drop.col.min(self.line_display_len(drop.line));
         if !copy && drop_off >= start_off && drop_off <= end_off {
             return false; // 移动落点在选区内 = 无变化
         }
@@ -181,7 +179,7 @@ mod tests {
     fn dnd_move_relocates_text_with_single_undo() {
         let mut c = core_with("abcd\nefgh\n");
         select(&mut c, 0, 1, 0, 3); // "bc"
-        // 落点 = 行 1 列 2（"ef" 之后）；移动 → 先删后插
+                                    // 落点 = 行 1 列 2（"ef" 之后）；移动 → 先删后插
         assert!(c.finish_drop_selection(CursorPos { line: 1, col: 2 }, false));
         assert_eq!(c.doc.to_text(), "ad\nefbcgh\n");
         // 光标落到插入文本尾（行 1 列 4），选区清空
@@ -197,7 +195,11 @@ mod tests {
         let mut c = core_with("abcd\nefgh\n");
         select(&mut c, 0, 1, 0, 3);
         assert!(c.finish_drop_selection(CursorPos { line: 1, col: 2 }, true));
-        assert_eq!(c.doc.to_text(), "abcd\nefbcgh\n", "复制只在落点插入（ef 之后）");
+        assert_eq!(
+            c.doc.to_text(),
+            "abcd\nefbcgh\n",
+            "复制只在落点插入（ef 之后）"
+        );
     }
 
     #[test]
@@ -267,7 +269,8 @@ mod tests {
         // 按下点 (1000, 0)：hit_test 折算到行尾列 4，落在选区内 → 候选态
         assert!(c.begin_dnd_press(1000.0, 0.0));
         assert_eq!(
-            c.dnd.as_ref().unwrap().press_x, 1000.0,
+            c.dnd.as_ref().unwrap().press_x,
+            1000.0,
             "按下坐标必须如实记录"
         );
         // 距按下点 1px：阈值内仍是候选（旧实现按到原点距离 ≈1000px 已成拖拽）

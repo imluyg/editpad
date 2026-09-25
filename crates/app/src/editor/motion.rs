@@ -198,12 +198,18 @@ impl EditorCore {
         let col = self.cursor.col;
         if right {
             if col < len {
-                Some(CursorPos { line: self.cursor.line, col: col + 1 })
+                Some(CursorPos {
+                    line: self.cursor.line,
+                    col: col + 1,
+                })
             } else {
                 None
             }
         } else if col > 0 {
-            Some(CursorPos { line: self.cursor.line, col: col - 1 })
+            Some(CursorPos {
+                line: self.cursor.line,
+                col: col - 1,
+            })
         } else {
             None
         }

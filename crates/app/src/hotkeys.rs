@@ -761,11 +761,19 @@ pub(crate) fn handle_key(
         // P134（C8）：Home/End 开态走视觉行（wrapping-aware）；Alt+Home/End
         // 到逻辑行首/尾（Alt 系不入注册表，见上方注记）。Shift 透传选区。
         Key::Named(Named::Home) => edit(EditOp::Motion(
-            if mods.alt() { Motion::LogicalHome } else { Motion::Home },
+            if mods.alt() {
+                Motion::LogicalHome
+            } else {
+                Motion::Home
+            },
             mods.shift(),
         )),
         Key::Named(Named::End) => edit(EditOp::Motion(
-            if mods.alt() { Motion::LogicalEnd } else { Motion::End },
+            if mods.alt() {
+                Motion::LogicalEnd
+            } else {
+                Motion::End
+            },
             mods.shift(),
         )),
         Key::Named(Named::PageUp) => edit(EditOp::Motion(Motion::PageUp, mods.shift())),
@@ -774,7 +782,6 @@ pub(crate) fn handle_key(
         _ => None,
     }
 }
-
 
 // ---------- P129：命令面板数据源与模糊匹配 ----------
 

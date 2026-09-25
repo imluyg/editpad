@@ -20,11 +20,11 @@ pub(crate) fn acquire_single_instance() -> bool {
     let Some(name) = editpad_core::instance_mutex_name() else {
         return true;
     };
-    let wide: Vec<u16> =
-        std::ffi::OsStr::new(&name).encode_wide().chain(std::iter::once(0)).collect();
-    let handle = unsafe {
-        CreateMutexW(std::ptr::null_mut(), 0, wide.as_ptr())
-    };
+    let wide: Vec<u16> = std::ffi::OsStr::new(&name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, wide.as_ptr()) };
     if handle.is_null() {
         return true;
     }
@@ -54,7 +54,10 @@ pub(crate) fn show_message(title: &str, body: &str) {
     const MB_ICONINFORMATION: u32 = 0x40;
     const MB_TOPMOST: u32 = 0x4_0000;
     let wide = |s: &str| -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     };
     let title_w = wide(title);
     let body_w = wide(body);

@@ -497,7 +497,6 @@ impl Editpad {
     }
 }
 
-
 /// P129：命令面板模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteMode {

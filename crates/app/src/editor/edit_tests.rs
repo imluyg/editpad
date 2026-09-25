@@ -335,133 +335,153 @@ fn current_line_copy_text_includes_line_ending() {
     assert_eq!(p.current_line_copy_text(), "");
 }
 
-    // ---------- P123 查找命中高亮 ----------
+// ---------- P123 查找命中高亮 ----------
 
-    #[test]
-    fn match_line_pieces_split_multiline_hits_by_display_span() {
-        let c = core_with("ab\ncd\r\nef");
-        // 单行命中：恒等片段
-        assert_eq!(
-            c.match_line_pieces(&editpad_core::MatchPos { line: 0, col: 1, len_chars: 1 }),
-            vec![(0, 1, 2)]
-        );
-        // 跨行命中：显示跨度口径（\r\n 计 1）——"d" + 换行 + "e"
-        assert_eq!(
-            c.match_line_pieces(&editpad_core::MatchPos { line: 1, col: 1, len_chars: 3 }),
-            vec![(1, 1, 2), (2, 0, 1)]
-        );
-        // 零宽命中与行号越界：空表（绘制层跳过）
-        assert!(c
-            .match_line_pieces(&editpad_core::MatchPos { line: 0, col: 0, len_chars: 0 })
-            .is_empty());
-        assert!(c
-            .match_line_pieces(&editpad_core::MatchPos { line: 9, col: 0, len_chars: 2 })
-            .is_empty());
-    }
+#[test]
+fn match_line_pieces_split_multiline_hits_by_display_span() {
+    let c = core_with("ab\ncd\r\nef");
+    // 单行命中：恒等片段
+    assert_eq!(
+        c.match_line_pieces(&editpad_core::MatchPos {
+            line: 0,
+            col: 1,
+            len_chars: 1
+        }),
+        vec![(0, 1, 2)]
+    );
+    // 跨行命中：显示跨度口径（\r\n 计 1）——"d" + 换行 + "e"
+    assert_eq!(
+        c.match_line_pieces(&editpad_core::MatchPos {
+            line: 1,
+            col: 1,
+            len_chars: 3
+        }),
+        vec![(1, 1, 2), (2, 0, 1)]
+    );
+    // 零宽命中与行号越界：空表（绘制层跳过）
+    assert!(c
+        .match_line_pieces(&editpad_core::MatchPos {
+            line: 0,
+            col: 0,
+            len_chars: 0
+        })
+        .is_empty());
+    assert!(c
+        .match_line_pieces(&editpad_core::MatchPos {
+            line: 9,
+            col: 0,
+            len_chars: 2
+        })
+        .is_empty());
+}
 
-    // ---------- P125 覆写模式 ----------
+// ---------- P125 覆写模式 ----------
 
-    #[test]
-    fn overwrite_typing_replaces_char_in_line() {
-        let mut c = core_with("abc");
-        c.overwrite = true;
-        c.cursor = CursorPos { line: 0, col: 1 };
-        c.insert_str("X");
-        assert_eq!(c.doc.to_text(), "aXc");
-        assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
-    }
+#[test]
+fn overwrite_typing_replaces_char_in_line() {
+    let mut c = core_with("abc");
+    c.overwrite = true;
+    c.cursor = CursorPos { line: 0, col: 1 };
+    c.insert_str("X");
+    assert_eq!(c.doc.to_text(), "aXc");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 2 });
+}
 
-    #[test]
-    fn overwrite_at_line_end_appends_and_newline_never_overwrites() {
-        let mut c = core_with("ab");
-        c.overwrite = true;
-        c.cursor = CursorPos { line: 0, col: 2 };
-        c.insert_str("c");
-        assert_eq!(c.doc.to_text(), "abc", "行尾无字符可替换：照常追加");
-        c.cursor = CursorPos { line: 0, col: 3 };
-        c.insert_str("\n");
-        assert_eq!(c.doc.to_text(), "abc\n", "换行永不参与覆写");
-    }
+#[test]
+fn overwrite_at_line_end_appends_and_newline_never_overwrites() {
+    let mut c = core_with("ab");
+    c.overwrite = true;
+    c.cursor = CursorPos { line: 0, col: 2 };
+    c.insert_str("c");
+    assert_eq!(c.doc.to_text(), "abc", "行尾无字符可替换：照常追加");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    c.insert_str("\n");
+    assert_eq!(c.doc.to_text(), "abc\n", "换行永不参与覆写");
+}
 
-    #[test]
-    fn overwrite_multi_char_paste_still_inserts() {
-        let mut c = core_with("abc");
-        c.overwrite = true;
-        c.cursor = CursorPos { line: 0, col: 0 };
-        c.insert_str("XY");
-        assert_eq!(c.doc.to_text(), "XYabc", "多字符（粘贴/IME 上屏）恒插入");
-    }
+#[test]
+fn overwrite_multi_char_paste_still_inserts() {
+    let mut c = core_with("abc");
+    c.overwrite = true;
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.insert_str("XY");
+    assert_eq!(c.doc.to_text(), "XYabc", "多字符（粘贴/IME 上屏）恒插入");
+}
 
-    #[test]
-    fn overwrite_typing_groups_into_single_undo() {
-        let mut c = core_with("abcdef");
-        c.overwrite = true;
-        c.cursor = CursorPos { line: 0, col: 0 };
-        for ch in ["X", "Y", "Z"] {
-            c.insert_str(ch);
-        }
-        assert_eq!(c.doc.to_text(), "XYZdef");
-        assert!(c.undo(), "连续覆写打字成组：一次撤销");
-        assert_eq!(c.doc.to_text(), "abcdef");
+#[test]
+fn overwrite_typing_groups_into_single_undo() {
+    let mut c = core_with("abcdef");
+    c.overwrite = true;
+    c.cursor = CursorPos { line: 0, col: 0 };
+    for ch in ["X", "Y", "Z"] {
+        c.insert_str(ch);
     }
+    assert_eq!(c.doc.to_text(), "XYZdef");
+    assert!(c.undo(), "连续覆写打字成组：一次撤销");
+    assert_eq!(c.doc.to_text(), "abcdef");
+}
 
-    /// 回归：`Document::remove_range` 收的是**字符**下标，旧实现传的
-    /// `char::len_utf8()`（字节数）——压在 3 字节汉字上打一个字母会连带吃掉
-    /// 后面两个字符（本例把下一行都吸进来了）。
-    #[test]
-    fn overwrite_replaces_exactly_one_wide_char() {
-        let mut c = core_with("中心\nnext");
-        c.overwrite = true;
-        c.cursor = CursorPos { line: 0, col: 0 };
-        c.insert_str("A");
-        assert_eq!(c.doc.to_text(), "A心\nnext", "只吃掉光标下的那一个字符");
-        assert_eq!(c.cursor, CursorPos { line: 0, col: 1 });
-    }
+/// 回归：`Document::remove_range` 收的是**字符**下标，旧实现传的
+/// `char::len_utf8()`（字节数）——压在 3 字节汉字上打一个字母会连带吃掉
+/// 后面两个字符（本例把下一行都吸进来了）。
+#[test]
+fn overwrite_replaces_exactly_one_wide_char() {
+    let mut c = core_with("中心\nnext");
+    c.overwrite = true;
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.insert_str("A");
+    assert_eq!(c.doc.to_text(), "A心\nnext", "只吃掉光标下的那一个字符");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 1 });
+}
 
-    #[test]
-    fn overwrite_on_final_char_of_document_does_not_overrun() {
-        // 文档只剩一个 3 字节字符：旧实现按 0..3 删，右端点越出文本长度
-        let mut c = core_with("中");
-        c.overwrite = true;
-        c.cursor = CursorPos { line: 0, col: 0 };
-        c.insert_str("A");
-        assert_eq!(c.doc.to_text(), "A", "覆写最后一个字符不得越界、不得多吃");
-    }
+#[test]
+fn overwrite_on_final_char_of_document_does_not_overrun() {
+    // 文档只剩一个 3 字节字符：旧实现按 0..3 删，右端点越出文本长度
+    let mut c = core_with("中");
+    c.overwrite = true;
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.insert_str("A");
+    assert_eq!(c.doc.to_text(), "A", "覆写最后一个字符不得越界、不得多吃");
+}
 
-    #[test]
-    fn apply_tool_transforms_selection_and_reselects() {
-        let mut c = core_with("foo bar");
-        c.select_span(0, 4, 3); // 选中 "bar"
-        assert!(c.apply_tool(ToolKind::ToolBase64Encode).unwrap());
-        assert_eq!(c.doc.to_text(), "foo YmFy");
-        assert_eq!(c.selected_text().as_deref(), Some("YmFy"), "选区保持覆盖新文本");
-        // 解码往返
-        assert!(c.apply_tool(ToolKind::ToolBase64Decode).unwrap());
-        assert_eq!(c.doc.to_text(), "foo bar");
-        // 无选区 → Err
-        c.anchor = None;
-        c.cursor = CursorPos { line: 0, col: 7 };
-        assert!(c.apply_tool(ToolKind::ToolMd5).is_err());
-        // 无效 Base64 → Err 不动文档
-        c.select_span(0, 0, 1);
-        assert!(c.apply_tool(ToolKind::ToolBase64Decode).is_err());
-        assert_eq!(c.doc.to_text(), "foo bar");
-    }
+#[test]
+fn apply_tool_transforms_selection_and_reselects() {
+    let mut c = core_with("foo bar");
+    c.select_span(0, 4, 3); // 选中 "bar"
+    assert!(c.apply_tool(ToolKind::ToolBase64Encode).unwrap());
+    assert_eq!(c.doc.to_text(), "foo YmFy");
+    assert_eq!(
+        c.selected_text().as_deref(),
+        Some("YmFy"),
+        "选区保持覆盖新文本"
+    );
+    // 解码往返
+    assert!(c.apply_tool(ToolKind::ToolBase64Decode).unwrap());
+    assert_eq!(c.doc.to_text(), "foo bar");
+    // 无选区 → Err
+    c.anchor = None;
+    c.cursor = CursorPos { line: 0, col: 7 };
+    assert!(c.apply_tool(ToolKind::ToolMd5).is_err());
+    // 无效 Base64 → Err 不动文档
+    c.select_span(0, 0, 1);
+    assert!(c.apply_tool(ToolKind::ToolBase64Decode).is_err());
+    assert_eq!(c.doc.to_text(), "foo bar");
+}
 
-    #[test]
-    fn apply_tool_hash_replaces_selection_with_hex() {
-        let mut c = core_with("abc");
-        c.select_span(0, 0, 3);
-        assert!(c.apply_tool(ToolKind::ToolSha256).unwrap());
-        assert_eq!(
-            c.doc.to_text(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-    #[test]
-    fn overwrite_resets_on_document_change() {
-        let mut c = core_with("a");
-        c.overwrite = true;
-        c.reset_document(Document::from_str("b"));
-        assert!(!c.overwrite, "换文档复位为插入模式");
-    }
+#[test]
+fn apply_tool_hash_replaces_selection_with_hex() {
+    let mut c = core_with("abc");
+    c.select_span(0, 0, 3);
+    assert!(c.apply_tool(ToolKind::ToolSha256).unwrap());
+    assert_eq!(
+        c.doc.to_text(),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+#[test]
+fn overwrite_resets_on_document_change() {
+    let mut c = core_with("a");
+    c.overwrite = true;
+    c.reset_document(Document::from_str("b"));
+    assert!(!c.overwrite, "换文档复位为插入模式");
+}

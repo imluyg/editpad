@@ -91,7 +91,6 @@ impl EditorCore {
             self.doc.remove_range(at, at + 1);
         }
 
-
         // 第 60 轮：跨行选区将被替换——先记录 (起点行, 起点列>0, 终点行,
         // 消失行数) 供书签再映射（口径与 touched_lines 一致：末点在行首
         // 时该行不算触及，其内容整体并入结果行）
@@ -231,17 +230,16 @@ impl EditorCore {
         };
         let src = self.doc.slice_text(start, end);
         let out = match kind {
-            ToolKind::ToolBase64Encode => {
-                editpad_core::toolkit::base64_encode(src.as_bytes())
-            }
+            ToolKind::ToolBase64Encode => editpad_core::toolkit::base64_encode(src.as_bytes()),
             ToolKind::ToolBase64Decode => {
                 let bytes = editpad_core::toolkit::base64_decode(&src)
                     .ok_or(EditErr::Base64DecodeInvalid)?;
                 String::from_utf8(bytes).map_err(|_| EditErr::Base64DecodeNotUtf8)?
             }
             ToolKind::ToolUrlEncode => editpad_core::toolkit::url_encode(&src),
-            ToolKind::ToolUrlDecode => editpad_core::toolkit::url_decode(&src)
-                .ok_or(EditErr::UrlDecodeInvalid)?,
+            ToolKind::ToolUrlDecode => {
+                editpad_core::toolkit::url_decode(&src).ok_or(EditErr::UrlDecodeInvalid)?
+            }
             ToolKind::ToolMd5 => editpad_core::toolkit::md5_hex(src.as_bytes()),
             ToolKind::ToolSha256 => editpad_core::toolkit::sha256_hex(src.as_bytes()),
         };

@@ -1170,17 +1170,35 @@ fn apply_line_block_clamps_cursor_into_new_row_count() {
 #[test]
 fn sequence_lines_formats_all_bases_with_pad_and_step() {
     // 十进制基础 + 负步长
-    assert_eq!(sequence_lines(3, 5, -2, NumBase::Dec, 0, false), ["5", "3", "1"]);
+    assert_eq!(
+        sequence_lines(3, 5, -2, NumBase::Dec, 0, false),
+        ["5", "3", "1"]
+    );
     // 补零定宽（十进制）
-    assert_eq!(sequence_lines(3, 1, 1, NumBase::Dec, 3, false), ["001", "002", "003"]);
+    assert_eq!(
+        sequence_lines(3, 1, 1, NumBase::Dec, 3, false),
+        ["001", "002", "003"]
+    );
     // 补零只作用于数字部分，负号在补零之外
-    assert_eq!(sequence_lines(2, -3, 1, NumBase::Dec, 3, false), ["-003", "-002"]);
+    assert_eq!(
+        sequence_lines(2, -3, 1, NumBase::Dec, 3, false),
+        ["-003", "-002"]
+    );
     // 十六进制大小写两形态
-    assert_eq!(sequence_lines(2, 9, 1, NumBase::Hex, 2, false), ["09", "0a"]);
+    assert_eq!(
+        sequence_lines(2, 9, 1, NumBase::Hex, 2, false),
+        ["09", "0a"]
+    );
     assert_eq!(sequence_lines(2, 9, 1, NumBase::Hex, 2, true), ["09", "0A"]);
     // 二进制 / 八进制
-    assert_eq!(sequence_lines(3, 0, 2, NumBase::Bin, 4, false), ["0000", "0010", "0100"]);
-    assert_eq!(sequence_lines(2, 8, 1, NumBase::Oct, 2, false), ["10", "11"]);
+    assert_eq!(
+        sequence_lines(3, 0, 2, NumBase::Bin, 4, false),
+        ["0000", "0010", "0100"]
+    );
+    assert_eq!(
+        sequence_lines(2, 8, 1, NumBase::Oct, 2, false),
+        ["10", "11"]
+    );
     // i64 饱和：极值 + 正步长停在 MAX，不回绕
     assert_eq!(
         sequence_lines(2, i64::MAX, 1, NumBase::Dec, 0, false),
@@ -1216,7 +1234,11 @@ fn zero_width_block_is_persistent_insertion_column() {
     // 插入（行 1 "gh" 长 2，列 2 恰在行尾 → "ghZ"）
     assert!(c.insert_into_block("Z"));
     assert_eq!(c.doc.to_text(), "abZcdef\nghZ\nijZklm");
-    assert_eq!(c.cursor, CursorPos { line: 0, col: 3 }, "光标落首行插入文本之后");
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 0, col: 3 },
+        "光标落首行插入文本之后"
+    );
     assert!(c.undo(), "零宽插入必须可撤销");
     assert_eq!(c.doc.to_text(), "abcdef\ngh\nijklm");
 
@@ -1546,78 +1568,96 @@ fn outdent_on_phantom_line_is_noop() {
     assert_eq!(c.doc.to_text(), "a\n");
 }
 
-    // ---------- P124：行操作扩展与词首大写 ----------
+// ---------- P124：行操作扩展与词首大写 ----------
 
-    #[test]
-    fn reverse_lines_reverses_block_and_is_undoable() {
-        let mut c = core_with("a\nb\nc");
-        assert!(c.reverse_lines());
-        assert_eq!(c.doc.to_text(), "c\nb\na");
-        assert!(c.undo());
-        assert_eq!(c.doc.to_text(), "a\nb\nc");
-        // 回文块：幂等 no-op
-        let mut p = core_with("x\ny\nx");
-        assert!(!p.reverse_lines());
-        assert_eq!(p.doc.to_text(), "x\ny\nx");
-    }
+#[test]
+fn reverse_lines_reverses_block_and_is_undoable() {
+    let mut c = core_with("a\nb\nc");
+    assert!(c.reverse_lines());
+    assert_eq!(c.doc.to_text(), "c\nb\na");
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), "a\nb\nc");
+    // 回文块：幂等 no-op
+    let mut p = core_with("x\ny\nx");
+    assert!(!p.reverse_lines());
+    assert_eq!(p.doc.to_text(), "x\ny\nx");
+}
 
-    #[test]
-    fn numeric_sort_extracts_leading_signed_int_and_parks_keyless_last() {
-        let mut c = core_with("b 3\n-1 x\nno num\n+2 y\n10 z");
-        assert!(c.sort_lines_numeric(SortOrder::Ascending));
-        assert_eq!(c.doc.to_text(), "-1 x\n+2 y\nb 3\n10 z\nno num");
-        assert!(c.sort_lines_numeric(SortOrder::Descending));
-        assert_eq!(c.doc.to_text(), "10 z\nb 3\n+2 y\n-1 x\nno num");
-        // 子串中的数字也作数（主流编辑器同口径）：无需行首
-        let mut d = core_with("id=42\nid=7");
-        assert!(d.sort_lines_numeric(SortOrder::Ascending));
-        assert_eq!(d.doc.to_text(), "id=7\nid=42");
-    }
+#[test]
+fn numeric_sort_extracts_leading_signed_int_and_parks_keyless_last() {
+    let mut c = core_with("b 3\n-1 x\nno num\n+2 y\n10 z");
+    assert!(c.sort_lines_numeric(SortOrder::Ascending));
+    assert_eq!(c.doc.to_text(), "-1 x\n+2 y\nb 3\n10 z\nno num");
+    assert!(c.sort_lines_numeric(SortOrder::Descending));
+    assert_eq!(c.doc.to_text(), "10 z\nb 3\n+2 y\n-1 x\nno num");
+    // 子串中的数字也作数（主流编辑器同口径）：无需行首
+    let mut d = core_with("id=42\nid=7");
+    assert!(d.sort_lines_numeric(SortOrder::Ascending));
+    assert_eq!(d.doc.to_text(), "id=7\nid=42");
+}
 
-    #[test]
-    fn length_sort_orders_by_char_count() {
-        let mut c = core_with("ccc\na\ndd");
-        assert!(c.sort_lines_length(SortOrder::Ascending));
-        assert_eq!(c.doc.to_text(), "a\ndd\nccc");
-        assert!(c.sort_lines_length(SortOrder::Descending));
-        assert_eq!(c.doc.to_text(), "ccc\ndd\na");
-    }
+#[test]
+fn length_sort_orders_by_char_count() {
+    let mut c = core_with("ccc\na\ndd");
+    assert!(c.sort_lines_length(SortOrder::Ascending));
+    assert_eq!(c.doc.to_text(), "a\ndd\nccc");
+    assert!(c.sort_lines_length(SortOrder::Descending));
+    assert_eq!(c.doc.to_text(), "ccc\ndd\na");
+}
 
-    #[test]
-    fn consecutive_dedupe_keeps_first_of_each_run() {
-        let mut c = core_with("a\na\nb\na\na\na\nc");
-        assert!(c.remove_consecutive_duplicate_lines());
-        assert_eq!(c.doc.to_text(), "a\nb\na\nc");
-        assert!(c.undo(), "可整体撤销");
-        assert_eq!(c.doc.to_text(), "a\na\nb\na\na\na\nc");
-        // 全无连续重复：no-op
-        let mut d = core_with("x\ny");
-        assert!(!d.remove_consecutive_duplicate_lines());
-    }
+#[test]
+fn consecutive_dedupe_keeps_first_of_each_run() {
+    let mut c = core_with("a\na\nb\na\na\na\nc");
+    assert!(c.remove_consecutive_duplicate_lines());
+    assert_eq!(c.doc.to_text(), "a\nb\na\nc");
+    assert!(c.undo(), "可整体撤销");
+    assert_eq!(c.doc.to_text(), "a\na\nb\na\na\na\nc");
+    // 全无连续重复：no-op
+    let mut d = core_with("x\ny");
+    assert!(!d.remove_consecutive_duplicate_lines());
+}
 
-    #[test]
-    fn title_case_uppercases_word_starts_and_lowers_rest() {
-        let mut c = core_with("hello WORLD foo_bar\n中文test");
-        c.cursor = CursorPos { line: 0, col: 0 };
-        c.select_all();
-        assert!(c.convert_case(CaseKind::Title));
-        assert_eq!(c.doc.to_text(), "Hello World Foo_Bar\n中文test", "下划线分段、CJK 视为词段");
-        // 幂等：已词首大写 → no-op
-        assert!(!c.convert_case(CaseKind::Title));
-    }
+#[test]
+fn title_case_uppercases_word_starts_and_lowers_rest() {
+    let mut c = core_with("hello WORLD foo_bar\n中文test");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.select_all();
+    assert!(c.convert_case(CaseKind::Title));
+    assert_eq!(
+        c.doc.to_text(),
+        "Hello World Foo_Bar\n中文test",
+        "下划线分段、CJK 视为词段"
+    );
+    // 幂等：已词首大写 → no-op
+    assert!(!c.convert_case(CaseKind::Title));
+}
 
-    #[test]
-    fn extract_leading_int_handles_signs_overflow_and_words() {
-        assert_eq!(crate::editor::block::extract_leading_int("-12abc"), Some(-12));
-        assert_eq!(crate::editor::block::extract_leading_int("+7"), Some(7));
-        assert_eq!(crate::editor::block::extract_leading_int("abc-3"), Some(-3), "子串取数");
-        assert_eq!(crate::editor::block::extract_leading_int("--5"), Some(-5), "第二个 - 与 5 成键");
-        assert_eq!(crate::editor::block::extract_leading_int("no digits"), None);
-        // 超长数字串：饱和钳制而非丢键
-        assert_eq!(
-            crate::editor::block::extract_leading_int(&"9".repeat(60)),
-            Some(i128::MAX)
-        );
-        // 负向饱和
-        assert_eq!(crate::editor::block::extract_leading_int(&format!("-{}", "9".repeat(60))), Some(i128::MIN));
-    }
+#[test]
+fn extract_leading_int_handles_signs_overflow_and_words() {
+    assert_eq!(
+        crate::editor::block::extract_leading_int("-12abc"),
+        Some(-12)
+    );
+    assert_eq!(crate::editor::block::extract_leading_int("+7"), Some(7));
+    assert_eq!(
+        crate::editor::block::extract_leading_int("abc-3"),
+        Some(-3),
+        "子串取数"
+    );
+    assert_eq!(
+        crate::editor::block::extract_leading_int("--5"),
+        Some(-5),
+        "第二个 - 与 5 成键"
+    );
+    assert_eq!(crate::editor::block::extract_leading_int("no digits"), None);
+    // 超长数字串：饱和钳制而非丢键
+    assert_eq!(
+        crate::editor::block::extract_leading_int(&"9".repeat(60)),
+        Some(i128::MAX)
+    );
+    // 负向饱和
+    assert_eq!(
+        crate::editor::block::extract_leading_int(&format!("-{}", "9".repeat(60))),
+        Some(i128::MIN)
+    );
+}

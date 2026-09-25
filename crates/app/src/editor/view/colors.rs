@@ -3,7 +3,6 @@
 //! （P160 自 view.rs 拆出，纯移动零行为变更。）
 use super::*;
 
-
 /// 浅色主题的固定配色（保持 v1 观感）；深色主题在 draw 时由 palette 派生。
 pub(super) const SELECTION_COLOR: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.25);
 pub(super) const CARET_COLOR: Color = Color::from_rgb8(0x11, 0x11, 0x11);
@@ -67,7 +66,10 @@ impl EditorColors {
                 gutter_text: GUTTER_TEXT,
                 // P115：组字串与正文同色（正文恒用 palette.text）
                 preedit_text: palette.text,
-                preedit_underline: Color { a: 0.6, ..palette.text },
+                preedit_underline: Color {
+                    a: 0.6,
+                    ..palette.text
+                },
                 // 滚动条用前景色低透明度叠加，两种主题都自然成立
                 scrollbar_track: Color::from_rgba8(0x00, 0x00, 0x00, 0.05),
                 scrollbar_thumb: Color::from_rgba8(0x00, 0x00, 0x00, 0.30),
@@ -76,8 +78,14 @@ impl EditorColors {
                 find: FIND_MATCH_LIGHT,
                 // P132：辅助线族——前景低透明度（参考线比标尺更淡），
                 // 两种主题都「隐而不失」
-                indent_guide: Color { a: 0.14, ..palette.text },
-                edge_ruler: Color { a: 0.22, ..palette.text },
+                indent_guide: Color {
+                    a: 0.14,
+                    ..palette.text
+                },
+                edge_ruler: Color {
+                    a: 0.22,
+                    ..palette.text
+                },
                 link_underline: BRACKET_LIGHT,
                 // 与选区同族的淡蓝（更淡），像素对拍可复用蓝色判据
                 invisibles: Color::from_rgba8(0x33, 0x66, 0xCC, 0.30),
@@ -91,8 +99,14 @@ impl EditorColors {
             gutter_text: Color { a: 0.55, ..text },
             preedit_text: text,
             preedit_underline: Color { a: 0.6, ..text },
-            scrollbar_track: Color { a: 0.06, ..palette.text },
-            scrollbar_thumb: Color { a: 0.38, ..palette.text },
+            scrollbar_track: Color {
+                a: 0.06,
+                ..palette.text
+            },
+            scrollbar_thumb: Color {
+                a: 0.38,
+                ..palette.text
+            },
             bookmark: BOOKMARK_COLOR,
             bracket: Color { a: 0.85, ..text },
             find: FIND_MATCH_DARK,

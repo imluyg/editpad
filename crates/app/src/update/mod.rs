@@ -25,10 +25,10 @@ pub(crate) use super::*;
 
 // 按域拆分的 impl 块（P157：纯移动零行为变更；私有方法经 pub(super) 跨文件可见）
 mod edit;
-mod tabs;
 mod file;
 mod find;
 mod settings;
+mod tabs;
 
 // ---------- P149：周期节拍订阅（OS 线程独占睡眠 + async channel 桥接） ----------
 
@@ -309,10 +309,6 @@ impl Editpad {
         self.manifest_rev += 1;
     }
 
-
-
-
-
     pub(crate) fn new(cli_files: Vec<PathBuf>) -> (Self, Task<Message>) {
         // P33：先把 Family::Monospace 的解析目标钉到 CJK 等宽候选（幂等、
         // 进程内一次）——必须发生在首帧排版之前，否则排版缓存里已固化的
@@ -331,12 +327,11 @@ impl Editpad {
         // P154：UI 字体（按界面语言解析）与行号位等宽字体——两者都与正文族
         // 解耦；候选全未命中则 None（UI 回落 iced 默认、行号回落 UI 字体），
         // 不引入失败模式。
-        let ui_font_family =
-            pick_ui_font_family(settings.language, &available_fonts)
-                .map(|name| leak_font_family(name.to_owned()));
-        let gutter_font_family = pick_gutter_font_family(&available_fonts)
-            .map(|name| leak_font_family(name.to_owned()));        // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
-        // （对齐 P20「记住最近文件」先例）
+        let ui_font_family = pick_ui_font_family(settings.language, &available_fonts)
+            .map(|name| leak_font_family(name.to_owned()));
+        let gutter_font_family =
+            pick_gutter_font_family(&available_fonts).map(|name| leak_font_family(name.to_owned())); // P29：快照总开关关闭时清空存量快照区——只关开关不清数据等于没关
+                                                                                                     // （对齐 P20「记住最近文件」先例）
         if !settings.enable_snapshots {
             if let Some(dir) = editpad_core::snapshot::snapshot_dir() {
                 editpad_core::snapshot::clear_session(&dir);
@@ -374,7 +369,11 @@ impl Editpad {
         }
         if configured_font_missing {
             if let Some(name) = state.settings.font_family.as_deref() {
-                state.status = format!("{}{name}{}", editpad_core::Key::StFontMissing.text(state.settings.language), editpad_core::Key::StFontMissingSuffix.text(state.settings.language));
+                state.status = format!(
+                    "{}{name}{}",
+                    editpad_core::Key::StFontMissing.text(state.settings.language),
+                    editpad_core::Key::StFontMissingSuffix.text(state.settings.language)
+                );
             }
         }
         // P149：caret 闪烁 / 快照心跳的节拍链已改为订阅时钟驱动（见
@@ -633,10 +632,6 @@ impl Editpad {
         }
     }
 
-
-
-
-
     // ---------- domain methods (round 81 Phase 1: update() split) ----------
     /// 域：菜单栏/最近文件/面板。臂体自原 update() 逐字搬移，零行为变更。
     fn update_menus(&mut self, msg: Message) -> Task<Message> {
@@ -689,7 +684,9 @@ impl Editpad {
                 if path.exists() {
                     self.request_open(path)
                 } else {
-                    self.set_status_error(self.t_suffix(editpad_core::Key::StRecentMissing, &entry));
+                    self.set_status_error(
+                        self.t_suffix(editpad_core::Key::StRecentMissing, &entry),
+                    );
                     Task::none()
                 }
             }
@@ -814,10 +811,9 @@ impl Editpad {
                     None => Task::none(),
                     Some(payload) => {
                         self.heartbeat_inflight = true;
-                        Task::perform(
-                            async move { drive_heartbeat(payload).await },
-                            |message| message,
-                        )
+                        Task::perform(async move { drive_heartbeat(payload).await }, |message| {
+                            message
+                        })
                     }
                 }
             }
@@ -874,20 +870,9 @@ impl Editpad {
         }
     }
 
-
     // ---------- 编辑分发 ----------
 
-
-
-
     // ---------- 加载管线 ----------
-
-
-
-
-
-
-
 
     pub(crate) fn subscription(&self) -> Subscription<Message> {
         let load = match &self.active_load {
@@ -905,21 +890,25 @@ impl Editpad {
             editor::CARET_BLINK_MS
         };
         let caret = Subscription::run_with(
-            TickKind::Caret { interval_ms: caret_interval },
+            TickKind::Caret {
+                interval_ms: caret_interval,
+            },
             tick_stream,
         );
-        let heartbeat =
-            if session_restore_allowed(
-                self.settings.enable_snapshots,
-                self.settings.remember_session,
-            ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT {
-                Subscription::run_with(
-                    TickKind::Heartbeat { interval_secs: self.settings.snapshot_interval_secs },
-                    tick_stream,
-                )
-            } else {
-                Subscription::none()
-            };
+        let heartbeat = if session_restore_allowed(
+            self.settings.enable_snapshots,
+            self.settings.remember_session,
+        ) && self.settings.exit_mode == editpad_core::EXIT_MODE_SNAPSHOT
+        {
+            Subscription::run_with(
+                TickKind::Heartbeat {
+                    interval_secs: self.settings.snapshot_interval_secs,
+                },
+                tick_stream,
+            )
+        } else {
+            Subscription::none()
+        };
         let monitor = if self.tabs.iter().any(|t| t.monitor) {
             Subscription::run_with(TickKind::Monitor, tick_stream)
         } else {
@@ -959,18 +948,20 @@ impl Editpad {
         let close_requests = window::close_requests().map(Message::CloseRequested);
         // P18 即时保存不走订阅：编辑后由 maybe_schedule_autosave 直接派发
         // 「睡眠防抖→落盘」的专用线程（inflight 去重，至多一个挂起）
-        Subscription::batch([load, events, close_requests, caret, heartbeat, monitor, pending_open])
+        Subscription::batch([
+            load,
+            events,
+            close_requests,
+            caret,
+            heartbeat,
+            monitor,
+            pending_open,
+        ])
     }
 
     // ---------- 保存 ----------
 
-
-
     // ---------- 即时保存（P18，按页独立） ----------
-
-
-
-
 
     /// P155：`Key` + 运行期值的拼接（`fmt_suffix` 的短封装）。
     /// 注：`self.t(..)` 定义在 view.rs（同一 `impl Editpad`，全局唯一）。
@@ -1036,7 +1027,6 @@ impl Editpad {
 /// P102：窗口几何落盘节流窗（2 秒一道；最后一次状态由关闭路径兜底）。
 const GEOMETRY_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-
 // ---------- P126：只读判定与资源管理器定位 ----------
 
 /// P126：只读锁定的动作分类——true = 会改动文档内容（只读下拒收）。
@@ -1091,7 +1081,10 @@ fn open_external(target: &str) -> std::io::Result<()> {
     return Ok(());
     #[cfg(not(test))]
     {
-        std::process::Command::new("explorer").arg(target).spawn().map(|_| ())
+        std::process::Command::new("explorer")
+            .arg(target)
+            .spawn()
+            .map(|_| ())
     }
 }
 
@@ -1105,6 +1098,9 @@ fn open_external(target: &str) -> std::io::Result<()> {
     return Ok(());
     #[cfg(not(test))]
     {
-        std::process::Command::new("xdg-open").arg(target).spawn().map(|_| ())
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map(|_| ())
     }
 }

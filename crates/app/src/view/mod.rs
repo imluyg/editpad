@@ -27,8 +27,8 @@ use iced::widget::column;
 // 按域拆分的 impl 块（纯移动零行为变更；私有方法经 pub(super) 跨文件可见）
 mod find_ops;
 mod find_panel;
-mod overlays;
 mod lifecycle;
+mod overlays;
 mod restore;
 mod scans;
 mod snapshots;
@@ -98,63 +98,22 @@ impl Editpad {
         }
     }
 
-
     // ---------- 周期快照心跳（P31） ----------
-
-
-
-
-
-
 
     // ---------- 关窗流（P29 快照直退） ----------
 
-
-
-
-
     // ---------- 启动会话恢复（P30） ----------
-
-
-
-
-
-
-
-
-
-
 
     // ---------- 查找 / 替换内部逻辑 ----------
 
-
-
-
-
-
-
-
-
-
-
-
-
     // ---------- 展示辅助 ----------
-
-
-
-
 
     // 设置面板渲染（settings_panel/sidebar/content/row_widget/stepper/font_picker 等 8 方法）已迁往 settings_ui.rs（第 82 轮 Phase 2a）
 
-pub(crate) fn view(&self) -> Element<'_, Message> {
+    pub(crate) fn view(&self) -> Element<'_, Message> {
         // P22 第三批：当前页是否为 Markdown（决定预览按钮可用性）
-        let is_markdown = self
-            .cur_handle
-            .borrow()
-            .highlight_syntax_name()
-            .as_deref()
-            == Some("Markdown");
+        let is_markdown =
+            self.cur_handle.borrow().highlight_syntax_name().as_deref() == Some("Markdown");
         // P33/P36：UI 全部控件与正文同族，字号固定不随正文缩放——
         // Ctrl+滚轮（P48）与设置面板只调节文件内容；P34：族随设置切换
         let uipx = editor::ui_font_px();
@@ -178,18 +137,13 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         for (idx, name) in menu_names.iter().enumerate() {
             let open = self.menu_bar_open == Some(idx);
             menubar_inner = menubar_inner.push(
-                button(
-                    text(self.t(*name)).size(uipx).font(uifont),
-                )
-                .padding([1, 8])
-                .style(move |theme, status| menubar_text_style(theme, status, open))
-                .on_press_maybe((!self.busy).then_some(Message::MenuToggled(idx))),
+                button(text(self.t(*name)).size(uipx).font(uifont))
+                    .padding([1, 8])
+                    .style(move |theme, status| menubar_text_style(theme, status, open))
+                    .on_press_maybe((!self.busy).then_some(Message::MenuToggled(idx))),
             );
         }
-        let menubar = mouse_area(
-            menubar_inner.padding([0, 4]),
-        )
-        .on_move(Message::MenubarHovered);
+        let menubar = mouse_area(menubar_inner.padding([0, 4])).on_move(Message::MenubarHovered);
 
         // 第 70 轮：工具栏整体移除——打开/保存/查找/设置全部由顶部菜单
         // 栏承载（用户裁决：与文件菜单重复）；置脏指示由标签页 ● 前缀
@@ -219,13 +173,16 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 if self.renaming_tab == Some(tab.id) {
                     strip = strip.push(
                         row![
-                            text_input(self.t(editpad_core::Key::RenamePlaceholder), &self.rename_input)
-                                .id(rename_input_id()) // P64：与聚焦操作同源
-                                .size(uipx)
-                                .font(uifont)
-                                .on_input(Message::TabRenameInputChanged)
-                                .on_submit(Message::TabRenameCommitted)
-                                .width(150),
+                            text_input(
+                                self.t(editpad_core::Key::RenamePlaceholder),
+                                &self.rename_input
+                            )
+                            .id(rename_input_id()) // P64：与聚焦操作同源
+                            .size(uipx)
+                            .font(uifont)
+                            .on_input(Message::TabRenameInputChanged)
+                            .on_submit(Message::TabRenameCommitted)
+                            .width(150),
                             button(text("✓").size(uipx).font(uifont))
                                 .padding([2, 7])
                                 .style(chrome_button_style)
@@ -245,8 +202,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 // P168：页签名走当前界面语言——此前 display_name() 硬编码
                 // 中文，英文界面下标签仍是「未命名N」（状态栏/重命名占位
                 // 已是 UntitledN，同屏混排，用户复报）。
-                let tab_label =
-                    tab.display_name_in(self.lang());
+                let tab_label = tab.display_name_in(self.lang());
                 // P57：页签换中性样式——活动页淡底描边、非活动透明悬停淡染
                 let active = i == self.active_tab;
                 // P112：页签 = 「胶囊容器 + 文字按钮 + × 关闭按钮」。
@@ -257,39 +213,31 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                 // 页不渲染 ×（豁免口径与菜单一致）；文字按钮仍承接
                 // SwitchTab（含 P65 双击重命名）。
                 let closeable = !tab.pinned;
-                let mut pill = row![
-                    button(
-                        text(format!(
-                            "{marker}{pin}{}",
-                            tab_label
-                        ))
+                let mut pill = row![button(
+                    text(format!("{marker}{pin}{}", tab_label))
                         .size(uipx)
                         .font(uifont),
-                    )
-                    .padding(Padding {
-                        top: 2.0,
-                        right: if closeable { 4.0 } else { 10.0 },
-                        bottom: 2.0,
-                        left: 10.0,
-                    })
-                    .style(tab_label_style)
-                    .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),
-                ]
+                )
+                .padding(Padding {
+                    top: 2.0,
+                    right: if closeable { 4.0 } else { 10.0 },
+                    bottom: 2.0,
+                    left: 10.0,
+                })
+                .style(tab_label_style)
+                .on_press_maybe((!self.busy).then_some(Message::SwitchTab(i))),]
                 .align_y(Alignment::Center);
                 if closeable {
                     pill = pill.push(
                         button(text("×").size(uipx).font(uifont))
                             .padding([2, 8])
                             .style(tab_close_style)
-                            .on_press_maybe(
-                                (!self.busy).then_some(Message::CloseTabAt(i)),
-                            ),
+                            .on_press_maybe((!self.busy).then_some(Message::CloseTabAt(i))),
                     );
                 }
                 let hovered = self.hovered_tab == Some(i);
                 let pill_area = mouse_area(
-                    container(pill)
-                        .style(move |theme| tab_pill_style(theme, active, hovered)),
+                    container(pill).style(move |theme| tab_pill_style(theme, active, hovered)),
                 )
                 .on_enter(Message::TabHovered(Some(i)))
                 .on_exit(Message::TabHovered(None))
@@ -360,10 +308,13 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if let Some((bytes_read, total_bytes)) = self.progress {
             body = body.push(
                 row![
-                    text(self.t(editpad_core::Key::RecentsLoading)).size(uipx).font(uifont),
-                    container(
-                        progress_bar(0.0..=total_bytes.max(1) as f32, bytes_read as f32)
-                    )
+                    text(self.t(editpad_core::Key::RecentsLoading))
+                        .size(uipx)
+                        .font(uifont),
+                    container(progress_bar(
+                        0.0..=total_bytes.max(1) as f32,
+                        bytes_read as f32
+                    ))
                     .width(Fill),
                     text(format!(
                         "{} / {} KB",
@@ -403,34 +354,38 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
             if !self.closed_stack.is_empty() {
                 panel = panel.push(
                     button(
-                        container(text(format!(
-                            "{}{}{}",
-                            self.t(editpad_core::Key::RecentReopenPrefix),
-                            self.closed_stack[0]
-                                .file_name()
-                                .map(|n| n.display().to_string())
-                                .unwrap_or_else(|| self.closed_stack[0].display().to_string()),
-                            self.t(editpad_core::Key::RecentReopenSuffix)
-                        ))
-                        .size(uipx)
-                        .font(uifont))
+                        container(
+                            text(format!(
+                                "{}{}{}",
+                                self.t(editpad_core::Key::RecentReopenPrefix),
+                                self.closed_stack[0]
+                                    .file_name()
+                                    .map(|n| n.display().to_string())
+                                    .unwrap_or_else(|| self.closed_stack[0].display().to_string()),
+                                self.t(editpad_core::Key::RecentReopenSuffix)
+                            ))
+                            .size(uipx)
+                            .font(uifont),
+                        )
                         .width(Fill),
                     )
                     .width(Fill)
                     .style(chrome_menu_item_style)
-                    .on_press_maybe(
-                        (!self.busy).then_some(Message::ReopenLastClosedFile),
-                    ),
+                    .on_press_maybe((!self.busy).then_some(Message::ReopenLastClosedFile)),
                 );
             }
             // P20 隐私出口：一键抹掉 config.toml 里的全部历史路径
             if !self.settings.recent_files.is_empty() {
                 panel = panel.push(
                     row![
-                        button(text(self.t(editpad_core::Key::RecentsClear)).size(uipx).font(uifont))
-                            .padding([2, 8])
-                            .style(chrome_button_style)
-                            .on_press_maybe((!self.busy).then_some(Message::RecentsCleared)),
+                        button(
+                            text(self.t(editpad_core::Key::RecentsClear))
+                                .size(uipx)
+                                .font(uifont)
+                        )
+                        .padding([2, 8])
+                        .style(chrome_button_style)
+                        .on_press_maybe((!self.busy).then_some(Message::RecentsCleared)),
                         text(self.t(editpad_core::Key::RecentsClearHint))
                             .size(uipx)
                             .font(uifont)
@@ -450,16 +405,22 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         if self.goto_visible {
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text(self.t(editpad_core::Key::GotoTitle)).size(uipx).font(uifont),
+                    text(self.t(editpad_core::Key::GotoTitle))
+                        .size(uipx)
+                        .font(uifont),
                     text_input(self.t(editpad_core::Key::GotoPlaceholder), &self.goto_input)
                         .size(uipx)
                         .font(uifont)
                         .on_input(Message::GotoInputChanged)
                         .on_submit(Message::GotoSubmit)
                         .width(140),
-                    button(text(self.t(editpad_core::Key::GotoButton)).size(uipx).font(uifont))
-                        .style(chrome_button_style)
-                        .on_press(Message::GotoSubmit),
+                    button(
+                        text(self.t(editpad_core::Key::GotoButton))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .style(chrome_button_style)
+                    .on_press(Message::GotoSubmit),
                     button(text("×").size(uipx).font(uifont))
                         .style(chrome_button_style)
                         .on_press(Message::GotoToggled),
@@ -480,20 +441,30 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     text(self.t(editpad_core::Key::CloseConfirmDirty))
                         .size(uipx)
                         .font(uifont),
-                    button(text(self.t(editpad_core::Key::ButtonSaveAndClose)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press_maybe(
-                            (!self.busy).then_some(Message::ConfirmSaveAndClose)
-                        ),
-                    button(text(self.t(editpad_core::Key::ButtonDiscardChanges)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::DiscardAndClose),
-                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::CancelClose),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonSaveAndClose))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press_maybe((!self.busy).then_some(Message::ConfirmSaveAndClose)),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonDiscardChanges))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::DiscardAndClose),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonCancel))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::CancelClose),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -514,25 +485,36 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     ))
                     .size(uipx)
                     .font(uifont),
-                    button(text(self.t(editpad_core::Key::ButtonDiscardAndClose)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::ConfirmCloseTabDiscard(idx)),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonDiscardAndClose))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::ConfirmCloseTabDiscard(idx)),
                     // P21 完整版：已命名的页可直接「保存并关闭」
-                    button(text(self.t(editpad_core::Key::ButtonSaveAndClose)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press_maybe(
-                            // P145：夹紧兜底——确认条下标随关页平移/清理
-                            //（close_tab_now），此处 get 防未来回归越界
-                            (!self.busy
-                                && self.tabs.get(idx).is_some_and(|t| t.path.is_some()))
+                    button(
+                        text(self.t(editpad_core::Key::ButtonSaveAndClose))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press_maybe(
+                        // P145：夹紧兜底——确认条下标随关页平移/清理
+                        //（close_tab_now），此处 get 防未来回归越界
+                        (!self.busy && self.tabs.get(idx).is_some_and(|t| t.path.is_some()))
                             .then_some(Message::CloseTabSave(idx)),
-                        ),
-                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::CancelCloseTab),
+                    ),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonCancel))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::CancelCloseTab),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -561,14 +543,22 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     ))
                     .size(uipx)
                     .font(uifont),
-                    button(text(self.t(editpad_core::Key::ButtonDiscardAndClose)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::ConfirmBatchCloseDiscard),
-                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::CancelBatchCloseTabs),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonDiscardAndClose))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::ConfirmBatchCloseDiscard),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonCancel))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::CancelBatchCloseTabs),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -587,15 +577,23 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                         editpad_core::Key::DiscardOpenSuffix,
                     ))
                     .size(uipx)
-                        .font(uifont),
-                    button(text(self.t(editpad_core::Key::ButtonDiscardAndOpen)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::ConfirmOpenDiscard),
-                    button(text(self.t(editpad_core::Key::ButtonCancel)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::ConfirmOpenCancel),
+                    .font(uifont),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonDiscardAndOpen))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::ConfirmOpenDiscard),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonCancel))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::ConfirmOpenCancel),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -631,24 +629,36 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                             })
                             .size(uipx)
                             .font(uifont),
-                            button(text(self.t(editpad_core::Key::ButtonReload)).size(uipx).font(uifont))
-                                .padding([4, 12])
-                                .style(chrome_button_style)
-                                .on_press(Message::ConfirmExternalReload(first)),
-                            button(text(self.t(editpad_core::Key::ButtonIgnore)).size(uipx).font(uifont))
-                                .padding([4, 12])
-                                .style(chrome_button_style)
-                                .on_press(Message::IgnoreExternalChange(first)),
+                            button(
+                                text(self.t(editpad_core::Key::ButtonReload))
+                                    .size(uipx)
+                                    .font(uifont)
+                            )
+                            .padding([4, 12])
+                            .style(chrome_button_style)
+                            .on_press(Message::ConfirmExternalReload(first)),
+                            button(
+                                text(self.t(editpad_core::Key::ButtonIgnore))
+                                    .size(uipx)
+                                    .font(uifont)
+                            )
+                            .padding([4, 12])
+                            .style(chrome_button_style)
+                            .on_press(Message::IgnoreExternalChange(first)),
                         ]
                         .spacing(8)
                         .align_y(Alignment::Center)
                         .padding([6, 10]);
                         if total > 1 {
                             bar = bar.push(
-                                button(text(self.t(editpad_core::Key::ButtonIgnoreAll)).size(uipx).font(uifont))
-                                    .padding([4, 12])
-                                    .style(chrome_button_style)
-                                    .on_press(Message::IgnoreAllExternalChanges),
+                                button(
+                                    text(self.t(editpad_core::Key::ButtonIgnoreAll))
+                                        .size(uipx)
+                                        .font(uifont),
+                                )
+                                .padding([4, 12])
+                                .style(chrome_button_style)
+                                .on_press(Message::IgnoreAllExternalChanges),
                             );
                         }
                         body = body.push(rule::horizontal(1)).push(bar);
@@ -666,14 +676,22 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
                     text(self.t(editpad_core::Key::RestoreTitle))
                         .size(uipx)
                         .font(uifont),
-                    button(text(self.t(editpad_core::Key::ButtonRestore)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::SessionRecoverAccepted),
-                    button(text(self.t(editpad_core::Key::ButtonDiscard)).size(uipx).font(uifont))
-                        .padding([4, 12])
-                        .style(chrome_button_style)
-                        .on_press(Message::SessionRecoverDiscarded),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonRestore))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::SessionRecoverAccepted),
+                    button(
+                        text(self.t(editpad_core::Key::ButtonDiscard))
+                            .size(uipx)
+                            .font(uifont)
+                    )
+                    .padding([4, 12])
+                    .style(chrome_button_style)
+                    .on_press(Message::SessionRecoverDiscarded),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -720,18 +738,19 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         } else {
             Theme::Light.palette()
         };
-        let sep_color = Color { a: 0.30, ..palette.text };
+        let sep_color = Color {
+            a: 0.30,
+            ..palette.text
+        };
         // 第 76 轮：状态栏行高与顶部菜单栏一致压缩（竖条 20→14px 随行高
         // 同缩；整行 padding [6,10]→[1,8]）
         let sep_v = move || -> Element<'_, Message> {
             container(text(""))
                 .width(1)
                 .height(14)
-                .style(move |_: &Theme| {
-                    container::Style {
-                        background: Some(Background::Color(sep_color)),
-                        ..container::Style::default()
-                    }
+                .style(move |_: &Theme| container::Style {
+                    background: Some(Background::Color(sep_color)),
+                    ..container::Style::default()
                 })
                 .into()
         };
@@ -762,21 +781,38 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
         let status_bar = row![
             text(path_show).size(uipx).font(uifont).width(280),
             sep_v(),
-            text(format!("{}: {doc_chars}", self.t(editpad_core::Key::StatusLength)))
-                .size(uipx)
-                .font(uifont),
-            text(format!("{}: {line_count}", self.t(editpad_core::Key::StatusLines)))
-                .size(uipx)
-                .font(uifont),
-            text(format!("{}: {}", self.t(editpad_core::Key::StatusLine), cursor.line + 1))
-                .size(uipx)
-                .font(uifont),
-            text(format!("{}: {}", self.t(editpad_core::Key::StatusColumn), cursor.col + 1))
-                .size(uipx)
-                .font(uifont),
-            text(format!("{}: {cur_off}", self.t(editpad_core::Key::StatusPosition)))
-                .size(uipx)
-                .font(uifont),
+            text(format!(
+                "{}: {doc_chars}",
+                self.t(editpad_core::Key::StatusLength)
+            ))
+            .size(uipx)
+            .font(uifont),
+            text(format!(
+                "{}: {line_count}",
+                self.t(editpad_core::Key::StatusLines)
+            ))
+            .size(uipx)
+            .font(uifont),
+            text(format!(
+                "{}: {}",
+                self.t(editpad_core::Key::StatusLine),
+                cursor.line + 1
+            ))
+            .size(uipx)
+            .font(uifont),
+            text(format!(
+                "{}: {}",
+                self.t(editpad_core::Key::StatusColumn),
+                cursor.col + 1
+            ))
+            .size(uipx)
+            .font(uifont),
+            text(format!(
+                "{}: {cur_off}",
+                self.t(editpad_core::Key::StatusPosition)
+            ))
+            .size(uipx)
+            .font(uifont),
             // 弹性段吸收中部余量：左右两组竖线位置恒定
             text("").width(Fill),
             sep_v(),
@@ -856,10 +892,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
 
     // ---------- 浮层弹窗（P39/P40） ----------
 
-
     // ---------- 第 69 轮：顶部菜单栏浮层 ----------
-
-
 
     // 第 62 轮：「查找全部」结果面板（停靠式，非浮层）——数据源 =
     // 查找后台扫描的全量命中表，重扫刷新自动跟随。渲染行数封顶
@@ -868,21 +901,7 @@ pub(crate) fn view(&self) -> Element<'_, Message> {
     //
     // ---------- P129：命令面板 / 快速标签切换 ----------
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     // settings_overlay 已迁往 settings_ui.rs（第 82 轮 Phase 2a）
-
 }
 
 // ---------- 「查找全部」结果面板助手（第 62 轮） ----------

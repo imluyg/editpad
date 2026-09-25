@@ -39,10 +39,7 @@ pub(crate) fn plan_restore_order(
     snapshot_dir: &Path,
     cap_bytes: u64,
 ) -> (Vec<usize>, usize) {
-    fn page_estimate(
-        tab: &editpad_core::snapshot::SessionTab,
-        snapshot_dir: &Path,
-    ) -> u64 {
+    fn page_estimate(tab: &editpad_core::snapshot::SessionTab, snapshot_dir: &Path) -> u64 {
         if let Some(file) = &tab.file {
             fs::metadata(snapshot_dir.join(file))
                 .map(|m| m.len())

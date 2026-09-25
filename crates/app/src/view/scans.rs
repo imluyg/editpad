@@ -42,7 +42,11 @@ impl Editpad {
         if self.regex_enabled {
             if let Err(e) = editpad_core::compile_regex(&effective_query, self.case_sensitive) {
                 self.cancel_fif_scan();
-                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StInvalidRegex, &e.to_string()));
+                self.set_status_error(editpad_core::fmt_suffix(
+                    self.lang(),
+                    editpad_core::Key::StInvalidRegex,
+                    &e.to_string(),
+                ));
                 return Task::none();
             }
         }
@@ -94,7 +98,11 @@ impl Editpad {
         if self.regex_enabled {
             if let Err(e) = editpad_core::compile_regex(&effective_query, self.case_sensitive) {
                 self.cancel_find_scan();
-                self.set_status_error(editpad_core::fmt_suffix(self.lang(), editpad_core::Key::StInvalidRegex, &e.to_string()));
+                self.set_status_error(editpad_core::fmt_suffix(
+                    self.lang(),
+                    editpad_core::Key::StInvalidRegex,
+                    &e.to_string(),
+                ));
                 return Task::none();
             }
         }
@@ -111,21 +119,23 @@ impl Editpad {
             debounce_ms: FIND_DEBOUNCE_MS,
         };
         self.find_scan = Some(self.find_seq);
-        Task::perform(drive_find_scan(payload, move |doc, q, cs, rx| {
-            if rx {
-                // P70：正则走全文扫描（to_text 拷贝发生在后台线程）；
-                // 编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
-                editpad_core::find_all_regex(&doc.to_text(), q, cs)
-                    .unwrap_or_default()
-            } else {
-                let hits = editpad_core::find_all_document(doc, q, cs);
-                if whole_word {
-                    editpad_core::filter_whole_word(doc, hits)
+        Task::perform(
+            drive_find_scan(payload, move |doc, q, cs, rx| {
+                if rx {
+                    // P70：正则走全文扫描（to_text 拷贝发生在后台线程）；
+                    // 编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
+                    editpad_core::find_all_regex(&doc.to_text(), q, cs).unwrap_or_default()
                 } else {
-                    hits
+                    let hits = editpad_core::find_all_document(doc, q, cs);
+                    if whole_word {
+                        editpad_core::filter_whole_word(doc, hits)
+                    } else {
+                        hits
+                    }
                 }
-            }
-        }), |message| message)
+            }),
+            |message| message,
+        )
     }
 
     /// 取消在途扫描并清空结果（关查找栏/Esc/清空查询共用）。
@@ -143,7 +153,11 @@ impl Editpad {
     /// 全部命中、关态清空。开/关/换结果的所有路径收口于此（关栏走
     /// cancel_find_scan，扫描完成走 FindScanDone）。
     pub(crate) fn sync_find_highlights(&mut self) {
-        let hits = if self.find_visible { self.matches.clone() } else { Vec::new() };
+        let hits = if self.find_visible {
+            self.matches.clone()
+        } else {
+            Vec::new()
+        };
         self.cur_handle.borrow_mut().set_find_highlights(hits);
     }
 
@@ -190,5 +204,4 @@ impl Editpad {
             batch_strides: HL_PAVE_BATCH_STRIDES,
         }))
     }
-
 }

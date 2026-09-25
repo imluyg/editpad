@@ -20,18 +20,18 @@
 
 mod core;
 // Phase 2c: EditorCore impl split by domain into undo/motion/edit/block/highlight (pub(crate) bump)
-mod undo;
-mod motion;
-mod edit;
 mod block;
+mod edit;
 mod highlight;
+mod motion;
+mod undo;
 // B10 多光标一期：附加光标集（增删/折叠/步进/caret_rect_at 重入）
 mod cursors;
 
+mod dnd;
+mod links;
 mod metrics;
 mod scrollbars;
-mod links;
-mod dnd;
 mod view;
 // 第 72 轮：软换行（候选池⑯ Phase 1）地基组件；第 73 轮接线完成
 // （EditorCore 视觉映射 / hit_test / motion / 滚动 / draw 全部消费），

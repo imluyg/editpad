@@ -52,11 +52,7 @@ pub(crate) const UI_FONT_CANDIDATES_ZH: [&str; 4] = [
     "微软雅黑",
     "SimSun",
 ];
-pub(crate) const UI_FONT_CANDIDATES_EN: [&str; 3] = [
-    "Segoe UI Variable",
-    "Segoe UI",
-    "Tahoma",
-];
+pub(crate) const UI_FONT_CANDIDATES_EN: [&str; 3] = ["Segoe UI Variable", "Segoe UI", "Tahoma"];
 
 /// P154：行号位字体候选链（**等宽**，只画 ASCII 数字故不要求 CJK 覆盖）。
 ///
@@ -150,7 +146,10 @@ pub(crate) fn enumerate_available_families() -> Vec<String> {
 ///   Some(规范条目)——手改 config.toml 的大小写/空白变体被自动矫正；
 /// * 未命中 → None：**只回退本次渲染，不抹掉配置**（用户重装字体后
 ///   自动恢复；启动时给一次状态栏提示）。
-pub(crate) fn effective_font_family(configured: Option<&str>, available: &[String]) -> Option<String> {
+pub(crate) fn effective_font_family(
+    configured: Option<&str>,
+    available: &[String],
+) -> Option<String> {
     let name = configured?;
     if available.iter().any(|f| f == name) {
         return Some(name.to_owned());

@@ -153,16 +153,10 @@ impl Editpad {
                 tab.editor.borrow_mut().set_font_size(next);
                 self.set_status(format!(
                     "{}{next:.0}{}{:.0}{}",
-                    self.t(
-editpad_core::Key::
-StTabFontSizePrefix),
-                    self.t(
-editpad_core::Key::
-StTabFontSizeMiddle),
+                    self.t(editpad_core::Key::StTabFontSizePrefix),
+                    self.t(editpad_core::Key::StTabFontSizeMiddle),
                     self.settings.font_size,
-                    self.t(
-editpad_core::Key::
-StTabFontSizeSuffix)
+                    self.t(editpad_core::Key::StTabFontSizeSuffix)
                 ));
                 Task::none()
             }
@@ -171,7 +165,10 @@ StTabFontSizeSuffix)
                 let tab = self.tab_mut();
                 tab.font_size_override = None;
                 tab.editor.borrow_mut().set_font_size(global);
-                self.set_status(format!("{}{global:.0}", self.t(editpad_core::Key::StTabFontReset)));
+                self.set_status(format!(
+                    "{}{global:.0}",
+                    self.t(editpad_core::Key::StTabFontReset)
+                ));
                 Task::none()
             }
             Message::TabWrapOverrideToggled => {
@@ -259,7 +256,9 @@ StTabFontSizeSuffix)
                 self.persist_settings();
                 self.set_status(match self.settings.backup_mode.as_str() {
                     BACKUP_MODE_SIMPLE => self.t(editpad_core::Key::StBackupSimpleShort).to_owned(),
-                    BACKUP_MODE_TIMESTAMPED => self.t(editpad_core::Key::StBackupTimestampedShort).to_owned(),
+                    BACKUP_MODE_TIMESTAMPED => self
+                        .t(editpad_core::Key::StBackupTimestampedShort)
+                        .to_owned(),
                     _ => self.t(editpad_core::Key::StBackupOffShort).to_owned(),
                 });
                 Task::none()
@@ -315,5 +314,4 @@ StTabFontSizeSuffix)
             _ => Task::none(),
         }
     }
-
 }

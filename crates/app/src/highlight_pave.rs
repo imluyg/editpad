@@ -26,18 +26,19 @@ pub(crate) struct HlPavePayload {
 /// worker 的推进循环：反复 [`advance_checkpoints`](editpad_core::LazyHighlighter::advance_checkpoints)
 /// 直到铺满/取消/无活可干；每批后上报累计档位数。
 /// 独立成函数以便测试注入 panic 路径（同 drive_load 的 loader 注入）。
-pub(crate) fn pave_run(payload: &HlPavePayload, report: &mut dyn FnMut(u64)) -> editpad_core::LazyHighlighter {
+pub(crate) fn pave_run(
+    payload: &HlPavePayload,
+    report: &mut dyn FnMut(u64),
+) -> editpad_core::LazyHighlighter {
     let mut hl = payload.highlighter.clone();
     let mut built_total = 0u64;
     loop {
         if payload.cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let built = hl.advance_checkpoints(
-            payload.batch_strides,
-            payload.total_lines,
-            &mut |i| payload.doc.line_str(i),
-        );
+        let built = hl.advance_checkpoints(payload.batch_strides, payload.total_lines, &mut |i| {
+            payload.doc.line_str(i)
+        });
         if built == 0 {
             break;
         }
@@ -52,7 +53,9 @@ pub(crate) fn pave_run(payload: &HlPavePayload, report: &mut dyn FnMut(u64)) -> 
 /// 保证语义：无论推进成功、被取消还是 **panic**，都恰好回一条 `HlPaved`
 /// ——否则「语法分析中…」状态永不解除。panic 兜底回未推进的起点克隆，
 /// 安装它等于无变化，UI 不受损。
-pub(crate) fn build_hl_pave_stream(payload: HlPavePayload) -> impl iced::futures::Stream<Item = Message> {
+pub(crate) fn build_hl_pave_stream(
+    payload: HlPavePayload,
+) -> impl iced::futures::Stream<Item = Message> {
     stream::channel(
         8,
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -80,12 +83,11 @@ pub(crate) async fn drive_hl_pave<F>(
     let tab_id = payload.tab_id;
     std::thread::spawn(move || {
         // AssertUnwindSafe：panic 后仅透传兜底克隆，不再触碰线程局部可变性
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pave(&payload, &mut |done| {
-                    let _ = notify_tx.send(HlEvent::Progress(done));
-                })
-            }));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pave(&payload, &mut |done| {
+                let _ = notify_tx.send(HlEvent::Progress(done));
+            })
+        }));
         let done = match outcome {
             Ok(hl) => HlEvent::Done(Box::new(hl)),
             Err(..) => HlEvent::Done(Box::new(payload.highlighter.clone())),
