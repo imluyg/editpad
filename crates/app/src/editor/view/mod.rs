@@ -223,6 +223,269 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第十二步第四段：开态（软换行开）逐视觉段的正文绘制自 `draw` 提出。
+    ///
+    /// S-5 的**最后一块**。做法与 `draw_body_wrap_off` 完全一致：方法开头把 `f.*`
+    /// 解回原来的局部名，于是方法体与原分支逐行同形；等价性用反向归一 `diff` 复核
+    /// （改名清单见下）。本分支不碰 `scroll_left`（`text_x0` 里已扣减过），故不绑定。
+    ///
+    /// 护栏：这一块是全文件被判据盯得最密的区域（折行段绘制、组字三段式、P118
+    /// 首段滚出视口、Phase 2 查找联动、横向剔除窗口…），第①步把方法摘掉后
+    /// 红了一整批，见日常档。
+    fn draw_body_wrap_on(&self, renderer: &mut iced::Renderer, f: &DrawFrame<'_>) {
+        let core = f.core;
+        let bounds = f.bounds;
+        let colors = f.colors;
+        let lh = f.lh;
+        let text_x0 = f.text_x0;
+        let gutter_w = f.gutter_w;
+        let body_font = self.font;
+        let gutter_font = core.gutter_font().unwrap_or(body_font);
+        let palette_text = f.palette_text;
+        let display_right_edge = f.display_right_edge;
+        let preedit_w = f.preedit_w;
+        let preedit_text = f.preedit_text;
+        let reflow = f.reflow;
+        let total = core.visual_rows_total();
+        if total > 0 {
+            let first_v = (core.scroll_top.floor() as i64).max(0) as u32;
+            let rows_v = (core.viewport_h / lh).ceil() as u32 + 1;
+            // 组字行重排多出的段数也纳入可见范围（后续行下移 k）
+            let k_vis = reflow.as_ref().map_or(0, |r| r.k.max(0) as u32);
+            let last_v = first_v
+                .saturating_add(rows_v)
+                .saturating_add(k_vis)
+                .min(total - 1);
+            // P118：组字行整行重排的绘制挂在其**首个被迭代到的段**上，
+            // 恒绘一次——修前挂在段 0（行号段）上，行号滚出视口顶后
+            // 循环只遇到段 ≥1、逐段 continue，组字行视口内部分整体
+            // 空白（用户截图：行号不可见时打字，上方文字全部消失）
+            let mut reflow_painted = false;
+            for v in first_v..=last_v {
+                let (line, seg, seg_start, seg_end) = core.locate_visual(v);
+                // 后续逻辑行整体下移：该行原首段之前的一切（含组字
+                // 行本身的旧表段）不动；组字行由首段全量重排绘制
+                let y_off =
+                    reflow.as_ref().map_or(
+                        0.0f32,
+                        |r| {
+                            if line > r.line {
+                                r.k as f32
+                            } else {
+                                0.0
+                            }
+                        },
+                    );
+                let y = bounds.y + (v as f32 + y_off - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                // 行号数字：仅逻辑行首段（设计 §4.1）。算法复刻关态
+                // （左缘 + Default 对齐，P66附 口径；数字仍右对齐于
+                // 行号栏右缘 − GUTTER_MIN）
+                if seg == 0 {
+                    self.draw_gutter_number(
+                        renderer,
+                        core,
+                        bounds,
+                        colors,
+                        gutter_font,
+                        lh,
+                        gutter_w,
+                        line,
+                        y,
+                    );
+                }
+                // P115 续：组字行（含空行）由重排全量绘制——首个被迭代
+                // 到的段负责整行（新段逐段裁视口外，P118：不要求段 0
+                // 在视口内），其余旧表段跳过
+                if reflow.as_ref().is_some_and(|r| r.line == line) {
+                    if !reflow_painted {
+                        reflow_painted = true;
+                        let rtext = core.line_text(line);
+                        let rruns = core.highlight_runs(line, &rtext);
+                        if let Some(r) = &reflow {
+                            for (bi, &bs) in r.breaks.iter().enumerate() {
+                                let be =
+                                    r.breaks.get(bi + 1).copied().unwrap_or(r.s.chars().count());
+                                if be <= bs {
+                                    continue;
+                                }
+                                let yv =
+                                    bounds.y + (r.v0 as f32 + bi as f32 - core.scroll_top) * lh;
+                                if yv + lh <= bounds.y || yv >= bounds.y + bounds.height {
+                                    continue;
+                                }
+                                paint_composed_segment(
+                                    renderer,
+                                    core,
+                                    body_font,
+                                    text_x0,
+                                    yv,
+                                    &r.s,
+                                    &r.s_xs,
+                                    bs,
+                                    be,
+                                    r.col_p,
+                                    r.pel,
+                                    palette_text,
+                                    colors.preedit_text,
+                                    &rruns,
+                                    bounds,
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let text = core.line_text(line);
+                let lens = text.chars().count();
+                // P115 勘误：插槽判断须在空行检查**之前**——空行
+                // （新文档/空白行输入）与行尾组字是老浮层实现本可
+                // 显示、三段式嵌入行绘制后会被整行跳过（用户复报
+                // 「组字直接没了」）；空行只有段 0 且无正文
+                let pre_slot: Option<(&str, usize, f32)> =
+                    preedit_text.as_deref().zip(preedit_w).and_then(|(p, w)| {
+                        (core.cursor.line == line && core.cursor.col <= lens).then_some((
+                            p,
+                            core.cursor.col,
+                            w,
+                        ))
+                    });
+                if seg_start >= lens {
+                    // 空行/幻影行：仅首段且无正文——组字画在段首，
+                    // 可显示宽 = 整段预算（子层硬裁到折行边界）
+                    if let Some((p, _, w)) = pre_slot {
+                        let zone = Rectangle {
+                            x: text_x0,
+                            y: bounds.y,
+                            width: (display_right_edge - text_x0).max(0.0),
+                            height: bounds.height,
+                        };
+                        renderer.start_layer(zone);
+                        if w > 0.0 {
+                            renderer.fill_text(
+                                core_text::Text {
+                                    content: p.to_owned(),
+                                    bounds: Size::new(f32::INFINITY, lh),
+                                    size: Pixels(core.font_size()),
+                                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                    font: body_font,
+                                    align_x: core_text::Alignment::Default,
+                                    align_y: alignment::Vertical::Top,
+                                    shaping: core_text::Shaping::Advanced,
+                                    wrapping: core_text::Wrapping::None,
+                                },
+                                Point::new(text_x0, y),
+                                colors.preedit_text,
+                                bounds,
+                            );
+                        }
+                        renderer.end_layer();
+                    }
+                    continue;
+                }
+                let runs = core.highlight_runs(line, &text);
+                if let Some((p, col_p, w)) = pre_slot {
+                    // 段内命中：col_p 在本段 [seg_start, seg_end)；行尾
+                    // （末段 col==seg_end==lens）也在本段画——中间段尾
+                    // col==seg_end 由下一段段首处理（避免双画）
+                    let hit = seg_start <= col_p
+                        && (col_p < seg_end || (col_p == seg_end && seg_end == lens));
+                    if hit {
+                        let rel = core.px_of_len(line, &text, col_p, lens)
+                            - core.px_of_len(line, &text, seg_start, lens);
+                        // 段尾可用 = 折行预算 − 段内起点（段末字符右缘
+                        // ≤ 预算不贴满，P96；空行/段尾整宽按预算计）
+                        let remain = (display_right_edge - text_x0 - rel).max(0.0);
+                        let vis = w.min(remain);
+                        paint_text_slice(
+                            renderer,
+                            core,
+                            body_font,
+                            text_x0,
+                            y,
+                            line,
+                            seg_start,
+                            &text,
+                            seg_start,
+                            col_p,
+                            0.0,
+                            palette_text,
+                            &runs,
+                            bounds,
+                        );
+                        // 组字 + 被挤出的后文放进「组字插入区」子层：
+                        // fill_text 的 clip 参数受 iced 文本缓存「首次
+                        // 绘制锁定」不可依赖（同内容先前以控件矩形缓存
+                        // 后，此处的窄 clip 不生效）——改用层掩码硬裁，
+                        // 右缘 = 折行边界（P115：后文被推到边界处截断，
+                        // 不再画进滚动条槽位/控件右缘）
+                        let zone = Rectangle {
+                            x: text_x0 + rel,
+                            y: bounds.y,
+                            width: (display_right_edge - text_x0 - rel).max(0.0),
+                            height: bounds.height,
+                        };
+                        renderer.start_layer(zone);
+                        if vis > 0.0 {
+                            renderer.fill_text(
+                                core_text::Text {
+                                    content: p.to_owned(),
+                                    bounds: Size::new(f32::INFINITY, lh),
+                                    size: Pixels(core.font_size()),
+                                    line_height: core_text::LineHeight::Absolute(Pixels(lh)),
+                                    font: body_font,
+                                    align_x: core_text::Alignment::Default,
+                                    align_y: alignment::Vertical::Top,
+                                    shaping: core_text::Shaping::Advanced,
+                                    wrapping: core_text::Wrapping::None,
+                                },
+                                Point::new(text_x0 + rel, y),
+                                colors.preedit_text,
+                                bounds,
+                            );
+                        }
+                        paint_text_slice(
+                            renderer,
+                            core,
+                            body_font,
+                            text_x0,
+                            y,
+                            line,
+                            seg_start,
+                            &text,
+                            col_p,
+                            seg_end,
+                            rel + vis,
+                            palette_text,
+                            &runs,
+                            bounds,
+                        );
+                        renderer.end_layer();
+                        continue;
+                    }
+                }
+                paint_text_slice(
+                    renderer,
+                    core,
+                    body_font,
+                    text_x0,
+                    y,
+                    line,
+                    seg_start,
+                    &text,
+                    seg_start,
+                    seg_end,
+                    0.0,
+                    palette_text,
+                    &runs,
+                    bounds,
+                );
+            }
+        }
+    }
+
     /// S-5 第十二步第三段：关态（软换行不开）逐逻辑行的正文绘制自 `draw` 提出。
     ///
     /// 这是 `draw` 里最后两块之一。本方法体与原 `else` 分支逐行对应，只做了
@@ -1595,6 +1858,10 @@ struct DrawFrame<'a> {
     scroll_left: f32,
     /// 组字串的裁剪盒（与 `display_right_edge` 同门控）。
     preedit_clip: Rectangle,
+    /// 本帧「文字可画到哪儿」的右界：开态 = 折行边界，关态 = 控件右缘。
+    /// 第 172 轮随开态分支外提才加上——字段等有读者时再加（`-D warnings`
+    /// 的 dead_code 会拦下提前扩的上下文）。
+    display_right_edge: f32,
     preedit_w: Option<f32>,
     /// 存引用而非克隆：方法里 `preedit_text.as_deref()` 的写法与 `draw` 里逐字相同。
     preedit_text: &'a Option<String>,
@@ -1634,9 +1901,6 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         let core = self.core.borrow();
         // P34：本帧字形族来自构造入参（默认 = BODY_FONT）
         let body_font = self.font;
-        // P154：行号栏字形族——应用层下发的等宽族；未下发则跟随正文字体
-        // （拆分前口径，逐像素等价）。只用于行号数字，正文/高亮/组字不变。
-        let gutter_font = core.gutter_font().unwrap_or(body_font);
         let palette = theme.palette();
         let colors = EditorColors::resolve(theme);
         let lh = core.line_height();
@@ -1886,248 +2150,14 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             gutter_w,
             scroll_left,
             preedit_clip,
+            display_right_edge,
             preedit_w,
             preedit_text: &preedit_text,
             reflow: reflow.as_ref(),
         };
         if core.wrap_enabled() {
-            let total = core.visual_rows_total();
-            if total > 0 {
-                let first_v = (core.scroll_top.floor() as i64).max(0) as u32;
-                let rows_v = (core.viewport_h / lh).ceil() as u32 + 1;
-                // 组字行重排多出的段数也纳入可见范围（后续行下移 k）
-                let k_vis = reflow.as_ref().map_or(0, |r| r.k.max(0) as u32);
-                let last_v = first_v
-                    .saturating_add(rows_v)
-                    .saturating_add(k_vis)
-                    .min(total - 1);
-                // P118：组字行整行重排的绘制挂在其**首个被迭代到的段**上，
-                // 恒绘一次——修前挂在段 0（行号段）上，行号滚出视口顶后
-                // 循环只遇到段 ≥1、逐段 continue，组字行视口内部分整体
-                // 空白（用户截图：行号不可见时打字，上方文字全部消失）
-                let mut reflow_painted = false;
-                for v in first_v..=last_v {
-                    let (line, seg, seg_start, seg_end) = core.locate_visual(v);
-                    // 后续逻辑行整体下移：该行原首段之前的一切（含组字
-                    // 行本身的旧表段）不动；组字行由首段全量重排绘制
-                    let y_off = reflow.as_ref().map_or(0.0f32, |r| {
-                        if line > r.line {
-                            r.k as f32
-                        } else {
-                            0.0
-                        }
-                    });
-                    let y = bounds.y + (v as f32 + y_off - core.scroll_top) * lh;
-                    if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                        continue;
-                    }
-                    // 行号数字：仅逻辑行首段（设计 §4.1）。算法复刻关态
-                    // （左缘 + Default 对齐，P66附 口径；数字仍右对齐于
-                    // 行号栏右缘 − GUTTER_MIN）
-                    if seg == 0 {
-                        self.draw_gutter_number(
-                            renderer,
-                            &core,
-                            bounds,
-                            &colors,
-                            gutter_font,
-                            lh,
-                            gutter_w,
-                            line,
-                            y,
-                        );
-                    }
-                    // P115 续：组字行（含空行）由重排全量绘制——首个被迭代
-                    // 到的段负责整行（新段逐段裁视口外，P118：不要求段 0
-                    // 在视口内），其余旧表段跳过
-                    if reflow.as_ref().is_some_and(|r| r.line == line) {
-                        if !reflow_painted {
-                            reflow_painted = true;
-                            let rtext = core.line_text(line);
-                            let rruns = core.highlight_runs(line, &rtext);
-                            if let Some(r) = &reflow {
-                                for (bi, &bs) in r.breaks.iter().enumerate() {
-                                    let be = r
-                                        .breaks
-                                        .get(bi + 1)
-                                        .copied()
-                                        .unwrap_or(r.s.chars().count());
-                                    if be <= bs {
-                                        continue;
-                                    }
-                                    let yv =
-                                        bounds.y + (r.v0 as f32 + bi as f32 - core.scroll_top) * lh;
-                                    if yv + lh <= bounds.y || yv >= bounds.y + bounds.height {
-                                        continue;
-                                    }
-                                    paint_composed_segment(
-                                        renderer,
-                                        &core,
-                                        body_font,
-                                        text_x0,
-                                        yv,
-                                        &r.s,
-                                        &r.s_xs,
-                                        bs,
-                                        be,
-                                        r.col_p,
-                                        r.pel,
-                                        palette.text,
-                                        colors.preedit_text,
-                                        &rruns,
-                                        bounds,
-                                    );
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    let text = core.line_text(line);
-                    let lens = text.chars().count();
-                    // P115 勘误：插槽判断须在空行检查**之前**——空行
-                    // （新文档/空白行输入）与行尾组字是老浮层实现本可
-                    // 显示、三段式嵌入行绘制后会被整行跳过（用户复报
-                    // 「组字直接没了」）；空行只有段 0 且无正文
-                    let pre_slot: Option<(&str, usize, f32)> =
-                        preedit_text.as_deref().zip(preedit_w).and_then(|(p, w)| {
-                            (core.cursor.line == line && core.cursor.col <= lens).then_some((
-                                p,
-                                core.cursor.col,
-                                w,
-                            ))
-                        });
-                    if seg_start >= lens {
-                        // 空行/幻影行：仅首段且无正文——组字画在段首，
-                        // 可显示宽 = 整段预算（子层硬裁到折行边界）
-                        if let Some((p, _, w)) = pre_slot {
-                            let zone = Rectangle {
-                                x: text_x0,
-                                y: bounds.y,
-                                width: (display_right_edge - text_x0).max(0.0),
-                                height: bounds.height,
-                            };
-                            renderer.start_layer(zone);
-                            if w > 0.0 {
-                                renderer.fill_text(
-                                    core_text::Text {
-                                        content: p.to_owned(),
-                                        bounds: Size::new(f32::INFINITY, lh),
-                                        size: Pixels(core.font_size()),
-                                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                        font: body_font,
-                                        align_x: core_text::Alignment::Default,
-                                        align_y: alignment::Vertical::Top,
-                                        shaping: core_text::Shaping::Advanced,
-                                        wrapping: core_text::Wrapping::None,
-                                    },
-                                    Point::new(text_x0, y),
-                                    colors.preedit_text,
-                                    bounds,
-                                );
-                            }
-                            renderer.end_layer();
-                        }
-                        continue;
-                    }
-                    let runs = core.highlight_runs(line, &text);
-                    if let Some((p, col_p, w)) = pre_slot {
-                        // 段内命中：col_p 在本段 [seg_start, seg_end)；行尾
-                        // （末段 col==seg_end==lens）也在本段画——中间段尾
-                        // col==seg_end 由下一段段首处理（避免双画）
-                        let hit = seg_start <= col_p
-                            && (col_p < seg_end || (col_p == seg_end && seg_end == lens));
-                        if hit {
-                            let rel = core.px_of_len(line, &text, col_p, lens)
-                                - core.px_of_len(line, &text, seg_start, lens);
-                            // 段尾可用 = 折行预算 − 段内起点（段末字符右缘
-                            // ≤ 预算不贴满，P96；空行/段尾整宽按预算计）
-                            let remain = (display_right_edge - text_x0 - rel).max(0.0);
-                            let vis = w.min(remain);
-                            paint_text_slice(
-                                renderer,
-                                &core,
-                                body_font,
-                                text_x0,
-                                y,
-                                line,
-                                seg_start,
-                                &text,
-                                seg_start,
-                                col_p,
-                                0.0,
-                                palette.text,
-                                &runs,
-                                bounds,
-                            );
-                            // 组字 + 被挤出的后文放进「组字插入区」子层：
-                            // fill_text 的 clip 参数受 iced 文本缓存「首次
-                            // 绘制锁定」不可依赖（同内容先前以控件矩形缓存
-                            // 后，此处的窄 clip 不生效）——改用层掩码硬裁，
-                            // 右缘 = 折行边界（P115：后文被推到边界处截断，
-                            // 不再画进滚动条槽位/控件右缘）
-                            let zone = Rectangle {
-                                x: text_x0 + rel,
-                                y: bounds.y,
-                                width: (display_right_edge - text_x0 - rel).max(0.0),
-                                height: bounds.height,
-                            };
-                            renderer.start_layer(zone);
-                            if vis > 0.0 {
-                                renderer.fill_text(
-                                    core_text::Text {
-                                        content: p.to_owned(),
-                                        bounds: Size::new(f32::INFINITY, lh),
-                                        size: Pixels(core.font_size()),
-                                        line_height: core_text::LineHeight::Absolute(Pixels(lh)),
-                                        font: body_font,
-                                        align_x: core_text::Alignment::Default,
-                                        align_y: alignment::Vertical::Top,
-                                        shaping: core_text::Shaping::Advanced,
-                                        wrapping: core_text::Wrapping::None,
-                                    },
-                                    Point::new(text_x0 + rel, y),
-                                    colors.preedit_text,
-                                    bounds,
-                                );
-                            }
-                            paint_text_slice(
-                                renderer,
-                                &core,
-                                body_font,
-                                text_x0,
-                                y,
-                                line,
-                                seg_start,
-                                &text,
-                                col_p,
-                                seg_end,
-                                rel + vis,
-                                palette.text,
-                                &runs,
-                                bounds,
-                            );
-                            renderer.end_layer();
-                            continue;
-                        }
-                    }
-                    paint_text_slice(
-                        renderer,
-                        &core,
-                        body_font,
-                        text_x0,
-                        y,
-                        line,
-                        seg_start,
-                        &text,
-                        seg_start,
-                        seg_end,
-                        0.0,
-                        palette.text,
-                        &runs,
-                        bounds,
-                    );
-                }
-            }
+            // 开态逐视觉段绘制（S-5 第十二步第四段外提为 `draw_body_wrap_on`）
+            self.draw_body_wrap_on(renderer, &f);
         } else {
             // 关态逐逻辑行绘制（S-5 第十二步第三段外提为 `draw_body_wrap_off`）
             self.draw_body_wrap_off(renderer, &f);
