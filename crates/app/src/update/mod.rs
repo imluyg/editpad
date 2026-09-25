@@ -704,56 +704,75 @@ impl Editpad {
                 Task::none()
             }
             Message::BarsDismissed => {
-                self.find_visible = false;
-                self.goto_visible = false;
-                self.recents_visible = false;
-                // P151：Esc 同时收起命令面板与重命名态（下方既有分支同款），
-                // 收尾把输入焦点还给正文——否则中文输入法在正文里失效
-                self.palette_visible = false;
-                self.focus_editor();
-                // P27：Esc 一并关闭设置弹窗
-                self.settings_visible = false;
-                // Esc 同时视作放弃关闭/打开确认
-                self.confirm_visible = false;
-                self.pending_close = false;
-                // 收起的确实是一次「打开确认」时，命令行/转发批次一并作废
-                // （与 ConfirmOpenCancel 同一口径；无确认在飞时按 Esc 不该
-                // 打断一次正常的批量打开）
-                if self.open_confirm.take().is_some() {
-                    self.pending_cli.clear();
-                    // 同 ConfirmOpenCancel：这次打开携带的跳行意图一并作废
-                    self.pending_link_goto = None;
-                    self.pending_fif_goto = None;
-                }
-                // P21：Esc 也取消标签页关闭确认
-                self.close_tab_confirm = None;
-                // P28：Esc 同时收起右键菜单与批量关闭确认
-                self.tab_context_menu = None;
-                self.batch_close_confirm = None;
-                // 第 69 轮：Esc 同时收起顶部菜单栏浮层
-                self.menu_bar_open = None;
-                // P50：Esc 一并收起外部修改提示条
-                self.external_change = None;
-                // P55：Esc 一并取消就地重命名（一切保持原状）
-                self.renaming_tab = None;
-                self.rename_input.clear();
-                // P67：Esc 一并收起状态栏编码/行尾菜单
-                self.encoding_menu = false;
-                self.eol_menu = false;
-                // P10：取消在途扫描 + 清结果（含序号失效）
-                self.cancel_find_scan();
-                // 关栏（Esc 路径）同样清掉查找进度提示，避免左下角残留；
-                // 只清自己写的那条（换过别的状态时标记已失效）
-                if self.find_status {
-                    self.status.clear();
-                    self.status_is_error = false;
-                    self.find_status = false;
-                }
-                self.find_drag = None;
+                // S-2 第一步：收起动作收进唯一出口（臂体逐字搬进
+                // `dismiss_all_prompts`，零行为变更）。原先这一段是十几种浮层
+                // 各写一行、每轮新增都要记得补（P21/P27/P28/P50/P55/P151/69 轮
+                // 各补过一次）；收口后新增浮层只有一条 checklist：
+                // 在 `dismiss_all_prompts` 加一行 + 在穷尽回归里加一条断言。
+                self.dismiss_all_prompts();
                 Task::none()
             }
             _ => Task::none(),
         }
+    }
+
+    /// 「Esc / 焦点离开 = 一切临时裁决与浮层收起」的唯一出口：确认条五族
+    /// （退出保存 / 打开 / 单页关闭 / 批量关闭 / 外部修改）、浮层（查找栏 /
+    /// 转跳 / 最近 / 命令面板 / 设置弹窗 / 右键菜单 / 顶部菜单栏 / 重命名 /
+    /// 编码与行尾菜单）、以及查找扫描与拖动态。逐条 `= None` 的手写清单集中到
+    /// 这里，是为了让「某个裁决逃逸 Esc」这件事只可能发生在这一处。
+    ///
+    /// ⚠️ 本函数**不**改变「多个裁决能否同时显示」的策略——那是 S-2 剩下的
+    /// UX 裁决（`external_change` 装的是多页聚合队列，与单页/批量确认条在今天
+    /// 是可以合法共存的），点单后要么把存储收进 `enum PendingPrompt`、要么
+    /// 在这里加一条优先级截断。
+    pub(crate) fn dismiss_all_prompts(&mut self) {
+        self.find_visible = false;
+        self.goto_visible = false;
+        self.recents_visible = false;
+        // P151：Esc 同时收起命令面板与重命名态（下方既有分支同款），
+        // 收尾把输入焦点还给正文——否则中文输入法在正文里失效
+        self.palette_visible = false;
+        self.focus_editor();
+        // P27：Esc 一并关闭设置弹窗
+        self.settings_visible = false;
+        // Esc 同时视作放弃关闭/打开确认
+        self.confirm_visible = false;
+        self.pending_close = false;
+        // 收起的确实是一次「打开确认」时，命令行/转发批次一并作废
+        // （与 ConfirmOpenCancel 同一口径；无确认在飞时按 Esc 不该
+        // 打断一次正常的批量打开）
+        if self.open_confirm.take().is_some() {
+            self.pending_cli.clear();
+            // 同 ConfirmOpenCancel：这次打开携带的跳行意图一并作废
+            self.pending_link_goto = None;
+            self.pending_fif_goto = None;
+        }
+        // P21：Esc 也取消标签页关闭确认
+        self.close_tab_confirm = None;
+        // P28：Esc 同时收起右键菜单与批量关闭确认
+        self.tab_context_menu = None;
+        self.batch_close_confirm = None;
+        // 第 69 轮：Esc 同时收起顶部菜单栏浮层
+        self.menu_bar_open = None;
+        // P50：Esc 一并收起外部修改提示条
+        self.external_change = None;
+        // P55：Esc 一并取消就地重命名（一切保持原状）
+        self.renaming_tab = None;
+        self.rename_input.clear();
+        // P67：Esc 一并收起状态栏编码/行尾菜单
+        self.encoding_menu = false;
+        self.eol_menu = false;
+        // P10：取消在途扫描 + 清结果（含序号失效）
+        self.cancel_find_scan();
+        // 关栏（Esc 路径）同样清掉查找进度提示，避免左下角残留；
+        // 只清自己写的那条（换过别的状态时标记已失效）
+        if self.find_status {
+            self.status.clear();
+            self.status_is_error = false;
+            self.find_status = false;
+        }
+        self.find_drag = None;
     }
 
     // ---------- domain methods (round 81 Phase 1: update() split) ----------

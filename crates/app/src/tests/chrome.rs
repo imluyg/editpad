@@ -1,5 +1,72 @@
 use super::*;
 
+/// S-2 第一步的**穷尽**回归：Esc（`BarsDismissed`）必须收起所有临时裁决与浮层。
+/// 逐字段点亮、再逐字段断言清零——新增一种浮层时，本用例就是那条 checklist 的
+/// 第二半（第一半在 `dismiss_all_prompts` 里加一行）。历史上这类「漏收一条」
+/// 是一轮一轮补出来的（P21/P27/P28/P50/P55/P151 与第 69 轮各补过一次），
+/// 从来没有一条用例钉住全集；`encoding_menu`/`eol_menu`/`find_drag`/
+/// `menu_bar_open` 四条在本用例之前无人断言过 Esc 会收起它们。
+#[test]
+fn esc_dismisses_every_transient_prompt() {
+    let mut app = Editpad::default();
+    let id0 = app.tabs[0].id;
+    // ---- 点亮全集（能直接置态的就置态，不依赖各自入口消息） ----
+    app.find_visible = true;
+    app.goto_visible = true;
+    app.recents_visible = true;
+    app.palette_visible = true;
+    app.settings_visible = true;
+    app.confirm_visible = true;
+    app.pending_close = true;
+    app.open_confirm = Some(PathBuf::from("C:/w/x.txt"));
+    app.pending_cli.push_back(PathBuf::from("C:/w/y.txt"));
+    app.pending_link_goto = Some(7);
+    app.pending_fif_goto = Some((0, 0, 0));
+    app.close_tab_confirm = Some(id0);
+    app.tab_context_menu = Some(0);
+    app.batch_close_confirm = Some(vec![id0]);
+    app.menu_bar_open = Some(1);
+    app.external_change = Some(vec![id0]);
+    app.renaming_tab = Some(id0);
+    app.rename_input.push_str("new-name");
+    app.encoding_menu = true;
+    app.eol_menu = true;
+    app.find_status = true;
+    app.status = "第 1/3 处匹配".to_owned();
+    app.find_drag = Some(FindDrag::Pending);
+
+    dispatch(&mut app, Message::BarsDismissed);
+
+    // ---- 断言全集清零 ----
+    assert!(!app.find_visible, "查找栏");
+    assert!(!app.goto_visible, "转跳栏");
+    assert!(!app.recents_visible, "最近文件");
+    assert!(!app.palette_visible, "命令面板");
+    assert!(!app.settings_visible, "设置弹窗");
+    assert!(!app.confirm_visible, "退出保存确认");
+    assert!(!app.pending_close, "关窗标记");
+    assert_eq!(app.open_confirm, None, "打开确认");
+    assert!(app.pending_cli.is_empty(), "收起打开确认时命令行批次作废");
+    assert_eq!(app.pending_link_goto, None, "悬挂的跳行意图一并作废");
+    assert_eq!(app.pending_fif_goto, None, "悬挂的 FIF 跳行意图一并作废");
+    assert_eq!(app.close_tab_confirm, None, "单页关闭确认");
+    assert_eq!(app.tab_context_menu, None, "标签右键菜单");
+    assert_eq!(app.batch_close_confirm, None, "批量关闭确认");
+    assert_eq!(app.menu_bar_open, None, "顶部菜单栏浮层");
+    assert_eq!(app.external_change, None, "外部修改提示条");
+    assert_eq!(app.renaming_tab, None, "就地重命名态");
+    assert!(app.rename_input.is_empty(), "重命名输入框清空");
+    assert!(!app.encoding_menu, "状态栏编码菜单");
+    assert!(!app.eol_menu, "状态栏行尾菜单");
+    assert!(!app.find_status, "查找进度标记");
+    assert!(app.status.is_empty(), "查找进度写过的状态栏文本要一并清");
+    assert!(app.find_drag.is_none(), "查找浮层拖动态（P209）");
+    assert!(
+        !app.busy && app.tabs.len() == 1 && app.tabs[0].id == id0,
+        "收起动作不得顺带改文档/页集合状态"
+    );
+}
+
 // ---------- P153：查找框淡出（点正文后查找框转半透明） ----------
 
 /// 淡出系数是查找框内所有控件的**单一来源**：1.0 = 不淡出，
