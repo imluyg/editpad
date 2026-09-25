@@ -320,6 +320,11 @@ impl WrapIndex {
 /// 视口又跳回原处（用户复报：末尾按回车「行号闪一下」）。故新增
 /// [`Self::needs_reconcile`] / [`Self::mark_reconciled`]，由编辑汇点在
 /// 本帧夹紧**之后、下一帧之前**做一次全量对账（见 `EditorCore::reconcile_wrap_index`）。
+///
+/// ⚠️ 第 183 轮 ⑤：整表重置**不止**由编辑触发——视口宽/字号/滚动条让位都会改
+/// 折行像素预算，同样落进 `ensure_synced` 的重置分支，而那条路径上没有编辑汇点。
+/// 现由 `EditorCore::clamp_scroll` 承担收敛（每次推进有限行数的分摊步，且在对账
+/// 收完之前不按虚低总数往下钳），本字段即该窗口的判据。
 pub(crate) struct WrapCache {
     pub(crate) enabled: bool,
     /// 最近同步的显示列预算（≥1，列模型回退路径用）。

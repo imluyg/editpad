@@ -16,7 +16,7 @@ pub(crate) use editpad_core::{
 pub(crate) use super::metrics::{
     char_cols, display_cols, measure_insertion, prefix_width, shape_row_xs,
     validate_measured_char_width, visible_window_of_xs, H_CLIP_MARGIN_CHARS,
-    RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS,
+    RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS, WRAP_RECONCILE_STEP,
 };
 pub(crate) use super::scrollbars::VERTICAL_SCROLLBAR_RESERVE;
 pub(crate) use super::wrap::{segment_index, WrapCache};
@@ -567,6 +567,14 @@ pub struct EditorCore {
     pub(crate) max_cols_stale: bool,
     /// 上次全量重算 `max_line_cols` 的时刻（限流用，见上字段）。
     pub(crate) max_cols_checked: Option<std::time::Instant>,
+    /// ⑤（第 183 轮）：折行索引「整表重置后未对账」窗口的**分摊收敛游标**——
+    /// 下一次要重算的第一行行号。全量一次是 O(文档字符数)（实测 debug profile
+    /// 6 万行 ≈975 ms），改宽时每帧一次绝不可接受，故每次只推进行数上限
+    /// （见 `motion.rs` 的 `WRAP_RECONCILE_STEP`）。
+    pub(crate) wrap_sweep_next: usize,
+    /// 游标所属的折行像素预算：预算再漂移 ⇒ 重置过的表必须从头扫
+    /// （旧游标之前的行在新预算下已经是「每行 1 段」的占位值）。
+    pub(crate) wrap_sweep_px: f32,
     /// 书签行集合（0 起行号，升序）。第 60 轮书签套件的状态底座：
     /// * 会话级标注——不写入文件、不入会话快照（重启即清，主流编辑器
     ///   同口径），也不参与置脏判定；
@@ -742,6 +750,8 @@ impl Default for EditorCore {
             max_row_width_px: 0.0,
             max_cols_stale: false,
             max_cols_checked: None,
+            wrap_sweep_next: 0,
+            wrap_sweep_px: 0.0,
             bookmarks: BTreeSet::new(),
             find_hl: Vec::new(),
             bracket_cache: RefCell::new(None),

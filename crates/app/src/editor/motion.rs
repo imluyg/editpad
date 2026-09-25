@@ -516,9 +516,22 @@ impl EditorCore {
 
     pub fn clamp_scroll(&mut self) {
         self.scroll_top = self.scroll_top.max(0.0);
-        // 第 73 轮 ⑯：行程按视觉行总数（软换行开态 = 段计数前缀，
-        // 关态 = 逻辑行数，恒等退化）
-        let rows_total = self.scroll_content_lines() as f32;
+        // 先读一次：`scroll_content_lines` 内部 `ensure_synced` 会把本帧的预算
+        // 漂移（视口宽/字号/gutter/滚动条让位）真正落成「整表重置」
+        let mut rows_total = self.scroll_content_lines() as f32;
+        // ⑤（第 183 轮）：整表重置后「每行暂记 1 段」的 `total()` 系统性偏小。
+        // `needs_reconcile` 的注释早就写明「滚动夹紧不得据此定上限」，但当时只有
+        // 编辑汇点兑现了这条（它在夹紧前就完成全量对账）。几何变化没有汇点：
+        // 虚低上限会把视口打回上方（实测 9 行/真实 43 段的夹具上报 10 ⇒ 上限从
+        // 33.9 掉到 1.9，文档末尾再也滚不到）。这里在补齐之前不往下钳，并把
+        // 收敛推进一步——任何读总量的路径都经过本函数，窗口会自行闭合。
+        let stale = self.wrap.borrow().enabled && self.wrap.borrow().needs_reconcile();
+        if stale {
+            if !self.reconcile_wrap_step() {
+                return;
+            }
+            rows_total = self.scroll_content_lines() as f32;
+        }
         let max = (rows_total - self.viewport_h / self.line_height()).max(0.0);
         // P66：恢复小数滚动位置。P59 的整行对齐（round）是「tiny-skia 对
         // Cached 文本无真裁剪」年代的权宜——半可见行会画出控件边界且部分
@@ -710,6 +723,8 @@ impl EditorCore {
             let (lines, cols) = (self.doc.line_count(), self.wrap_max_cols());
             let px = self.wrap_max_px();
             self.wrap.borrow_mut().enable(lines, cols, px);
+            // ⑤（第 183 轮）：`enable` 即整表重置，对账由本函数末尾那次
+            // `clamp_scroll` 的分摊步补齐（几何/开关/编辑三条路径共用同一收敛点）
         } else {
             self.wrap.borrow_mut().disable();
             self.goal_px = None;
@@ -812,6 +827,15 @@ impl EditorCore {
             self.segments_of_line(line, &text);
         }
         self.wrap.borrow_mut().mark_reconciled();
+        // 游标与全量对账对齐：本预算下已全部收敛
+        self.wrap_sweep_next = lines;
+        self.wrap_sweep_px = self.wrap_max_px();
+    }
+
+    /// 测试钩子：⑤ 分摊对账的每次行数上限（用例据此造「一步收不完」的文档）。
+    #[cfg(test)]
+    pub(crate) fn wrap_reconcile_step(&self) -> usize {
+        WRAP_RECONCILE_STEP
     }
 
     /// O-5 增量路径的收敛半边：只把**申报过**的第 `first..=last` 行喂进折行
@@ -1337,9 +1361,41 @@ impl EditorCore {
     }
 
     /// 同步视口宽度（P13；RedrawRequested 时与高度一起更新）。
+    ///
+    /// ⑤（第 183 轮）：宽度也走一次夹紧——它是折行像素预算的输入，改宽即
+    /// 「整表重置」，[`Self::clamp_scroll`] 会在未对账的窗口里既不按虚低上限
+    /// 钳制、又把收敛往前推一步（关态恒等地就是原来的钳制，零额外成本）。
     pub fn set_viewport_width(&mut self, w: f32) {
         self.viewport_w = w.max(0.0);
         self.clamp_scroll_horizontal();
+        self.clamp_scroll();
+    }
+
+    /// ⑤：把「整表重置后未对账」的窗口往前推进 [`WRAP_RECONCILE_STEP`] 行。
+    /// 返回 `true` = 全部行已按当前预算重算完（`total()` 自此可信）。
+    ///
+    /// 与编辑汇点用的全量 [`Self::reconcile_wrap_index`] 同一套逐行
+    /// `segments_of_line`，只是分摊到多次调用；游标随预算漂移归零，
+    /// 因为重置过的表里游标之前的行也已退回「每行 1 段」。
+    fn reconcile_wrap_step(&mut self) -> bool {
+        let px = self.wrap_max_px();
+        let lines = self.doc.line_count();
+        if (px - self.wrap_sweep_px).abs() > 0.5 || self.wrap_sweep_next > lines {
+            self.wrap_sweep_px = px;
+            self.wrap_sweep_next = 0;
+        }
+        let from = self.wrap_sweep_next.min(lines);
+        let hi = (from + WRAP_RECONCILE_STEP).min(lines);
+        for line in from..hi {
+            let text = self.line_text(line);
+            self.segments_of_line(line, &text);
+        }
+        self.wrap_sweep_next = hi;
+        if hi < lines {
+            return false;
+        }
+        self.wrap.borrow_mut().mark_reconciled();
+        true
     }
 
     /// 视口高度（像素）。应用层暂未消费，供测试与后续里程碑（如状态栏显示）使用。

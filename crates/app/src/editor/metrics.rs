@@ -18,6 +18,13 @@ pub(crate) const TAB_STOP_COLS: usize = 4;
 pub(crate) const RECOMPUTE_MAX_COLS_COOLDOWN: std::time::Duration =
     std::time::Duration::from_millis(500);
 
+/// ⑤（第 183 轮）：几何变化后折行索引**分摊**对账的每次行数上限。
+/// 与 P45 同一命题：整文档一次是 O(字符数)（实测 debug profile 5000 行 75 ms、
+/// 60000 行 976 ms，release 约其 1/5~1/10），而改宽是逐帧事件，逐帧一次全量
+/// 会把拖拽变成逐帧几十毫秒卡顿。按本步长摊到若干帧，一帧只付约 1000 行的
+/// 断点重算；未收敛的窗口里 `clamp_scroll` 不按虚低总数钳制（同 P154 口径）。
+pub(crate) const WRAP_RECONCILE_STEP: usize = 1000;
+
 /// 字符是否按「全宽（2 列）」计。
 ///
 /// 基础段来自 Unicode East Asian Width W/F 并集；**第 40 轮按等宽 CJK 字体
