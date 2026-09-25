@@ -1,9 +1,10 @@
-# Editpad CI：test / release 阻断性；clippy 阻断（本地基线已清零）；fmt 信息性。
+# Editpad CI：test / release / clippy / fmt 全部阻断。
 #
-# ⚠️ fmt 作业暂为 continue-on-error：仓库有数百处格式偏差（2026-09-24 本机实测
-# `cargo fmt --all -- --check` 报 733 个 hunk；rustfmt.toml 仅设 max_width=100，
-# 即默认风格，偏差来自手写紧凑写法），刻意不在单轮全量格式化——分模块逐批收敛
-# 后再接入阻断。
+# fmt 已于 2026-09-25 转阻断：本机 `cargo fmt --all -- --check` 实测 **0 hunk**
+# （分两批收敛：`editpad-core` 203 hunk / `editpad` 552 hunk，均为纯格式化独立
+# 提交）。此前长期挂 `continue-on-error: true` 的原因是仓库有数百处手写紧凑写法
+# （rustfmt.toml 只有 max_width=100，即默认风格），一次性全量重排会把功能改动
+# 埋进噪声里。现在收敛完了，闸门关掉。
 #
 # clippy 用 `-D warnings`：Phase 0 已本地清零（rustfmt/clippy 组件已装齐）。
 # 注意 channel = "stable" 漂移可能引入新 lint——届时按 CI 红修即可。
@@ -20,9 +21,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# 最小权限：三个作业都只读仓库（CI 不发布、不打 tag、不推任何东西），而
+# 最小权限：所有作业都只读仓库（CI 不发布、不打 tag、不推任何东西），而
 # GITHUB_TOKEN 的默认作用域是写——第三方 action（checkout / rust-toolchain /
-# rust-cache）因此也一并拿得到写权限。顶层显式收窄。
+# rust-cache / upload-artifact）因此也一并拿得到写权限。顶层显式收窄。
 permissions:
   contents: read
 
@@ -30,12 +31,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: test (workspace)
+  # test 与 clippy 合一个作业（原先两个 windows 作业各编译一遍依赖树）。
+  # 两个命令仍是独立步骤，红了看步骤名就能定位，不会因为输出混在一起难查。
+  test-and-clippy:
+    name: test + clippy (workspace)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       # 缓存 target/ 与 cargo 注册表：全量编译 iced + syntect 是 CI 的
       # 主要耗时，无缓存时每次 push 都要重来一遍。
       - uses: Swatinem/rust-cache@v2
@@ -59,6 +64,8 @@ jobs:
             exit 1
           fi
           echo "vendor iced_tiny_skia 补丁命中（lock 中无 source 行）"
+      # 放在 test 之后：测试挂了先修测试，不必等 clippy。
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   release-build:
     name: release build
@@ -68,19 +75,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release --workspace
-
-  clippy:
-    name: clippy (-D warnings)
-    # 与 test 同平台：Windows 专属代码（kernel32 FFI、资源编译等 cfg 门控
-    # 路径）此前在 ubuntu 上被整体跳过，从未被 lint
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # E-12 第④点：打包脚本此前从不在 CI 跑——它对版本资源的校验
+      # （ProductName / FileVersion vs Cargo.toml 版本）与 `Resolve-Cargo`
+      # 解析逻辑一次都没被执行过，资源注入回归只能等本地打包时才发现。
+      # `-SkipBuild` 复用上面刚编好的 release exe；`-SkipCheck` 是因为 CI 的
+      # HEAD 通常没有精确 tag（打 tag 是发布动作，由维护者本机决定），而
+      # 本步要验的是**资源与打包管线**，不是可追溯性。
+      - name: package (verify resources, no rebuild)
+        shell: pwsh
+        run: ./package.ps1 -SkipBuild -SkipCheck
+      # D-4：把校验过的产物上传成 artifact（保留 14 天）。它不等于发行——
+      # 清单里那行 `UNTAGGED` 会如实标出这次构建没打标。
+      - uses: actions/upload-artifact@v4
         with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+          name: editpad-win64-ci
+          path: |
+            dist/Editpad-*-win64.zip
+            dist/Editpad-*-sha256.txt
+          if-no-files-found: error
 
   # E-12：rustdoc 死链关卡。本轮一次性清了 18 处（多为「公开文档链接到私有项」，
   # 另含 `Vec<PathBuf>` 被当成未闭合 HTML 标签、`[3,12]`/`[0]` 被当成链接），
@@ -98,9 +110,8 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   fmt:
-    name: fmt (informational)
+    name: fmt (blocking)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

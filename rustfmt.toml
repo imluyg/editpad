@@ -1,4 +1,5 @@
 # 格式纪律：当前保持 rustfmt 默认风格（仅显式写出 max_width）。
-# 注：本机离线未装 rustfmt 组件，基线尚未用 rustfmt 全量校验——
-# CI 的 fmt 作业接入前需先 `rustup component add rustfmt` 本地跑通。
+# 注：2026-09-25 已用 rustfmt 全量收敛（core 203 hunk / app 552 hunk 两批独立
+# 提交），`cargo fmt --all -- --check` 本机实测 0 偏差、CI 的 fmt 作业已转阻断。
+# 新代码提交前本地跑一遍 `cargo fmt --all` 即可保持清零。
 max_width = 100
