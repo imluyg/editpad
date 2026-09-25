@@ -138,6 +138,52 @@ impl EditorView {
         core.refresh_visible_row_layouts(self.font);
     }
 
+    /// S-5 第三步：书签琥珀圆点自 `draw` 提成方法（A 层，逐字搬移）。
+    /// 这块只需 4 个共享量，故仍走显式传参而非 `DrawFrame`——小结构参数化
+    /// 更清楚，`DrawFrame` 留给正文/选区那种十几量的大块。
+    /// 护栏：`headless_bookmark_dot_ink_lives_in_gutter_strip`（实测把圆点短路
+    /// 成"一颗都不画"它会红，所以这块外提是有主的）。
+    fn draw_bookmark_dots(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+    ) {
+        // 书签墨迹（第 60 轮）：左侧条带内的琥珀圆点，只为带书签的可见行
+        // 画（is_bookmarked O(log n)/行）；在 A 层掩码内，半可见行的越界
+        // 半圆被硬裁，与行号/正文同受控件边界约束
+        // 第 73 轮 ⑯：软换行开态圆点锚定逻辑行**首段**的视觉行
+        let (bk_first, bk_last) = core.visible_range();
+        for line in bk_first..=bk_last {
+            if !core.is_bookmarked(line) {
+                continue;
+            }
+            let v = core.visual_row_of(line, 0);
+            let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+            if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                continue;
+            }
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x + (BOOKMARK_STRIP - BOOKMARK_DOT) * 0.5,
+                        y: y + (lh - BOOKMARK_DOT) * 0.5,
+                        width: BOOKMARK_DOT,
+                        height: BOOKMARK_DOT,
+                    },
+                    border: iced::Border {
+                        radius: Radius::from(BOOKMARK_DOT * 0.5),
+                        ..iced::Border::default()
+                    },
+                    ..renderer::Quad::default()
+                },
+                colors.bookmark,
+            );
+        }
+    }
+
     /// S-5 第二步：主光标 / 附加光标 / 拖拽落点竖线自 `draw` 提成方法。
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
@@ -518,37 +564,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             colors.gutter_bg,
         );
 
-        // 书签墨迹（第 60 轮）：左侧条带内的琥珀圆点，只为带书签的可见行
-        // 画（is_bookmarked O(log n)/行）；在 A 层掩码内，半可见行的越界
-        // 半圆被硬裁，与行号/正文同受控件边界约束
-        // 第 73 轮 ⑯：软换行开态圆点锚定逻辑行**首段**的视觉行
-        let (bk_first, bk_last) = core.visible_range();
-        for line in bk_first..=bk_last {
-            if !core.is_bookmarked(line) {
-                continue;
-            }
-            let v = core.visual_row_of(line, 0);
-            let y = bounds.y + (v as f32 - core.scroll_top) * lh;
-            if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                continue;
-            }
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: Rectangle {
-                        x: bounds.x + (BOOKMARK_STRIP - BOOKMARK_DOT) * 0.5,
-                        y: y + (lh - BOOKMARK_DOT) * 0.5,
-                        width: BOOKMARK_DOT,
-                        height: BOOKMARK_DOT,
-                    },
-                    border: iced::Border {
-                        radius: Radius::from(BOOKMARK_DOT * 0.5),
-                        ..iced::Border::default()
-                    },
-                    ..renderer::Quad::default()
-                },
-                colors.bookmark,
-            );
-        }
+        self.draw_bookmark_dots(renderer, &core, bounds, &colors, lh);
 
         // 链接悬停下划线（P133，路线图 E2）：悬停 token 下方 1.5px 线
         //（与括号匹配/预编辑下划线同族）。折行开态按视觉段拆分（URL 可
