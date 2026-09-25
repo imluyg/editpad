@@ -555,3 +555,59 @@ fn p153_clicking_editor_body_emits_press_message_through_view_tree() {
         "菜单栏区域的点击不得触发正文淡出；实际 {miss:?}"
     );
 }
+
+/// P259：弹层卡片的固定高度必须容得下它自己要画的所有条目。
+///
+/// 起因是编码弹层：条目从 3 种扩到 7 种（P127 补 Big5/Shift_JIS/EUC-JP/EUC-KR）
+/// 时高度还写死 `ITEM_H * 3.0 + 12.0 = 108px`，而容器是固定 `height` 且**没有**
+/// `scrollable` ⇒ 后四项被剪在卡片外，且锚点 `ay = vh - card_h - 36` 让剪掉的
+/// 部分压在状态栏与窗口下缘之外，表现就是"点了没反应"。
+///
+/// ⚠️ 本用例能测的是**几何算法与条目表**这两头的关系（单调、退化、条目唯一），
+/// **测不到**"有人在别的调用点又写死了一个数"——那一半只能靠 `encoding_menu_overlay`
+/// 现在把高度写成从 [`ENCODING_MENU_ITEMS`] 推导这一**结构**保证。真正的像素级
+/// 判据（每项 bounds 都在卡片内）留待接进本文件已有的 `ui` 布局夹具。
+#[test]
+fn status_menu_card_height_covers_every_encoding_item() {
+    use crate::view::overlays::{status_menu_card_h, ENCODING_MENU_ITEMS, STATUS_MENU_CARD_PAD};
+    // 与 encoding_menu_overlay 内的两个常数同值（改了那边不改这里会红）
+    const ITEM_H: f32 = 32.0;
+    const SPACING: f32 = 2.0;
+
+    let n = ENCODING_MENU_ITEMS.len();
+    assert!(
+        n >= 4,
+        "自检：编码表只剩 {n} 项，本用例已失去判别力（P127 扩展被删了？）"
+    );
+    let h = status_menu_card_h(n, ITEM_H, SPACING);
+    // 每一项都必须占满一个行高，外加条目间距与上下内边距
+    let need = n as f32 * ITEM_H + (n as f32 - 1.0) * SPACING + STATUS_MENU_CARD_PAD * 2.0;
+    assert!(
+        (h - need).abs() < 1e-4,
+        "卡片高 {h} 与按条目算出的 {need} 不符"
+    );
+    // 改前那个写死值连 4 项都装不下——本条钉住"不再退回那个量级"
+    assert!(h > 108.0, "{n} 项的卡片高只有 {h}，回到写死 3 项的老形状了");
+    // 条目增减必须带着高度走（结构上同源，这里再钉一次单调性）
+    assert!(
+        status_menu_card_h(n + 1, ITEM_H, SPACING) > h,
+        "多一项高度不长"
+    );
+    assert!(
+        status_menu_card_h(n - 1, ITEM_H, SPACING) < h,
+        "少一项高度不降"
+    );
+    // 退化入参：0 项也要给出一个正的高度（防 (n-1) 下溢成巨大浮点数）
+    assert!(
+        status_menu_card_h(0, ITEM_H, SPACING) >= ITEM_H,
+        "空表退化高度异常"
+    );
+    // 条目表自身：标签唯一且非空（重复项会让用户以为有两种同名编码）
+    let mut labels: Vec<&str> = ENCODING_MENU_ITEMS.iter().map(|(l, _)| *l).collect();
+    for l in &labels {
+        assert!(!l.is_empty(), "编码表里有空标签");
+    }
+    labels.sort_unstable();
+    labels.dedup();
+    assert_eq!(labels.len(), n, "编码表里有同名条目");
+}

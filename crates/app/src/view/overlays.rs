@@ -704,7 +704,7 @@ impl Editpad {
             container(panel)
                 .width(card_w)
                 .height(card_h)
-                .padding(4)
+                .padding(STATUS_MENU_CARD_PAD)
                 .style(popup_card_style),
         );
         mouse_area(
@@ -737,39 +737,20 @@ impl Editpad {
                 .style(chrome_menu_item_style)
                 .on_press_maybe(named.then_some(Message::SaveWithEncoding(enc)))
         };
-        let panel = column![
-            item(
-                &enc_label(self.lang(), "UTF-8"),
-                editpad_core::SaveEncoding::Utf8
-            ),
-            item(
-                &enc_label(self.lang(), "UTF-8(BOM)"),
-                editpad_core::SaveEncoding::Utf8Bom
-            ),
-            item(
-                &enc_label(self.lang(), "GBK"),
-                editpad_core::SaveEncoding::Gbk
-            ),
-            // P127：CJK 传统编码扩展（无法映射字符照旧按数值实体写入）
-            item(
-                &enc_label(self.lang(), "Big5"),
-                editpad_core::SaveEncoding::Big5
-            ),
-            item(
-                &enc_label(self.lang(), "Shift_JIS"),
-                editpad_core::SaveEncoding::ShiftJis
-            ),
-            item(
-                &enc_label(self.lang(), "EUC-JP"),
-                editpad_core::SaveEncoding::EucJp
-            ),
-            item(
-                &enc_label(self.lang(), "EUC-KR"),
-                editpad_core::SaveEncoding::EucKr
-            ),
-        ]
-        .spacing(2);
-        self.status_menu_overlay(W, ITEM_H * 3.0 + 12.0, panel.into())
+        // 目标编码全集见 [`ENCODING_MENU_ITEMS`]。**菜单条目与卡片高度同源
+        // 于那一张表**——P259 的教训：编码从 3 种扩到 7 种时卡片高度没跟着改，
+        // 后四种被剪在固定 height 容器外，整半功能在界面上摸不到。
+        const SPACING: f32 = 2.0;
+        let items: Vec<Element<'_, Message>> = ENCODING_MENU_ITEMS
+            .iter()
+            .map(|(label, enc)| item(&enc_label(self.lang(), label), *enc).into())
+            .collect();
+        let panel = column(items).spacing(SPACING);
+        self.status_menu_overlay(
+            W,
+            status_menu_card_h(ENCODING_MENU_ITEMS.len(), ITEM_H, SPACING),
+            panel.into(),
+        )
     }
     /// P67：行尾弹出菜单——当前主导行尾标头 + 两个转换项（已是目标
     /// 则禁用）。转换为可撤销的文档编辑。
@@ -817,4 +798,40 @@ impl Editpad {
         .spacing(4);
         self.status_menu_overlay(W, ITEM_H * 2.0 + 28.0, panel.into())
     }
+}
+
+/// [`status_menu_overlay`] 里卡片容器的内边距。**必须与卡片高度算法共用**：
+/// 高度按条目数算时漏掉这份内边距，最后一项就会被剪在卡片外。
+pub(crate) const STATUS_MENU_CARD_PAD: f32 = 4.0;
+
+/// 编码弹层的全部目标编码——**菜单条目与卡片高度唯一的共同来源**。
+///
+/// 放成模块级 `const` 就是为了让 headless 用例能拿到条目数去核对卡片高度
+/// （见 `tests/chrome.rs` 的 `status_menu_card_height_covers_*`）：原先条目
+/// 长在 `column![]` 里、高度写死 `ITEM_H * 3.0 + 12.0`，两处之间没有任何
+/// 结构联系，加一项就剪一项。
+pub(crate) const ENCODING_MENU_ITEMS: &[(&str, editpad_core::SaveEncoding)] = &[
+    ("UTF-8", editpad_core::SaveEncoding::Utf8),
+    ("UTF-8(BOM)", editpad_core::SaveEncoding::Utf8Bom),
+    ("GBK", editpad_core::SaveEncoding::Gbk),
+    // P127：CJK 传统编码扩展（无法映射字符照旧按数值实体写入）
+    ("Big5", editpad_core::SaveEncoding::Big5),
+    ("Shift_JIS", editpad_core::SaveEncoding::ShiftJis),
+    ("EUC-JP", editpad_core::SaveEncoding::EucJp),
+    ("EUC-KR", editpad_core::SaveEncoding::EucKr),
+];
+
+/// 状态栏弹层卡片的**固定高度**：条目数 × 行高 + (条目数-1) × 间距 + 上下内边距。
+///
+/// 为什么单列成一个函数：卡片容器是固定 `height` 且**没有** `scrollable`
+/// （见 [`status_menu_overlay`] 的构造），所以"高度写死、条目加多"这一类
+/// 脱钩不会报错，只会把多出来的条目**剪到卡片外面**——而锚点是
+/// `vh - card_h - 36`，被剪的部分正好压到状态栏和窗口下缘之外，表现为
+/// "点了没反应"。实测踩过一次：编码菜单从 3 项扩到 7 项（P127 补 Big5 /
+/// Shift_JIS / EUC-JP / EUC-KR）时高度仍是 `ITEM_H * 3.0 + 12.0 = 108px`，
+/// 后四项整个摸不到 ⇒ 等于 P127 那半功能在界面上不存在（P259）。
+/// 现在高度一律由"构建条目用的那个集合"推导，两者结构上无法再脱钩。
+pub(crate) fn status_menu_card_h(items: usize, item_h: f32, spacing: f32) -> f32 {
+    let n = items.max(1) as f32;
+    n * item_h + (n - 1.0) * spacing + STATUS_MENU_CARD_PAD * 2.0
 }

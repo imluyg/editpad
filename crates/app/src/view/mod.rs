@@ -28,7 +28,9 @@ use iced::widget::column;
 mod find_ops;
 mod find_panel;
 mod lifecycle;
-mod overlays;
+// P259：抬到 `pub(crate)` 只为让 headless 用例能读到编码表与卡片高度算法
+// （弹层本身只有 GUI 看得见，能测的就是这条几何关系）。
+pub(crate) mod overlays;
 mod restore;
 mod scans;
 mod snapshots;
