@@ -86,7 +86,7 @@ jobs:
         run: ./package.ps1 -SkipBuild -SkipCheck
       # D-4：把校验过的产物上传成 artifact（保留 14 天）。它不等于发行——
       # 清单里那行 `UNTAGGED` 会如实标出这次构建没打标。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: editpad-win64-ci
           path: |
