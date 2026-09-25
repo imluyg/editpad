@@ -138,6 +138,41 @@ impl EditorView {
         core.refresh_visible_row_layouts(self.font);
     }
 
+    /// S-5 第七步：背景与行号栏底这两枚 quad 自 `draw` 提成方法（A 层，逐字搬移）。
+    ///
+    /// 两色都由调用方传入（`palette.background`／`colors.gutter_bg` 都是本帧只读量，
+    /// 方法内不解析主题，保持「本帧量由调用方算好再传」的口径）。
+    ///
+    /// 护栏：`headless_backdrop_paints_background_and_gutter_strip`——第①步实测
+    /// 把这两枚 quad 整块短路掉时既有 574 条应用层用例**全绿**（画满整个控件的东西
+    /// 没人管），所以先立判据再搬。
+    fn draw_backdrop(
+        &self,
+        renderer: &mut iced::Renderer,
+        bounds: Rectangle,
+        bg: Color,
+        gutter_bg: Color,
+        gutter_w: f32,
+    ) {
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds,
+                ..renderer::Quad::default()
+            },
+            bg,
+        );
+        renderer.fill_quad(
+            renderer::Quad {
+                bounds: Rectangle {
+                    width: gutter_w,
+                    ..bounds
+                },
+                ..renderer::Quad::default()
+            },
+            gutter_bg,
+        );
+    }
+
     /// S-5 第三步：书签琥珀圆点自 `draw` 提成方法（A 层，逐字搬移）。
     /// 这块只需 4 个共享量，故仍走显式传参而非 `DrawFrame`——小结构参数化
     /// 更清楚，`DrawFrame` 留给正文/选区那种十几量的大块。
@@ -865,23 +900,13 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 选区(底) → 正文/行号 → 光标/预编辑下划线/滚动条(顶)。
         renderer.start_layer(bounds);
 
-        // 背景与行号栏
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds,
-                ..renderer::Quad::default()
-            },
+        // 背景与行号栏（S-5 第七步外提为 `draw_backdrop`，逐字搬移）
+        self.draw_backdrop(
+            renderer,
+            bounds,
             palette.background,
-        );
-        renderer.fill_quad(
-            renderer::Quad {
-                bounds: Rectangle {
-                    width: gutter_w,
-                    ..bounds
-                },
-                ..renderer::Quad::default()
-            },
             colors.gutter_bg,
+            gutter_w,
         );
 
         self.draw_bookmark_dots(renderer, &core, bounds, &colors, lh);
