@@ -4497,6 +4497,122 @@ fn headless_backdrop_paints_background_and_gutter_strip() {
     );
 }
 
+/// S-5 第十一步护栏（第②步补）：**关态（非重排）** 的输入法下划线必须真的上屏。
+///
+/// 为什么非补不可：C 层这块和命中底色那块一样有**两份**分支——组字重排存在时
+/// 逐段画（开态），否则按原段口径画一条。第 168 轮第①步把整块短路跑全量，
+/// 只红一条 `headless_preedit_reflow_wraps_tail_and_shifts_following_lines`
+/// （它测的是重排那条分支）⇒ 原段口径那条分支**无人看守**。
+///
+/// 判据用 `preedit_ul_off` 开关当**同一份文档的"画 vs 不画"oracle**：两帧只差
+/// 这一个布尔量，差分里剩下的就只有那 2px 下划线本身——不必去猜字形墨迹与
+/// 下划线各自的 y 范围，也不会被组字串正文、光标竖线一起带进差分。
+#[test]
+fn headless_preedit_underline_inks_in_wrap_off_state() {
+    use super::super::CursorPos;
+    let (w, h) = (620u32, 340u32);
+    let core = EditorHandle::default();
+    // 显式字形族：本用例跨两帧逐像素比，P33 的一次性全局钉字若落在两帧之间
+    // 会让整版平移（同文件里 s5_caret 与 O-3续 那两处的教训）。
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let frame = |ul_off: bool| -> Vec<u8> {
+        {
+            let mut c = core.borrow_mut();
+            // 顺序要紧：reset_document 会清组字与光标
+            c.reset_document(editpad_core::Document::from_str("ab"));
+            c.set_viewport_width(600.0);
+            c.set_viewport_height(300.0);
+            c.set_word_wrap(false);
+            c.scroll_top = 0.0;
+            c.cursor = CursorPos { line: 0, col: 2 };
+            c.ime_preedit("xyz".to_owned());
+            c.preedit_ul_off = ul_off;
+        }
+        let mut view = EditorView {
+            core: core.clone(),
+            font,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let style = iced::advanced::renderer::Style::default();
+        // 前置预热帧：冷帧量宽失败会让整版平移（P189 的像素护栏教训）
+        for _ in 0..3 {
+            view.draw(
+                &tree,
+                &mut renderer,
+                &Theme::Light,
+                &style,
+                lyt,
+                mouse::Cursor::Unavailable,
+                &rect,
+            );
+        }
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[rect],
+            Color::WHITE,
+        );
+        pixels.data().to_vec()
+    };
+
+    let on = frame(false);
+    let off = frame(true);
+    let (w, h) = (620usize, 340usize);
+    let (mut n, mut ymin, mut ymax, mut xmin, mut xmax) =
+        (0usize, usize::MAX, 0usize, usize::MAX, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if on[i..i + 4] != off[i..i + 4] {
+                n += 1;
+                ymin = ymin.min(y);
+                ymax = ymax.max(y);
+                xmin = xmin.min(x);
+                xmax = xmax.max(x);
+            }
+        }
+    }
+    let lh = core.borrow().line_height();
+    eprintln!(
+        "[S-5⑪] 关态预编辑下划线差分 {n}px，y=[{ymin}..{ymax}] x=[{xmin}..{xmax}]（行高 {lh:.1}）"
+    );
+
+    // ① 存在性：摘掉下划线就没差分 ⇒ 关态分支根本没画
+    assert!(n > 10, "关态预编辑下划线没有上屏（差分仅 {n}px）");
+    // ② 形状：2px 横线 ⇒ 纵向只该跨几行，跨多了就是别的东西在动
+    assert!(
+        ymax - ymin <= 4,
+        "差分纵向跨了 {}px（y=[{ymin}..{ymax}]），不像一条 2px 下划线",
+        ymax - ymin
+    );
+    // ③ 宽度量级：3 个字符的下划线
+    assert!(
+        xmax - xmin >= 10,
+        "差分横向只有 {}px，太窄不像 3 字符下划线",
+        xmax - xmin
+    );
+    // ④ 落在第 0 行的行盒里（文档只有一行，画到别处即错位）
+    assert!(
+        ymax as f32 <= lh * 1.5,
+        "差分出现在 y={ymax}，超出首行行盒（行高 {lh:.1}）"
+    );
+    assert!(xmin > 20, "下划线左缘 x={xmin} 压进了行号栏");
+}
+
 /// S-5 护栏（外提光标层的前置）：**光标竖线必须真的上屏，且只占光标那一列**。
 ///
 /// 为什么非补不可：既有像素用例覆盖了滚动条刻度、选区带、组字、折行段与书签

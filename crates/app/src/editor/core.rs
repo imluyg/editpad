@@ -610,6 +610,11 @@ pub struct EditorCore {
     /// 同一份文档、同一次滚动，只切这一个开关，两帧必须逐像素相同。
     #[cfg(test)]
     pub(crate) h_clip_off: bool,
+    /// 测试开关（关态预编辑下划线摘除，供像素守卫当**改前/改后 oracle**）：
+    /// 置 true 时 C 层只画组字串本身、不画那 2px 下划线。生产构建里
+    /// [`Self::preedit_ul_off`] 恒 false，本字段不参与任何逻辑。
+    #[cfg(test)]
+    pub(crate) preedit_ul_off: bool,
     /// P133：悬停链接的字符区间 `(line, c0, c1)`（下划线绘制数据源）。
     /// 鼠标移动探测写入；编辑后经失效汇点清空（跨度可能失配）。
     pub(crate) link_hover: Option<(usize, usize, usize)>,
@@ -743,6 +748,8 @@ impl Default for EditorCore {
             shaped_chars: std::cell::Cell::new(0),
             #[cfg(test)]
             h_clip_off: false,
+            #[cfg(test)]
+            preedit_ul_off: false,
             // P132：绘制开关默认关（Settings 默认 true 在应用层下发时生效；
             // 无头测试构造的裸 core 不画参考线）
             indent_guides: false,
@@ -996,6 +1003,19 @@ impl EditorCore {
     #[cfg(test)]
     pub(crate) fn take_shaped_chars(&self) -> usize {
         self.shaped_chars.take()
+    }
+
+    /// 关态（非重排）预编辑下划线的摘除开关：测试构建读字段，
+    /// 生产构建恒 false——像素守卫拿它当"画 vs 不画"的同一帧对照。
+    #[cfg(test)]
+    pub(crate) fn preedit_ul_off(&self) -> bool {
+        self.preedit_ul_off
+    }
+
+    /// 同上，非测试构建恒假（常量折叠后那条分支不再存在）。
+    #[cfg(not(test))]
+    pub(crate) fn preedit_ul_off(&self) -> bool {
+        false
     }
 
     /// 测试钩子：累加本帧进 shaping 的字符数（`paint_text_slice` 入口调用）。

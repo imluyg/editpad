@@ -1984,7 +1984,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         );
                     }
                 }
-            } else {
+            } else if !core.preedit_ul_off() {
                 let caret = core.caret_rect_relative();
                 let row_top_y = caret.y - core.ink_offset;
                 let in_view = caret.y + lh > 0.0 && caret.y < core.viewport_h;
