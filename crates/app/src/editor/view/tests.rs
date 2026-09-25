@@ -5509,8 +5509,12 @@ fn s5_caret_layer_inks_on_the_caret_column() {
         family: iced::font::Family::Name("NSimSun"),
         ..iced::Font::MONOSPACE
     };
+    // P281（承 P280）：core 挪到闭包外，两帧共用同一份——否则每帧新建 core 就
+    // 每帧各向全局 font_system 量一次字宽，两帧量到不同值时整版平移、差分里
+    // 混进一堆正文。顺带把 `sb_activity` 钉掉：`EditorCore::default()` 里它是
+    // `Some(now)`，滚动条整层的 alpha 随时钟淡出，也是跨帧差分的噪声源。
+    let core = EditorHandle::default();
     let render = |blink_on: bool| -> tiny_skia::Pixmap {
-        let core = EditorHandle::default();
         {
             let mut c = core.borrow_mut();
             let doc_text: String = (0..20).map(|i| format!("line {i} abcdef\n")).collect();
@@ -5521,10 +5525,11 @@ fn s5_caret_layer_inks_on_the_caret_column() {
             c.scroll_top = 0.0;
             // 让 blink_on 单独决定可见性：活动期常显那条分支在这里必须关掉
             c.last_activity = None;
+            c.sb_activity = None;
             c.blink_on = blink_on;
         }
         let mut view = EditorView {
-            core,
+            core: core.clone(),
             font,
             zoom_accum: 0.0,
         };
