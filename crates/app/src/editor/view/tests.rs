@@ -4039,3 +4039,126 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
         "续段命中左缘 x={minx_tail} 与首段 x={minx_head} 相差 >3px ⇒ 续行仍按绝对列偏移起排"
     );
 }
+
+/// S-5 护栏（外提光标层的前置）：**光标竖线必须真的上屏，且只占光标那一列**。
+///
+/// 为什么非补不可：既有像素用例覆盖了滚动条刻度、选区带、组字、折行段与书签
+/// 圆点，却**没有一条断言光标墨迹的存在**（`headless_caret_and_selection_
+/// never_ink_above_first_row` 只管「不越界」）。实测把外提后的 `draw_carets`
+/// 调用整行摘掉，787 条全绿——那一层是无人看守的；无人看守时「全绿」不能当作
+/// 外提等价的证据，所以先补判据再搬。
+#[test]
+fn s5_caret_layer_inks_on_the_caret_column() {
+    use super::super::CursorPos;
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    let render = |blink_on: bool| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            let doc_text: String = (0..20).map(|i| format!("line {i} abcdef\n")).collect();
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.cursor = CursorPos { line: 3, col: 6 };
+            c.scroll_top = 0.0;
+            // 让 blink_on 单独决定可见性：活动期常显那条分支在这里必须关掉
+            c.last_activity = None;
+            c.blink_on = blink_on;
+        }
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[viewport_rect],
+            Color::WHITE,
+        );
+        pixels
+    };
+
+    let off = render(false);
+    let on = render(true);
+    let mut xs: Vec<u32> = Vec::new();
+    let mut ys: Vec<u32> = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            if let (Some(a), Some(b)) = (off.pixel(x, y), on.pixel(x, y)) {
+                let d = (a.red() as i32 - b.red() as i32).abs()
+                    + (a.green() as i32 - b.green() as i32).abs()
+                    + (a.blue() as i32 - b.blue() as i32).abs();
+                if d > 8 {
+                    xs.push(x);
+                    ys.push(y);
+                }
+            }
+        }
+    }
+    let n = xs.len();
+    let (xmin, xmax) = (xs.iter().min().unwrap(), xs.iter().max().unwrap());
+    let (ymin, ymax) = (ys.iter().min().unwrap(), ys.iter().max().unwrap());
+    eprintln!("[S-5] 光标开/关差分：{n}px，x=[{xmin}..{xmax}] y=[{ymin}..{ymax}]");
+
+    // ① 存在性——整层摘掉时这里先红（差分应为 0 像素）
+    assert!(n >= 12, "光标开/关两帧差异仅 {n}px：光标竖线没有上屏");
+    // ② 形状——竖线 = x 跨度窄、y 跨度至少一行
+    assert!(
+        xmax - xmin <= 6,
+        "光标 x 跨度 {}px，不像一条竖线",
+        xmax - xmin
+    );
+    assert!(
+        ymax - ymin >= 8,
+        "光标 y 跨度 {}px，不足一行高",
+        ymax - ymin
+    );
+    // ③ 落点——差异集中在光标所在行带内，且不越出控件矩形
+    assert!(
+        ymax - ymin <= 44,
+        "光标差分跨 {}px 高，超出单行行带（不得跨行留墨）",
+        ymax - ymin
+    );
+    assert!(
+        *ymin >= ey as u32 && *ymax < (ey + eh) as u32,
+        "光标墨迹越出控件矩形：y=[{ymin}..{ymax}]"
+    );
+    // ④ 夹具自证——关帧本身得有别处墨迹，否则"零差异"可能只是整帧没画东西
+    let mut body_ink = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if let Some(p) = off.pixel(x, y) {
+                if (p.red() as i32 + p.green() as i32 + p.blue() as i32) < 700 {
+                    body_ink += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        body_ink > 200,
+        "关帧整幅仅 {body_ink}px 墨迹：夹具失效，差分断言无从谈起"
+    );
+}
