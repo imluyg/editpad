@@ -2287,6 +2287,123 @@ fn o1_every_visible_line_keeps_its_selection_band() {
     assert!(rows >= 8, "可视行数过少（{rows}），护栏形同虚设");
 }
 
+/// 第 174 轮：补上 S-5 第 163 轮拆 `draw_selections` 时留下的**残留缺口**——
+/// 附加光标（Ctrl+M `add_next_match`）的词选区上屏从来没有专门判据。
+///
+/// 缺口是真的：把 `draw_selections` 里收集附加光标区间那一圈 `for ec in
+/// core.extra_cursors` 摘掉跑全量，797 条**一条都不红**（本轮第①步现证，读数
+/// 记在日档）。既有两条选区护栏都只喂主选区（`select_all` / 单字符选区），
+/// 多光标那一支结构上有代码、判据上没人管。
+///
+/// 判据形状：主光标**无**选区，只让两个附加光标各持一段词选区，于是
+/// 「行 1／行 2 有蓝调带、行 0／行 3／行 4 没有」是**同帧内的空间归属**——
+/// 蓝带不可能来自主选区（它压根不存在），也别想靠"整幅泛蓝"蒙过负向断言。
+/// 不跨帧比像素（P33 全局钉字与字体测量冷热会让整版平移，见上条 `o1_...` 的
+/// 被否证记录）。
+#[test]
+fn s5_extra_cursor_word_selection_inks_on_its_own_row() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let core = EditorHandle::default();
+    let lh = core.borrow().line_height();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(
+            "foo 111\nfoo 222\nfoo 333\nbar 444\nbaz 555",
+        ));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.set_word_wrap(false);
+        c.cursor = CursorPos { line: 0, col: 1 };
+        c.anchor = None; // 主光标不带选区：蓝带只能来自附加光标
+        assert!(
+            c.ordered_selection().is_none(),
+            "测试前提失效：主光标应无选区"
+        );
+        assert!(
+            c.add_next_match().unwrap_or(false),
+            "测试前提失效：应能加到第 2 个实例"
+        );
+        assert!(
+            c.add_next_match().unwrap_or(false),
+            "测试前提失效：应能加到第 3 个实例"
+        );
+        assert_eq!(c.extra_cursors.len(), 2, "应有两个附加光标");
+        for ec in c.extra_cursors.iter() {
+            assert!(ec.anchor.is_some(), "附加光标应各持一段词选区");
+        }
+        c.sb_activity = None; // 滚动条黑块会污染墨迹判据（P114 口径）
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let (w, h) = (700u32, 500u32);
+    let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &rect,
+    );
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &[rect],
+        Color::WHITE,
+    );
+    // 逐逻辑行量蓝调像素。SELECTION_COLOR(0x33,0x66,0xCC,0.25) 叠白底是本画面
+    // 里唯一带蓝调的东西（正文/行号/底纹全灰阶）；|R−B| 张量判法与 Pixmap 的
+    // BGRA 通道序无关（第 60 轮实测）
+    let blue = |line: usize| -> u32 {
+        let y0 = (line as f32 * lh) as i32;
+        let y1 = ((line + 1) as f32 * lh) as i32;
+        let mut n = 0u32;
+        for y in y0..y1 {
+            for x in 0..560i32 {
+                if let Some(p) = pixels.pixel(x as u32, y as u32) {
+                    if ((p.red() as i32) - (p.blue() as i32)).abs() >= 25 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let (b0, b1, b2, b3, b4) = (blue(0), blue(1), blue(2), blue(3), blue(4));
+    eprintln!("[第 174 轮] 蓝调墨迹：主光标行 {b0} / 附加光标行 {b1},{b2} / 无光标行 {b3},{b4}");
+    assert!(
+        b1 >= 20 && b2 >= 20,
+        "附加光标的词选区没上屏（行 1={b1}px、行 2={b2}px）⇒ `draw_selections` 里\
+         extra_cursors 那一圈无人看守（本用例的存在理由）"
+    );
+    assert!(
+        b0 <= 1,
+        "主光标不该有选区，却在行 0 量到 {b0}px 蓝调 ⇒ 夹具被改坏，归属不再唯一"
+    );
+    assert!(
+        b3 <= 1 && b4 <= 1,
+        "无光标的行出现蓝调（{b3}/{b4}px）⇒ 判据把别的东西当成了选区带"
+    );
+}
+
 /// 第 60 轮（headless 像素级）：书签圆点必须画在行号栏左侧条带内——
 /// 标记行在条带采样区出现琥珀墨迹，摘除后同区归零；且圆点不得污染
 /// 条带右侧的行号数字区（越界即条带几何漂移）。
