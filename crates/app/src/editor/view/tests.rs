@@ -1929,13 +1929,30 @@ fn render_frame_cost_is_bounded_on_large_document() {
 /// 实际取串次数。视口固定在文档中部，`select_all` 后选区向两端各伸出
 /// 半个文档——改前即每帧「全文档行数 × 整行取串」。
 fn draw_once_and_count_line_text(lines: usize, select_all: bool, hits: usize) -> usize {
+    draw_frame_and_count_line_text(lines, select_all, hits, false, false)
+}
+
+/// 同款管线，多两个旋钮：`indent` 决定夹具是否带行首缩进，`guides` 决定
+/// 缩进参考线开关。给「某个绘制块不许整行取串」这类次数契约用——同一份
+/// 夹具只切一个开关，两帧的取串次数必须相同（该块一旦自己取串就会多出来）。
+fn draw_frame_and_count_line_text(
+    lines: usize,
+    select_all: bool,
+    hits: usize,
+    indent: bool,
+    guides: bool,
+) -> usize {
     let core = EditorHandle::default();
     {
         let mut c = core.borrow_mut();
-        let doc: String = (0..lines).map(|i| format!("row-{i:03} abc\n")).collect();
+        let pad = if indent { "    " } else { "" };
+        let doc: String = (0..lines)
+            .map(|i| format!("{pad}row-{i:03} abc\n"))
+            .collect();
         c.reset_document(editpad_core::Document::from_str(&doc));
         c.set_viewport_width(600.0);
         c.set_viewport_height(300.0);
+        c.indent_guides = guides;
         if select_all {
             c.select_all();
         }
@@ -2023,8 +2040,26 @@ fn o1_find_hit_draw_cost_scales_with_viewport_not_document() {
     );
 }
 
-// ---------- 关态长行的**横向**剔除（O-1 的姊妹命题，第 157 轮勘出） ----------
-//
+/// P278 护栏：缩进参考线一圈**不许整行取串**。同一份带行首缩进的夹具、同一
+/// 个视口，只切参考线这一个开关，两帧的整行取串次数必须相同。
+///
+/// 改前那个块为了问「这行缩进几列」，把每个可见行 `line_text()` 物化一遍——
+/// 于是「开着参考线」这个纯视觉选项让每帧的整行物化量翻倍（长行文档里是每帧
+/// 几万字，而绝大多数行的答案就是 0）。参考线的**画在哪儿**由 P132 那条像素
+/// 用例守（`headless_indent_guides_ink_at_tab_stops_and_toggle_off`），本条只
+/// 守它的成本：换成 rope 行首字符流之后，开态相对关态应当一颗不多取。
+#[test]
+fn o3_indent_guides_add_no_whole_line_fetch() {
+    let off = draw_frame_and_count_line_text(2_000, false, 0, true, false);
+    let on = draw_frame_and_count_line_text(2_000, false, 0, true, true);
+    eprintln!("[P278] 参考线开/关的单帧取串次数：关 {off} / 开 {on}");
+    assert_eq!(
+        on, off,
+        "缩进参考线开态比关态多 {on} vs {off} 次整行取串：该块仍在自行取串"
+    );
+}
+
+// ---------- 关态长行的**横向**剔除（O-1 的姊妹命题，第 157 轮勘出） ----------//
 // O-1 把绘制循环按视口**行**剔干净了，但一行只要有一列可见就整行进 shaping：
 // 视口 600px 装得下 ~60 个字符，4000 字符的行仍完整进 cosmic-text（第 157 轮
 // 实测行长 11→4000 时取串次数一动不动、帧耗时 113→861ms）。所以这里的护栏
@@ -4404,19 +4439,25 @@ fn headless_find_and_bookmark_marks_ink_on_scrollbar_track() {
 // ---------- P132：缩进参考线 + 右缘标尺 ----------
 
 #[test]
-fn leading_indent_cols_counts_display_columns() {
-    use super::super::metrics::TAB_STOP_COLS;
-    assert_eq!(leading_indent_cols(""), 0);
-    assert_eq!(leading_indent_cols("abc"), 0);
-    assert_eq!(leading_indent_cols("    code"), 4);
+fn leading_indent_cols_of_counts_display_columns() {
+    use super::super::metrics::leading_indent_cols_of;
+    let cols = |s: &str| leading_indent_cols_of(s.chars());
+    assert_eq!(cols(""), 0);
+    assert_eq!(cols("abc"), 0);
+    assert_eq!(cols("    code"), 4);
     // Tab 补齐到制表位：1 空格 + Tab = 4 列；两个 Tab = 8 列
-    assert_eq!(leading_indent_cols("\tcode"), TAB_STOP_COLS);
-    assert_eq!(leading_indent_cols(" \tcode"), TAB_STOP_COLS);
-    assert_eq!(leading_indent_cols("\t\tcode"), 2 * TAB_STOP_COLS);
+    assert_eq!(cols("\tcode"), TAB_STOP_COLS);
+    assert_eq!(cols(" \tcode"), TAB_STOP_COLS);
+    assert_eq!(cols("\t\tcode"), 2 * TAB_STOP_COLS);
     // 行中 Tab 不算缩进
-    assert_eq!(leading_indent_cols("a\tb"), 0);
+    assert_eq!(cols("a\tb"), 0);
     // 宽字符属内容非缩进
-    assert_eq!(leading_indent_cols("中文"), 0);
+    assert_eq!(cols("中文"), 0);
+    // P278：绘制层喂的是 rope 的**行首之后整条字符流**（会越过行尾），
+    // 故换行必须终止扫描——纯空白行不许把下一行的缩进吃进来。
+    assert_eq!(cols("   \n    x"), 3, "换行须终止扫描");
+    assert_eq!(cols("\t\n\t"), TAB_STOP_COLS, "换行须终止扫描");
+    assert_eq!(cols("\r\n  y"), 0, "CRLF 的 \\r 亦终止");
 }
 
 /// P132（headless 像素级）：缩进参考线——8 空格缩进行的制表位 4/8 列

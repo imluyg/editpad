@@ -80,9 +80,15 @@ pub(crate) fn char_cols(c: char, col: usize) -> f32 {
 /// 口径与渲染制表位同源：空格计 1 列、Tab 跳到下一个 [`TAB_STOP_COLS`]
 /// 制表位——只统计行首连续空白（首个非空白字符即止；宽字符属内容，
 /// 一律不算缩进）。
-pub(crate) fn leading_indent_cols(text: &str) -> usize {
+///
+/// P278：入参为字符迭代器而非 `&str`，因为绘制层每可见行都要问一次这件
+/// 事——喂 rope 的零拷贝字符流（`EditorCore::line_leading_indent_cols`）
+/// 就只扫行首那几个字符，喂整行字符串则要先物化几千字符。
+/// 遇到首个非空白即止，故行尾换行符天然终结扫描，纯空白行也越不到下一行
+/// 的缩进上去。
+pub(crate) fn leading_indent_cols_of(chars: impl Iterator<Item = char>) -> usize {
     let mut col = 0usize;
-    for ch in text.chars() {
+    for ch in chars {
         match ch {
             ' ' => col += 1,
             '\t' => col += TAB_STOP_COLS - (col % TAB_STOP_COLS),

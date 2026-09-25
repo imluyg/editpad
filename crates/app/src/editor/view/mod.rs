@@ -30,8 +30,7 @@ use super::core::{
     SCROLL_LINES_PER_NOTCH, WRAP_SB_RESERVE_HYSTERESIS_LINES,
 };
 use super::metrics::{
-    char_cols, display_cols, leading_indent_cols, measure_char_width, measure_ink_box,
-    shape_row_xs, TAB_STOP_COLS,
+    char_cols, display_cols, measure_char_width, measure_ink_box, shape_row_xs, TAB_STOP_COLS,
 };
 use super::scrollbars::{
     mark_y_for_row, resolve_mark_click, wrap_sb_reserve_needed, HScrollbar, MarkTarget, VScrollbar,
@@ -1132,7 +1131,7 @@ impl EditorView {
             let (g_first, g_last) = core.visible_range();
             let tab = TAB_STOP_COLS;
             for line in g_first..=g_last {
-                let cols = leading_indent_cols(&core.line_text(line));
+                let cols = core.line_leading_indent_cols(line);
                 if cols < tab {
                     continue;
                 }

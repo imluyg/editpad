@@ -1,3 +1,4 @@
+use super::metrics::leading_indent_cols_of;
 use super::*;
 
 impl EditorCore {
@@ -1227,6 +1228,21 @@ impl EditorCore {
     #[cfg(test)]
     pub(crate) fn take_line_text_calls(&self) -> usize {
         self.line_text_calls.take()
+    }
+
+    /// 第 `line` 行行首缩进的显示列数（缩进参考线定位）。
+    ///
+    /// P278：与 [`Self::line_text`] 不是一条路——本查询只吃行首那几个字符。
+    /// 参考线每个可见行都要问一次「这行缩进几列」，旧写法为此把整行物化成
+    /// String：单行日志/压缩文件这类主用例里等于每帧白抄几千到几万字符，
+    /// 而绝大多数答案就是 0。字符流经 `leading_indent_cols_of` 在首个非空白
+    /// （含换行）处终止，故与整行口径逐字符一致。
+    pub(crate) fn line_leading_indent_cols(&self, line: usize) -> usize {
+        if line >= self.doc.line_count() {
+            return 0;
+        }
+        let start = self.doc.line_to_char(line);
+        leading_indent_cols_of(self.doc.chars_from(start))
     }
 
     /// 行号栏宽度。
