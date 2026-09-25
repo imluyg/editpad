@@ -74,6 +74,11 @@ impl Renderer {
     ) {
         let scale_factor = viewport.scale_factor();
 
+        // 本批开始：上一批留下的裁剪掩码缓存一律不算数——掩码可能在批间被重新
+        // 分配而尺寸看不出差别（`screenshot` 每次都新建一张）。见
+        // `engine::invalidate_clip_mask_cache` 的注释。
+        engine::invalidate_clip_mask_cache();
+
         self.layers.flush();
 
         for &damage_bounds in damage {

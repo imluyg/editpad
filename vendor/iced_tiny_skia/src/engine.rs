@@ -380,7 +380,7 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
+                        adjust_clip_mask_cached(clip_mask, clip_bounds);
                         Some(clip_mask as &_)
                     }
                 };
@@ -418,7 +418,7 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
+                        adjust_clip_mask_cached(clip_mask, clip_bounds);
                         Some(clip_mask as &_)
                     }
                 };
@@ -453,7 +453,7 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
+                        adjust_clip_mask_cached(clip_mask, clip_bounds);
                         Some(clip_mask as &_)
                     }
                 };
@@ -862,7 +862,61 @@ fn rounded_box_sdf(
     (x.powf(2.0) + y.powf(2.0)).sqrt() - radius
 }
 
+/// 裁剪掩码"当前内容对应哪个矩形"的缓存键：掩码尺寸 + 矩形四个分量的位型。
+type ClipMaskKey = (u32, u32, [u32; 4]);
+
+thread_local! {
+    /// 上一次**真正**建好的掩码是哪一张、表示哪个矩形；`None` = 不确定。
+    static CLIP_MASK_HELD: std::cell::RefCell<Option<ClipMaskKey>> =
+        std::cell::RefCell::new(None);
+}
+
+fn clip_mask_key(clip_mask: &tiny_skia::Mask, bounds: Rectangle) -> Option<ClipMaskKey> {
+    let parts = [bounds.x, bounds.y, bounds.width, bounds.height];
+    // 非有限值不进缓存，并且要顺手让缓存作废：位型相等不代表语义相等（NaN 有多种
+    // 位型），而这张掩码已经被改成了"说不清"的内容——留着旧键会让下一次误判命中。
+    if !parts.iter().all(|v| v.is_finite()) {
+        CLIP_MASK_HELD.with(|c| *c.borrow_mut() = None);
+        return None;
+    }
+    Some((
+        clip_mask.width(),
+        clip_mask.height(),
+        parts.map(f32::to_bits),
+    ))
+}
+
+/// 让缓存作废。`Renderer::draw` 每批开头调一次。
+///
+/// 缓存**只在一批绘制内**有效：掩码可能在批与批之间被外层重新分配（窗口缩放、
+/// `screenshot` 每次都新建一张），而新掩码是全零的、尺寸却可能和缓存里那条完全
+/// 一样——那时跳过重建就会把内容整片裁掉。同批之内掩码始终是同一个 `&mut Mask`、
+/// 且全 crate 只有 [`adjust_clip_mask`] 写它（第 187 轮逐个调用点核过），才安全。
+pub fn invalidate_clip_mask_cache() {
+    CLIP_MASK_HELD.with(|c| *c.borrow_mut() = None);
+}
+
+/// 无条件重建整窗裁剪掩码。**所有**写掩码的路径都必须经过这里，缓存才可信。
+///
+/// `EDITPAD_CLIP_PROBE=1` 时打印每次真正发生的重建（调用点 + 掩码尺寸 + 矩形），
+/// 用于事后复核"缓存到底省掉了多少整窗 memset"。测量口径见 `adjust_clip_mask_cached`
+/// 的头（同族门控探针先例是本文件里的 `EDITPAD_QUAD_LOG`）。
+#[track_caller]
 pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
+    if std::env::var_os("EDITPAD_CLIP_PROBE").is_some() {
+        let loc = std::panic::Location::caller();
+        eprintln!(
+            "CLIPBUILD {}:{} {}x{} ({:.1},{:.1},{:.1},{:.1})",
+            loc.file().rsplit(['/', '\\']).next().unwrap_or("?"),
+            loc.line(),
+            clip_mask.width(),
+            clip_mask.height(),
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height
+        );
+    }
     clip_mask.clear();
 
     let path = {
@@ -886,4 +940,26 @@ pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
         false,
         tiny_skia::Transform::default(),
     );
+
+    if let Some(key) = clip_mask_key(clip_mask, bounds) {
+        CLIP_MASK_HELD.with(|c| *c.borrow_mut() = Some(key));
+    }
+}
+
+/// [`adjust_clip_mask`] 的缓存版：**只给图元级的文本绘制用**。
+///
+/// 上游对每个越界图元都重画一遍整窗掩码（`clear` 是整张 memset，再叠一次
+/// `fill_path`）。第 187 轮实测：长行文档 9 帧共 291 次重建，其中 252 次来自
+/// 同一个文本图元分支、请求的是**同一个** 700×500 矩形 ⇒ 每帧约 28 次整窗
+/// memset + 路径填充纯属白活（按 350,000 字节/次算，一帧几百万字节的重复写）。
+/// 掩码内容与"上一次真正重建用的矩形"相同即可直接复用。
+///
+/// 因此"同一尺寸的另一张掩码"不会被误判命中（缓存失效点见
+/// [`invalidate_clip_mask_cache`]）。
+pub fn adjust_clip_mask_cached(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
+    let key = clip_mask_key(clip_mask, bounds);
+    if key.is_some() && CLIP_MASK_HELD.with(|c| *c.borrow() == key) {
+        return;
+    }
+    adjust_clip_mask(clip_mask, bounds);
 }
