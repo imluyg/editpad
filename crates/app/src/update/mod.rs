@@ -922,17 +922,30 @@ impl Editpad {
         // 自我续期」的四条链（caret/心跳/监视/转发轮询），执行器 worker
         // 不再被常驻睡眠占用。订阅按 run_with 身份去重：开关/间隔变化
         // 即重键，旧流撤销、桥接线程自然收敛。
-        let caret_interval = if self.cur_handle.borrow().scrollbar_fading() {
+        let (blink_needed, fading) = {
+            let c = self.cur_handle.borrow();
+            (c.blink_tick_needed(), c.scrollbar_fading())
+        };
+        let caret_interval = if fading {
             editor::SCROLLBAR_FADE_TICK_MS
         } else {
             editor::CARET_BLINK_MS
         };
-        let caret = Subscription::run_with(
-            TickKind::Caret {
-                interval_ms: caret_interval,
-            },
-            tick_stream,
-        );
+        // P279：组字进行中应用光标恒不绘制（P167），这一拍翻的相位没人看得见，
+        // 而 P117 之后「一条消息 = 一整帧」，所以干脆不订这条链（判据与滚动条
+        // 淡出快拍都在 `EditorCore::blink_tick_needed`）。组字一结束就有消息进
+        // update、本函数随即重键，闪烁照旧恢复；IME 候选窗走 `ime_anchor_rect`，
+        // 从不依赖本拍。
+        let caret = if blink_needed {
+            Subscription::run_with(
+                TickKind::Caret {
+                    interval_ms: caret_interval,
+                },
+                tick_stream,
+            )
+        } else {
+            Subscription::none()
+        };
         let heartbeat = if session_restore_allowed(
             self.settings.enable_snapshots,
             self.settings.remember_session,

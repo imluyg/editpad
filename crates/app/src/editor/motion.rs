@@ -1265,6 +1265,32 @@ impl EditorCore {
         self.tick_blink_at(std::time::Instant::now());
     }
 
+    /// 组字（IME 预编辑）是否进行中——preedit 非空即算。
+    ///
+    /// P167（应用光标组字期恒不绘制）与 P279（闪烁拍可否省掉）共用本判据，
+    /// 两处不可能各说一套。
+    pub(crate) fn preedit_active(&self) -> bool {
+        self.preedit.as_deref().is_some_and(|p| !p.is_empty())
+    }
+
+    /// P279：这一拍闪烁心跳**有没有可能改变画面**——应用层据此决定还订不订
+    /// 这条订阅。
+    ///
+    /// 在 P117 之后（vendor 恒整视口栅格化、部分损伤呈现被禁用）一条消息就是
+    /// 一整帧，所以"每 530ms 翻一次一个没人看的相位"是真金白银的白绘。组字
+    /// 进行中应用光标根本不绘制（P167），相位翻与不翻像素逐帧相同；而这条链
+    /// 还兼着竖直滚动条淡出的快拍驱动，故淡出进行中必须留拍——两个条件合成
+    /// 本判据，组字期一结束（提交/取消都是一条消息，`subscription` 随即重键）
+    /// 闪烁就恢复。IME 候选窗定位走 `ime_anchor_rect`，与本拍无关，不受影响。
+    pub fn blink_tick_needed(&self) -> bool {
+        self.blink_tick_needed_at(std::time::Instant::now())
+    }
+
+    /// [`Self::blink_tick_needed`] 的可注入时钟版（单测用，同 `scrollbar_fading_at`）。
+    pub(crate) fn blink_tick_needed_at(&self, now: std::time::Instant) -> bool {
+        self.scrollbar_fading_at(now) || !self.preedit_active()
+    }
+
     /// [`Self::tick_blink`] 的可注入时钟版（单测用）。
     pub(crate) fn tick_blink_at(&mut self, now: std::time::Instant) {
         let blink_due = self
@@ -1294,7 +1320,7 @@ impl EditorCore {
     /// 「光标不对」）。IME 定位（request_input_method 的 caret
     /// rect）不经本闸，候选窗跟随不受影响。
     pub fn caret_visible(&self) -> bool {
-        if self.preedit.as_deref().is_some_and(|p| !p.is_empty()) {
+        if self.preedit_active() {
             return false;
         }
         if let Some(t) = self.last_activity {

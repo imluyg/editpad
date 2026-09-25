@@ -1440,6 +1440,35 @@ fn caret_blink_phase_toggles_and_activity_forces_visible() {
 }
 
 #[test]
+fn blink_tick_needed_tracks_whether_the_phase_is_on_screen() {
+    // P279 契约：闪烁拍只在「这一拍有可能改变画面」时才留订阅——P117 之后
+    // vendor 恒整视口栅格化，一条消息就是一整帧。判据两条：组字期应用光标
+    // 根本不绘制（P167）⇒ 无事可做；滚动条淡出用同一条链驱动 ⇒ 必须留拍。
+    let mut c = core_with("hello");
+    let t0 = std::time::Instant::now();
+    assert!(c.blink_tick_needed_at(t0), "无组字时闪烁链照常运行");
+
+    c.ime_preedit("da pin yin".to_owned());
+    assert!(
+        !c.blink_tick_needed_at(t0),
+        "组字期光标不画，这拍翻的相位没人看"
+    );
+    assert!(
+        !c.caret_visible(),
+        "同帧自证：判据报「不必」时光标确实不可见（否则就是摘掉了真在闪的链）"
+    );
+
+    // 淡出进行中：即使组字期也必须留拍（同一条链兼着动画驱动）
+    c.sb_activity = Some(t0 - std::time::Duration::from_millis(SCROLLBAR_IDLE_MS as u64 + 5));
+    assert!(c.scrollbar_fading_at(t0), "夹具自证：此刻确在淡出窗内");
+    assert!(c.blink_tick_needed_at(t0), "淡出快拍不得因组字被摘");
+
+    // 组字结束（上屏/取消都是一条消息，订阅随即重键）→ 恢复
+    c.ime_preedit(String::new());
+    assert!(c.blink_tick_needed_at(t0), "组字结束闪烁必须回来");
+}
+
+#[test]
 fn caret_hidden_while_preedit_composing() {
     // P167：组字进行中应用光标恒隐藏——组字串自带插入点指示，应用光标
     // 叠画组字尾且随闪烁忽隐忽现，主流编辑器组字期均不显示文本光标
