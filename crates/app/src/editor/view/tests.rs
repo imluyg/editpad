@@ -694,6 +694,174 @@ fn headless_preedit_reflow_paints_line_when_first_segment_scrolled_out() {
     );
 }
 
+/// 第 173 轮：P118 场景的**分辨力**加强版（headless 像素级）。
+///
+/// 为什么另立一条而不是改上面那条：`..._paints_line_when_first_segment_scrolled_out`
+/// 断的是"视口内有墨 + 首墨行落在顶行"，而第 170 轮第①步实测——把组字重排的
+/// 预计算短路成恒 `None` 跑全量，796 条里**只红另一条**、这条不红。原因就在
+/// 那两句断言上：回退到 `pre_slot` 三段式后正文照画、首段照滚出视口 ⇒ 它分辨
+/// 不出"整行重排"与"同一行右移 + 折行边界硬裁"（P115 口径）。
+///
+/// 本条改断**只有重排路径能给出的现象**：组字把后文挤出的那一个**新视觉段**
+/// （视觉行索引 = 未组字时的段数 `seg_old`）确有正文墨迹、且**从行首左缘起排**。
+/// 回退分支给不出这一行——重排关闭时 `visual_rows_total` 仍是 `seg_old`，绘制循环
+/// `last_v = (first_v + rows_v + k_vis).min(total - 1)` 根本迭代不到它，而开态那
+/// 一行是 `reflow_painted` 全量重排逐段画出来的（P118 的机制本身）。
+///
+/// 判据拿 `preedit_reflow_off` 当**同一份文档、同一次滚动的同帧 oracle**（做法同
+/// 第 168 轮的 `preedit_ul_off`）；并自带夹具自证：回退帧必须在自己的旧段里有
+/// 大量墨迹，否则"新行无墨"可能只是整帧啥都没画。
+#[test]
+fn headless_p118_reflow_shifts_tail_into_a_new_segment() {
+    use super::super::wrap::pixel_breaks;
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let (w, h) = (500u32, 260u32);
+    let (ex, ey, ew, eh) = (10.0f32, 10.0f32, 460.0f32, 230.0f32);
+    let core = EditorHandle::default();
+    // ── 夹具参数按**实测**折行预算倒推（换字体／换 DPI 时前提自证，不硬编码字符数）
+    let (body, preedit, seg_old, seg_new) = {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str("中"));
+        c.set_viewport_width(ew);
+        c.set_viewport_height(eh);
+        c.set_word_wrap(true);
+        let budget = c.wrap_max_px();
+        let probe = shape_row_xs(font, 16.0, "中中").expect("shape 失败");
+        let char_w = (probe[1] - probe[0]).max(1.0);
+        let per_seg = ((budget / char_w).floor() as usize).max(4);
+        let n = per_seg + per_seg / 2; // 1.5 段 ⇒ 未组字时占 2 段
+        let body = "中".repeat(n);
+        let preedit = "时".repeat(per_seg); // ≈ 一整段 ⇒ 合成串必多出一段
+        c.reset_document(editpad_core::Document::from_str(&body));
+        let old = c.segments_of_line(0, &body).len();
+        let s: String = body.chars().chain(preedit.chars()).collect();
+        let s_xs = shape_row_xs(font, 16.0, &s).expect("shape 失败");
+        let new = pixel_breaks(&s_xs, budget, &s).len();
+        (body, preedit, old, new)
+    };
+    assert!(
+        seg_old >= 2,
+        "测试前提失效：未组字的长行应已折成 ≥2 段（P118 要的就是首段滚出视口），实际 {seg_old}"
+    );
+    assert!(
+        seg_new > seg_old,
+        "测试前提失效：组字后应多出一个视觉段（重排独有现象），实际 {seg_old}→{seg_new}"
+    );
+    let frame = |reflow_off: bool| -> tiny_skia::Pixmap {
+        {
+            let mut c = core.borrow_mut();
+            // 顺序要紧：reset_document 会清组字与光标
+            c.reset_document(editpad_core::Document::from_str(&body));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.set_word_wrap(true);
+            let end = c.line_display_len(0);
+            c.cursor = CursorPos { line: 0, col: end };
+            c.ensure_visible();
+            // 首段（行号段）滚出视口顶 = P118 场景；下滚一行即可
+            c.scroll_top = 1.0;
+            c.sb_activity = None; // 滚动条黑块会污染墨迹判据（P114 口径）
+            assert!(c.ime_preedit(preedit.clone()));
+            c.preedit_reflow_off = reflow_off;
+        }
+        let mut view = EditorView {
+            core: core.clone(),
+            font,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let style = iced::advanced::renderer::Style::default();
+        // 预热帧：冷帧量宽失败会让整版平移（P189 的像素护栏教训）
+        for _ in 0..3 {
+            view.draw(
+                &tree,
+                &mut renderer,
+                &Theme::Light,
+                &style,
+                lyt,
+                mouse::Cursor::Unavailable,
+                &rect,
+            );
+        }
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[rect],
+            Color::WHITE,
+        );
+        pixels
+    };
+    let on = frame(false);
+    let off = frame(true);
+    let (gutter, lh) = {
+        let c = core.borrow();
+        (c.gutter_width(), c.line_height())
+    };
+    // 视觉行 v 在 [x_lo, x_hi) 内的正文墨迹数；scroll_top 恒 1.0，故
+    // y = bounds.y + (v − 1)·lh（与实现同一公式）
+    let band = |px: &tiny_skia::Pixmap, v: usize, x_lo: f32, x_hi: f32| -> u32 {
+        let y0 = ey + (v as f32 - 1.0) * lh;
+        let mut n = 0u32;
+        for y in (y0 + 3.0) as i32..(y0 + lh - 2.0) as i32 {
+            for x in x_lo as i32..x_hi as i32 {
+                if y < 0 || x < 0 {
+                    continue;
+                }
+                if let Some(p) = px.pixel(x as u32, y as u32) {
+                    let avg = (p.red() as i32 + p.green() as i32 + p.blue() as i32) / 3;
+                    if avg < 200 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+    let (x0, xr) = (ex + gutter, ex + ew);
+    let new_row_on = band(&on, seg_old, x0, xr);
+    let new_row_off = band(&off, seg_old, x0, xr);
+    // 新段是**重排后的新一行**，文字必从行首左缘起排：只看左缘 4 字宽
+    let char_w = core.borrow().char_width();
+    let left_on = band(&on, seg_old, x0, x0 + 4.0 * char_w);
+    let off_body = band(&off, 1, x0, xr) + band(&off, seg_old - 1, x0, xr);
+    eprintln!(
+        "[第 173 轮] 新段行 v={seg_old}：重排 {new_row_on}px / 回退 {new_row_off}px；\
+         左缘 {left_on}px；回退帧旧段自证 {off_body}px（段数 {seg_old}→{seg_new}）"
+    );
+    assert!(
+        off_body > 300,
+        "夹具自证失败：回退帧自己的段里几乎没墨（{off_body}px），\
+         两帧差分说明不了任何事"
+    );
+    assert!(
+        new_row_on >= 40,
+        "重排没把后文挤进新视觉段（v={seg_old} 只有 {new_row_on}px）"
+    );
+    assert!(
+        new_row_off * 5 <= new_row_on,
+        "回退分支也在同一行画出 {new_row_off}px（重排 {new_row_on}px）⇒ 判据分辨不出\
+         重排与 pre_slot 三段式"
+    );
+    assert!(
+        left_on >= 20,
+        "新段文字未从行首左缘起排（左缘带只有 {left_on}px）⇒ 不是折行新段的样子"
+    );
+}
+
 /// P115 行中组字回归（headless 像素级）：组字串作为「虚拟插入文本」
 /// 参与行绘制——光标在**行中**时后文整体右移组字实测宽（不再与组字
 /// 重叠，用户复报「行中打字组字与已打的字重叠」；修前组字浮层直接

@@ -615,6 +615,12 @@ pub struct EditorCore {
     /// [`Self::preedit_ul_off`] 恒 false，本字段不参与任何逻辑。
     #[cfg(test)]
     pub(crate) preedit_ul_off: bool,
+    /// 测试开关（组字行**插入重排**摘除，第 173 轮）：置 true 时
+    /// `compute_reflow` 恒返回 `None`，即回退到 `pre_slot` 三段式老路径。
+    /// P118 那条用例原本分不清这两支（第 170 轮第①步现证：短路后它不红），
+    /// 加强版拿本开关当"重排 vs 回退"的同一帧 oracle。生产构建恒 false。
+    #[cfg(test)]
+    pub(crate) preedit_reflow_off: bool,
     /// P133：悬停链接的字符区间 `(line, c0, c1)`（下划线绘制数据源）。
     /// 鼠标移动探测写入；编辑后经失效汇点清空（跨度可能失配）。
     pub(crate) link_hover: Option<(usize, usize, usize)>,
@@ -750,6 +756,8 @@ impl Default for EditorCore {
             h_clip_off: false,
             #[cfg(test)]
             preedit_ul_off: false,
+            #[cfg(test)]
+            preedit_reflow_off: false,
             // P132：绘制开关默认关（Settings 默认 true 在应用层下发时生效；
             // 无头测试构造的裸 core 不画参考线）
             indent_guides: false,
@@ -1015,6 +1023,19 @@ impl EditorCore {
     /// 同上，非测试构建恒假（常量折叠后那条分支不再存在）。
     #[cfg(not(test))]
     pub(crate) fn preedit_ul_off(&self) -> bool {
+        false
+    }
+
+    /// 组字行插入重排的摘除开关（第 173 轮）：测试构建读字段，生产构建恒假
+    /// ——`compute_reflow` 拿它当"重排 vs `pre_slot` 回退"的同帧对照。
+    #[cfg(test)]
+    pub(crate) fn preedit_reflow_off(&self) -> bool {
+        self.preedit_reflow_off
+    }
+
+    /// 同上，非测试构建恒假。
+    #[cfg(not(test))]
+    pub(crate) fn preedit_reflow_off(&self) -> bool {
         false
     }
 

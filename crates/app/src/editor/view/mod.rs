@@ -684,7 +684,9 @@ impl EditorView {
         text_x0: f32,
         display_right_edge: f32,
     ) -> Option<ReflowLayout> {
-        if core.wrap_enabled() {
+        // `preedit_reflow_off`：测试专用的同帧 oracle（恒 None ⇒ 回退 `pre_slot`
+        // 三段式），用来证 P118 那条用例真能分辨两支；生产构建恒 false。
+        if core.wrap_enabled() && !core.preedit_reflow_off() {
             preedit_text.as_deref().and_then(|p| {
                 let rl = core.cursor.line;
                 if rl >= core.doc.line_count() {
