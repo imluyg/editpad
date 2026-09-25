@@ -2113,6 +2113,137 @@ fn draw_long_line_frame(
     (shaped, pixels.data().to_vec())
 }
 
+/// 关态不可见字符标记的横向剔除管线：20 行、每行 `line_len` 组「字母+空格」
+/// （一半字符是空格 ⇒ 标记密集），横向滚动 `scroll_left` 后画一帧；
+/// 返回（本帧递交绘制的标记数，光栅化像素）。`clip_off` = true 走改前老口径
+/// （`h_clip_off` 开关 ⇒ `h_clip_window` 恒返回整行），当**改前算法的 oracle**。
+/// 字体名与 `draw_long_line_frame` 同款显式指定，理由见那里（P33 一次性全局钉字）。
+fn draw_ws_mark_frame(line_len: usize, scroll_left: f32, clip_off: bool) -> (usize, Vec<u8>) {
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let doc: String = (0..20)
+        .map(|i| {
+            let mut s = String::with_capacity(line_len * 2 + 1);
+            for k in 0..line_len {
+                s.push((b'a' + ((k + i) % 26) as u8) as char);
+                s.push(' ');
+            }
+            s.push('\n');
+            s
+        })
+        .collect();
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.show_whitespace = true;
+        c.scroll_left = scroll_left;
+        #[cfg(test)]
+        {
+            c.ws_clip_off = clip_off;
+            let _ = c.take_ws_marks();
+            let _ = c.take_shaped_chars();
+        }
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let (w, h) = (700u32, 500u32);
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &[viewport_rect],
+        Color::WHITE,
+    );
+    let marks = core.borrow().take_ws_marks();
+    (marks, pixels.data().to_vec())
+}
+
+/// 两帧墨迹的不对称量：`(只在 a 有墨, 只在 b 有墨)`。
+/// 断言失败时只印这两个数与包围盒级别的信息——140 万像素整片进 `assert_eq!`
+/// 的消息会把工具输出撑到十几 MB。
+fn ws_ink_asymmetry(a: &[u8], b: &[u8]) -> (u32, u32) {
+    let ink = |px: &[u8], i: usize| px[i] < 250 || px[i + 1] < 250 || px[i + 2] < 250;
+    let (mut only_a, mut only_b) = (0u32, 0u32);
+    for i in (0..a.len().min(b.len())).step_by(4) {
+        match (ink(a, i), ink(b, i)) {
+            (true, false) => only_a += 1,
+            (false, true) => only_b += 1,
+            _ => {}
+        }
+    }
+    (only_a, only_b)
+}
+
+/// 关态不可见字符标记的横向剔除契约（第 183 轮）：**只断次数，不断像素**。
+///
+/// 递交绘制的标记量必须与**视口宽**同阶、与行长脱钩（实测 4 千组「字母+空格」
+/// 的行整行递交 56000 个 quad，剔除后 938 个；行长 ×5 数字一动不动）。
+/// oracle = `ws_clip_off`（只切标记这一圈，不切正文的 `h_clip_window`——两个一起
+/// 切就把两件事的差异糊成一条差分）。它同时充当变异探针：把本改动回退成旧算法，
+/// ②那条敏感性断言自己就红，不必手工短路源码。
+///
+/// ⚠️ 为什么这条不配像素判据（第 160 轮那套是配的）：实测「一帧递交万级图元」
+/// 会**偶发性**丢掉屏内内容——同一段代码连跑两次，一次两帧逐位相同、另一次开态
+/// 帧比整行帧多 5440 px 墨迹（差异铺满整个视口）。本仓的像素用例全量并发时共享
+/// 一个进程，把这种量级的帧放进用例池会连带把别的像素用例打红（第 183 轮实测：
+/// 加了 56000-quad 夹具的那一次跑，`o3_horizontal_clipping_*` 与
+/// `s5_caret_layer_inks_on_the_caret_column` 同时红）。⇒ 成本用次数判据（本用例），
+/// 像素等价性由第 160 轮既有用例守，丢内容现象列 §2 待勘。
+#[test]
+fn p273_wrap_off_whitespace_marks_are_culled_by_viewport_width() {
+    // 夹具刻意做小：本仓的像素用例全量并发时共享一个进程，第 183 轮实测把
+    // 万级图元的帧（`clip_off = true` 那几帧）放得越大， sibling 像素用例越容易
+    // 红（`o3_horizontal_clipping_*` 与 `s5_caret_layer_*` 各红过一次），疑与 P33
+    // 一次性全局钉字落在别家用例两帧之间有关。这里只留**一帧**老口径，量级
+    // 6 000 quad 已足够把下面的比例断言拉开到 ~30 倍。
+    let near = draw_ws_mark_frame(300, 0.0, false).0;
+    let far = draw_ws_mark_frame(1_500, 0.0, false).0;
+    let oracle = draw_ws_mark_frame(300, 0.0, true).0;
+    assert!(near > 0, "探针失效：整帧一个标记都没递交");
+    assert!(
+        oracle > near * 4,
+        "敏感性：改前 {oracle} 个应远多于改后 {near} 个（否则分不清剔没剔）"
+    );
+    assert_eq!(
+        near, far,
+        "标记量必须与行长脱钩：300 组 {near} vs 1500 组 {far}"
+    );
+
+    // 滚到行中段：窗口跟着 scroll_left 走（不是只剔右端），量级不得膨胀
+    let scrolled = draw_ws_mark_frame(1_500, 3_000.0, false).0;
+    assert!(
+        scrolled > 0 && scrolled <= near * 2,
+        "滚动后仍须只递交窗口内的标记：行首 {near} vs 滚动后 {scrolled}"
+    );
+}
+
 /// 正文带（x ≥ 120，即行号栏右侧）的墨迹像素数。行号数字全在 x < 120，
 /// 所以这个计数**只可能**来自正文——它同时充当「帧不是空白」的夹具自证。
 fn body_ink(px: &[u8]) -> u32 {
@@ -2167,6 +2298,10 @@ fn o3_long_line_shaping_is_capped_by_viewport_width_not_line_length() {
 /// 不在屏上。`scroll_left = 1500` 那组尤其要紧：此时窗口左端不在 0，
 /// 无 runs 分支要靠调用点传的 `dx` 把整片文字搬回正确的绝对位置，
 /// `dx` 若算错，这一组会整体错位而 `scroll_left = 0` 那组照样绿。
+///
+/// ⚠️ 第 183 轮实测本用例在全量并发下**偶发红**（同一段源码两次跑，一次两帧
+/// 逐位相同、另一次开态帧多 5440 px 墨迹），已连同另外两条像素用例的同现象记进
+/// §2 待勘；本轮不动它的判据（改成单向断言等于把一个还没定案的现象写进契约）。
 #[test]
 fn o3_horizontal_clipping_is_pixel_identical_to_full_line_paint() {
     for scroll_left in [0.0f32, 1_500.0, 12_000.0] {
@@ -2176,9 +2311,17 @@ fn o3_horizontal_clipping_is_pixel_identical_to_full_line_paint() {
             shaped_on < shaped_off,
             "scroll_left={scroll_left}：开态 shaping {shaped_on} 不少于改前 {shaped_off}，剔除没生效"
         );
-        assert_eq!(
-            px_on, px_off,
-            "scroll_left={scroll_left}：横向剔除改变了像素（开态 {shaped_on} 字符 / 改前 {shaped_off} 字符）"
+        let (only_on, only_off) = ws_ink_asymmetry(&px_on, &px_off);
+        assert!(
+            px_on == px_off,
+            "scroll_left={scroll_left}：横向剔除改变了像素（开态 {shaped_on} 字符 / \
+             改前 {shaped_off} 字符）；首个差异在第 {} 字节（开态独有 {only_on} px / \
+             改前独有 {only_off} px 墨迹）",
+            px_on
+                .iter()
+                .zip(px_off.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or(0)
         );
         let ink = body_ink(&px_on);
         assert!(

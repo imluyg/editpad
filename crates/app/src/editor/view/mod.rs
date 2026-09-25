@@ -1019,6 +1019,12 @@ impl EditorView {
                                     let cx = bounds.x + gutter_w + x
                                         - core.px_of(line, &text, breaks[seg])
                                         - scroll_left;
+                                    // 开态的横向成本天然被段预算封顶（一段 ≤ 折行
+                                    // 预算 ≤ 视口宽），故只需与关态共用同一计数口径
+                                    #[cfg(test)]
+                                    if matches!(ch, ' ' | '\t') {
+                                        core.count_ws_mark();
+                                    }
                                     draw_ws_mark(renderer, y, cx, ch, adv);
                                 }
                             }
@@ -1034,15 +1040,45 @@ impl EditorView {
                 if core.show_whitespace {
                     // P267：与开态那份同病同治——`idx` 查表、`col` 只管制表位与
                     // 标记宽度。**两侧都要改**，这是本仓第 6 次"分叉只守一边"。
+                    //
+                    // 第 183 轮：横向剔除。改前这一圈对**整行**每个字符都查一次
+                    // `row_x` 并递交一枚 quad，而视口只装得下几十字符——屏外的
+                    // quad 照样进层栈、照样被 tiny-skia 栅格化。窗口口径直接复用
+                    // 正文那份 `h_clip_window`（含四条「宁可不剔」退路，以及测试期
+                    // 的老口径开关 `h_clip_off`），故标记与字形永远同带。
+                    // `col` 仍须从行首逐字符累计（Tab 的制表位依赖段内列），但窗口
+                    // 之外不再查表、不再递交。
+                    let lens = text.chars().count();
+                    // 老口径开关只切**本圈**，不与正文的 `h_clip_off` 混用：
+                    // 两个一起切，差分就把两件事糊成一条（判据须断在被改动的差异上）
+                    let (wlo, whi, _) = if core.ws_clip_off() {
+                        (0usize, lens, 0.0f32)
+                    } else {
+                        core.h_clip_window(
+                            line,
+                            &text,
+                            lens,
+                            scroll_left - gutter_w,
+                            scroll_left + bounds.width - gutter_w,
+                        )
+                    };
                     let mut col = 0usize;
                     for (idx, ch) in text.chars().enumerate() {
-                        if ch == '\n' || ch == '\r' {
+                        if ch == '\n' || ch == '\r' || idx >= whi {
                             break;
                         }
                         let adv = char_cols(ch, col) as usize;
-                        if let Some(x) = core.row_x(line, idx) {
-                            let cx = bounds.x + gutter_w + x - scroll_left;
-                            draw_ws_mark(renderer, y, cx, ch, adv);
+                        if idx >= wlo {
+                            if let Some(x) = core.row_x(line, idx) {
+                                let cx = bounds.x + gutter_w + x - scroll_left;
+                                // 只数真会上一屏的那两类（闭包对别的字符是空操作），
+                                // 免得计数名字超出它量到的东西
+                                #[cfg(test)]
+                                if matches!(ch, ' ' | '\t') {
+                                    core.count_ws_mark();
+                                }
+                                draw_ws_mark(renderer, y, cx, ch, adv);
+                            }
                         }
                         col += adv;
                     }

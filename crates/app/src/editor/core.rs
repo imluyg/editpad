@@ -613,6 +613,15 @@ pub struct EditorCore {
     /// 字符进 shaping），故另设本计数。生产构建整字段不参与编译。
     #[cfg(test)]
     pub(crate) shaped_chars: std::cell::Cell<usize>,
+    /// 测试钩子（不可见字符标记的横向剔除契约，第 183 轮）：整帧交给绘制闭包的
+    /// **标记个数**。标记是纯 A 层 quad，屏外那几百个照样进层栈、照样栅格化，
+    /// 所以这一项直接就是软渲染的像素工作量。生产构建整字段不参与编译。
+    #[cfg(test)]
+    pub(crate) ws_marks: std::cell::Cell<usize>,
+    /// 测试开关（关态标记横向剔除的老口径对照）：置 true 时不可见字符标记一圈
+    /// 恒按整行递交，即第 183 轮之前。与 [`Self::h_clip_off`] **各管一头**。
+    #[cfg(test)]
+    pub(crate) ws_clip_off: bool,
     /// 测试开关（横向剔除的老口径对照）：置 true 时 `h_clip_window` 恒返回整行，
     /// 即第 160 轮之前的绘制路径。像素等价性用例拿它当**改前算法的 oracle**——
     /// 同一份文档、同一次滚动，只切这一个开关，两帧必须逐像素相同。
@@ -763,7 +772,11 @@ impl Default for EditorCore {
             #[cfg(test)]
             shaped_chars: std::cell::Cell::new(0),
             #[cfg(test)]
+            ws_marks: std::cell::Cell::new(0),
+            #[cfg(test)]
             h_clip_off: false,
+            #[cfg(test)]
+            ws_clip_off: false,
             #[cfg(test)]
             preedit_ul_off: false,
             #[cfg(test)]
@@ -1053,6 +1066,33 @@ impl EditorCore {
     #[cfg(test)]
     pub(crate) fn count_shaped_chars(&self, n: usize) {
         self.shaped_chars.set(self.shaped_chars.get() + n);
+    }
+
+    /// 关态不可见字符标记横向剔除的摘除开关（第 183 轮）：测试构建读字段，
+    /// 生产构建恒假——像素守卫拿它当「标记整行递交 vs 只递交窗口内」的同帧
+    /// 对照。**必须与正文的 `h_clip_window` 分开**：两者一起切就把两件事的
+    /// 差异糊成一条差分（本轮第一次就因此误判「剔除改变了像素」）。
+    #[cfg(test)]
+    pub(crate) fn ws_clip_off(&self) -> bool {
+        self.ws_clip_off
+    }
+
+    /// 同上，非测试构建恒假（常量折叠后那条分支不再存在）。
+    #[cfg(not(test))]
+    pub(crate) fn ws_clip_off(&self) -> bool {
+        false
+    }
+
+    /// 测试钩子（不可见字符标记横向剔除契约）：累加本帧递交绘制的标记个数。
+    #[cfg(test)]
+    pub(crate) fn count_ws_mark(&self) {
+        self.ws_marks.set(self.ws_marks.get() + 1);
+    }
+
+    /// 同上：读取并清零本帧标记计数。
+    #[cfg(test)]
+    pub(crate) fn take_ws_marks(&self) -> usize {
+        self.ws_marks.take()
     }
 
     /// 水平内容宽（像素）：列模型高水位与真实行宽证据取较大者。
