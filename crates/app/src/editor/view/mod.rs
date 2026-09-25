@@ -188,6 +188,63 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第四步：列块高亮自 `draw` 提成方法（A 层，函数体逐字搬移）。
+    ///
+    /// 与书签圆点同款：本块只用 7 个本帧只读量，显式传参比塞进 `DrawFrame`
+    /// 更清楚——`DrawFrame` 要等 `text_x0`/`preedit_w`/`reflow` 都算完才构造得出来，
+    /// 而列块高亮在 A 层、远早于那一刻。`char_w` 也走显式传参而非在方法内
+    /// `core.char_width()`，保持「本帧量由调用方算好再传」的既有口径（第 2 条教训）。
+    ///
+    /// 护栏：`headless_block_selection_highlight_frame_diff`（第①步实测把本块
+    /// 短路成"一颗都不画"它会红，所以这块外提是有主的）。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_block_highlight(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+    ) {
+        // 第 67 轮 ⑮：列块高亮——逐行画 [c0, c1) 段 quad，颜色与单选区
+        // 同族（互斥状态不会同帧出现）。短行自动到行尾：x1 取该行实际
+        // 列宽 min(c1) 的像素。P89：y 与选区同款按墨迹盒居中。
+        if let Some((r0, r1, c0, c1)) = core.active_block() {
+            for line in r0..=r1 {
+                let y = bounds.y + (line as f32 - core.scroll_top) * lh + core.decoration_inset();
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                let text = core.line_text(line);
+                let cols = text.chars().count();
+                let x0 = core.px_of(line, &text, c0.min(cols));
+                let x1 = core.px_of(line, &text, c1.min(cols).max(c0.min(cols)));
+                // B9 Phase 1：零宽插入列（c0==c1）画 2px 竖指示条而非
+                // 0.4 列宽的窄带——「在此列插入」的锚需要与有宽块可区分
+                let width = if c1 == c0 {
+                    CARET_WIDTH
+                } else {
+                    (x1 - x0).max(char_w * 0.4)
+                };
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + gutter_w + x0 - scroll_left,
+                            y,
+                            width,
+                            height: lh,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.selection,
+                );
+            }
+        }
+    }
+
     fn draw_carets(&self, renderer: &mut iced::Renderer, f: &DrawFrame<'_>) {
         let core = f.core;
         let bounds = f.bounds;
@@ -909,40 +966,17 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             paint_selection(sel_start, sel_end);
         }
 
-        // 第 67 轮 ⑮：列块高亮——逐行画 [c0, c1) 段 quad，颜色与单选区
-        // 同族（互斥状态不会同帧出现）。短行自动到行尾：x1 取该行实际
-        // 列宽 min(c1) 的像素。P89：y 与选区同款按墨迹盒居中。
-        if let Some((r0, r1, c0, c1)) = core.active_block() {
-            for line in r0..=r1 {
-                let y = bounds.y + (line as f32 - core.scroll_top) * lh + core.decoration_inset();
-                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                    continue;
-                }
-                let text = core.line_text(line);
-                let cols = text.chars().count();
-                let x0 = core.px_of(line, &text, c0.min(cols));
-                let x1 = core.px_of(line, &text, c1.min(cols).max(c0.min(cols)));
-                // B9 Phase 1：零宽插入列（c0==c1）画 2px 竖指示条而非
-                // 0.4 列宽的窄带——「在此列插入」的锚需要与有宽块可区分
-                let width = if c1 == c0 {
-                    CARET_WIDTH
-                } else {
-                    (x1 - x0).max(char_w * 0.4)
-                };
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: Rectangle {
-                            x: bounds.x + gutter_w + x0 - scroll_left,
-                            y,
-                            width,
-                            height: lh,
-                        },
-                        ..renderer::Quad::default()
-                    },
-                    colors.selection,
-                );
-            }
-        }
+        // 第 67 轮 ⑮：列块高亮（S-5 第四步外提为 `draw_block_highlight`，逐字搬移）
+        self.draw_block_highlight(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            lh,
+            char_w,
+            gutter_w,
+            scroll_left,
+        );
 
         // 括号匹配高亮（第 61 轮）：光标邻接括号时，两侧括号各画一条
         // 2px 下划线（A 层 quad，随掩码裁剪；查询带光标键控缓存，
