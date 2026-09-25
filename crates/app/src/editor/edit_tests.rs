@@ -552,14 +552,14 @@ fn h_clip_window_falls_back_to_full_line_unless_layout_matches() {
         (0, 2000, 0.0)
     );
     // ② 表长与行字符数不吻合（行刚变短/变长）→ 整行
-    c.set_row_layout(0, (0..=5).map(|i| i as f32 * 10.0).collect());
+    c.set_row_layout(0, (0..=5).map(|i| i as f32 * 10.0).collect::<Vec<f32>>());
     assert_eq!(
         c.h_clip_window(0, &text, 2000, 5000.0, x_to),
         (0, 2000, 0.0)
     );
     // 吻合后按表裁剪：每字符 10px ⇒ 可视区 [5000,6000] 是字符 500..600，
     // 左右各 64 字符余量 → [436, 664)，起点像素 = 4360
-    c.set_row_layout(0, (0..=2000).map(|i| i as f32 * 10.0).collect());
+    c.set_row_layout(0, (0..=2000).map(|i| i as f32 * 10.0).collect::<Vec<f32>>());
     assert_eq!(
         c.h_clip_window(0, &text, 2000, 5000.0, x_to),
         (436, 664, 4360.0),

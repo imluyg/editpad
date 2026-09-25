@@ -869,7 +869,7 @@ impl EditorCore {
         let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
         self.row_layouts
             .get(&line)
-            .map(|v| v.as_slice())
+            .map(|v| &v[..])
             .filter(|xs| xs.len() == n + 1 && size_ok)
     }
 
@@ -1041,9 +1041,10 @@ impl EditorCore {
         // 的像素偏移」再按字符中点反解（与 hit_test 同口径）
         let seg_base_px = self.px_of(line, &text, s0);
         let goal_seg = goal - seg_base_px;
-        let xs_fresh: Option<&Vec<f32>> = self
+        let xs_fresh: Option<&[f32]> = self
             .row_layouts
             .get(&line)
+            .map(|v| &v[..])
             .filter(|xs| xs.len().saturating_sub(1) >= lens);
         let mut col = if goal_seg <= 0.0 {
             s0 // goal 在段起点左侧 → 段首

@@ -494,7 +494,7 @@ fn hit_test_with_stale_layout_never_returns_column_beyond_line_length() {
     // 按旧长度算出，越出行长，再喂给不夹紧的编辑入口就落到别的字符/别的位置。
     let mut c = core_with("abc\ndefg\nhij");
     let stale_long_row: Vec<f32> = (0..=10).map(|k| k as f32 * 8.0).collect();
-    c.row_layouts.insert(0, stale_long_row);
+    c.row_layouts.insert(0, stale_long_row.into());
 
     let hit = c.hit_test(9_000.0, 0.0);
     assert_eq!(hit.line, 0, "y=0 应命中首行");
@@ -2356,6 +2356,43 @@ fn row_layout_memo_reuses_on_unchanged_frame_and_recomputes_after_edit() {
     );
     // 未编辑行（纪元失配但键相同）命中复用，不丢布局
     assert_eq!(c.row_layouts[&1].len(), "world".chars().count() + 1);
+}
+
+#[test]
+fn row_layout_memo_hit_shares_one_table_instead_of_copying_it() {
+    // P277 契约（**次数/分配**命题，与机器负载无关）：memo 命中的行，本帧
+    // `row_layouts` 与 memo 指向同一块字形表。上一那条用例只断言两帧**内容**
+    // 相同，改前是 `Vec` 深拷贝——内容同样相同，所以它抓不到这次回退；
+    // 本用例断的是分配同一性，改前必红（现算/命中两个分支都红）。
+    let mut c = core_with("hello world\nsecond line here");
+    c.set_viewport_height(1000.0);
+    c.set_viewport_width(800.0);
+
+    // 首帧：现算并回填 memo，注入本帧的那份就该是 memo 那一份
+    c.refresh_visible_row_layouts(BODY_FONT);
+    assert_eq!(c.row_layout_memo.len(), 2, "两可见行都应回填 memo");
+    let table0 = std::rc::Rc::as_ptr(&c.row_layouts[&0]);
+    assert!(
+        std::ptr::eq(table0, std::rc::Rc::as_ptr(&c.row_layout_memo[&0].3)),
+        "现算行注入本帧的布局应与 memo 同一块表，而不是复制一份"
+    );
+    // 探针自证：首帧确实取过串（否则下面「命中帧 0 次」是探针失效而非 memo 生效）
+    assert!(
+        c.take_line_text_calls() > 0,
+        "探针失效：首帧一次整行取串都没有"
+    );
+
+    // 命中帧：零取串 + 零表复制
+    c.refresh_visible_row_layouts(BODY_FONT);
+    assert_eq!(
+        c.take_line_text_calls(),
+        0,
+        "命中帧不该再整行取串（memo 未生效）"
+    );
+    assert!(
+        std::ptr::eq(table0, std::rc::Rc::as_ptr(&c.row_layouts[&0])),
+        "命中帧应共享 memo 那张表：闪烁/滚动帧每可见行深拷贝一遍就是白付的成本"
+    );
 }
 
 #[test]

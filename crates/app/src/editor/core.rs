@@ -443,6 +443,9 @@ pub(crate) struct Snapshot {
 // 可读，语义见下方各字段文档（bracket_cache / sel_span_cache）。
 type BracketCache = RefCell<Option<(CursorPos, Option<(usize, usize)>)>>;
 type SelSpanCache = RefCell<Option<((usize, usize), Option<usize>)>>;
+/// P162 可见行 shaping memo 的值：`(正文字体, 字号, 内容纪元, 字形起点表)`。
+/// 起别名只为把四元组里那个 `Rc<[f32]>` 收进一处名字（clippy type_complexity）。
+type RowLayoutMemo = HashMap<usize, (Font, f32, u64, Rc<[f32]>)>;
 
 pub struct EditorCore {
     pub doc: Document,
@@ -554,13 +557,16 @@ pub struct EditorCore {
     /// 点击/高亮分片一律按字形真实位置定位——与绘制零误差，字体回退、
     /// 分数宽度、连字、TAB 实际展开全部如实反映，静态列模型的任何假设
     /// 破缺（非等宽字体、非整倍字号）都不再产生累计漂移。
-    pub(crate) row_layouts: HashMap<usize, Vec<f32>>,
+    ///
+    /// P277：值改 `Rc<[f32]>`——memo 命中的行每帧只是 refcount +1，不再把整张
+    /// 字形表按行复制一遍（见 [`Self::set_row_layout`]）。
+    pub(crate) row_layouts: HashMap<usize, Rc<[f32]>>,
     /// P162：可见行 shaping memo。key = 行号，值 = (正文字体, 字号, 内容纪元, xs)。
     /// 三元键全匹配才复用——行内容变化经纪元失配（汇点自增）、字体/字号
     /// 变化经显式键失配，均无外部失效点。命中行零 shaping、零行文本读取；
     /// 此前每帧对 ~50 个可见行全量重做段落 shaping（闪烁/滚动帧白付），
     /// memo 后仅编辑行与滚入行现算。容量超限整体清空（有界内存）。
-    pub(crate) row_layout_memo: HashMap<usize, (Font, f32, u64, Vec<f32>)>,
+    pub(crate) row_layout_memo: RowLayoutMemo,
     /// P116 字号戳：row_layouts 注入时的字号——缩放下旧字号布局会
     /// 「长度对齐但字宽过期」（旧 xs 在缩放帧被 px_of/断行误用 →
     /// 缩小留白/放大超右缘，用户复报；trusted_xs/px_of 必须按字号
@@ -880,7 +886,13 @@ impl EditorCore {
     /// 同时抬升真实行宽高水位（水平行程钳制用）。
     /// P116：记录注入时的字号（row_layouts_font_size）——缩放帧旧 xs
     /// 必须因字号失配失效。
-    pub fn set_row_layout(&mut self, line: usize, xs: Vec<f32>) {
+    ///
+    /// P277：值类型为 `Rc<[f32]>`，故 memo 命中帧只是 refcount +1——此前每个
+    /// 可见行每帧把整张表深拷贝一遍（`字符数 × 4` 字节），而拷贝出的两份内容
+    /// 必然相同（闪烁/滚动帧白付）。按 `Vec` 注入的调用方经 `Into` 保持原样，
+    /// capacity == len 时那次转换直接接管堆内存、不复制元素。
+    pub fn set_row_layout(&mut self, line: usize, xs: impl Into<Rc<[f32]>>) {
+        let xs = xs.into();
         if let Some(&w) = xs.last() {
             self.max_row_width_px = self.max_row_width_px.max(w);
         }
@@ -891,7 +903,7 @@ impl EditorCore {
     /// P162：可见行布局注入的 memo 化版（控件层 `layout` 每帧调用）。
     ///
     /// 对可见行做 (正文字体, 字号, 内容纪元) 键控的 shaping memo：命中行
-    /// 直接复用缓存 xs（零 shaping、零行文本读取）；未命中行按与绘制
+    /// 直接复用缓存 xs（零 shaping、零行文本读取、零表复制）；未命中行按与绘制
     /// 同源段落现算并回填 memo。row_layouts 仍每帧先清后注（旧口径，
     /// 无陈旧残留）；memo 跨帧存续，命中键失配的途径：
     /// * 行内容变化 → [`Self::invalidate_highlight_from`] 自增纪元
@@ -921,6 +933,7 @@ impl EditorCore {
                     let Some(xs) = shape_row_xs(font, size, &text) else {
                         continue;
                     };
+                    let xs: Rc<[f32]> = Rc::from(xs);
                     if self.row_layout_memo.len() >= ROW_LAYOUT_MEMO_CAP {
                         self.row_layout_memo.clear();
                     }
