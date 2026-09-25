@@ -481,6 +481,15 @@ pub struct EditorCore {
     pub(crate) highlight: Option<RefCell<LazyHighlighter>>,
     /// 输入法预编辑串（组字过程中的拼音/候选串），提交前显示在光标处。
     pub(crate) preedit: Option<String>,
+    /// ⑧（第 185 轮）：**上一帧真正画出来的**主光标锚点（控件相对坐标）。
+    /// 组字期间画出来的光标在组字可显示尾（P115），重排存在时还会随重排
+    /// 折到下一段（P118）——而 `caret_rect_relative()` 只有提交态位置。IME
+    /// 候选框的锚点在 `Widget::update` 里取，那里拿不到本帧的 `DrawFrame`
+    /// （preedit 实测宽与 reflow 都是绘制期产物），改前于是把候选框放在
+    /// **组字串开头**、重排时还高一段。绘制点把用过的坐标记在这里，IME 侧
+    /// 与绘制侧共用同一份事实；非组字帧恒 `None`（提交态几何本就精确，
+    /// 不能拿上一帧的缓存去替代它）。
+    pub(crate) ime_anchor: std::cell::Cell<Option<(f32, f32)>>,
     /// 正文字号（驱动行高与列宽）；默认 16，合法区间见 core 设置层。
     pub(crate) font_size: f32,
     /// 编辑器是否持有键盘焦点（点击编辑区置真，点击其他控件置假）。
@@ -732,6 +741,7 @@ impl Default for EditorCore {
             typing_run: None,
             highlight: None,
             preedit: None,
+            ime_anchor: std::cell::Cell::new(None),
             font_size: FONT_SIZE_DEFAULT,
             focused: true,
             blink_on: true,
@@ -1081,6 +1091,11 @@ impl EditorCore {
     #[cfg(not(test))]
     pub(crate) fn ws_clip_off(&self) -> bool {
         false
+    }
+
+    /// ⑧：绘制侧记下本帧主光标的实际落点（控件相对坐标），供 IME 锚点复用。
+    pub(crate) fn set_ime_anchor(&self, pos: Option<(f32, f32)>) {
+        self.ime_anchor.set(pos);
     }
 
     /// 测试钩子（不可见字符标记横向剔除契约）：累加本帧递交绘制的标记个数。

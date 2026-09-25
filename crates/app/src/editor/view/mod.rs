@@ -1673,7 +1673,15 @@ impl EditorView {
         // 组字尾所在段定位（可能随重排折到下一段）
         let caret = core.caret_rect_relative();
         let caret_in_view = caret.y + caret.height > 0.0 && caret.y < core.viewport_h;
-        if core.caret_visible() && caret_in_view {
+        // ⑧（第 185 轮）：组字期间主光标竖线**不画**（`caret_visible()` 见非空
+        // preedit 恒 false，P115 口径），用户看得见的是那条组字带的**右端**；
+        // 下面这对坐标正是带右端（重排在下一段时也跟着换段）。把它记给 IME，
+        // 候选框就落在看得见的位置上——改前 IME 侧在 `Widget::update` 里只能拿
+        // 提交态的 `caret_rect_relative()`，于是候选框停在**组字串开头**，差一整
+        // 个拼音串的宽，重排时还高一段。绘制与锚点共用同一份算式，不再分叉。
+        let composing = core.preedit.as_deref().is_some_and(|p| !p.is_empty());
+        let mut ime_anchor = None;
+        if (core.caret_visible() && caret_in_view) || composing {
             let (cx, cy) = if let Some(r) = &reflow {
                 let s1 = (r.col_p + r.pel).min(r.s.chars().count());
                 match reflow_seg_of(&r.breaks, s1) {
@@ -1692,19 +1700,26 @@ impl EditorView {
                     preedit_w.map_or(0.0f32, |w| core.preedit_visual_w(core.cursor.col, w));
                 (bounds.x + caret.x + pre_dx, bounds.y + caret.y)
             };
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: Rectangle {
-                        x: cx,
-                        y: cy,
-                        width: caret.width,
-                        height: caret.height,
+            if composing {
+                ime_anchor = Some((cx - bounds.x, cy - bounds.y));
+            }
+            if core.caret_visible() && caret_in_view {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x: cx,
+                            y: cy,
+                            width: caret.width,
+                            height: caret.height,
+                        },
+                        ..renderer::Quad::default()
                     },
-                    ..renderer::Quad::default()
-                },
-                colors.caret,
-            );
+                    colors.caret,
+                );
+            }
         }
+        // ⑧：无论本帧结论如何都落一遍（非组字帧恒 None，IME 侧回到精确的提交态）
+        core.set_ime_anchor(ime_anchor);
 
         // B10 多光标：附加光标竖线（与主光标同闪同色；caret_rect_at
         // 重入几何，视口剔除同款口径）。组字偏移/折行重排只属主光标
@@ -2274,7 +2289,13 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 组字事件被两处消费（用户复现：预编辑串在查找框与正文各画一份）。
         if self.core.borrow().focused {
             let core = self.core.borrow();
-            let caret = core.caret_rect_relative();
+            let caret = core.ime_anchor_rect();
+            // ⑧（第 185 轮）：锚点走 `ime_anchor_rect()`——组字中它就是这一帧
+            // **画出来的**插入点（组字带右端，重排时随重排换段），非组字帧恒等于
+            // 精确的提交态几何。改前这里直接用 `caret_rect_relative()`，候选框于是
+            // 停在**组字串开头**，差一整个拼音串的宽。
+            // ⚠️ 本行调用点自身没有看守（`Widget::update` 里要构造 `Shell`，无头
+            // 测试到不了）——与 P272 那条"方法有人守、接线没人守"同型，已记 §2。
             let ime: input_method::InputMethod = input_method::InputMethod::Enabled {
                 cursor: Rectangle {
                     x: bounds.x + caret.x,

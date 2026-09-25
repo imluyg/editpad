@@ -2206,21 +2206,128 @@ fn ws_ink_asymmetry(a: &[u8], b: &[u8]) -> (u32, u32) {
     (only_a, only_b)
 }
 
+/// ⑧（第 185 轮）：组字期间 IME 候选框的锚点必须落在**这一帧画出来的光标**上，
+/// 而不是提交态位置（改前差一整个拼音串的宽，重排时还高一段）。
+///
+/// 判据不碰像素（跨帧像素比较在本池子里有时序问题，见 §2 ⭐）：绘制点记下的锚点
+/// 与提交态几何的差，必须明显是"组字把它推前了"的量级；另有一格反向对照——
+/// **非组字帧必须不记锚点**，否则提交态也会被上一帧替代。
+#[test]
+fn p276_ime_anchor_follows_the_painted_caret_while_composing() {
+    use super::super::CursorPos;
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str("abcdefgh\nsecond line\n"));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(200.0);
+        c.cursor = CursorPos { line: 0, col: 0 };
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 200.0), Size::new(600.0, 200.0));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let (w, h) = (700u32, 300u32);
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let mut frame = |view: &mut EditorView| {
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &[viewport_rect],
+            Color::WHITE,
+        );
+    };
+
+    // ① 反向对照：非组字帧的锚点矩形恒等于提交态几何
+    frame(&mut view);
+    {
+        let c = core.borrow();
+        assert_eq!(
+            c.ime_anchor_rect(),
+            c.caret_rect_relative(),
+            "非组字帧不该被上一帧的锚点替代"
+        );
+    }
+
+    // ② 组字帧：锚点须跟着画出来的光标（右移一整个拼音串的可显示宽）
+    let bare = {
+        let mut c = core.borrow_mut();
+        assert!(
+            c.ime_preedit("zhongguo".to_owned()),
+            "夹具：preedit 应被接受"
+        );
+        c.caret_rect_relative()
+    };
+    frame(&mut view);
+    let anchor = core.borrow().ime_anchor_rect();
+    let dx = anchor.x - bare.x;
+    assert!(
+        dx > 24.0 && dx < 200.0,
+        "IME 锚点应比提交态右移一整个拼音串宽（8 字符），实际 dx={dx:.1}\
+         （提交态 x={:.1}、锚点 x={:.1}）",
+        bare.x,
+        anchor.x
+    );
+    assert!(
+        (anchor.y - bare.y).abs() < 0.5,
+        "关态没有重排，y 不该动：{:.1} vs {:.1}",
+        anchor.y,
+        bare.y
+    );
+
+    // ③ 组字结束 ⇒ 锚点必须清空（不能让候选框停在旧位置）
+    {
+        core.borrow_mut().preedit = None;
+    }
+    frame(&mut view);
+    {
+        let c = core.borrow();
+        assert_eq!(
+            c.ime_anchor_rect(),
+            c.caret_rect_relative(),
+            "组字结束后必须回到精确的提交态几何，不能让候选框停在旧位置"
+        );
+    }
+}
+
 /// 关态不可见字符标记的横向剔除契约（第 183 轮）：**只断次数，不断像素**。
 ///
 /// 递交绘制的标记量必须与**视口宽**同阶、与行长脱钩（实测 4 千组「字母+空格」
 /// 的行整行递交 56000 个 quad，剔除后 938 个；行长 ×5 数字一动不动）。
 /// oracle = `ws_clip_off`（只切标记这一圈，不切正文的 `h_clip_window`——两个一起
 /// 切就把两件事的差异糊成一条差分）。它同时充当变异探针：把本改动回退成旧算法，
-/// ②那条敏感性断言自己就红，不必手工短路源码。
+/// 那条敏感性断言自己就红，不必手工短路源码。
 ///
-/// ⚠️ 为什么这条不配像素判据（第 160 轮那套是配的）：实测「一帧递交万级图元」
-/// 会**偶发性**丢掉屏内内容——同一段代码连跑两次，一次两帧逐位相同、另一次开态
-/// 帧比整行帧多 5440 px 墨迹（差异铺满整个视口）。本仓的像素用例全量并发时共享
-/// 一个进程，把这种量级的帧放进用例池会连带把别的像素用例打红（第 183 轮实测：
-/// 加了 56000-quad 夹具的那一次跑，`o3_horizontal_clipping_*` 与
-/// `s5_caret_layer_inks_on_the_caret_column` 同时红）。⇒ 成本用次数判据（本用例），
-/// 像素等价性由第 160 轮既有用例守，丢内容现象列 §2 待勘。
+/// ⚠️ 为什么这条不配像素判据（第 160 轮那套是配的）：实测「一帧递交万级图元」会
+/// **偶发性**丢掉屏内内容——同一段代码连跑两次，一次两帧逐位相同、另一次开态帧比
+/// 整行帧多 5440 px 墨迹（差异铺满整个视口），机制未定案（§2 ⭐ 第 ① 条）。
+/// 另注：第 183 轮曾把"`o3_horizontal_clipping_*` 的偶发红"归因到"本用例的大帧进池"，
+/// 第 184 轮四组控制实验**推翻了那条归因**（红只需要"整池并发 + 跨帧比较"两个条件，
+/// 见日档第 184 轮段）——成本判据用次数这条结论不变。
 #[test]
 fn p273_wrap_off_whitespace_marks_are_culled_by_viewport_width() {
     // 夹具刻意做小（4 行；曾经用 20 行 × 4 千组量到 56000 → 938，那版大帧会把

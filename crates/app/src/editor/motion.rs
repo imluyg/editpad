@@ -1353,6 +1353,17 @@ impl EditorCore {
         self.caret_rect_at(self.cursor)
     }
 
+    /// ⑧（第 185 轮）：IME 候选框该用的矩形。组字中取**上一帧真正画出来的**那个
+    /// 插入点（组字带右端，重排时随重排换段——见 `EditorCore::ime_anchor`），
+    /// 非组字帧恒退回精确的提交态几何。
+    pub fn ime_anchor_rect(&self) -> Rectangle {
+        let caret = self.caret_rect_relative();
+        match self.ime_anchor.get() {
+            Some((x, y)) => Rectangle { x, y, ..caret },
+            None => caret,
+        }
+    }
+
     pub fn set_viewport_height(&mut self, h: f32) {
         self.viewport_h = h.max(self.line_height());
         self.clamp_scroll();
