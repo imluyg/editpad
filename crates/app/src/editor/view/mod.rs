@@ -245,6 +245,125 @@ impl EditorView {
         }
     }
 
+    /// S-5 第五步：查找命中底色自 `draw` 提成方法（A 层，函数体逐字搬移）。
+    ///
+    /// 与列块同款走显式传参：`DrawFrame` 在本块之后才构造得出来。`vis_first`／
+    /// `vis_last` 由调用方算好传入（`visible_range()` 的结果在 `draw` 里被多处共用，
+    /// 方法内再算一次等于把同一帧的量取两遍）。
+    ///
+    /// 护栏：开态 `wrap_find_highlight_paints_on_the_hit_visual_segment`＋关态
+    /// `find_highlight_paints_only_the_hit_span_when_wrap_off`。⚠️ 关态那条是
+    /// **第 162 轮现补的**：本块有开态／关态两份拆段循环，第①步实测把整块短路时
+    /// 全量只有开态一条红——关态分支此前无人看守（O-1 那条断的是取串次数上界，
+    /// 短路只会让次数更小，恒不红）。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_find_hits(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+        vis_first: usize,
+        vis_last: usize,
+    ) {
+        // 查找命中高亮（P123）：查找栏开态的全部命中在视口内上底色。
+        // 画在选区**之前**——当前命中的选区带覆盖其底色，当前/非当前
+        // 命中自然区分（主流编辑器同款层次）。几何与选区绘制同款：
+        // 折行开态逐视觉段分段、墨迹盒居中、与控件边界求交；命中表是
+        // 后台扫描快照，编辑后至下一次扫描完成前位置可能漂移（可接受，
+        // 主流同口径），绘制时对超界行列做钳制防御。
+        if !core.find_hl.is_empty() {
+            for hit in &core.find_hl {
+                // 命中片段一律从 `hit.line` 起向**后**展开（`match_line_pieces`
+                // 每步至少吃掉 1 字符，故末片行号 ≤ hit.line + len_chars）。
+                // 据此可在拆片之前先否掉整个不在视口内的命中。
+                if hit.line > vis_last || hit.line + hit.len_chars < vis_first {
+                    continue;
+                }
+                for (line, c0, c1) in core.match_line_pieces(hit) {
+                    if c1 <= c0 {
+                        continue; // 零宽命中画不出底色
+                    }
+                    if line < vis_first || line > vis_last {
+                        continue; // 视口外的整行片段：不必取串即可否掉
+                    }
+                    let text = core.line_text(line);
+                    let lens = text.chars().count();
+                    let (c0, c1) = (c0.min(lens), c1.min(lens));
+                    if c1 <= c0 {
+                        continue;
+                    }
+                    // 起点行不在视口内且命中不跨行 → 快速剔除
+                    if core.wrap_enabled() {
+                        let base = core.line_visual_base(line) as f32;
+                        let breaks = core.segments_of_line(line, &text);
+                        for (s, &seg_start) in breaks.iter().enumerate() {
+                            let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
+                            let cs = c0.max(seg_start);
+                            let ce = c1.min(seg_end);
+                            if ce <= cs {
+                                continue;
+                            }
+                            let row = base + s as f32;
+                            if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh
+                            {
+                                continue;
+                            }
+                            let seg_base = core.px_of_len(line, &text, seg_start, lens);
+                            let x0 = core.px_of_len(line, &text, cs, lens) - seg_base;
+                            let x1 = core.px_of_len(line, &text, ce, lens) - seg_base;
+                            let Some(rect) = Rectangle {
+                                x: bounds.x + gutter_w + x0 - scroll_left,
+                                y: bounds.y
+                                    + (row - core.scroll_top) * lh
+                                    + core.decoration_inset(),
+                                width: (x1 - x0).max(char_w * 0.4),
+                                height: lh,
+                            }
+                            .intersection(&bounds) else {
+                                continue;
+                            };
+                            renderer.fill_quad(
+                                renderer::Quad {
+                                    bounds: rect,
+                                    ..renderer::Quad::default()
+                                },
+                                colors.find,
+                            );
+                        }
+                    } else {
+                        let row = line as f32;
+                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
+                            continue;
+                        }
+                        let x0 = core.px_of_len(line, &text, c0, lens);
+                        let x1 = core.px_of_len(line, &text, c1, lens);
+                        let Some(rect) = Rectangle {
+                            x: bounds.x + gutter_w + x0 - scroll_left,
+                            y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
+                            width: (x1 - x0).max(char_w * 0.4),
+                            height: lh,
+                        }
+                        .intersection(&bounds) else {
+                            continue;
+                        };
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: rect,
+                                ..renderer::Quad::default()
+                            },
+                            colors.find,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn draw_carets(&self, renderer: &mut iced::Renderer, f: &DrawFrame<'_>) {
         let core = f.core;
         let bounds = f.bounds;
@@ -756,98 +875,20 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // 绘制结果逐像素不变。
         let (vis_first, vis_last) = core.visible_range();
 
-        // 查找命中高亮（P123）：查找栏开态的全部命中在视口内上底色。
-        // 画在选区**之前**——当前命中的选区带覆盖其底色，当前/非当前
-        // 命中自然区分（主流编辑器同款层次）。几何与选区绘制同款：
-        // 折行开态逐视觉段分段、墨迹盒居中、与控件边界求交；命中表是
-        // 后台扫描快照，编辑后至下一次扫描完成前位置可能漂移（可接受，
-        // 主流同口径），绘制时对超界行列做钳制防御。
-        if !core.find_hl.is_empty() {
-            for hit in &core.find_hl {
-                // 命中片段一律从 `hit.line` 起向**后**展开（`match_line_pieces`
-                // 每步至少吃掉 1 字符，故末片行号 ≤ hit.line + len_chars）。
-                // 据此可在拆片之前先否掉整个不在视口内的命中。
-                if hit.line > vis_last || hit.line + hit.len_chars < vis_first {
-                    continue;
-                }
-                for (line, c0, c1) in core.match_line_pieces(hit) {
-                    if c1 <= c0 {
-                        continue; // 零宽命中画不出底色
-                    }
-                    if line < vis_first || line > vis_last {
-                        continue; // 视口外的整行片段：不必取串即可否掉
-                    }
-                    let text = core.line_text(line);
-                    let lens = text.chars().count();
-                    let (c0, c1) = (c0.min(lens), c1.min(lens));
-                    if c1 <= c0 {
-                        continue;
-                    }
-                    // 起点行不在视口内且命中不跨行 → 快速剔除
-                    if core.wrap_enabled() {
-                        let base = core.line_visual_base(line) as f32;
-                        let breaks = core.segments_of_line(line, &text);
-                        for (s, &seg_start) in breaks.iter().enumerate() {
-                            let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
-                            let cs = c0.max(seg_start);
-                            let ce = c1.min(seg_end);
-                            if ce <= cs {
-                                continue;
-                            }
-                            let row = base + s as f32;
-                            if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh
-                            {
-                                continue;
-                            }
-                            let seg_base = core.px_of_len(line, &text, seg_start, lens);
-                            let x0 = core.px_of_len(line, &text, cs, lens) - seg_base;
-                            let x1 = core.px_of_len(line, &text, ce, lens) - seg_base;
-                            let Some(rect) = Rectangle {
-                                x: bounds.x + gutter_w + x0 - scroll_left,
-                                y: bounds.y
-                                    + (row - core.scroll_top) * lh
-                                    + core.decoration_inset(),
-                                width: (x1 - x0).max(char_w * 0.4),
-                                height: lh,
-                            }
-                            .intersection(&bounds) else {
-                                continue;
-                            };
-                            renderer.fill_quad(
-                                renderer::Quad {
-                                    bounds: rect,
-                                    ..renderer::Quad::default()
-                                },
-                                colors.find,
-                            );
-                        }
-                    } else {
-                        let row = line as f32;
-                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
-                            continue;
-                        }
-                        let x0 = core.px_of_len(line, &text, c0, lens);
-                        let x1 = core.px_of_len(line, &text, c1, lens);
-                        let Some(rect) = Rectangle {
-                            x: bounds.x + gutter_w + x0 - scroll_left,
-                            y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
-                            width: (x1 - x0).max(char_w * 0.4),
-                            height: lh,
-                        }
-                        .intersection(&bounds) else {
-                            continue;
-                        };
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: rect,
-                                ..renderer::Quad::default()
-                            },
-                            colors.find,
-                        );
-                    }
-                }
-            }
-        }
+        // 查找命中底色（P123，S-5 第五步外提为 `draw_find_hits`，逐字搬移）。
+        // 护栏：开态／关态各一条两帧差分（见 `draw_find_hits` 文档注释）。
+        self.draw_find_hits(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            lh,
+            char_w,
+            gutter_w,
+            scroll_left,
+            vis_first,
+            vis_last,
+        );
 
         // 选区高亮：只画与视口相交的视觉行（双宽感知）。
         // 第 73 轮 ⑯：软换行开态逐视觉段画 [cs, ce) 子区间（跨段选区
