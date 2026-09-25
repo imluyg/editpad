@@ -705,6 +705,74 @@ fn remove_marked_lines_disjoint_runs_and_undo_restores() {
     assert_eq!(c.undo_stack.len(), depth, "no-op 不得入栈");
 }
 
+/// P269：跨行选区**末点落在行首**时，其下的书签要上移几格。
+///
+/// 病灶在 `edit.rs` 的两份手写副本里：`vanished = if e.col == 0 { e.line - 1 - s.line }
+/// else { e.line - s.line }`。末点在行首时该行内容确实没被吃，但它前面那个换行被
+/// 吃掉了 ⇒ 编号里照样少一行，多减的那个 1 让**其下所有书签少上移一行**：琥珀圆点、
+/// 滚动条刻度、`BookmarkNext` 目标，以及「删除带书签的行」（会删错一行）全跟着指错。
+#[test]
+fn bookmark_below_cross_line_selection_ending_at_col_zero_shifts_by_the_true_line_count() {
+    let doc = "r0\nr1\nr2\nr3\nr4\n";
+
+    // ---- A：删除选区（`delete_selection` 那一份副本）----
+    let mut c = core_with(doc);
+    c.cursor = CursorPos { line: 4, col: 0 };
+    assert!(c.toggle_bookmark(), "书签打在最后一行真实行 r4");
+    c.anchor = Some(CursorPos { line: 1, col: 0 });
+    c.cursor = CursorPos { line: 3, col: 0 }; // 末点正好落在 r3 行首
+    assert!(c.delete_selection());
+    assert_eq!(
+        c.doc.to_text(),
+        "r0\nr3\nr4\n",
+        "选区把 1..3 并成一条结果行：6 行（含幻影末行）变 4 行，净少 2"
+    );
+    assert_eq!(
+        c.bookmarked_lines(),
+        vec![2],
+        "r4 现在是第 2 行 ⇒ 书签必须上移正好 2 格（旧写法只移 1 格 → 停在 3）"
+    );
+
+    // ---- 同一形状走插入路径、以及末点不在行首的正对照，各自单开用例：
+    // 判据虽已收成一份 `vanished_lines`，但**两个调用点各自有名可指**，
+    // 万一将来又被人拆成两份副本，红的那条会直接说是哪条路径丢了看守。
+}
+
+/// P269 的另一半：同一形状走**插入**路径（`insert_str` 那份副本）。
+#[test]
+fn bookmark_shifts_the_same_way_on_the_insert_path() {
+    let mut d = core_with("r0\nr1\nr2\nr3\nr4\n");
+    d.cursor = CursorPos { line: 4, col: 0 };
+    assert!(d.toggle_bookmark());
+    d.anchor = Some(CursorPos { line: 1, col: 0 });
+    d.cursor = CursorPos { line: 3, col: 0 };
+    d.insert_str("X");
+    assert_eq!(d.doc.to_text(), "r0\nXr3\nr4\n");
+    assert_eq!(
+        d.bookmarked_lines(),
+        vec![2],
+        "输入路径必须与删除路径同口径（两份副本曾经各错各的）"
+    );
+}
+
+/// P269 的正对照：末点**不在**行首时行为不变（旧写法这一支本来就对）。
+#[test]
+fn bookmark_shift_is_unchanged_when_the_selection_ends_midline() {
+    // 选 `(1,0)→(3,2)` 吃掉 "r1\nr2\nr3" ⇒ 剩 "r0\n" + "\nr4\n"，r4 从 4 变 2
+    let mut e = core_with("r0\nr1\nr2\nr3\nr4\n");
+    e.cursor = CursorPos { line: 4, col: 0 };
+    assert!(e.toggle_bookmark());
+    e.anchor = Some(CursorPos { line: 1, col: 0 });
+    e.cursor = CursorPos { line: 3, col: 2 };
+    assert!(e.delete_selection());
+    assert_eq!(e.doc.to_text(), "r0\n\nr4\n");
+    assert_eq!(
+        e.bookmarked_lines(),
+        vec![2],
+        "末点不在行首时同样少 2 行——这一支改前就是对的，本用例防我改坏它"
+    );
+}
+
 #[test]
 fn remove_marked_lines_crlf_last_real_line_and_phantom() {
     // 末真实行被标：块区间含其行尾，删除后前文的尾随换行保持

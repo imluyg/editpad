@@ -97,11 +97,7 @@ impl EditorCore {
         let replaced_span: Option<(usize, bool, usize, usize)> =
             self.ordered_selection().and_then(|(s, e)| {
                 (e.line > s.line).then(|| {
-                    let vanished = if e.col == 0 {
-                        e.line - 1 - s.line
-                    } else {
-                        e.line - s.line
-                    };
+                    let vanished = Self::vanished_lines(s, e);
                     (s.line, s.col > 0, e.line, vanished)
                 })
             });
@@ -472,6 +468,23 @@ impl EditorCore {
         stamp
     }
 
+    /// 跨行选区被替换/删除后**净消失几行**（P269）——`insert_str` 与
+    /// `delete_selection` 两处共用这一份，旧形状是两份手写副本各自带同一个错。
+    ///
+    /// 答案是 `e.line - s.line`，**与末点落在第几列无关**：选区总是把
+    /// `s.line ..= e.line` 并成一条结果行，n 行并 1 行就少 n-1 行 = `e.line - s.line`。
+    /// 末点在下一行行首（`e.col == 0`）时该行的**内容**确实没被吃掉，但它前面
+    /// 那个换行被吃掉了 ⇒ 它在编号里照样消失一格。实测 `"r0\nr1\nr2\nr3\nr4\n"`
+    /// 选 `(1,0)→(3,0)` 删 `[3,9)`：5 行（含幻影末行）变 3 行，净少 **2** 行；
+    /// 旧写法在此多减一个 1 只报 1 行，于是**其下所有书签少上移一行**——
+    /// 琥珀圆点、滚动条刻度、`BookmarkNext` 目标、以及「删除带书签的行」
+    /// 全部跟着指到错的行上（最后那条还会删错行）。
+    /// 旁边那句"末点在行首时该行不算触及"是 `touched_lines` 的口径，
+    /// 说的是**哪几行的内容被碰过**，与"行数少了几格"不是同一个问题。
+    pub(crate) fn vanished_lines(s: CursorPos, e: CursorPos) -> usize {
+        e.line - s.line
+    }
+
     /// 有选区时删除之（含快照）；返回是否发生了删除。零宽选区仅清除标记。
     pub(crate) fn delete_selection(&mut self) -> bool {
         if self.selected_text().is_some() {
@@ -479,11 +492,7 @@ impl EditorCore {
             // 终点行, 消失行数)，删除后按精化规则再映射书签（同 insert_str）
             let span = self.ordered_selection().and_then(|(s, e)| {
                 (e.line > s.line).then(|| {
-                    let vanished = if e.col == 0 {
-                        e.line - 1 - s.line
-                    } else {
-                        e.line - s.line
-                    };
+                    let vanished = Self::vanished_lines(s, e);
                     (s.line, s.col > 0, e.line, vanished)
                 })
             });
