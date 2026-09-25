@@ -203,12 +203,66 @@ where
                 },
                 &mut head,
             )?;
-            if guard_replacements
-                && stats.replacements as f32 / stats.chars.max(1) as f32 > BINARY_REPLACEMENT_RATIO
-            {
-                return Err(CoreError::BinaryDetected {
-                    path: path.to_path_buf(),
-                });
+            if guard_replacements {
+                // P274（原 P266，外加一条实测出来的更重漏口）：BOM 只说明"作者意图
+                // 是 UTF-8"，不保证正文真是 UTF-8。小文件那条链（`decode_body`）在这
+                // 里做三件事：① 全文出现 0x00 ⇒ 二进制；② 严格 UTF-8 不合法 ⇒ 退回
+                // GBK 重解；③ GBK 解出来仍满屏 U+FFFD ⇒ 二进制。流式这一支改前只有
+                // ②' 的占比一道，于是实测出两格不一致：
+                //   · 误加 BOM 的 GBK 大文件被**拒绝打开**（同一份字节在小文件上按
+                //     GBK 正确恢复）；
+                //   · 误加 BOM 且正文含 NUL 的二进制被**当作文本收下**（小文件判二进制）
+                //     ⇒ 用户一按保存就把原始字节按 UTF-8 覆写回去，那是不可逆的损毁。
+                if stats.nul {
+                    return Err(CoreError::BinaryDetected {
+                        path: path.to_path_buf(),
+                    });
+                }
+                if stats.replacements as f32 / stats.chars.max(1) as f32 > BINARY_REPLACEMENT_RATIO
+                {
+                    // GBK 兜底：在**同一个已打开的 fd**上 seek 回 BOM 之后重读
+                    // （重开文件曾是 TOCTOU 的成因，见 `Plan::ScanThenBuild` 那段）
+                    let mut file = reader.into_inner();
+                    file.seek(std::io::SeekFrom::Start(bom_len as u64))
+                        .map_err(|source| CoreError::Read {
+                            path: path.to_path_buf(),
+                            source,
+                        })?;
+                    let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
+                    let n = fill_chunk(&mut reader, &mut chunk).map_err(io_err(path))?;
+                    // 进度不得倒退：第一趟已经按原始字节数报到 first_len
+                    let start = (total_bytes - total_bytes / 4)
+                        .max(first_len as u64)
+                        .min(total_bytes);
+                    let mut gstats = BuildStats::default();
+                    let mut ghead = HeadSample::default();
+                    let gbk = build_pass(
+                        &mut reader,
+                        path,
+                        &chunk[..n],
+                        0,
+                        GBK,
+                        total_bytes,
+                        start,
+                        total_bytes - start,
+                        &mut on_progress,
+                        Some(&mut gstats),
+                        &mut ghead,
+                    )?;
+                    if gstats.nul
+                        || gstats.replacements as f32 / gstats.chars.max(1) as f32
+                            > BINARY_REPLACEMENT_RATIO
+                    {
+                        return Err(CoreError::BinaryDetected {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    return Ok(LoadedDocument {
+                        doc: gbk,
+                        encoding: "GBK",
+                        sample: ghead.buf,
+                    });
+                }
             }
             Ok(LoadedDocument {
                 doc,
@@ -557,6 +611,8 @@ impl Utf8Scan {
 struct BuildStats {
     replacements: usize,
     chars: usize,
+    /// P274：本趟输入里是否出现过 0x00（与 `decode_body` 的 NUL 判据同口径）。
+    nul: bool,
 }
 
 /// 解码文本头部样本采集上限（字符数）：足够 shebang/XML/JSON/YAML 嗅探。
@@ -625,6 +681,10 @@ fn absorb(
     if let Some(s) = stats {
         s.chars += out.chars().count();
         s.replacements += out.matches('\u{FFFD}').count();
+        // P274：NUL 判据也走同一趟（`decode_body` 的口径是「整个文件里出现任何
+        // 0x00 即二进制」）。只在带守卫的那一支统计（`stats` 为 Some），
+        // UTF-8 快路径与 UTF-16 两支（NUL 在那里是合法字符字节）都不为此付钱。
+        s.nul |= src.contains(&0);
     }
 }
 
@@ -1049,11 +1109,9 @@ mod tests {
     ///
     /// 与 `decode` 那侧同源的老问题。这里 `Plan::Direct(UTF_8, "UTF-8(BOM)", 3)`
     /// 改前给 `build_pass` 传 `None`（根本不统计）。
-    /// ⚠️ 如实披露一处**残余不对称**：流式直达分支没有 GBK 兜底重读那一步
-    /// （那要动 `ScanThenBuild` 的回卷与 `bom_len`，而那条链上有 TOCTOU 与前
-    /// 进进度上报的历史），所以"误加 BOM 的 GBK 文件"在小文件上是**按 GBK
-    /// 正确恢复**（见上一条用例 ②），在大文件上是**拒绝打开**。两边都不再
-    /// 损毁数据，但行为不一致，已记台账 §2。
+    /// 第 183 轮 P274 把这条支剩下的两格不对称也补上了（NUL 判据 + GBK 兜底重读），
+    /// 与小文件链 `decode_body` 完全同款——见下面的
+    /// `p274_streaming_bom_shares_both_guards_with_small_file_path`。
     #[test]
     fn streaming_utf8_bom_applies_the_replacement_guard() {
         let dir = scratch_dir("p265-bom-stream");
@@ -1068,20 +1126,107 @@ mod tests {
         assert_eq!(loaded.doc.to_text(), "中文内容\n第二行\n");
         assert_eq!(loaded.encoding, "UTF-8(BOM)");
 
-        // 纯高位字节的"BOM 文件"必须被拒（改前：整屏 U+FFFD 静默收下）
+        // 纯高位字节的"BOM 文件"。第 183 轮 P274 **改判**这一格的预期：
+        // 0x80 在 GBK 里是合法的「€」，小文件链（`decode_body`）从来就是按 GBK 收下
+        // 它的（见 `utf8_bom_body_shares_the_binary_guards` ④ 的注：0x80 实测解出
+        // 合法字符、0xFF 才是真解不出）。流式这一支补上 GBK 兜底之后两边必须一致，
+        // 所以此处不再期望 BinaryDetected。P265 那条"整屏 U+FFFD 静默收下"的防护
+        // 由下面的 0xFF 一格继续守着——**改的是不对称，不是判据**。
+        let euros = dir.join("euros.txt");
+        let mut euro_bytes = vec![0xEF, 0xBB, 0xBF];
+        euro_bytes.extend_from_slice(&[0x80u8; 4096]);
+        fs::write(&euros, &euro_bytes).unwrap();
+        let loaded = load_document_streaming(&euros, |_| {})
+            .expect("BOM + 合法 GBK 正文（€×4096）应按 GBK 兜底载入，与小文件同判");
+        assert_eq!(loaded.encoding, "GBK", "标签必须说实话，不是 UTF-8(BOM)");
+        assert_eq!(loaded.doc.to_text(), "€".repeat(4096));
+
         let junk = dir.join("junk.txt");
         let mut junk_bytes = vec![0xEF, 0xBB, 0xBF];
-        junk_bytes.extend_from_slice(&[0x80u8; 4096]);
+        junk_bytes.extend_from_slice(&[0xFFu8; 4096]);
         fs::write(&junk, &junk_bytes).unwrap();
         match load_document_streaming(&junk, |_| {}) {
             Err(CoreError::BinaryDetected { .. }) => {}
             Ok(other) => panic!(
-                "BOM + 全非法字节应判二进制，实际收下 {} 字符、标签 {:?}",
+                "BOM + GBK 也未分配的字节应判二进制，实际收下 {} 字符、标签 {:?}",
                 other.doc.to_text().chars().count(),
                 other.encoding
             ),
             Err(e) => panic!("期望 BinaryDetected，实际 {e:?}"),
         }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P274（原 P266，外加本轮实测出的一条更重的漏口）：流式 BOM 直达支必须与
+    /// 小文件链 `decode_body` **同判据**。三格都是先量过分歧再修的：
+    ///
+    /// ① 误加 BOM 的 GBK **大**文件（200 KB，走多块 + 回卷重读）：改前**拒绝打开**，
+    ///    同一份字节在小文件上按 GBK 正确恢复；
+    /// ② 误加 BOM 且正文含 NUL：改前**当作文本收下**（小文件判二进制）——那不只是
+    ///    打不开，用户一按保存就把原始字节按 UTF-8 覆写回去，属不可逆损毁。
+    ///    夹具刻意用「合法 UTF-8 的 ASCII + 0x00」，让占比判据根本不触发，
+    ///    只有 NUL 这一道判据能拦住它（否则本用例分不清是哪道判据生效）。
+    /// ③ 兜底那次回卷重读之后进度上报不得倒退（`ScanThenBuild` 那条链上有过
+    ///    TOCTOU 与进度倒退的历史，这里共用同一次 seek 重读，必须一起钉住）。
+    ///
+    /// 防"修过头"那一格（合法 BOM + 合法 UTF-8 仍按 `UTF-8(BOM)` 收下）由
+    /// `streaming_utf8_bom_applies_the_replacement_guard` 的第一段守着，未动。
+    #[test]
+    fn p274_streaming_bom_shares_both_guards_with_small_file_path() {
+        let dir = scratch_dir("p274-bom-stream");
+        fs::create_dir_all(&dir).unwrap();
+
+        // ① + ③：200 KB 的 GBK 正文贴了 UTF-8 BOM
+        let big = dir.join("big-gbk.txt");
+        let mut gbk_bytes = vec![0xEF, 0xBB, 0xBF];
+        for _ in 0..50_000 {
+            gbk_bytes.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]); // "中文" 的 GBK
+        }
+        fs::write(&big, &gbk_bytes).unwrap();
+        let mut events = Vec::new();
+        let loaded = load_document_streaming(&big, |p| events.push(p))
+            .expect("误加 BOM 的 GBK 大文件必须与小文件一样按 GBK 恢复");
+        assert_eq!(loaded.encoding, "GBK", "标签必须说实话");
+        assert_eq!(loaded.doc.to_text(), "中文".repeat(50_000));
+        for pair in events.windows(2) {
+            assert!(
+                pair[0].bytes_read <= pair[1].bytes_read,
+                "兜底重读之后进度倒退：{} → {}",
+                pair[0].bytes_read,
+                pair[1].bytes_read
+            );
+        }
+        let last = *events.last().expect("至少一次回调");
+        assert_eq!(last.bytes_read, last.total_bytes, "末次进度必须是全量");
+        assert_eq!(last.total_bytes as usize, gbk_bytes.len());
+
+        // ②：合法 UTF-8 的正文里插 NUL（占比判据根本不触发，只有 NUL 判据拦得住）
+        let nul = dir.join("nul-bom.txt");
+        let mut nul_bytes = vec![0xEF, 0xBB, 0xBF];
+        for k in 0..20_000u32 {
+            nul_bytes.extend_from_slice(b"hello ");
+            nul_bytes.push(b'a' + (k % 26) as u8);
+            nul_bytes.push(0x00);
+        }
+        fs::write(&nul, &nul_bytes).unwrap();
+        // 前提核实：这份字节在改前那一支确实会被当文本收下（0 个替换字符）
+        assert!(
+            std::str::from_utf8(&nul_bytes[3..]).is_ok(),
+            "夹具须是合法 UTF-8，否则本用例分不清靠哪道判据拒的"
+        );
+        match load_document_streaming(&nul, |_| {}) {
+            Err(CoreError::BinaryDetected { .. }) => {}
+            Ok(other) => panic!(
+                "BOM + 含 NUL 的二进制不得当文本收下（保存即不可逆覆写原字节），\
+                 实际标签 {:?}、前 16 字符 {:?}",
+                other.encoding,
+                other.doc.to_text().chars().take(16).collect::<String>()
+            ),
+            Err(e) => panic!("期望 BinaryDetected，实际 {e:?}"),
+        }
+
+        // 与小文件链逐格对账：同样两份字节，`decode` 与流式必须给同一个结论
+        assert!(decode(&nul_bytes).is_binary, "小文件侧本来就判二进制");
         fs::remove_dir_all(&dir).ok();
     }
 
