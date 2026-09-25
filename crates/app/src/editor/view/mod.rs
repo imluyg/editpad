@@ -223,6 +223,102 @@ impl EditorView {
     /// 函数体逐字搬移；开头一段 `let` 把 `DrawFrame` 的字段还原成原名，
     /// 好让搬过来的代码不必改一个字（`reflow` 由 `Option<ReflowLayout>`
     /// 变成 `Option<&ReflowLayout>`，字段访问经自动解引用等价）。
+    /// S-5 第九步：缩进参考线（P132/C4）自 `draw` 提成方法（A 层，函数体逐字搬移）。
+    ///
+    /// 护栏：`headless_indent_guides_ink_at_tab_stops_and_toggle_off`（第①步现证：
+    /// 两块一起短路 ⇒ 恰好红它和右缘标尺那条）。块内那句 `visible_range()` 按原样
+    /// 留在方法里——搬运不改求值次序（第 158 轮第 2 条教训）。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_indent_guides(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+    ) {
+        // 缩进参考线（P132，路线图 C4）：行首缩进制表位倍数处的淡竖线，
+        // 画在正文之下（A 层）。每个可见逻辑行各自绘制（覆盖本行行盒
+        // 高度，连续同缩进行自然连成一条）；制表位倍数 ≤ 行首缩进列数
+        // 才画（与制表位/Tab↔空格转换同源口径）。软换行开态锚定逻辑行
+        // 首段（行首空白恒在段 0），x 只含空白字符（全半宽）故按列模型
+        // 换算精确，无字形布局依赖。
+        if core.indent_guides {
+            let (g_first, g_last) = core.visible_range();
+            let tab = TAB_STOP_COLS;
+            for line in g_first..=g_last {
+                let cols = leading_indent_cols(&core.line_text(line));
+                if cols < tab {
+                    continue;
+                }
+                let v = core.visual_row_of(line, 0);
+                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                    continue;
+                }
+                let mut g = tab;
+                while g <= cols {
+                    let x = bounds.x + gutter_w + g as f32 * char_w - scroll_left;
+                    if x >= bounds.x + gutter_w - 1.0 {
+                        // 不画进行号栏（参考线属正文区）
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x,
+                                    y,
+                                    width: 1.0,
+                                    height: lh,
+                                },
+                                ..renderer::Quad::default()
+                            },
+                            colors.indent_guide,
+                        );
+                    }
+                    g += tab;
+                }
+            }
+        }
+    }
+
+    /// S-5 第九步：右缘标尺（P132/C5）自 `draw` 提成方法（A 层，逐字搬移）。
+    ///
+    /// 护栏：`headless_edge_ruler_ink_at_column_and_toggle_off`。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_edge_ruler(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+    ) {
+        // 右缘标尺（P132，路线图 C5）：固定显示列处的纵向辅助线（0=关），
+        // 画在正文之下、横贯整个正文区高度；随横向滚动移动（它标记的是
+        // 文档列而非屏幕位置），滚出行号栏右侧即被剔除。
+        if core.edge_column > 0 {
+            let x = bounds.x + gutter_w + core.edge_column as f32 * char_w - scroll_left;
+            if x >= bounds.x + gutter_w && x < bounds.x + bounds.width {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: Rectangle {
+                            x,
+                            y: bounds.y,
+                            width: 1.0,
+                            height: bounds.height,
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    colors.edge_ruler,
+                );
+            }
+        }
+    }
+
     /// S-5 第八步：链接悬停下划线（P133）自 `draw` 提成方法（A 层，函数体逐字搬移）。
     ///
     /// 护栏：`headless_link_hover_underline_ink_under_token`（第①步实测：把本块与
@@ -1056,68 +1152,28 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             scroll_left,
         );
 
-        // 缩进参考线（P132，路线图 C4）：行首缩进制表位倍数处的淡竖线，
-        // 画在正文之下（A 层）。每个可见逻辑行各自绘制（覆盖本行行盒
-        // 高度，连续同缩进行自然连成一条）；制表位倍数 ≤ 行首缩进列数
-        // 才画（与制表位/Tab↔空格转换同源口径）。软换行开态锚定逻辑行
-        // 首段（行首空白恒在段 0），x 只含空白字符（全半宽）故按列模型
-        // 换算精确，无字形布局依赖。
-        if core.indent_guides {
-            let (g_first, g_last) = core.visible_range();
-            let tab = TAB_STOP_COLS;
-            for line in g_first..=g_last {
-                let cols = leading_indent_cols(&core.line_text(line));
-                if cols < tab {
-                    continue;
-                }
-                let v = core.visual_row_of(line, 0);
-                let y = bounds.y + (v as f32 - core.scroll_top) * lh;
-                if y + lh <= bounds.y || y >= bounds.y + bounds.height {
-                    continue;
-                }
-                let mut g = tab;
-                while g <= cols {
-                    let x = bounds.x + gutter_w + g as f32 * char_w - scroll_left;
-                    if x >= bounds.x + gutter_w - 1.0 {
-                        // 不画进行号栏（参考线属正文区）
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: Rectangle {
-                                    x,
-                                    y,
-                                    width: 1.0,
-                                    height: lh,
-                                },
-                                ..renderer::Quad::default()
-                            },
-                            colors.indent_guide,
-                        );
-                    }
-                    g += tab;
-                }
-            }
-        }
+        // 缩进参考线（S-5 第九步外提为 `draw_indent_guides`，逐字搬移）
+        self.draw_indent_guides(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            lh,
+            char_w,
+            gutter_w,
+            scroll_left,
+        );
 
-        // 右缘标尺（P132，路线图 C5）：固定显示列处的纵向辅助线（0=关），
-        // 画在正文之下、横贯整个正文区高度；随横向滚动移动（它标记的是
-        // 文档列而非屏幕位置），滚出行号栏右侧即被剔除。
-        if core.edge_column > 0 {
-            let x = bounds.x + gutter_w + core.edge_column as f32 * char_w - scroll_left;
-            if x >= bounds.x + gutter_w && x < bounds.x + bounds.width {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: Rectangle {
-                            x,
-                            y: bounds.y,
-                            width: 1.0,
-                            height: bounds.height,
-                        },
-                        ..renderer::Quad::default()
-                    },
-                    colors.edge_ruler,
-                );
-            }
-        }
+        // 右缘标尺（S-5 第九步外提为 `draw_edge_ruler`，逐字搬移）
+        self.draw_edge_ruler(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            char_w,
+            gutter_w,
+            scroll_left,
+        );
 
         // 绘制成本按视口规模结算（O-1）：书签/参考线/不可见字符/正文四个
         // 循环一开始就吃 `visible_range()`，唯有下面两处按「选区规模 /
