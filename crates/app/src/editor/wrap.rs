@@ -134,14 +134,16 @@ pub(crate) fn pixel_breaks(xs: &[f32], max_px: f32, body: &str) -> Vec<usize> {
 ///
 /// BIT 用 `Vec<i64>` 存差分树；`seg_now` 记录每行当前计入 BIT 的段数
 /// （与 memo 解耦：memo 可被 gen 过期，seg_now 恒与 BIT 一致）。
+/// memo 条目：`(算出它时的内容代次, 断点表, 断行路径 = 用了真实字形 xs)`。
+/// 路径入键：同代内列模型↔像素互切（xs 注入/失效）即重算，列模型 memo
+/// 不冒充像素结果（反之亦然）——换文档帧的脏 xs 曾以列模型/截断像素结果
+/// 固化 memo，表现为 CJK 长行 boot 后整行不折、滚动不自愈。
+type MemoEntry = (u64, Rc<Vec<usize>>, bool);
+
 pub(crate) struct WrapIndex {
     bit: Vec<i64>, // 1-based Fenwick；bit[0] 占位
     seg_now: Vec<u32>,
-    /// (gen, breaks, 断行路径=real_xs.is_some())。路径入键：同代内列
-    /// 模型↔像素互切（xs 注入/失效）即重算，列模型 memo 不冒充像素结果
-    /// （反之亦然）——换文档帧的脏 xs 曾以列模型/截断像素结果固化 memo，
-    /// 表现为 CJK 长行 boot 后整行不折、滚动不自愈。
-    memo: HashMap<usize, (u64, Rc<Vec<usize>>, bool)>,
+    memo: HashMap<usize, MemoEntry>,
     gen: u64,
 }
 
@@ -165,6 +167,72 @@ impl WrapIndex {
     /// （陈旧值由窗口行重算逐步收敛，见模块注释）。
     pub(crate) fn bump_gen(&mut self) {
         self.gen = self.gen.wrapping_add(1);
+    }
+
+    /// O-5：**行数变化时的增量维护**（取代整表 `reset`）。
+    ///
+    /// 语义：旧文档的半开区间 `[a, a + count_old)` 被替换成新文档的
+    /// `[a, a + count_new)`，其余行内容不变、只是整体平移 `k` 行。因此
+    /// 只有被替换那一段的断点需要作废重算，平移段**原样搬键**。
+    ///
+    /// 申报可信度由调用方负责（`EditorCore` 的编辑路径给出区间）；区间与
+    /// 行数变化对不上时返回 `false`，调用方退回整表路径——**宁可慢，不可
+    /// 把陈旧断点留在索引里**。
+    ///
+    /// 成本：`O(行数)` 的**纯整数**活（seg_now splice + BIT 重建）加
+    /// `O(平移段 memo 条数)` 的搬键，取代原先每行一次整行取串 + 现算断点。
+    /// 返回 `true` 后 `[a, a + count_new)` 的行在 BIT 里暂记 1 段，
+    /// 由调用方立刻 `set_line` 收敛（同一个汇点内，不逃逸到帧外）。
+    pub(crate) fn shift_for_edit(
+        &mut self,
+        old_lines: usize,
+        new_lines: usize,
+        a: usize,
+        count_new: usize,
+    ) -> bool {
+        let k = new_lines as isize - old_lines as isize;
+        let count_old = count_new as isize - k;
+        let a = a.min(new_lines);
+        // 申报的区间装不下这次行数变化（例如删除行后又整体替换）→ 不增量
+        if count_old < 0 || a + count_old as usize > old_lines {
+            return false;
+        }
+        let old_tail_from = a + count_old as usize;
+        // memo：区间内的直接作废；区间之后的按键平移（内容没变，断点仍可复用）
+        let mut moved: Vec<(usize, MemoEntry)> = Vec::new();
+        self.memo.retain(|idx, v| {
+            if *idx >= old_tail_from {
+                moved.push((*idx, v.clone()));
+                false
+            } else {
+                *idx < a
+            }
+        });
+        for (idx, v) in moved {
+            self.memo.insert((idx as isize + k) as usize, v);
+        }
+        // seg_now：同样只换区间、其余保序平移
+        self.seg_now.splice(
+            a..old_tail_from.min(self.seg_now.len()),
+            std::iter::repeat_n(1u32, count_new),
+        );
+        debug_assert_eq!(self.seg_now.len(), new_lines);
+        self.rebuild_bit(new_lines);
+        true
+    }
+
+    /// 按 `seg_now` 重建 Fenwick（O(n) 整数活，除一次向量分配外无别的开销）。
+    /// ⚠️ 必须 `+=` 不能 `=`：处理到 i 时 `bit[i]` 已含前面子节点累加进来的
+    /// 和，赋值会把它们抹掉（O(n) 建树法的前提就是"边补父节点边累加"）。
+    fn rebuild_bit(&mut self, n: usize) {
+        self.bit = vec![0; n + 1];
+        for i in 1..=n {
+            self.bit[i] += self.seg_now[i - 1] as i64;
+            let j = i + i.isolate_lowest_one();
+            if j <= n {
+                self.bit[j] += self.bit[i];
+            }
+        }
     }
 
     /// 确保某行按当前代次与内容计入索引：命中同代 memo 直接返回；
@@ -317,6 +385,54 @@ impl WrapCache {
         } else {
             self.index.bump_gen();
         }
+    }
+
+    /// O-5：**申报式**编辑汇点。`changed = Some((first, last))` 表示编辑路径
+    /// 声明「新文档里只有第 `first..=last` 行的内容变了或新增了」。
+    ///
+    /// 返回 `Some((first, last))` = 增量路径成立，调用方须**在同一汇点内**
+    /// 把这几行喂给 `set_line` 收敛（此时 `total()` 才精确）；
+    /// 返回 `None` = 没申报或申报与行数变化对不上，已走原整表路径，
+    /// 调用方按老规矩 `reconcile_wrap_index()` 全量对账。
+    ///
+    /// 这条通道换掉的正是报告 O-5 指出的形态：软换行开态下每一次回车都把
+    /// 整表 memo 清空再逐行重算（实测 1 万行文档 = 每次回车 10 005 次整行
+    /// 取串 + 现算断点）。
+    pub(crate) fn after_edit_span(
+        &mut self,
+        lines: usize,
+        changed: Option<(usize, usize)>,
+    ) -> Option<(usize, usize)> {
+        let (first, last) = changed?;
+        if last < first || lines == 0 {
+            self.after_edit(lines);
+            return None;
+        }
+        // 索引正处于「整表重置后未对账」态（刚开启软换行/刚换窗口预算/上一笔
+        // 未申报的行数变化）：此时区间外的行还是「每行 1 段」的占位值，
+        // 增量路径会把 P154 那个「total 偏小 → 行号闪一下」的窗口重新打开，
+        // 所以老老实实走全量。
+        if self.needs_reconcile {
+            self.after_edit(lines);
+            return None;
+        }
+        let count_new = last - first + 1;
+        if lines == self.last_lines {
+            // 行数没变：与 `after_edit` 同（推代次，未申报的行由下次查询懒惰
+            // 重算），区别只是申报区间当场收敛，不必等下次查询
+            self.index.bump_gen();
+            return Some((first, last));
+        }
+        if !self
+            .index
+            .shift_for_edit(self.last_lines, lines, first, count_new)
+        {
+            self.after_edit(lines);
+            return None;
+        }
+        self.last_lines = lines;
+        // 索引不再处于「重置后未对账」态：区间外可信、区间内由调用方即刻收敛
+        Some((first, last))
     }
 
     /// 查询入口兜底同步：列/像素预算或行数与现状不符（窗口缩放/字号变更/

@@ -165,3 +165,64 @@ fn wrap_index_matches_full_rebuild_across_random_edits() {
         }
     }
 }
+
+// TEMP-DIAG-O5 已撤，改为下面的常驻契约用例
+
+/// O-5 的「开态回车成本」契约（次数断言，与上面那条同行数插入判据同族）：
+/// **改变行数**的击键（回车）不得再把折行索引整表重算——次数必须与文档规模
+/// 脱钩。改前实测：500 行 505 次 / 2000 行 2005 次 / 1 万行 10 005 次
+/// （每一次回车都付全文档代价），改后三档都是 5 次。
+///
+/// 正确性不在这里测：与本条无关心——`wrap_index_matches_full_rebuild_across_random_edits`
+/// 拿「整表重建」当 oracle 逐行对照，增量平移一旦与真值不一致它先红。
+#[test]
+fn wrap_line_count_change_cost_is_independent_of_document_size() {
+    let mut counts: Vec<(usize, usize)> = Vec::new();
+    for lines in [500usize, 2_000, 10_000] {
+        let text: String = (0..lines)
+            .map(|i| format!("row{i} 一些要折行的中文内容 words\n"))
+            .collect();
+        let mut c = EditorCore::default();
+        c.reset_document(editpad_core::Document::from_str(&text));
+        c.set_viewport_width(400.0);
+        c.set_viewport_height(200.0);
+        c.set_word_wrap(true);
+        for l in 0..lines {
+            let t = c.line_text(l);
+            c.segments_of_line(l, &t);
+        }
+        c.reconcile_wrap_index();
+        c.cursor = CursorPos {
+            line: lines / 2,
+            col: 3,
+        };
+        // 一次回车 = 编辑汇点（增量平移 + 当场收敛受影响行）+ 帧末对账。
+        // 两者都计入：真实应用里它们同帧发生，用户付的就是这一帧的钱。
+        c.take_line_text_calls();
+        c.insert_str("\n");
+        c.reconcile_wrap_index();
+        let calls = c.take_line_text_calls();
+        assert!(
+            calls > 0,
+            "探针失效：{lines} 行文档按一次回车一次整行取串都没有"
+        );
+        // 紧接着退格：光标此刻在**新行行首**（col 0）⇒ 这次退格把两行并回去，
+        // 是「行数 -1」的另一半热路径（申报点：edit.rs `backspace`）
+        c.take_line_text_calls();
+        assert!(c.backspace(), "退格应当真的删掉内容（并行）");
+        c.reconcile_wrap_index();
+        let merge = c.take_line_text_calls();
+        assert!(merge > 0, "探针失效：并行退格一次取串都没有");
+        counts.push((lines, calls.max(merge)));
+    }
+    eprintln!("[O-5] 开态「回车 / 并行退格」取串次数（各档取两者较大值）：{counts:?}");
+    let (small, large) = (counts[0].1, counts[2].1);
+    assert!(
+        large * 20 < counts[2].0,
+        "1 万行文档按一次回车取串 {large} 次：折行索引又被整表重算了"
+    );
+    assert!(
+        large <= small * 2 + 5,
+        "文档 ×20 使回车取串次数 {small} → {large}：成本仍按文档规模结算"
+    );
+}

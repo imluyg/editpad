@@ -814,6 +814,25 @@ impl EditorCore {
         self.wrap.borrow_mut().mark_reconciled();
     }
 
+    /// O-5 增量路径的收敛半边：只把**申报过**的第 `first..=last` 行喂进折行
+    /// 索引（其余行由 `WrapIndex::shift_for_edit` 原样平移，内容没变 ⇒ 断点
+    /// 仍可复用）。区间越界按文档尾部钳制——申报方给的是新文档坐标，
+    /// 汇点之后不应越界，钳制只是防御。
+    pub(crate) fn rebreak_wrap_lines(&mut self, first: usize, last: usize) {
+        if !self.wrap.borrow().enabled {
+            return;
+        }
+        let lines = self.doc.line_count();
+        if lines == 0 {
+            return;
+        }
+        let hi = last.min(lines - 1);
+        for line in first.min(hi)..=hi {
+            let text = self.line_text(line);
+            self.segments_of_line(line, &text);
+        }
+    }
+
     /// 可信的真实字形布局：与正文**逐字符对齐**（字符数 + 1）**且字号与
     /// 当前一致**才返回。所有 [`WrapCache::segments_of`] 调用点必须经此
     /// 取 xs——换文档/换行内容的帧里 row_layouts 尚存上一帧布局，残缺 xs

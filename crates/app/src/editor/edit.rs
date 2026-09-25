@@ -121,10 +121,14 @@ impl EditorCore {
         let first_line = self.cursor.line;
 
         self.doc.insert(start_offset, &text);
-        self.invalidate_highlight_from(start_offset);
-
         // 推进光标到插入文本的末尾（EOL 单元感知，CRLF 算一次换行）
         let (new_lines, tail_cols) = measure_insertion(&text);
+        // O-5：向折行索引**申报**受影响的逻辑行闭区间 `[first_line,
+        // first_line + new_lines]`——与下面 `raise_max_line_cols` 用的是同一段
+        // 行区间，两处口径不各算一份。申报成立时软换行索引只做按行平移 +
+        // 重算这几行，不再整表重算（回车键的开态成本因此从 O(文档行数) 回到
+        // O(受影响行)）。
+        self.invalidate_highlight_span(start_offset, Some((first_line, first_line + new_lines)));
         if new_lines > 0 {
             self.cursor.line += new_lines;
             self.cursor.col = tail_cols;
@@ -333,7 +337,8 @@ impl EditorCore {
             // 幸存行 = 当前行（move_local 已回退到上一行），被吞行 = 下一行
             self.remap_merge_pair(self.cursor.line, self.cursor.line + 1);
         }
-        self.invalidate_highlight_from(start);
+        // O-5：受影响行 = 并行后的幸存行，与下面 `raise_max_line_cols` 同一段
+        self.invalidate_highlight_span(start, Some((self.cursor.line, self.cursor.line)));
         // P13：并行后的新行可能更宽（也可能只是收缩——高水位不回退）
         self.raise_max_line_cols(self.cursor.line..=self.cursor.line);
         self.ensure_visible();
@@ -362,9 +367,10 @@ impl EditorCore {
             // 幻影行消失，并集与平移都是无害 no-op）
             self.remap_merge_pair(self.cursor.line, self.cursor.line + 1);
         }
-        self.invalidate_highlight_from(offset);
-        // P13：下一行并入当前行，合并结果可能更宽
+        // O-5：受影响行 = 下一行并入后的当前行，与下面同一段区间
         let merged = self.cursor.line;
+        self.invalidate_highlight_span(offset, Some((merged, merged)));
+        // P13：下一行并入当前行，合并结果可能更宽
         self.raise_max_line_cols(merged..=merged);
         self.ensure_visible();
         true
@@ -487,9 +493,10 @@ impl EditorCore {
                 let line = self.doc.char_to_line(start);
                 let col = start - self.doc.line_to_char(line);
                 self.cursor = CursorPos { line, col };
-                self.invalidate_highlight_from(start);
-                // P13：跨行删除后首尾两行拼成一行的宽度可能变化
+                // O-5：跨行选区删除后首尾并成一行，受影响行就是那一行
                 let joined = self.cursor.line;
+                self.invalidate_highlight_span(start, Some((joined, joined)));
+                // P13：跨行删除后首尾两行拼成一行的宽度可能变化
                 self.raise_max_line_cols(joined..=joined);
                 if let Some((sa, keeps, eb, van)) = span {
                     self.remap_replaced_span(sa, keeps, eb, van);

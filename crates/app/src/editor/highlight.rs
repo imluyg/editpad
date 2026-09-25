@@ -27,6 +27,20 @@ impl EditorCore {
 
     /// 第 `offset` 字符偏移之后的高亮状态失效。
     pub(crate) fn invalidate_highlight_from(&mut self, offset: usize) {
+        self.invalidate_highlight_span(offset, None);
+    }
+
+    /// O-5：带**受影响逻辑行区间申报**的突变汇点。
+    /// `changed = Some((first, last))` 表示「新文档里只有第 `first..=last`
+    /// 行的内容变了或新增了」——成立的编辑路径走这条，折行索引只做按行
+    /// 平移 + 当场重算这几行；不申报/申报对不上则退回原全量对账。
+    /// 本函数仍是全部正文突变的唯一汇点（`invalidate_highlight_from` 只是
+    /// 它的「不申报」别名）。
+    pub(crate) fn invalidate_highlight_span(
+        &mut self,
+        offset: usize,
+        changed: Option<(usize, usize)>,
+    ) {
         // P162：内容纪元自增——行布局 memo（EditorCore::row_layout_memo）
         // 及未来帧间缓存的新鲜度键。本函数是全部正文突变的唯一汇点
         // （第 61 轮口径），undo/重做/换文档同经此路。
@@ -42,11 +56,23 @@ impl EditorCore {
         self.last_link_probe = None;
         // 第 73 轮 ⑯：软换行缓存同汇点失效——行数变化整表重置，
         // 否则只推代次（memo 过期由下次查询懒惰重算）
-        self.wrap.borrow_mut().after_edit(self.doc.line_count());
-        // P154：整表重置后立刻对账（否则「每行 1 段」的偏小 total 会被
-        // 下一帧的滚动夹紧/滚动条行程当成真值 → 视口先被拉回再跳回，
-        // 表现为行号闪一下；见 reconcile_wrap_index 注释）
-        self.reconcile_wrap_index();
+        let lines = self.doc.line_count();
+        let touched = match changed {
+            Some(range) => self.wrap.borrow_mut().after_edit_span(lines, Some(range)),
+            None => {
+                self.wrap.borrow_mut().after_edit(lines);
+                None
+            }
+        };
+        match touched {
+            // 增量路径：只收敛申报过的那几行（P154 的「total 偏小」窗口
+            // 因此不存在——本函数返回时索引已与真值一致）
+            Some((first, last)) => self.rebreak_wrap_lines(first, last),
+            // P154：整表重置后立刻对账（否则「每行 1 段」的偏小 total 会被
+            // 下一帧的滚动夹紧/滚动条行程当成真值 → 视口先被拉回再跳回，
+            // 表现为行号闪一下；见 reconcile_wrap_index 注释）
+            None => self.reconcile_wrap_index(),
+        }
         if let Some(hl) = &self.highlight {
             let line = self.doc.char_to_line(offset.min(self.doc.text_len()));
             hl.borrow_mut().invalidate_from(line);
