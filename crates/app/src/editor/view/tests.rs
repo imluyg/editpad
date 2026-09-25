@@ -2680,6 +2680,105 @@ fn headless_invisibles_marks_toggle_frame_diff() {
     );
 }
 
+/// P268（headless）：**组字串以一个"发不出字形"的字符结尾时不得越界 panic**。
+///
+/// 病灶：`compute_reflow` 只挡 `s_xs.len() < 2`，而三个读者都按
+/// "合成流字符数"那个位置去索引（`s_xs[(col_p+pel).min(chars)]` 定光标、
+/// `s_xs[ul_lo]/s_xs[ul_hi]` 画组字下划线）。`shape_row_xs` 的表长是
+/// "最后一个**有字形**的字符 + 2"，所以行尾字符发不出字形时表**短一格**，
+/// 那个索引直接越界 ⇒ 输入法组字过程中整个编辑器崩掉。
+/// 短表不是假想：本轮实测 U+200D（零宽连接符）、U+0301（组合符）、
+/// U+FE0F（变体选符）、U+1D165（音乐符号）四种结尾都产出 `len == chars`
+/// ——字体栈没覆盖到的码位不留条目（emoji 🚀 反而正常，因为有 fallback）。
+///
+/// 判据两半：①渲染不 panic（本用例能跑完就是主断言）；②**回退路径仍然把
+/// 组字画出来了**（墨迹严格多于无组字基线），防"修成什么都不画"的假绿。
+#[test]
+fn headless_reflow_survives_preedit_ending_in_an_unshaped_char() {
+    use super::super::CursorPos;
+    let (w, h) = (400u32, 300u32);
+
+    let render = |preedit: &str| -> tiny_skia::Pixmap {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str("abc"));
+            c.set_viewport_width(360.0);
+            c.set_viewport_height(260.0);
+            c.set_word_wrap(true);
+            c.focused = true;
+            c.cursor = CursorPos { line: 0, col: 3 };
+            // 组字本身：一个有字形的 'X' + 一个发不出字形的 U+1D165
+            // ⇒ 合成流以"无字形字符"结尾 ⇒ 表短一格
+            if !c.ime_preedit(preedit.to_owned()) {
+                panic!("ime_preedit 必须被消费（本用例前置：focused = true）");
+            }
+        }
+        let mut view = EditorView {
+            core,
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(360.0, 260.0), Size::new(360.0, 260.0));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(20.0, 20.0));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        // ← 改前这一行就 panic（index out of bounds: the length is 5 but an
+        //   index of 5 was attempted）
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
+        pixels
+    };
+    let ink = |p: &tiny_skia::Pixmap| -> u32 {
+        (0..p.height()).fold(0u32, |acc, y| {
+            acc + (0..p.width())
+                .filter(|&x| match p.pixel(x, y) {
+                    Some(v) => !(v.red() > 245 && v.green() > 245 && v.blue() > 245),
+                    None => false,
+                })
+                .count() as u32
+        })
+    };
+
+    let base = ink(&render(""));
+    let unshaped = ink(&render("X\u{1D165}"));
+    let shaped = ink(&render("XY"));
+    eprintln!("[P268] 无组字={base} 无字形结尾={unshaped} 正常结尾={shaped}");
+    assert!(base > 0, "连正文都没画出来，本用例的前置已经不成立");
+    assert!(
+        unshaped > base,
+        "回退路径下组字部分一个像素都没画（{unshaped} <= {base}）——\
+         说明 `compute_reflow` 返回 None 之后正文/组字被一起丢了，不是真修复"
+    );
+    // 两种结尾应当同量级（各只多出一个可见字符），防"回退把整行吞了"
+    assert!(
+        unshaped * 2 >= shaped,
+        "无字形结尾 ({unshaped}) 比正常结尾 ({shaped}) 墨迹少一半以上，回退画少了"
+    );
+}
+
 /// P267（headless 像素级）：**空格标记必须落在它自己那一格里**。
 ///
 /// 病灶：`draw_invisibles` 的两份循环用**显示列**去查按**字符**索引的

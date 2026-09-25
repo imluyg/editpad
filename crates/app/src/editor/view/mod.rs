@@ -706,7 +706,19 @@ impl EditorView {
                     return None;
                 }
                 let s_xs = shape_row_xs(body_font, core.font_size(), &s)?;
-                if s_xs.len() < 2 {
+                // P268：长度契约要按**读者实际索引到的位置**来判，不是"非空"就行。
+                // 三个读者都取"组字尾"那个位置：`s_xs[(col_p+pel).min(字符数)]`
+                // （光标定位，见 `draw_carets`）与 `s_xs[ul_lo] / s_xs[ul_hi]`
+                // （组字下划线），最大索引 = 合成流字符数 = `rlens + pel`。
+                // 而 `shape_row_xs` 在**行尾字符发不出字形**时给出的表短一格：
+                // 实测 U+200D、组合符 U+0301、变体选符 U+FE0F、音乐符号 U+1D165
+                // 四种都产出 `len == chars`（字体栈没覆盖就不留条目，末位那条
+                // `push` 只补到"最后一个有字形字符 + 1"）。
+                // 旧判据只挡 `len < 2` ⇒ 那种帧直接 index 越界 panic——
+                // **输入法组字过程中整个编辑器崩掉**。
+                // 这里返回 None 即走既有的 `pre_slot` 三段式回退（P118 那条同帧
+                // oracle 守着的路径）：观感退一步，但不崩、不画错。
+                if s_xs.len() < rlens + pel + 1 {
                     return None;
                 }
                 let budget = (display_right_edge - text_x0).max(1.0);
