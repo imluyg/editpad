@@ -2113,17 +2113,22 @@ fn draw_long_line_frame(
     (shaped, pixels.data().to_vec())
 }
 
-/// 关态不可见字符标记的横向剔除管线：20 行、每行 `line_len` 组「字母+空格」
+/// 关态不可见字符标记的横向剔除管线：**4 行**、每行 `line_len` 组「字母+空格」
 /// （一半字符是空格 ⇒ 标记密集），横向滚动 `scroll_left` 后画一帧；
 /// 返回（本帧递交绘制的标记数，光栅化像素）。`clip_off` = true 走改前老口径
-/// （`h_clip_off` 开关 ⇒ `h_clip_window` 恒返回整行），当**改前算法的 oracle**。
+/// （`ws_clip_off` 开关 ⇒ 标记一圈整行递交），当**改前算法的 oracle**。
 /// 字体名与 `draw_long_line_frame` 同款显式指定，理由见那里（P33 一次性全局钉字）。
+///
+/// ⚠️ 行数刻意只留 4、`line_len` 也别放大：oracle 那一帧会把 `line_len` 个 quad
+/// **整行**递交，第 183 轮实测大帧会扰动同进程里的其他像素用例（20 行 × 4 千组
+/// 的版本让 `o3_horizontal_clipping_*` 与 `s5_caret_layer_*` 在全量并发下连着红，
+/// 缩到本尺度后仍有偶发，见 §2 ⭐ 池第 ② 条）。
 fn draw_ws_mark_frame(line_len: usize, scroll_left: f32, clip_off: bool) -> (usize, Vec<u8>) {
     let font = Font {
         family: iced::font::Family::Name("NSimSun"),
         ..iced::Font::MONOSPACE
     };
-    let doc: String = (0..20)
+    let doc: String = (0..4)
         .map(|i| {
             let mut s = String::with_capacity(line_len * 2 + 1);
             for k in 0..line_len {
@@ -2218,11 +2223,9 @@ fn ws_ink_asymmetry(a: &[u8], b: &[u8]) -> (u32, u32) {
 /// 像素等价性由第 160 轮既有用例守，丢内容现象列 §2 待勘。
 #[test]
 fn p273_wrap_off_whitespace_marks_are_culled_by_viewport_width() {
-    // 夹具刻意做小：本仓的像素用例全量并发时共享一个进程，第 183 轮实测把
-    // 万级图元的帧（`clip_off = true` 那几帧）放得越大， sibling 像素用例越容易
-    // 红（`o3_horizontal_clipping_*` 与 `s5_caret_layer_*` 各红过一次），疑与 P33
-    // 一次性全局钉字落在别家用例两帧之间有关。这里只留**一帧**老口径，量级
-    // 6 000 quad 已足够把下面的比例断言拉开到 ~30 倍。
+    // 夹具刻意做小（4 行；曾经用 20 行 × 4 千组量到 56000 → 938，那版大帧会把
+    // sibling 像素用例打红，见函数头）：只留**一帧**老口径，1 200 个 quad 已足够
+    // 把下面的比例断言拉开到 4 倍以上，而单帧图元量小一个数量级。
     let near = draw_ws_mark_frame(300, 0.0, false).0;
     let far = draw_ws_mark_frame(1_500, 0.0, false).0;
     let oracle = draw_ws_mark_frame(300, 0.0, true).0;
@@ -2305,6 +2308,13 @@ fn o3_long_line_shaping_is_capped_by_viewport_width_not_line_length() {
 #[test]
 fn o3_horizontal_clipping_is_pixel_identical_to_full_line_paint() {
     for scroll_left in [0.0f32, 1_500.0, 12_000.0] {
+        // 第 183 轮：先画一帧**丢掉**。台账第 160/161 轮就把这条破坏源点名为
+        // 「P33 的一次性全局钉字落在两帧之间」——全量并发时本用例前面跑什么并不
+        // 确定，钉字/字形回退链的首次解析就可能落在下面两帧中间，两帧解析到不同
+        // 度量，整版一平移这条「逐像素相同」就红了（实测加了新像素用例进池后
+        // 3 跑红 2；只并跑本用例与新用例则 4 跑 0 红；把新用例 --skip 掉 3 跑
+        // 0 红）。先跑一帧把一次性初始化吃掉，判据一个字不用放宽。
+        let _ = draw_long_line_frame(20, 4_000, scroll_left, false);
         let (shaped_on, px_on) = draw_long_line_frame(20, 4_000, scroll_left, false);
         let (shaped_off, px_off) = draw_long_line_frame(20, 4_000, scroll_left, true);
         assert!(
