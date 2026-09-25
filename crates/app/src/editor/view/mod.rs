@@ -364,6 +364,150 @@ impl EditorView {
         }
     }
 
+    /// S-5 第六步：选区高亮自 `draw` 提成方法（A 层，函数体逐字搬移）。
+    ///
+    /// 这块本体是 `draw` 里的一个**闭包** `paint_selection`（捕获十余个本帧量），
+    /// 外提时把「收集 span」与「逐 span 绘制」整段一起搬进来、闭包原样保留在方法内
+    /// ——它对 `renderer` 的可变借用止于方法末尾，不与 `draw` 后续图层冲突。
+    /// 与前三块同款走显式传参（`DrawFrame` 在本块之后才构造得出来）。
+    ///
+    /// 护栏（第 163 轮第①步现证：摘掉本块 ⇒ 两条红）：
+    /// `o1_every_visible_line_keeps_its_selection_band` 与
+    /// `headless_single_char_selection_band_centered_on_glyph_ink`。
+    /// 已知残留缺口：`extra_cursors` 的词选区上屏没有专门的像素用例（它与主选区共用
+    /// 本块，摘块时被上面两条一起覆盖，但「span 列表是否含附加光标」这一步没测）。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_selections(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+        char_w: f32,
+        gutter_w: f32,
+        scroll_left: f32,
+        vis_first: usize,
+        vis_last: usize,
+    ) {
+        // 选区高亮：只画与视口相交的视觉行（双宽感知）。
+        // 第 73 轮 ⑯：软换行开态逐视觉段画 [cs, ce) 子区间（跨段选区
+        // 分段着色，段间空隙 = 折行边界天然不画）；关态走既有逻辑行路径。
+        // B10 Phase 2：附加光标词选区（Ctrl+M 产生）与主选区同管线——
+        // 统一收集为有序 (start, end) 对后逐个绘制（设计 §3.4）
+        let mut sel_spans: Vec<(CursorPos, CursorPos)> = Vec::new();
+        if let Some((s, e)) = core.ordered_selection() {
+            sel_spans.push((s, e));
+        }
+        for ec in core.extra_cursors.iter() {
+            if let Some(a) = ec.anchor {
+                let span = if (a.line, a.col) <= (ec.cursor.line, ec.cursor.col) {
+                    (a, ec.cursor)
+                } else {
+                    (ec.cursor, a)
+                };
+                sel_spans.push(span);
+            }
+        }
+        let mut paint_selection = |sel_start: CursorPos, sel_end: CursorPos| {
+            let last_line = core.doc.line_count().saturating_sub(1);
+            // O-1：循环界先与视口求交（同上——超集求交 + 保留逐行精筛，绘制
+            // 结果不变）。改前 `sel_start.line..=sel_end.line` 在 Ctrl+A 上是
+            // 「全文档行数 × 整行取串」，改后与视口行数同阶。
+            let lo = sel_start.line.max(vis_first);
+            let hi = sel_end.line.min(last_line).min(vis_last);
+            for line in lo..=hi {
+                let text = core.line_text(line);
+                let lens = text.chars().count();
+                let start_col = if line == sel_start.line {
+                    sel_start.col
+                } else {
+                    0
+                };
+                let end_col = if line == sel_end.line {
+                    sel_end.col
+                } else {
+                    lens
+                };
+                if end_col <= start_col {
+                    continue;
+                }
+                if core.wrap_enabled() {
+                    let base = core.line_visual_base(line) as f32;
+                    let breaks = core.segments_of_line(line, &text);
+                    for (s, &seg_start) in breaks.iter().enumerate() {
+                        let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
+                        let cs = start_col.max(seg_start);
+                        let ce = end_col.min(seg_end);
+                        if ce <= cs {
+                            continue;
+                        }
+                        let row = base + s as f32;
+                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
+                            continue;
+                        }
+                        // 段相对：续行从文本区左缘起排
+                        let seg_base = core.px_of_len(line, &text, seg_start, lens);
+                        let x0 = core.px_of_len(line, &text, cs.min(lens), lens) - seg_base;
+                        let x1 = core.px_of_len(line, &text, ce.min(lens), lens) - seg_base;
+                        // P59：选区矩形与控件边界求交（quad 无任何裁剪）
+                        // P88：y 下移字形墨迹上边距——行盒顶对齐会让选区
+                        // 带顶悬在首行上方空带（用户截图「色带残影」）
+                        // P89：改为按字形墨迹盒**居中**（带高仍 = 行盒高，
+                        // 多行选区带带相接不断裂；P88 只顶对齐会让带底
+                        // 悬出行盒下缘、单选字被顶在带顶不居中）
+                        let Some(rect) = Rectangle {
+                            x: bounds.x + gutter_w + x0 - scroll_left,
+                            y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
+                            width: (x1 - x0).max(char_w),
+                            height: lh,
+                        }
+                        .intersection(&bounds) else {
+                            continue;
+                        };
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: rect,
+                                ..renderer::Quad::default()
+                            },
+                            colors.selection,
+                        );
+                    }
+                    continue;
+                }
+                let row = line as f32;
+                if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
+                    continue;
+                }
+                let x0 = core.px_of_len(line, &text, start_col.min(lens), lens);
+                let x1 = core.px_of_len(line, &text, end_col.min(lens), lens);
+                // P59：选区矩形与控件边界求交——部分可见行的高亮不再越界
+                // （quad 无任何裁剪，越界部分会压标签条/状态栏）
+                // P88/P89：与折行分支同款——y 从墨迹上边距改为按墨迹
+                // 盒居中（带高仍 = 行盒高，单字选区字居中）
+                let Some(rect) = Rectangle {
+                    x: bounds.x + gutter_w + x0 - scroll_left,
+                    y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
+                    width: (x1 - x0).max(char_w),
+                    height: lh,
+                }
+                .intersection(&bounds) else {
+                    continue;
+                };
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: rect,
+                        ..renderer::Quad::default()
+                    },
+                    colors.selection,
+                );
+            }
+        };
+        for (sel_start, sel_end) in sel_spans {
+            paint_selection(sel_start, sel_end);
+        }
+    }
+
     fn draw_carets(&self, renderer: &mut iced::Renderer, f: &DrawFrame<'_>) {
         let core = f.core;
         let bounds = f.bounds;
@@ -890,122 +1034,19 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             vis_last,
         );
 
-        // 选区高亮：只画与视口相交的视觉行（双宽感知）。
-        // 第 73 轮 ⑯：软换行开态逐视觉段画 [cs, ce) 子区间（跨段选区
-        // 分段着色，段间空隙 = 折行边界天然不画）；关态走既有逻辑行路径。
-        // B10 Phase 2：附加光标词选区（Ctrl+M 产生）与主选区同管线——
-        // 统一收集为有序 (start, end) 对后逐个绘制（设计 §3.4）
-        let mut sel_spans: Vec<(CursorPos, CursorPos)> = Vec::new();
-        if let Some((s, e)) = core.ordered_selection() {
-            sel_spans.push((s, e));
-        }
-        for ec in core.extra_cursors.iter() {
-            if let Some(a) = ec.anchor {
-                let span = if (a.line, a.col) <= (ec.cursor.line, ec.cursor.col) {
-                    (a, ec.cursor)
-                } else {
-                    (ec.cursor, a)
-                };
-                sel_spans.push(span);
-            }
-        }
-        let mut paint_selection = |sel_start: CursorPos, sel_end: CursorPos| {
-            let last_line = core.doc.line_count().saturating_sub(1);
-            // O-1：循环界先与视口求交（同上——超集求交 + 保留逐行精筛，绘制
-            // 结果不变）。改前 `sel_start.line..=sel_end.line` 在 Ctrl+A 上是
-            // 「全文档行数 × 整行取串」，改后与视口行数同阶。
-            let lo = sel_start.line.max(vis_first);
-            let hi = sel_end.line.min(last_line).min(vis_last);
-            for line in lo..=hi {
-                let text = core.line_text(line);
-                let lens = text.chars().count();
-                let start_col = if line == sel_start.line {
-                    sel_start.col
-                } else {
-                    0
-                };
-                let end_col = if line == sel_end.line {
-                    sel_end.col
-                } else {
-                    lens
-                };
-                if end_col <= start_col {
-                    continue;
-                }
-                if core.wrap_enabled() {
-                    let base = core.line_visual_base(line) as f32;
-                    let breaks = core.segments_of_line(line, &text);
-                    for (s, &seg_start) in breaks.iter().enumerate() {
-                        let seg_end = breaks.get(s + 1).copied().unwrap_or(lens);
-                        let cs = start_col.max(seg_start);
-                        let ce = end_col.min(seg_end);
-                        if ce <= cs {
-                            continue;
-                        }
-                        let row = base + s as f32;
-                        if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
-                            continue;
-                        }
-                        // 段相对：续行从文本区左缘起排
-                        let seg_base = core.px_of_len(line, &text, seg_start, lens);
-                        let x0 = core.px_of_len(line, &text, cs.min(lens), lens) - seg_base;
-                        let x1 = core.px_of_len(line, &text, ce.min(lens), lens) - seg_base;
-                        // P59：选区矩形与控件边界求交（quad 无任何裁剪）
-                        // P88：y 下移字形墨迹上边距——行盒顶对齐会让选区
-                        // 带顶悬在首行上方空带（用户截图「色带残影」）
-                        // P89：改为按字形墨迹盒**居中**（带高仍 = 行盒高，
-                        // 多行选区带带相接不断裂；P88 只顶对齐会让带底
-                        // 悬出行盒下缘、单选字被顶在带顶不居中）
-                        let Some(rect) = Rectangle {
-                            x: bounds.x + gutter_w + x0 - scroll_left,
-                            y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
-                            width: (x1 - x0).max(char_w),
-                            height: lh,
-                        }
-                        .intersection(&bounds) else {
-                            continue;
-                        };
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: rect,
-                                ..renderer::Quad::default()
-                            },
-                            colors.selection,
-                        );
-                    }
-                    continue;
-                }
-                let row = line as f32;
-                if row < core.scroll_top || row > core.scroll_top + core.viewport_h / lh {
-                    continue;
-                }
-                let x0 = core.px_of_len(line, &text, start_col.min(lens), lens);
-                let x1 = core.px_of_len(line, &text, end_col.min(lens), lens);
-                // P59：选区矩形与控件边界求交——部分可见行的高亮不再越界
-                // （quad 无任何裁剪，越界部分会压标签条/状态栏）
-                // P88/P89：与折行分支同款——y 从墨迹上边距改为按墨迹
-                // 盒居中（带高仍 = 行盒高，单字选区字居中）
-                let Some(rect) = Rectangle {
-                    x: bounds.x + gutter_w + x0 - scroll_left,
-                    y: bounds.y + (row - core.scroll_top) * lh + core.decoration_inset(),
-                    width: (x1 - x0).max(char_w),
-                    height: lh,
-                }
-                .intersection(&bounds) else {
-                    continue;
-                };
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: rect,
-                        ..renderer::Quad::default()
-                    },
-                    colors.selection,
-                );
-            }
-        };
-        for (sel_start, sel_end) in sel_spans {
-            paint_selection(sel_start, sel_end);
-        }
+        // 选区高亮（S-5 第六步外提为 `draw_selections`，逐字搬移）
+        self.draw_selections(
+            renderer,
+            &core,
+            bounds,
+            &colors,
+            lh,
+            char_w,
+            gutter_w,
+            scroll_left,
+            vis_first,
+            vis_last,
+        );
 
         // 第 67 轮 ⑮：列块高亮（S-5 第四步外提为 `draw_block_highlight`，逐字搬移）
         self.draw_block_highlight(
