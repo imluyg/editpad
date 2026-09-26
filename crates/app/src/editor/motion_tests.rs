@@ -2311,6 +2311,57 @@ fn scrollbar_hit_marks_cap_for_draw_budget() {
     );
 }
 
+/// P291：刻度换算在暖帧里不碰正文——成本契约，判据是次数不是耗时。
+///
+/// 现象：`scrollbar_hit_marks` 每帧按命中表**整表**换算视觉行（一帧最多
+/// `MARK_MAX_PER_KIND`＝1000 次 `visual_row_of`），而这些命中行几乎都不在视口内。旧实现每次都先 `line_text`
+/// 物化整行、再拿它去查折行 memo ⇒ 100 行 × 4000 字符的夹具上实测**每帧 1000 次
+/// 整行拷贝（≈4 MB），拷完就丢**；另外每行还被 `chars().count()` 数两遍。
+///
+/// 四条断言各挡一种假绿：
+/// ① 首帧 `> 0`＝这把尺子不是恒零的（否则②退化成空断言，口径同 P286）；
+/// ② 暖帧 `== 0`＝契约本身；
+/// ③ 两次刻度逐元素相等＝"没重算"不等于"没算对"；
+/// ④ 换折行预算后重新 `> 0`＝惰性不是失忆，索引换代后该重取还得重取。
+#[test]
+fn p291_scrollbar_marks_do_not_reread_warm_lines() {
+    let long = "x".repeat(4000);
+    let text: String = (0..100).map(|_| format!("{long}\n")).collect();
+    let mut c = wrap_core(&text);
+    c.set_find_highlights(
+        (0..1000)
+            .map(|i| editpad_core::MatchPos {
+                line: i % 100,
+                col: 0,
+                len_chars: 1,
+            })
+            .collect(),
+    );
+
+    let first = c.scrollbar_hit_marks();
+    let cold = c.take_line_text_calls();
+    let again = c.scrollbar_hit_marks();
+    let warm = c.take_line_text_calls();
+
+    assert!(
+        cold > 0,
+        "夹具自检：首帧必须真的取过串，否则暖帧那条是空断言"
+    );
+    assert_eq!(warm, 0, "暖帧换算刻度不该物化任何整行，实际取串 {warm} 次");
+    assert_eq!(first, again, "换算结果必须与逐行重算时逐元素相同");
+    assert_eq!(first.len(), 1000, "夹具自检：刻度真的算满了一千条");
+
+    // 正对照：折行预算变 ⇒ 索引换代 ⇒ 同一批行必须重新取值
+    c.set_viewport_width(260.0);
+    let after = c.scrollbar_hit_marks();
+    let refetch = c.take_line_text_calls();
+    assert!(
+        refetch > 0,
+        "换代后必须重新取正文（惰性不等于失忆），实际 {refetch} 次"
+    );
+    assert_ne!(first, after, "预算变了，刻度所在视觉行就该变");
+}
+
 // ---------- P134：折行视觉行 Home/End（路线图 C8） ----------
 
 #[test]

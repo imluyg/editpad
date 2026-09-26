@@ -864,12 +864,17 @@ impl EditorCore {
     /// 用于断行（否者 break 按旧字宽计算 → 缩小留白/放大超右缘）。
     /// B10：cursors.rs 的 caret_rect_at 重入也消费——pub(crate)。
     pub(crate) fn trusted_xs(&self, line: usize, body: &str) -> Option<&[f32]> {
-        let n = body.chars().count();
+        self.trusted_xs_len(line, body.chars().count())
+    }
+
+    /// [`Self::trusted_xs`] 的「已知字符数」入口——判据只有这一份，调用方已用
+    /// O(1) 的 [`Self::line_display_len`] 量过长行时不必再为数一遍整行而扫它。
+    pub(crate) fn trusted_xs_len(&self, line: usize, n_chars: usize) -> Option<&[f32]> {
         let size_ok = (self.row_layouts_font_size - self.font_size).abs() < 0.01;
         self.row_layouts
             .get(&line)
             .map(|v| &v[..])
-            .filter(|xs| xs.len() == n + 1 && size_ok)
+            .filter(|xs| xs.len() == n_chars + 1 && size_ok)
     }
 
     /// (line, col) 的视觉行号（开关关 = line）。
@@ -889,10 +894,13 @@ impl EditorCore {
         if line >= lines {
             return prefix;
         }
-        let body = self.line_text(line);
-        let real_xs = self.trusted_xs(line, &body);
-        let breaks = w.segments_of(line, &body, real_xs);
-        let seg = segment_index(&breaks, col, body.chars().count());
+        // P291：这里原先每次 `line_text` 物化整行、再数两遍字符数。滚动条刻度按
+        // 命中表整表跑（一帧最多 `MARK_MAX_PER_KIND` 次）而那些行基本都不在视口
+        // 内；断点有同代 memo，命中就不需要正文，字符数走 P284 的 O(1) 行末口径。
+        let lens = self.line_display_len(line);
+        let real_xs = self.trusted_xs_len(line, lens);
+        let breaks = w.segments_of_lazy(line, real_xs, || self.line_text_ref(line));
+        let seg = segment_index(&breaks, col, lens);
         prefix + seg as u32
     }
 

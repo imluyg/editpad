@@ -238,16 +238,20 @@ impl WrapIndex {
     /// 确保某行按当前代次与内容计入索引：命中同代 memo 直接返回；
     /// 否则重算断点、差值更新 BIT 并写 memo。
     ///
+    /// P291：正文**惰性**提供——`fetch` 只在 memo 落空时才求值。"问这一行折几段"
+    /// 在生产里每帧最多发生一千次（滚动条命中刻度），而那些行绝大多数不在视口内；
+    /// 旧写法每次都先物化整行再查 memo，等于把注定丢掉的行抄一遍。
+    ///
     /// * `max_cols` = 列模型预算（`real_xs` 为 None 时使用）；
     /// * `max_px` = 像素预算（`real_xs` 为 Some 时使用，P96）；
     /// * `real_xs` = 真实字形逐字符 x（与绘制同源；None = 列模型回退）。
-    pub(crate) fn set_line(
+    pub(crate) fn breaks_of(
         &mut self,
         line: usize,
-        body: &str,
         max_cols: usize,
         max_px: f32,
         real_xs: Option<&[f32]>,
+        fetch: impl FnOnce() -> Rc<str>,
     ) -> Rc<Vec<usize>> {
         let pixel = real_xs.is_some();
         if let Some((g, b, p)) = self.memo.get(&line) {
@@ -255,12 +259,13 @@ impl WrapIndex {
                 return b.clone();
             }
         }
+        let body = fetch();
         let breaks = Rc::new(match real_xs {
             // P96：真实字形断行——段尾 = xs[段末字符右缘] ≤ max_px，
             // 非等宽/CJK 字体下也贴满右缘（列模型对非常规字距系统性
             // 留白：28px 字号 CJK 实测段尾缺 ~10% ≈ 6 字符）
-            Some(xs) => pixel_breaks(xs, max_px, body),
-            None => wrap_breaks(body, max_cols),
+            Some(xs) => pixel_breaks(xs, max_px, &body),
+            None => wrap_breaks(&body, max_cols),
         });
         let seg = breaks.len() as u32;
         let diff = seg as i64 - self.seg_now[line] as i64;
@@ -270,6 +275,19 @@ impl WrapIndex {
         self.seg_now[line] = seg;
         self.memo.insert(line, (self.gen, breaks.clone(), pixel));
         breaks
+    }
+
+    /// [`Self::breaks_of`] 的 `&str` 便车：调用方已持有正文时用（memo 命中
+    /// 时不求值、不拷贝）。
+    pub(crate) fn set_line(
+        &mut self,
+        line: usize,
+        body: &str,
+        max_cols: usize,
+        max_px: f32,
+        real_xs: Option<&[f32]>,
+    ) -> Rc<Vec<usize>> {
+        self.breaks_of(line, max_cols, max_px, real_xs, || Rc::from(body))
     }
 
     /// 逻辑行 `line` 首个视觉行的行号（之前所有行的段数和）。
@@ -479,6 +497,18 @@ impl WrapCache {
     ) -> Rc<Vec<usize>> {
         self.index
             .set_line(line, body, self.max_cols, self.max_px, real_xs)
+    }
+
+    /// P291：正文惰性版（[`WrapIndex::breaks_of`]）——memo 命中时**不求值** `fetch`。
+    /// 给"只问段序、多半不需要正文"的调用点用（视觉行换算按整表跑）。
+    pub(crate) fn segments_of_lazy(
+        &mut self,
+        line: usize,
+        real_xs: Option<&[f32]>,
+        fetch: impl FnOnce() -> Rc<str>,
+    ) -> Rc<Vec<usize>> {
+        self.index
+            .breaks_of(line, self.max_cols, self.max_px, real_xs, fetch)
     }
 }
 
