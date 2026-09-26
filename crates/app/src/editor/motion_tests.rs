@@ -745,36 +745,57 @@ fn pure_typing_insert_does_not_trigger_full_width_rescan() {
         n < 20,
         "纯插入一个字符却取串 {n} 次：全量重扫被武装了（O-4）"
     );
+    assert!(
+        !c.max_cols_stale,
+        "纯插入不该武装全量重扫标记（O-4 的正题）"
+    );
     assert_eq!(
         c.max_line_cols, 6,
         "复位标记不得牺牲水位正确性（row299 = 6 列）"
+    );
+    // P298（第 207 轮）：宽度那条链本身一颗整行都不许物化——直接问它，不借道
+    // 编辑路径（编辑受影响那一行取串是正当用途，另有用例守它的量级）。
+    c.take_line_text_calls();
+    c.recompute_max_line_cols();
+    assert_eq!(
+        c.take_line_text_calls(),
+        0,
+        "全量宽度重算又去物化整行了：单行超长文档里那就是一份整文件副本"
     );
 }
 
 /// O-4 的反向半条：会**删内容**的两类插入（替换选区、覆写吃字）可能让行净
 /// 变窄，标记必须原样保留，惰性全扫照旧发生。
+///
+/// ⚠️ 第 207 轮改判判据：这里原先数的是"整行取串次数 ≥ 200"，那是"全量收敛确实
+/// 跑了一遍"的**代理**。代理随零拷贝改造一起消失了（收敛照跑，只是不再物化整行），
+/// 于是换成被代理的那个事实本身——**窄化之后水位必须真的降下来**。
+/// 水位不降＝没收敛＝这条契约破，形状与原断言一致，且不再依赖任何实现细节。
 #[test]
 fn narrowing_inserts_still_trigger_full_width_rescan() {
-    let text: String = (0..300).map(|i| format!("row{i}\n")).collect();
-    // ① 替换选区 = 删旧内容 + 插新内容
+    // 每份夹具都把"最宽行"放在将被窄化的那一行：不收敛就会留一个过估的水位。
+    let filler: String = (0..300).map(|i| format!("row{i}\n")).collect();
+    // ① 替换选区 = 删旧内容 + 插新内容：行 0 从 60 列窄到 11 列
+    let text = format!("{}\n{}", "x".repeat(60), filler);
     let mut c = core_with(&text);
-    c.cursor = CursorPos { line: 0, col: 1 };
-    c.anchor = Some(CursorPos { line: 0, col: 0 });
-    c.take_line_text_calls();
-    c.insert_str("x");
-    assert!(
-        c.take_line_text_calls() >= 200,
-        "选区替换后应仍走一次全量收敛（不能一并复位掉）"
+    assert_eq!(c.max_line_cols, 60, "夹具自检：起始水位由行 0 抬高");
+    c.cursor = CursorPos { line: 0, col: 60 };
+    c.anchor = Some(CursorPos { line: 0, col: 10 });
+    c.insert_str("y");
+    assert_eq!(
+        c.max_line_cols, 11,
+        "选区替换后应仍走一次全量收敛（不能一并复位掉）：水位该从 60 降到 11"
     );
-    // ② 覆写态把汉字/字母换掉：行字符数不变而显示列可能变窄
-    let mut o = core_with(&text);
+    // ② 覆写态把汉字换掉：行字符数不变而显示列变窄（30 個漢字 = 60 列 → 59 列）
+    let text2 = format!("{}\n{}", "漢".repeat(30), filler);
+    let mut o = core_with(&text2);
+    assert_eq!(o.max_line_cols, 60, "夹具自检：起始水位由汉字行抬高");
     o.overwrite = true;
     o.cursor = CursorPos { line: 0, col: 0 };
-    o.take_line_text_calls();
     o.insert_str("a");
-    assert!(
-        o.take_line_text_calls() >= 200,
-        "覆写插入后应仍走一次全量收敛"
+    assert_eq!(
+        o.max_line_cols, 59,
+        "覆写插入后应仍走一次全量收敛：60 列被换成 59 列，水位不降＝没收敛"
     );
 }
 

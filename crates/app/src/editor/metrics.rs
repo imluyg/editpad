@@ -98,10 +98,21 @@ pub(crate) fn leading_indent_cols_of(chars: impl Iterator<Item = char>) -> usize
     col
 }
 
-/// 文本的显示列数（1 列 = `EditorCore::char_width` 像素）。
+/// [`display_cols_chars`] 的 `&str` 门面（算式只有那一份）。
+/// 调用方手上已经有整行文本时用它；只想知道一行多宽时**别**为它先物化整行，
+/// 直接喂字符流（见 `EditorCore::line_body_chars`）。
 pub(crate) fn display_cols(text: &str) -> f32 {
+    display_cols_chars(text.chars())
+}
+
+/// 文本的显示列数（1 列 = `EditorCore::char_width` 像素）——吃字符流。
+///
+/// 第 207 轮（场景①「打开 50MB 单行日志」）：这里原先只有一个 `&str` 版本，
+/// 于是"量一行有多宽"必须先物化整行；单行文档里"整行"就是整份文件，打开一次
+/// 要多抄一份。改成字符流口径（`Document::chars_from` 零拷贝），算式只留这一份。
+pub(crate) fn display_cols_chars(text: impl Iterator<Item = char>) -> f32 {
     let mut col = 0usize;
-    for c in text.chars() {
+    for c in text {
         col += char_cols(c, col) as usize;
     }
     col as f32

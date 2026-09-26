@@ -175,10 +175,10 @@ fn crlf_document_keeps_eol_through_undo() {
 #[test]
 fn tab_widths_advance_to_next_tab_stop() {
     // 'a'=1 列；Tab 在第 1 列推进到第 4 列（占 3）；'b'=1 → 共 5
-    assert_eq!(display_cols("a\tb"), 5.0);
+    assert_eq!(display_cols_chars("a\tb".chars()), 5.0);
     // Tab 恰在制表位上：至少仍占 1 列（"abc\t" = 3+1）
-    assert_eq!(display_cols("abc\td"), 5.0);
-    assert_eq!(display_cols("\t"), TAB_STOP_COLS as f32);
+    assert_eq!(display_cols_chars("abc\td".chars()), 5.0);
+    assert_eq!(display_cols_chars("\t".chars()), TAB_STOP_COLS as f32);
 
     // prefix_width 按字符索引取前缀宽：过 Tab 处发生跳跃
     assert_eq!(prefix_width("a\tb", 1), 1.0, "只有 'a'");

@@ -14,7 +14,7 @@ pub(crate) use editpad_core::{
 };
 
 pub(crate) use super::metrics::{
-    char_cols, display_cols, measure_insertion, prefix_width, shape_row_xs,
+    char_cols, display_cols_chars, measure_insertion, prefix_width, shape_row_xs,
     validate_measured_char_width, visible_window_of_xs, H_CLIP_MARGIN_CHARS,
     RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS, WRAP_RECONCILE_STEP,
 };

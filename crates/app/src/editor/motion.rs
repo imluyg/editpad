@@ -642,12 +642,52 @@ impl EditorCore {
         self.ensure_visible_horizontal();
     }
 
+    /// 第 `line` 行的正文（不含行尾）零拷贝字符流；行号越界 ⇒ 空流。
+    ///
+    /// 第 207 轮（场景①「打开 50MB 单行日志」）：这一行的正文长度可以直接问
+    /// （P284 的 `line_body_len_chars` 是 O(1)），所以量宽度不需要先把整行物化成
+    /// `String`——单行文档里"整行"就是整份文件。
+    fn line_body_chars(&self, line: usize) -> Box<dyn Iterator<Item = char> + '_> {
+        let n = self.doc.line_body_len_chars(line);
+        if n == 0 {
+            return Box::new(std::iter::empty());
+        }
+        Box::new(self.doc.chars_from(self.doc.line_to_char(line)).take(n))
+    }
+
+    /// P126：首行是否是 `.LOG` 标记（经典记事本行为：这种文件打开时在文末追加时间戳）。
+    ///
+    /// 第 207 轮（场景①）：这里原先写作 `doc.line_str(0).trim_end_matches(is_control) == ".LOG"`，
+    /// 而**每次打开都会无条件跑一遍**——单行超长日志的"第一行"就是整份文件，于是打开一份
+    /// 50MB 的单行日志要先多拷贝 50MB 才得出"不是 .LOG"。现在按字符判：先比前四个字符，
+    /// 再要求其余正文全是控制字符（与旧写法 `trim_end_matches` 的口径逐字等价），
+    /// 两步都在第一个不满足的字符上短路 ⇒ 不再物化整行。
+    pub(crate) fn first_line_is_log_marker(&self) -> bool {
+        const MARK: &[char] = &['.', 'L', 'O', 'G'];
+        let body = self.doc.line_body_len_chars(0);
+        if body < MARK.len() {
+            return false;
+        }
+        if self
+            .doc
+            .slice_text(0, MARK.len())
+            .chars()
+            .ne(MARK.iter().copied())
+        {
+            return false;
+        }
+        self.doc
+            .chars_from(MARK.len())
+            .take(body - MARK.len())
+            .all(char::is_control)
+    }
+
     /// 全量重算最大显示列数（整体换文档时调用；O(n)，加载路径本来 O(n)）。
     pub(crate) fn recompute_max_line_cols(&mut self) {
         let count = self.doc.line_count();
         let mut max = 0usize;
         for line in 0..count {
-            let cols = display_cols(self.line_text(line).as_str()) as usize;
+            let cols = display_cols_chars(self.line_body_chars(line)) as usize;
             if cols > max {
                 max = cols;
             }
@@ -658,7 +698,7 @@ impl EditorCore {
     /// 把 `[first_line, last_line]` 内各行宽度并入高水位（编辑后调用）。
     pub(crate) fn raise_max_line_cols(&mut self, lines: std::ops::RangeInclusive<usize>) {
         for line in lines {
-            let cols = display_cols(self.line_text(line).as_str()) as usize;
+            let cols = display_cols_chars(self.line_body_chars(line)) as usize;
             if cols > self.max_line_cols {
                 self.max_line_cols = cols;
             }

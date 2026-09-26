@@ -1391,6 +1391,102 @@ fn cli_open_failure_does_not_block_the_rest_of_queue() {
     assert!(app.busy, "下一个文件已开始加载（失败不中断排队链）");
 }
 
+// ---------- P298（第 207 轮，场景①「打开 50MB 单行日志」）：打开路径不许物化整行 ----------
+//
+// 两处无条件整行物化改前都在打开路径上：
+// ① `recompute_max_line_cols` 为量一行宽度先 `line_text(line)`（单行文档里那就是整份文件）；
+// ② `.LOG` 判定先 `doc.line_str(0)` 再 `trim_end_matches`（同样：第一行＝整份文件）。
+// 判据用**次数**（`line_text_calls`），不用耗时；峰值内存少一份整文件副本才是这一档的正题。
+
+/// 用真实打开链（FileDropped → Loaded）装一份文档，返回这一帧打开路径上的
+/// **整行物化次数**；同时断"该算出来的宽度真算出来了"（防空转：一条都不物化
+/// 也可能是什么都没算）。
+fn open_doc_and_count_materializations(doc: editpad_core::Document) -> usize {
+    let expect_chars = doc.text_len();
+    let expect_lines = doc.line_count();
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/logs/app.log")),
+    );
+    let seq = app.job_seq;
+    let handle = app.cur_handle.clone();
+    handle.borrow_mut().take_line_text_calls();
+    dispatch(
+        &mut app,
+        Message::Loaded(seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+    );
+    let ed = handle.borrow();
+    assert_eq!(ed.doc.text_len(), expect_chars, "夹具自检：文档确实装载了");
+    assert_eq!(ed.doc.line_count(), expect_lines, "夹具自检：行数");
+    // 高水位宽度必须等于最长行的字符数（纯 ASCII 夹具里 1 字符 = 1 列）：
+    // 这条同时证明"零拷贝那条字符流"走通了、且结果与旧的整行物化口径一致。
+    let widest = (0..expect_lines)
+        .map(|l| ed.doc.line_body_len_chars(l))
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        ed.max_line_cols, widest,
+        "最大列数没算对（零拷贝那条流可能少喂了字符）"
+    );
+    ed.take_line_text_calls()
+}
+
+#[test]
+fn p298_opening_never_materializes_a_whole_line() {
+    // 形状 A＝场景①本体：一行、20 万字符（真实文件里这一行可以是 50MB）
+    let single = editpad_core::Document::from_str(&"x".repeat(200_000));
+    let calls_single = open_doc_and_count_materializations(single);
+    // 形状 B＝常规多行文档：2 000 行 ×100 字符
+    let many: String = (0..2_000)
+        .map(|_| format!("{}\n", "y".repeat(100)))
+        .collect();
+    let calls_many = open_doc_and_count_materializations(editpad_core::Document::from_str(&many));
+    eprintln!(
+        "[P298] 打开路径上的整行物化次数：单行 20 万字符 {calls_single} / 2 千行 {calls_many}"
+    );
+    assert_eq!(
+        calls_single, 0,
+        "打开单行超长文档物化了 {calls_single} 次整行：其中任意一次都是整份文件的副本"
+    );
+    assert_eq!(calls_many, 0, "打开多行文档物化了 {calls_many} 次整行");
+}
+
+/// `.LOG` 判定的**旧算法 oracle**：逐字照抄改前那一行写法。
+fn log_marker_oracle(doc: &editpad_core::Document) -> bool {
+    doc.line_str(0).trim_end_matches(char::is_control) == ".LOG"
+}
+
+#[test]
+fn p298_log_marker_decision_matches_the_old_trim_rule() {
+    for text in [
+        ".LOG",
+        ".LOG\n",
+        ".LOG\nentry",
+        ".LOG\t",
+        ".LOG\x00\x01",
+        ".log",
+        ".LOGX",
+        "xLOG",
+        "LOG",
+        "",
+        ".",
+        ".LOG and then some printable text",
+        &format!(".LOG{}", "z".repeat(100_000)),
+        &"x".repeat(100_000),
+    ] {
+        let doc = editpad_core::Document::from_str(text);
+        let app = Editpad::default();
+        app.cur_handle.borrow_mut().reset_document(doc.clone());
+        let got = app.cur_handle.borrow().first_line_is_log_marker();
+        assert_eq!(
+            got,
+            log_marker_oracle(&doc),
+            "首行 {text:?} 的 .LOG 判定与改前写法不一致"
+        );
+    }
+}
+
 // ---------- P126：.LOG 首行自动时间戳 ----------
 
 #[test]

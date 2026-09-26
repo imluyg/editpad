@@ -144,7 +144,7 @@ impl Editpad {
                                 // 首行恰为 .LOG 的文件在文末追加当前日期时间。
                                 // 文本照常置脏（默认不自动写盘，落盘仍由用户
                                 // 决定）；会话恢复路径不追加（防快照滚雪球）。
-                                if ed.doc.line_str(0).trim_end_matches(char::is_control) == ".LOG" {
+                                if ed.first_line_is_log_marker() {
                                     let last = ed.doc.line_count() - 1;
                                     let tlen = ed.doc.text_len();
                                     let ends_nl = tlen > 0
