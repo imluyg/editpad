@@ -57,6 +57,8 @@ impl EditorCore {
         // 第 73 轮 ⑯：软换行缓存同汇点失效——行数变化整表重置，
         // 否则只推代次（memo 过期由下次查询懒惰重算）
         let lines = self.doc.line_count();
+        // P289：本次编辑**之前**的行数（必须在 after_edit_* 更新 last_lines 之前读）
+        let lines_before = self.wrap.borrow().lines_before_edit();
         let touched = match changed {
             Some(range) => self.wrap.borrow_mut().after_edit_span(lines, Some(range)),
             None => {
@@ -75,7 +77,15 @@ impl EditorCore {
         }
         if let Some(hl) = &self.highlight {
             let line = self.doc.char_to_line(offset.min(self.doc.text_len()));
-            hl.borrow_mut().invalidate_from(line);
+            // P289：申报成立 + 只有一行变化 + 行数没变 ⇒ 该行之后所有内容原样
+            // 不动，高亮器可以把编辑点之后的检查点尾巴留着待验（打字热路径）。
+            // 其余一律走与本改动之前逐字相同的保守路径。
+            match touched {
+                Some((first, last)) if first == last && lines == lines_before && line == first => {
+                    hl.borrow_mut().invalidate_from_single_line(line, lines);
+                }
+                _ => hl.borrow_mut().invalidate_from(line),
+            }
         }
     }
 

@@ -104,6 +104,13 @@ pub struct LazyHighlighter {
     dark: bool,
     /// checkpoints[k] = 解析完第 `k*STRIDE - 1` 行后的状态；`[0]` 为初始态。
     checkpoints: Vec<State>,
+    /// P289：`invalidate_from_declared` 暂存的"编辑点之后那一段检查点尾巴"。
+    /// `(at, tail, lines)`：`tail[0]` 是**旧文档**下进入第 `at*STRIDE` 行时的状态，
+    /// `lines` 是暂存当时的总行数。等重建正好推进到第 `at` 档时比一次
+    /// `ParseState`：相等且总行数没变 ⇒ 该档之后的内容与上下文都未被这次
+    /// 编辑波及，整段尾巴原样接回（省掉"每敲一个字符把整篇重铺一遍"）；
+    /// 不等或行数变了 ⇒ 丢弃，行为与改前一致。
+    stale_tail: Option<(usize, Vec<State>, usize)>,
     /// 行后状态缓存：key = 已解析完的行号。
     line_cache: HashMap<usize, State>,
     /// P61 渐进上色：可视区**近似**行后状态缓存（key = 行号）。
@@ -148,6 +155,7 @@ impl Clone for LazyHighlighter {
             syntax_name: self.syntax_name.clone(),
             dark: self.dark,
             checkpoints: self.checkpoints.clone(),
+            stale_tail: None,
             line_cache: self.line_cache.clone(),
             approx_line_cache: self.approx_line_cache.clone(),
             runs_cache: self.runs_cache.clone(),
@@ -211,6 +219,7 @@ impl LazyHighlighter {
             syntax_name: syntax.name.clone(),
             dark,
             checkpoints: vec![initial],
+            stale_tail: None,
             line_cache: HashMap::new(),
             approx_line_cache: HashMap::new(),
             runs_cache: HashMap::new(),
@@ -276,6 +285,25 @@ impl LazyHighlighter {
     /// （P23）：那些状态缺了文档后来长出来的真实行，续算会错色。
     /// 垫付只可能发生在最后一次补建的末档，重建成本 ≤ 一个档位。
     pub fn invalidate_from(&mut self, line_idx: usize) {
+        self.invalidate_from_inner(line_idx, None, 0);
+    }
+
+    /// P289：带申报的失效入口。`total_lines` 是**编辑后**的总行数；调用方只在
+    /// 「新文档里仅第 `line_idx` 行内容变了、其余行原样不动、行数也没变」时才走
+    /// 这条（打字路径正是如此）。满足申报时把编辑点之后的检查点档暂存起来，
+    /// 等重建推进到那一档再比状态（见 `Self::splice_stale_tail`，私有方法故不链）。
+    /// 不满足申报的编辑（换行、粘贴跨行、撤销…）一律调 [`Self::invalidate_from`]，
+    /// 行为与本改动之前逐字相同。
+    pub fn invalidate_from_single_line(&mut self, line_idx: usize, total_lines: usize) {
+        self.invalidate_from_inner(line_idx, Some(line_idx), total_lines);
+    }
+
+    fn invalidate_from_inner(
+        &mut self,
+        line_idx: usize,
+        declared: Option<usize>,
+        total_lines: usize,
+    ) {
         // P12：编辑即换代——在途的后台补建结果回来后对不上号，整体丢弃
         self.generation = next_generation();
         // P61：近似状态全部作废（基于旧文档内容，且与精确路径隔离的
@@ -288,6 +316,19 @@ impl LazyHighlighter {
         if let Some(p) = self.phantom_from {
             // 检查点 k 覆盖 [k*STRIDE, (k+1)*STRIDE)；含垫付行的档位全部不要
             keep = keep.min((p / STRIDE).max(1));
+        }
+        // P289：截断之前先把尾巴存下来。三个条件缺一不可——
+        // ① 有申报；② 无垫付档（垫付空行不是真实内容，接回会错色）；
+        // ③ 尾巴首档的入口行严格在改动行之后。
+        match declared {
+            Some(last_changed)
+                if self.phantom_from.is_none()
+                    && keep * STRIDE > last_changed
+                    && keep < self.checkpoints.len() =>
+            {
+                self.stale_tail = Some((keep, self.checkpoints[keep..].to_vec(), total_lines));
+            }
+            _ => self.stale_tail = None,
         }
         self.checkpoints.truncate(keep.max(1));
         if let Some(p) = self.phantom_from.take() {
@@ -355,6 +396,7 @@ impl LazyHighlighter {
                 self.phantom_from = Some(real_end);
             }
             self.checkpoints.push((parse, highlight));
+            Self::splice_stale_tail(&mut self.checkpoints, &mut self.stale_tail, total_lines);
         }
 
         // 起点：上一行的后状态有缓存则零步直达；否则从最近检查点推进
@@ -587,9 +629,37 @@ impl LazyHighlighter {
                 advance(&mut parse, &mut highlight, &text_of(i), ss, highlighter);
             }
             self.checkpoints.push((parse, highlight));
+            Self::splice_stale_tail(&mut self.checkpoints, &mut self.stale_tail, total_lines);
             built += 1;
         }
         built
+    }
+
+    /// 推进一档之后试接回尾巴——自由函数而非方法：`styled_line` / `advance_checkpoints`
+    /// 里 `&self.highlighter` 的不可变借用还在生效，方法要 `&mut self` 会撞车；
+    /// 只借这两个字段则各取所需（与本文件既有的字段级借用口径一致）。
+    fn splice_stale_tail(
+        checkpoints: &mut Vec<State>,
+        stale_tail: &mut Option<(usize, Vec<State>, usize)>,
+        total_lines: usize,
+    ) {
+        let Some((at, lines_at_stash)) = stale_tail.as_ref().map(|t| (t.0, t.2)) else {
+            return;
+        };
+        if checkpoints.len() <= at {
+            return; // 还没推到那一档，留着等
+        }
+        if checkpoints.len() != at + 1 || total_lines != lines_at_stash {
+            *stale_tail = None; // 已越过，或行数变了：不再有机会安全接回
+            return;
+        }
+        let Some((_, tail, _)) = stale_tail.take() else {
+            return;
+        };
+        let Some(first) = tail.first() else { return };
+        if checkpoints[at].0 == first.0 {
+            checkpoints.extend_from_slice(&tail[1..]);
+        }
     }
 }
 
@@ -817,6 +887,158 @@ mod tests {
             format!("let f{i} = {i};")
         });
         assert!(!runs.is_empty());
+    }
+
+    // ---------- P289：单行编辑后接回检查点尾巴 ----------
+
+    /// 铺满 `lines` 行的 rust 文档（每行都是独立的 `let` 语句 ⇒ 行语法上下文
+    /// 与相邻行无关，适合当"改动不波及下游"的正例夹具）。
+    fn paved(lines: usize) -> LazyHighlighter {
+        let mut hl = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let mut text_of = |i: usize| format!("let v{i} = {i};");
+        hl.advance_checkpoints(lines / STRIDE + 2, lines, &mut text_of);
+        hl
+    }
+
+    /// 编辑后的文档：第 5 行换成一条完整 `let`（语法上下文与原来一致）。
+    fn edited_let(i: usize) -> String {
+        if i == 5 {
+            "let changed = 42;".to_string()
+        } else {
+            format!("let v{i} = {i};")
+        }
+    }
+
+    /// 编辑后的文档：第 5 行**打开一个不闭合的块注释**（上下文延伸到后面的行）。
+    fn edited_open_comment(i: usize) -> String {
+        if i == 5 {
+            "let x = 1; /* 未闭合".to_string()
+        } else {
+            format!("let v{i} = {i};")
+        }
+    }
+
+    /// 正例：单行改动（不改变语法上下文）之后，申报路径应当
+    /// ① 用**更少的行解析次数**重建远端颜色，且 ② 结果与保守路径、与"从零解析"
+    /// 的基准逐格相同。
+    #[test]
+    fn single_line_edit_splices_checkpoints_without_changing_colors() {
+        let lines = 600usize;
+        let probes: Vec<usize> = (500..508).collect();
+        let text_of = edited_let;
+        // 基准：全新的 highlighter（从未建过检查点），逐行现算
+        let mut fresh = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let truth: Vec<_> = probes
+            .iter()
+            .map(|&i| {
+                let t = text_of(i);
+                let mut f = text_of;
+                fresh.styled_line(i, &t, lines, &mut f)
+            })
+            .collect();
+
+        let mut conservative = paved(lines);
+        conservative.invalidate_from(5);
+        let mut calls_conservative = 0usize;
+        let got_conservative: Vec<_> = probes
+            .iter()
+            .map(|&i| {
+                let t = text_of(i);
+                conservative.styled_line(i, &t, lines, &mut |k| {
+                    calls_conservative += 1;
+                    text_of(k)
+                })
+            })
+            .collect();
+
+        let mut declared = paved(lines);
+        declared.invalidate_from_single_line(5, lines);
+        let mut calls_declared = 0usize;
+        let got_declared: Vec<_> = probes
+            .iter()
+            .map(|&i| {
+                let t = text_of(i);
+                declared.styled_line(i, &t, lines, &mut |k| {
+                    calls_declared += 1;
+                    text_of(k)
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            got_declared, got_conservative,
+            "接回检查点尾巴改变了远端颜色（申报路径必须与保守路径逐格相同）"
+        );
+        assert_eq!(
+            got_conservative, truth,
+            "夹具失效：保守路径本身就不等于从零解析的基准，比了个错的参照"
+        );
+        assert!(
+            calls_declared * 2 < calls_conservative,
+            "申报路径没省下重铺：解析 {calls_declared} 行，保守路径 {calls_conservative} 行"
+        );
+        let full = paved(lines).checkpoints_len();
+        assert_eq!(
+            declared.checkpoints_len(),
+            full,
+            "尾巴应整段接回（档数回到铺满时的 {full}），实际 {}",
+            declared.checkpoints_len()
+        );
+        assert!(
+            conservative.checkpoints_len() < full,
+            "夹具自证：保守路径只为 probes 建到 {},本就该少于铺满的 {full}",
+            conservative.checkpoints_len()
+        );
+    }
+
+    /// 反例（防"过度保留"）：第 5 行改成**跨行未闭合注释**，语法上下文延伸到
+    /// 后面的行 ⇒ 接回判据必须判假，远端颜色必须与"全新解析"一致。
+    #[test]
+    fn context_changing_single_line_edit_never_reuses_stale_tail() {
+        let lines = 600usize;
+        let probes: Vec<usize> = (500..508).collect();
+        let text_of = edited_open_comment;
+        let mut fresh = LazyHighlighter::new("rs").expect("rust 语法存在");
+        let truth: Vec<_> = probes
+            .iter()
+            .map(|&i| {
+                let t = text_of(i);
+                let mut f = text_of;
+                fresh.styled_line(i, &t, lines, &mut f)
+            })
+            .collect();
+
+        let mut declared = paved(lines);
+        declared.invalidate_from_single_line(5, lines);
+        let got: Vec<_> = probes
+            .iter()
+            .map(|&i| {
+                let t = text_of(i);
+                let mut f = text_of;
+                declared.styled_line(i, &t, lines, &mut f)
+            })
+            .collect();
+        for (slot, &i) in probes.iter().enumerate() {
+            assert_eq!(
+                got[slot], truth[slot],
+                "第 {i} 行颜色与全新解析不一致（陈尾被接回）"
+            );
+        }
+        // 夹具自证：这组改动确实改变了远端颜色，否则"没接回"也照样绿
+        let mut untouched = paved(lines);
+        let before: Vec<_> = probes
+            .iter()
+            .map(|&i| {
+                let t = format!("let v{i} = {i};");
+                let plain = |k: usize| format!("let v{k} = {k};");
+                let mut f = plain;
+                untouched.styled_line(i, &t, lines, &mut f)
+            })
+            .collect();
+        assert_ne!(
+            before, truth,
+            "夹具失效：把第 5 行改成未闭合注释后远端颜色竟没变 ⇒ 这条反例什么都没测"
+        );
     }
 
     // ---------- P161：着色片段产物缓存 ----------

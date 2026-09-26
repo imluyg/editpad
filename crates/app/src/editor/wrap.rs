@@ -382,6 +382,13 @@ impl WrapCache {
 
     /// 编辑汇点：行数变化 → 整表重置；否则代次失效（memo 全部过期，
     /// BIT 保留旧计数，由窗口行重算差值收敛——模块注释的 v1 取舍）。
+    /// P289：上一次记账时的行数（＝本次编辑**之前**的行数）。失效汇点用它判断
+    /// "这次编辑有没有改变行数"——只有行数不变，编辑点之后的行才没有整体挪位，
+    /// 高亮器才可以把编辑点之后的检查点尾巴接回去。
+    pub(crate) fn lines_before_edit(&self) -> usize {
+        self.last_lines
+    }
+
     pub(crate) fn after_edit(&mut self, lines: usize) {
         if lines != self.last_lines {
             self.index.reset(lines);
