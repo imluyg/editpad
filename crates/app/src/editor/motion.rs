@@ -1227,8 +1227,9 @@ impl EditorCore {
     ///
     /// 新鲜度与行布局 memo 同一底座：`content_epoch` 由
     /// `invalidate_highlight_from`（正文突变的唯一汇点）自增，纪元一变整表清空
-    /// ⇒ 不存在"改完还发旧文本"的窗口。缓存按**字节**封顶，额度按"本帧要画的行"
-    /// 定（P292：越过额度即拒绝入表，长行文档里那正是本帧要画的那十几行）。
+    /// ⇒ 不存在"改完还发旧文本"的窗口。缓存按**字节**封顶，越过封顶**腾地方**
+    /// （P293：逐出窗口外的条目；P292 之前是拒绝入表，那会让长行文档滚动后
+    /// 每个消费者各抄一遍整行、且到下一次编辑前都不自愈）。
     /// 取串本身仍走 [`Self::line_text`]——两处口径（trim 掉行尾 `\n`/`\r`）
     /// 必须只有一份实现。
     pub(crate) fn line_text_ref(&self, line: usize) -> Rc<str> {
@@ -1255,11 +1256,60 @@ impl EditorCore {
         let fetched: Rc<str> = Rc::from(self.line_text(line).as_str());
         let mut memo = self.line_text_memo.borrow_mut();
         // 只在仍是同一纪元时收表；顺手也挡住"缓存自己被写坏"的情况。
-        if memo.epoch == epoch && memo.bytes + fetched.len() <= LINE_TEXT_MEMO_MAX_BYTES {
+        if memo.epoch != epoch {
+            return fetched;
+        }
+        // P293：额度满了逐出"本帧窗口之外"的条目，而不是拒绝新行入表。第 200 轮实测
+        // 过旧策略的代价：同一份 20000 字符/行的文档连续滚 16 屏（全程不编辑 ⇒ 表不
+        // 整表清空），前 7 屏每屏 14 次取串、第 8 屏 22、此后**恒 28**——先来的行占满
+        // 额度，后到的屏每个消费者各抄一遍整行，而且不到下一次编辑绝不会自愈。
+        // 窗口之内的是这帧正要共享的行，动它们等于把刚省的又抄回来；窗口之外的
+        // （已经滚过去的、或整表扫来的）才是该丢的。
+        if memo.bytes + fetched.len() > LINE_TEXT_MEMO_MAX_BYTES {
+            let (lo, hi) = self.memo_evict_window();
+            // 一次把窗口外的**都**扫走，而不是"刚腾出位置就停"：留着窗口外那些条目，
+            // 下一次入表又要重扫整张表（短行长时间滚动时表能有几万条），那份扫描代价
+            // 就会按表大小反复发生。窗口外的行按定义已离本帧 4 屏开外，丢了至多多取
+            // 一次串。
+            let far: Vec<usize> = memo
+                .map
+                .keys()
+                .filter(|&&l| l < lo || l > hi)
+                .copied()
+                .collect();
+            for l in far {
+                if let Some(v) = memo.map.remove(&l) {
+                    memo.bytes = memo.bytes.saturating_sub(v.len());
+                }
+            }
+        }
+        // 单行本身就有几 MB 时仍不收（这种行每次都现取，占着表反而把窗口内的挤掉）。
+        if memo.bytes + fetched.len() <= LINE_TEXT_MEMO_MAX_BYTES {
             memo.bytes += fetched.len();
             memo.map.insert(line, fetched.clone());
         }
         fetched
+    }
+
+    /// [`Self::line_text_ref`] 逐出时保留的行区间：本帧可见区（`memo_window`，由
+    /// `refresh_visible_row_layouts` 每帧刷新的快照）向两侧各外扩 `4 × 视口行数`，
+    /// 让来回滚半屏不必重新取串。
+    ///
+    /// ⚠️ 这里**不能**现算 `visible_range()`：`visual_row_of` 的取正文闭包是在
+    /// `self.wrap.borrow_mut()` 持锁期间调进 `line_text_ref` 的，而开态的
+    /// `visible_range()` 内部要 `wrap.borrow_mut()` ⇒ 当场 `already borrowed` panic。
+    /// 只读普通字段（`viewport_h` / `font_size`）才是安全的；窗口值读到陈旧也只是
+    /// 缓存少留一会儿，不可能给出错文本（表按 `content_epoch` 失效）。
+    fn memo_evict_window(&self) -> (usize, usize) {
+        let lh = self.line_height();
+        let rows = if lh > 0.0 {
+            (self.viewport_h / lh).ceil() as usize + 1
+        } else {
+            1
+        };
+        let pad = rows * 4 + 8;
+        let (first, last) = self.memo_window;
+        (first.saturating_sub(pad), last + pad)
     }
 
     /// 第 `line` 行的不含换行文本。

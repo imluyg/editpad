@@ -1681,6 +1681,81 @@ fn wrap_converge(c: &mut EditorCore) {
     }
 }
 
+/// P293 护栏 A：本帧窗口由 `refresh_visible_row_layouts` 刷新（短行夹具，走生产通路）。
+///
+/// 窗口值是整行 memo 的**逐出依据**，它的生产写入点只有一处；这条把"写入点写的就是
+/// `visible_range()`"钉住，好在 P293 那条策略测试可以不必每屏真去 shape 两万字符的行
+/// （那会把一次测试跑成几分钟——第 200 轮的渲染版仪表就是这么超时的）。
+#[test]
+fn p293_frame_window_tracks_visible_range() {
+    let text: String = (0..200).map(|i| format!("row-{i:03}\n")).collect();
+    let mut c = core_with(&text);
+    c.set_viewport_width(600.0);
+    c.set_viewport_height(300.0);
+    assert_eq!(c.memo_window, (0, 0), "新建 core 的窗口应当是零值");
+    c.scroll_top = 50.0;
+    c.refresh_visible_row_layouts(iced::Font::MONOSPACE);
+    assert_eq!(
+        c.memo_window,
+        c.visible_range(),
+        "刷新过一帧之后，逐出窗口必须等于本帧可见行区间"
+    );
+    assert!(c.memo_window.0 >= 50, "scroll_top=50 后窗口左缘应当跟着走");
+}
+
+/// P293 护栏 B：长行文档**连续滚过 16 屏**（全程不编辑 ⇒ memo 不整表清空），每屏的
+/// 整行物化次数必须仍是"每行一次"。
+///
+/// 第 200 轮实测旧策略（越过字节封顶就**拒绝入表**）：每行 20000 字符时前 7 屏 **14**
+/// 次、第 8 屏 **22**、此后**恒 28** —— 28 ＝ 这一屏的 14 行被两个消费者各抄一遍，
+/// 而且不到下一次编辑绝不会自愈。P293 把"满了就拒绝"换成"满了就逐出窗口之外的行"。
+///
+/// 夹具自证两条（都是本轮自己被咬出来的，不是装饰）：
+/// ① `doc.line_count()` 必须等于预期 —— 少写行尾 `\n` 会让整篇变成**一行**，而
+///    `line_text_calls` 对越界行的早退**不自增** ⇒ 读数会**假降为 0**、看着像全命中
+///    （第 199 轮那支被弃用的探针正是此因）；
+/// ② 每行取回来必须真有 `len` 个字符，防"空串也算命中"把次数压下去。
+#[test]
+fn p293_long_line_scroll_keeps_one_fetch_per_line() {
+    let rows = 14usize;
+    for len in [2_000usize, 20_000] {
+        let lines = 400usize;
+        let text: String = (0..lines)
+            .map(|i| format!("{i:05}{}\n", "x".repeat(len - 5)))
+            .collect();
+        let mut c = core_with(&text);
+        assert_eq!(
+            c.doc.line_count(),
+            lines + 1,
+            "夹具自检：{lines} 行带尾换行 ⇒ ropey 数到 {}+1（含末尾幻影行）。少了 `\\n` 就变成一整行，越界早退不计入取串数，读数会假降为 0",
+            lines
+        );
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        let mut per = Vec::new();
+        for screen in 0..16 {
+            let base = screen * rows;
+            // 生产里这一帧的窗口由 refresh_visible_row_layouts 写；此处照同一口径直接
+            // 赋值，是为了不把一次单测跑成几分钟（见护栏 A：它钉的就是那个写入点）。
+            c.memo_window = (base, base + rows);
+            c.take_line_text_calls();
+            for l in base..base + rows {
+                let a = c.line_text_ref(l);
+                let b = c.line_text_ref(l);
+                assert_eq!(a, b, "同一行两次取串口径必须一致");
+                assert_eq!(a.chars().count(), len, "夹具自检：第 {l} 行应有 {len} 字符");
+            }
+            per.push(c.take_line_text_calls());
+        }
+        eprintln!("[P293] len={len} 逐屏取串次数 = {per:?}（旧策略 20k 档是 14×7 → 22 → 28×8）");
+        assert!(
+            per.iter().all(|&n| n == rows),
+            "长行滚动中出现非 {rows} 的逐屏次数：{per:?}——额度满了又在拒绝入表，\
+             同一行被每个消费者各抄一遍"
+        );
+    }
+}
+
 #[test]
 fn wrap_off_identity_toggle_and_visual_mapping_roundtrip() {
     let mut c = core_with("aa\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\ncc\n");

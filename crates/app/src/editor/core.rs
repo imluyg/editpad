@@ -624,6 +624,13 @@ pub struct EditorCore {
     /// P283：`line_text_ref` 的 memo。键 = 行号，新鲜度 = `content_epoch`
     /// （正文突变的唯一汇点，与行布局 memo 同一底座）；纪元一变整体清空。
     pub(crate) line_text_memo: LineTextMemoCell,
+    /// P293：整行 memo 逐出用的"本帧可见行区间"快照，由
+    /// [`EditorCore::refresh_visible_row_layouts`] 每帧刷新。
+    /// **只影响缓存逐出**，不是正确性依据：读到陈旧值至多让缓存少留一会儿，
+    /// 表本身仍按 `content_epoch` 失效。之所以不现算 `visible_range()`——
+    /// `line_text_ref` 会在 `visual_row_of` 的 `wrap.borrow_mut()` 持锁期间被调进来，
+    /// 那里再碰 wrap 就是 `already borrowed` panic。
+    pub(crate) memo_window: (usize, usize),
     /// 不可见字符覆盖标记开关（第 63 轮）：渲染层读取；不影响文档
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
@@ -794,6 +801,7 @@ impl Default for EditorCore {
             bracket_cache: RefCell::new(None),
             sel_span_cache: RefCell::new(None),
             line_text_memo: RefCell::new(LineTextMemo::default()),
+            memo_window: (0, 0),
             show_whitespace: false,
             show_line_endings: false,
             #[cfg(test)]
@@ -931,6 +939,8 @@ impl EditorCore {
         let size = self.font_size;
         let epoch = self.content_epoch;
         let (first, last) = self.visible_range();
+        // P293：顺手把本帧可见区留给整行 memo 做逐出依据（只读用，见字段注释）。
+        self.memo_window = (first, last);
         self.row_layouts.clear();
         self.row_layouts_font_size = 0.0;
         self.max_row_width_px = 0.0;
