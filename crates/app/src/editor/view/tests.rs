@@ -5404,6 +5404,23 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
              偶红的归因要连滚动条一起重查"
         );
     }
+    // P295：读断点表之前，先按生产口径把本帧的行字形位置注入。**这是本用例的根因所在**：
+    // `segments_of_line` 在真实字形 xs 不可信时回退**列模型**（`wrap_breaks`，按字符预算断行），
+    // 而绘制那一帧用的是**像素断点**（P96 `pixel_breaks`）。夹具原先在任何一帧都没画过的时候
+    // 就读表，拿到的是列模型的"段首"，画的时候却是像素断点的段首——两个"段首"在非常规度量下
+    // 不是同一列，于是"续段命中该落在续行左缘"这条断言从一开始就在比两套口径。
+    //
+    // 三条读数把责任分清楚（本轮逐条跑过）：
+    // - 不注入 + 显式族名 ⇒ **恒红**在"续段左缘 x=310 vs 首段 x=46"（第 203 轮撞到的）；
+    // - 注入 + 显式族名 ⇒ 绿；
+    // - 注入 + `BODY_FONT` ⇒ 绿。
+    // ⇒ 红不红由**注入与否**决定，字体只是把分叉暴露出来的放大镜；`BODY_FONT` 恰好让两套
+    // 口径撞在一起，所以这个夹具缺陷一直藏着没说话。
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    core.borrow_mut().refresh_visible_row_layouts(font);
     // 夹具自证：这一行必须真的折出 ≥3 段，且记下末段的起始列
     let segs = core.borrow().line_visual_segments(0);
     assert!(
@@ -5421,22 +5438,20 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
         "夹具失效：末段起始列为 {last_seg_start}，与首段无法区分"
     );
 
-    // 画一帧（含两次前置预热帧），返回像素缓冲
+    // 画一帧（含三次前置预热帧），返回像素缓冲
     //
-    // ⚠️ 这里**故意**继续用 `BODY_FONT`，别顺手改成显式族名：本轮试过，改成
-    // `Family::Name("NSimSun")` 之后本用例从"偶发红"变成**恒红**在
-    // `续段命中左缘 x=310 与首段 x=46 相差 >3px`——也就是说"续行按段首左缘起排"
-    // 这条断言目前只在 BODY_FONT 实际解析到的那个族下成立。那是另一条更尖的线索
-    // （字体相关？还是段映射相关？），已单独记进 §2/日档，要修得另开一轮，
-    // 不是在本用例里换个字体就能收的。
+    // P295：字体改用**显式族名**（第 160 轮给跨帧像素比对立的规矩：`BODY_FONT` 是个
+    // 通用族描述，实际解析到谁由 P33 那次进程级一次性钉字决定，落在两帧之间就整版错位）。
+    // 第 203 轮换字体后本用例恒红，怀疑的不是字体而是**夹具读的是列模型断点**——
+    // 上面已按生产口径先注入行字形位置再读表，这里才敢用显式族名。
     let frame = |hits: Vec<editpad_core::MatchPos>| -> Vec<u8> {
         core.borrow_mut().find_hl = hits;
         let mut view = EditorView {
             core: core.clone(),
-            font: BODY_FONT,
+            font,
             zoom_accum: 0.0,
         };
-        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut renderer = iced::Renderer::new(font, Pixels(16.0));
         let mut tree = Tree::empty();
         let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
         let node = view.layout(&mut tree, &renderer, &limits);
