@@ -138,6 +138,23 @@ impl Editpad {
                     self.update(Message::Edit(EditOp::InsertText(text)))
                 }
             }
+            // ---------- 正文右键菜单（P308） ----------
+            Message::EditorContextMenu(x, y) => {
+                // 与标签右键菜单互斥：同一时刻只允许一个浮层菜单在场，
+                // 否则两层背板互相吞事件
+                self.tab_context_menu = None;
+                self.menu_anchor = (x, y);
+                self.editor_context_menu = true;
+                Task::none()
+            }
+            Message::EditorContextMenuClosed => {
+                self.editor_context_menu = false;
+                Task::none()
+            }
+            Message::EditorCtxCommand(inner) => {
+                self.editor_context_menu = false;
+                self.update(*inner)
+            }
             // ---------- 按键分发与热键捕获（P62） ----------
             Message::KeyPressed(key, modifiers) => {
                 // 热键捕获态拦截：Esc 直接取消（简单状态清除，无需消息

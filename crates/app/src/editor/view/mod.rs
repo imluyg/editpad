@@ -2757,9 +2757,25 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     }
                 }
             }
-            // P135：非左键按下取消拖拽会话（右键菜单/中键不与拖拽并存）
-            iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => {
-                self.core.borrow_mut().cancel_dnd();
+            // P135：非左键按下取消拖拽会话（右键菜单/中键不与拖拽并存）。
+            // P308：右键同时就地弹正文上下文菜单——锚点用窗口系绝对坐标，
+            // 与标签右键菜单同一套钳制逻辑。
+            iced::Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                let right = matches!(*button, mouse::Button::Right);
+                {
+                    let mut core = self.core.borrow_mut();
+                    core.cancel_dnd();
+                    // 右键落在正文上 = 正文是要操作的对象（焦点随之归属）
+                    if right {
+                        core.pointer_focus(cursor.position_over(bounds).is_some());
+                    }
+                }
+                if right && cursor.position_over(bounds).is_some() {
+                    if let Some(p) = cursor.position() {
+                        shell.publish(crate::Message::EditorContextMenu(p.x, p.y));
+                        shell.capture_event();
+                    }
+                }
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if !cursor.is_over(bounds) {

@@ -262,6 +262,14 @@ enum Message {
     /// （换行归一由 insert_str 按文档主导行尾完成，P9 起不再在 app 层预处理）
     Pasted(String),
 
+    /// P308：正文右键菜单——载荷 = 打开瞬间的指针位置（窗口系坐标）
+    EditorContextMenu(f32, f32),
+    /// P308：收起正文右键菜单（点菜单外 / Esc / 切页）
+    EditorContextMenuClosed,
+    /// P308：菜单项动作——先收起自己再转交内层消息
+    /// （菜单项因此不必各自记一份「收起」）
+    EditorCtxCommand(Box<Message>),
+
     OpenRequested,
     FileChosen(Option<PathBuf>),
     /// 后台加载进度：(任务 id, 已读字节, 总字节)

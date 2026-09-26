@@ -278,6 +278,8 @@ impl Editpad {
                     // P39：浮层锚点 = 打开那一刻的指针位置（标签条 mouse_area 跟踪）
                     self.menu_anchor = self.cursor_pos;
                     self.tab_context_menu = Some(i);
+                    // P308：正文右键菜单同锚点，两类菜单不同屏
+                    self.editor_context_menu = false;
                 }
                 Task::none()
             }

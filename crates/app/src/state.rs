@@ -268,6 +268,9 @@ pub(crate) struct Editpad {
     // ---------- 标签右键菜单（P28） ----------
     /// Some(idx) = 正在展示第 idx 个标签页的右键菜单
     pub(crate) tab_context_menu: Option<usize>,
+    /// P308：正文右键菜单是否展示中（与标签右键菜单互斥，同一时刻只有一个
+    /// 浮层菜单；锚点共用 [`Self::menu_anchor`]）
+    pub(crate) editor_context_menu: bool,
     // ---------- 浮层弹窗定位（P39/P40） ----------
     /// 右键菜单锚点（窗口系坐标）：打开菜单那一刻的指针位置
     pub(crate) menu_anchor: (f32, f32),
@@ -448,6 +451,8 @@ impl Default for Editpad {
             open_confirm: None,
             close_tab_confirm: None,
             tab_context_menu: None,
+            // P308：正文右键菜单默认收起
+            editor_context_menu: false,
             // P39/P40：浮层定位初值——锚点给一个可见的保守位置，
             // 尺寸未知 (0,0) = 贴边钳制跳过（启动后首个 Resized 事件校准）
             menu_anchor: (24.0, 56.0),

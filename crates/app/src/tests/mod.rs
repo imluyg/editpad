@@ -189,6 +189,8 @@ mod view_tree;
 pub(crate) use view_tree::ViewTree;
 
 mod chrome;
+// P308：正文右键菜单 + P307 连击选择的视图树接线核对
+mod ctx_menu;
 mod editor;
 mod file;
 mod find;

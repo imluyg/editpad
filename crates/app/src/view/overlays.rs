@@ -6,6 +6,30 @@
 use super::*;
 use iced::widget::column;
 
+/// P155：菜单项文案组装——「（✓ ）<当前语言的主标签>  <键位提示>」。
+///
+/// 键位提示（`Ctrl+S` 之类）是**快捷键字面量**，不随界面语言变化，
+/// 故与翻译无关；勾选前缀按开关态决定。抽出这一处是为了让菜单项
+/// 在两种语言下排版一致（标签与键位之间恒为两个空格）。
+/// P308 起菜单栏与正文右键菜单共用。
+fn item_label(
+    lang: editpad_core::Lang,
+    key: editpad_core::Key,
+    checked: bool,
+    combo: Option<&str>,
+) -> String {
+    let mut s = String::with_capacity(48);
+    if checked {
+        s.push_str("✓ ");
+    }
+    s.push_str(key.text(lang));
+    if let Some(combo) = combo {
+        s.push_str("  ");
+        s.push_str(combo);
+    }
+    s
+}
+
 impl Editpad {
     /// P39：标签右键菜单浮层——整窗透明背板（点击即收起）+ 锚在指针
     /// 位置、贴边钳制后的菜单卡片。opaque 双层防穿透：背板捕获菜单外
@@ -46,6 +70,150 @@ impl Editpad {
         .on_right_press(Message::TabContextMenuClosed)
         .into()
     }
+    /// P308：正文右键菜单浮层——背板、锚点钳制、卡片样式与标签右键菜单
+    /// 完全同款（同一套 `menu_anchor` / `clamp_menu_anchor` / 高度适配）。
+    pub(super) fn editor_context_menu_overlay(&self) -> Element<'_, Message> {
+        let vh = self.viewport_size.1;
+        let card_h = ctx_menu_card_h(vh);
+        let (ax, ay) = clamp_menu_anchor(self.menu_anchor, self.viewport_size, CTX_MENU_W, card_h);
+        let card = opaque(
+            container(
+                scrollable(self.editor_context_panel())
+                    .height(card_h)
+                    .width(CTX_MENU_W),
+            )
+            .padding(4)
+            .style(popup_card_style),
+        );
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(Padding {
+                    top: ay,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: ax,
+                }),
+        )
+        .on_press(Message::EditorContextMenuClosed)
+        .on_right_press(Message::EditorContextMenuClosed)
+        .into()
+    }
+
+    /// P308：正文右键菜单面板。菜单项一律经 [`Message::EditorCtxCommand`]
+    /// 转交**既有**消息（零新编辑逻辑），守卫口径与菜单栏一致：
+    /// busy 时全灰，只读页只留纯读取与导航项。文案全部复用既有语言键
+    /// （`Menu*` 与 `Hk*` 两族），不新增 i18n 条目。
+    pub(super) fn editor_context_panel(&self) -> Element<'_, Message> {
+        use editpad_core::Key as K;
+        let uipx = editor::ui_font_px();
+        let uifont = self.ui_font();
+        let lang = self.lang();
+        let interactive = !self.busy;
+        // 只读页：改内容与撤销/重做一律拒收（与 Ctrl+R 的拒绝口径一致）
+        let writable = interactive && !self.cur_handle.borrow().read_only;
+        let named = self.tab().path.is_some();
+        let item = |label: K, combo: Option<&str>, msg: Option<Message>| {
+            button(
+                container(
+                    text(item_label(lang, label, false, combo))
+                        .size(uipx)
+                        .font(uifont),
+                )
+                .width(Fill),
+            )
+            .width(Fill)
+            .padding([5, 10])
+            .style(chrome_menu_item_style)
+            .on_press_maybe(msg)
+        };
+        // 菜单项 = 「收起自身 + 转交」，故每项只需包一层
+        let cmd = |msg: Message| Some(Message::EditorCtxCommand(Box::new(msg)));
+        let edit = |op: crate::editor::EditOp| cmd(Message::Edit(op));
+        column![
+            item(
+                K::MenuUndo,
+                Some("Ctrl+Z"),
+                edit(EditOp::Undo).filter(|_| writable)
+            ),
+            item(
+                K::MenuRedo,
+                Some("Ctrl+Y"),
+                edit(EditOp::Redo).filter(|_| writable)
+            ),
+            rule::horizontal(1),
+            item(
+                K::MenuCut,
+                Some("Ctrl+X"),
+                cmd(Message::CutRequested).filter(|_| writable)
+            ),
+            item(
+                K::MenuCopy,
+                Some("Ctrl+C"),
+                cmd(Message::CopyRequested).filter(|_| interactive)
+            ),
+            item(
+                K::MenuPaste,
+                Some("Ctrl+V"),
+                cmd(Message::PasteRequested).filter(|_| writable)
+            ),
+            item(
+                K::MenuSelectAll,
+                Some("Ctrl+A"),
+                edit(EditOp::SelectAll).filter(|_| interactive)
+            ),
+            rule::horizontal(1),
+            item(
+                K::HkDelLine,
+                Some("Ctrl+L"),
+                edit(EditOp::DeleteLines).filter(|_| writable)
+            ),
+            item(
+                K::HkDupLine,
+                Some("Ctrl+D"),
+                edit(EditOp::DuplicateLines).filter(|_| writable)
+            ),
+            item(
+                K::MenuToggleComment,
+                Some("Ctrl+Q"),
+                edit(EditOp::ToggleLineComment).filter(|_| writable)
+            ),
+            item(
+                K::HkBookmarkToggle,
+                Some("Ctrl+F2"),
+                edit(EditOp::ToggleBookmark).filter(|_| interactive)
+            ),
+            rule::horizontal(1),
+            item(
+                K::MenuFind,
+                Some("Ctrl+F"),
+                cmd(Message::FindToggled).filter(|_| interactive)
+            ),
+            item(
+                K::MenuGoto,
+                Some("Ctrl+G"),
+                cmd(Message::GotoToggled).filter(|_| interactive)
+            ),
+            item(
+                K::FifTitle,
+                Some("F12"),
+                cmd(Message::FindInFilesToggled).filter(|_| interactive)
+            ),
+            rule::horizontal(1),
+            item(
+                K::TabCopyPath,
+                None,
+                cmd(Message::CopyFilePath(None)).filter(|_| interactive && named)
+            ),
+        ]
+        .spacing(2)
+        .padding([4, 6])
+        .into()
+    }
+
     /// 菜单栏浮层：整窗透明背板 + 锚在触发按钮槽位下方的卡片。
     ///
     /// 第 70 轮修订（用户反馈「弹窗会移动」）：
@@ -98,28 +266,7 @@ impl Editpad {
                 .style(chrome_menu_item_style)
                 .on_press_maybe(msg)
         };
-        // P155：菜单项文案组装——「（✓ ）<当前语言的主标签>  <键位提示>」。
-        //
-        // 键位提示（`Ctrl+S` 之类）是**快捷键字面量**，不随界面语言变化，
-        // 故与翻译无关；勾选前缀按开关态决定。抽出这一处是为了让菜单项
-        // 在两种语言下排版一致（标签与键位之间恒为两个空格）。
-        fn item_label(
-            lang: editpad_core::Lang,
-            key: editpad_core::Key,
-            checked: bool,
-            combo: Option<&str>,
-        ) -> String {
-            let mut s = String::with_capacity(48);
-            if checked {
-                s.push_str("✓ ");
-            }
-            s.push_str(key.text(lang));
-            if let Some(combo) = combo {
-                s.push_str("  ");
-                s.push_str(combo);
-            }
-            s
-        }
+        // P155：菜单项文案组装见 [`item_label`]（P308 起正文右键菜单共用）。
         let lang = self.lang();
         let sep = || rule::horizontal(1);
         let is_markdown =

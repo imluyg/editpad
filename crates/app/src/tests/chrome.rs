@@ -24,6 +24,7 @@ fn esc_dismisses_every_transient_prompt() {
     app.pending_fif_goto = Some((0, 0, 0));
     app.close_tab_confirm = Some(id0);
     app.tab_context_menu = Some(0);
+    app.editor_context_menu = true;
     app.batch_close_confirm = Some(vec![id0]);
     app.menu_bar_open = Some(1);
     app.external_change = Some(vec![id0]);
@@ -81,6 +82,7 @@ fn esc_dismisses_every_transient_prompt() {
     assert_eq!(app.pending_fif_goto, None, "悬挂的 FIF 跳行意图一并作废");
     assert_eq!(app.close_tab_confirm, None, "单页关闭确认");
     assert_eq!(app.tab_context_menu, None, "标签右键菜单");
+    assert!(!app.editor_context_menu, "正文右键菜单（P308）");
     assert_eq!(app.batch_close_confirm, None, "批量关闭确认");
     assert_eq!(app.menu_bar_open, None, "顶部菜单栏浮层");
     assert_eq!(app.external_change, None, "外部修改提示条");

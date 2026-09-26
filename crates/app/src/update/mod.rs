@@ -493,6 +493,10 @@ impl Editpad {
             | Message::PreviewToggled
             | Message::CursorMoved(..)
             | Message::EditorBodyPressed
+            // P308：正文右键菜单（开关 + 菜单项转交，转交后仍回本函数分发）
+            | Message::EditorContextMenu(..)
+            | Message::EditorContextMenuClosed
+            | Message::EditorCtxCommand(..)
             | Message::ViewportResized(..) => self.update_editor(message),
             // ---------- 标签页/右键菜单/批关 ----------
             Message::OpenContainingFolder
@@ -760,6 +764,8 @@ impl Editpad {
         self.close_tab_confirm = None;
         // P28：Esc 同时收起右键菜单与批量关闭确认
         self.tab_context_menu = None;
+        // P308：正文右键菜单同一条收起出口
+        self.editor_context_menu = false;
         self.batch_close_confirm = None;
         // 第 69 轮：Esc 同时收起顶部菜单栏浮层
         self.menu_bar_open = None;

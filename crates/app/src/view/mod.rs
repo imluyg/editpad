@@ -872,6 +872,10 @@ impl Editpad {
                 layered = layered.push(self.context_menu_overlay(idx));
             }
         }
+        // P308：正文右键菜单（在查找卡片/设置弹窗之下——它们仍可在其上操作）
+        if self.editor_context_menu {
+            layered = layered.push(self.editor_context_menu_overlay());
+        }
         // P150：查找/替换轻浮层（居中定宽、无背板、可继续编辑；Esc/× 关闭）
         if self.find_visible {
             layered = layered.push(self.find_overlay(uipx, uifont));
