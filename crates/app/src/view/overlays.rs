@@ -116,6 +116,7 @@ impl Editpad {
         // 只读页：改内容与撤销/重做一律拒收（与 Ctrl+R 的拒绝口径一致）
         let writable = interactive && !self.cur_handle.borrow().read_only;
         let named = self.tab().path.is_some();
+        let hits = self.cur_handle.borrow().has_find_hits();
         let item = |label: K, combo: Option<&str>, msg: Option<Message>| {
             button(
                 container(
@@ -202,6 +203,18 @@ impl Editpad {
                 Some("F12"),
                 cmd(Message::FindInFilesToggled).filter(|_| interactive)
             ),
+            // P310（A6）：命中↔书签联动。只在有命中时放行（否则点了只会
+            // 得到一句「当前没有查找命中」，不如直接灰掉）
+            item(
+                K::MenuMarkHitLines,
+                None,
+                edit(EditOp::MarkHitLinesAsBookmarks).filter(|_| interactive && hits)
+            ),
+            item(
+                K::MenuCopyHitLines,
+                None,
+                edit(EditOp::CopyHitLines).filter(|_| interactive && hits)
+            ),
             rule::horizontal(1),
             item(
                 K::TabCopyPath,
@@ -271,6 +284,8 @@ impl Editpad {
         let sep = || rule::horizontal(1);
         let is_markdown =
             self.cur_handle.borrow().highlight_syntax_name().as_deref() == Some("Markdown");
+        // P310：命中↔书签两条菜单项的放行判据
+        let hits = self.cur_handle.borrow().has_find_hits();
         let mut panel = column![].spacing(2).padding([4, 6]);
         match idx {
             // ---------- 文件 ----------
@@ -353,6 +368,16 @@ impl Editpad {
                     .push(item(
                         item_label(lang, editpad_core::Key::MenuGoto, false, Some("Ctrl+G")),
                         interactive.then_some(Message::GotoToggled),
+                    ))
+                    // P310（A6）：命中↔书签联动，无命中时灰掉
+                    .push(item(
+                        item_label(lang, editpad_core::Key::MenuMarkHitLines, false, None),
+                        (interactive && hits)
+                            .then_some(Message::Edit(EditOp::MarkHitLinesAsBookmarks)),
+                    ))
+                    .push(item(
+                        item_label(lang, editpad_core::Key::MenuCopyHitLines, false, None),
+                        (interactive && hits).then_some(Message::Edit(EditOp::CopyHitLines)),
                     ))
                     .push(sep())
                     .push(item(

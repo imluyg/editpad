@@ -23,6 +23,46 @@ impl Editpad {
                     None => Task::none(),
                 }
             }
+            // P310（路线图 A6）：命中行 ↔ 书签联动。两条都是只读操作
+            //（书签是可回滚标注，不动正文），故与 CopyBookmarkedLines 同款
+            // 在消息层前置拦截——apply_edit 只返回 bool，带不出「新增几条」
+            // 与剪贴板 Task。
+            Message::Edit(EditOp::MarkHitLinesAsBookmarks) => {
+                use editpad_core::Key as K;
+                if self.active_load.is_some() {
+                    return Task::none();
+                }
+                let mut ed = self.cur_handle.borrow_mut();
+                let none = ed.find_hl.is_empty();
+                let n = ed.mark_hit_lines_as_bookmarks();
+                drop(ed);
+                if none {
+                    self.set_status_error(self.t(K::StNoFindHits).to_owned());
+                } else if n == 0 {
+                    self.set_status(self.t(K::StHitsAlreadyMarked).to_owned());
+                } else {
+                    self.set_status(format!("{} {n}", self.t(K::StHitsMarkedPrefix)));
+                }
+                Task::none()
+            }
+            Message::Edit(EditOp::CopyHitLines) => {
+                use editpad_core::Key as K;
+                if self.active_load.is_some() {
+                    return Task::none();
+                }
+                let text = self.cur_handle.borrow().copy_hit_lines_text();
+                match text {
+                    Some(text) => {
+                        let n = text.matches('\n').count();
+                        self.set_status(format!("{} {n}", self.t(K::StHitsCopiedPrefix)));
+                        iced::clipboard::write(text)
+                    }
+                    None => {
+                        self.set_status_error(self.t(K::StNoFindHits).to_owned());
+                        Task::none()
+                    }
+                }
+            }
             Message::Edit(op) => {
                 let changed = self.apply_edit(op);
                 let mut tasks: Vec<Task<Message>> = Vec::new();
@@ -598,6 +638,8 @@ impl Editpad {
             // 复制标记行在消息层前置拦截（apply_edit 只返回 bool，带不出
             // 剪贴板 Task）；本分支仅为 match 穷尽性兜底，正常路径不可达
             E::CopyBookmarkedLines => false,
+            // P310 两条同款：正常路径由消息层拦截（要带「新增几条」与剪贴板）
+            E::MarkHitLinesAsBookmarks | E::CopyHitLines => false,
             // ---------- 括号匹配（第 61 轮） ----------
             // 纯光标移动：恒返回 false（不置脏），失败给状态栏提示
             E::JumpToMatchingBracket => {

@@ -194,6 +194,8 @@ mod ctx_menu;
 mod editor;
 mod file;
 mod find;
+// P310（A6）：查找命中 ↔ 书签联动的应用层核对
+mod hits;
 mod robustness;
 mod session;
 mod settings;

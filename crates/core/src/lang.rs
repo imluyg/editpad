@@ -199,6 +199,8 @@ key_table! {
     { MenuSelectAll => "全选", "Select All" },
     { MenuFind => "查找/替换栏", "Find/Replace Bar" },
     { MenuGoto => "跳转到行", "Go to Line" },
+    { MenuMarkHitLines => "把命中行标为书签", "Bookmark the Hit Lines" },
+    { MenuCopyHitLines => "复制全部命中行", "Copy All Hit Lines" },
     { MenuInsertDateTime => "插入日期时间", "Insert Date and Time" },
     { MenuToggleComment => "切换行注释", "Toggle Line Comment" },
     { MenuColumnEditor => "列编辑器…", "Column Editor…" },
@@ -427,6 +429,12 @@ key_table! {
     { StCancelledAutoClose => "保存后又有新改动，已取消自动关闭", "New edits arrived after saving; auto-close was cancelled" },
     { StRecentMissing => "文件不存在或已被移动：", "File does not exist or was moved: " },
     { StRecentsCleared => "已清空最近文件记录", "Recent files cleared" },
+    // P310（路线图 A6）：查找命中 ↔ 书签联动的状态提示。带计数的那两条
+    // 刻意把数字留在句尾（与 StFifTruncatedPrefix 同形，两种语言语序都通）
+    { StHitsMarkedPrefix => "命中行已标为书签，新增", "Hit lines bookmarked, added" },
+    { StHitsAlreadyMarked => "命中行已在书签里", "The hit lines are already bookmarked" },
+    { StHitsCopiedPrefix => "已复制命中行，共", "Hit lines copied, total" },
+    { StNoFindHits => "当前没有查找命中（先按 Ctrl+F 搜一次）", "No current find hits (search with Ctrl+F first)" },
     { StFullscreenOn => "已进入全屏（F11 退出；全屏期间不记忆窗口几何）", "Entered full screen (F11 to exit; window geometry is not remembered while full screen)" },
     { StFullscreenOff => "已退出全屏", "Exited full screen" },
     { StAlwaysOnTopOn => "窗口已置顶（F9 取消）", "Window pinned on top (F9 to cancel)" },

@@ -1734,6 +1734,11 @@ fn edit_op_mutates_classification_is_failsafe() {
     assert!(!crate::update::edit_op_mutates(&EditOp::CancelBlock));
     // B10：添加下一匹配只动光标集，不改文档（只读页放行）
     assert!(!crate::update::edit_op_mutates(&EditOp::AddNextMatch));
+    // P310（A6）：命中→书签是标注、复制命中行是纯读取 ⇒ 同族放行
+    assert!(!crate::update::edit_op_mutates(
+        &EditOp::MarkHitLinesAsBookmarks
+    ));
+    assert!(!crate::update::edit_op_mutates(&EditOp::CopyHitLines));
 }
 
 #[test]

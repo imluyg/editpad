@@ -1107,6 +1107,10 @@ pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
             | EditOp::BookmarkPrev
             | EditOp::BookmarksClearAll
             | EditOp::CopyBookmarkedLines
+            // P310（A6）：命中→书签是标注（与 ToggleBookmark 同族）、
+            // 复制命中行是纯读取 ⇒ 只读页同样放行
+            | EditOp::MarkHitLinesAsBookmarks
+            | EditOp::CopyHitLines
             | EditOp::JumpToMatchingBracket
             | EditOp::CancelBlock
             // B10：添加下一匹配只动光标集，不改文档（只读页可用）

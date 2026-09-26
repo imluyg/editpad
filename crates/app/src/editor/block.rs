@@ -1207,6 +1207,63 @@ impl EditorCore {
         true
     }
 
+    /// 当前是否有查找命中（菜单项是否放行判据；命中表随扫描/切页作废）。
+    pub fn has_find_hits(&self) -> bool {
+        !self.find_hl.is_empty()
+    }
+
+    /// 当前查找命中所在的行（去重升序，且**过滤掉不在本文档行域内的行号**）。
+    ///
+    /// 过滤不是防御性冗余：命中表是后台扫描的产物，正文可能已被动过，
+    /// 悬空行号一旦被写进书签集，跳转与渲染就得替它兜底（[`Self::hit_lines`]
+    /// 是这两条路径共同的唯一数据源，收在这里判一次）。
+    pub(crate) fn hit_lines(&self) -> Vec<usize> {
+        let count = self.doc.line_count();
+        let mut lines: Vec<usize> = self
+            .find_hl
+            .hits()
+            .iter()
+            .map(|h| h.line)
+            .filter(|&l| l < count)
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+
+    /// P310（路线图 A6）：把当前查找命中的所在行全部标成书签。
+    /// 返回新增条数；0（无命中 / 全部已带书签）= 幂等 no-op，不入撤销栈。
+    pub fn mark_hit_lines_as_bookmarks(&mut self) -> usize {
+        let fresh: Vec<usize> = self
+            .hit_lines()
+            .into_iter()
+            .filter(|l| !self.bookmarks.contains(l))
+            .collect();
+        if fresh.is_empty() {
+            return 0;
+        }
+        self.snapshot();
+        let n = fresh.len();
+        self.bookmarks.extend(fresh);
+        n
+    }
+
+    /// P310：全部命中行的文本（升序去重、按文档主导行尾连接）；无命中 ⇒ None。
+    /// 与 [`Self::copy_bookmarked_lines`] 同款：只读，不改文档不置脏。
+    pub fn copy_hit_lines_text(&self) -> Option<String> {
+        let lines = self.hit_lines();
+        if lines.is_empty() {
+            return None;
+        }
+        let nl = self.doc.line_ending().newline();
+        let mut out = String::new();
+        for l in lines {
+            out.push_str(&self.line_body_without_eol(l));
+            out.push_str(nl);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     /// 下一个/上一个书签的行号（[`Self::next_bookmark`] 的纯查询半边）：
     /// 光标之后（前）最近者；没有更近的就回绕到第一个（最后一个）。
     pub(crate) fn next_bookmark_line(&self, forward: bool) -> Option<usize> {

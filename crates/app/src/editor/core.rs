@@ -202,6 +202,13 @@ pub enum EditOp {
     RemoveBookmarkedLines,
     /// 复制全部标记行到剪贴板（不改文档、不置脏）
     CopyBookmarkedLines,
+    // ---------- P310（路线图 A6）：查找命中 ↔ 书签联动 ----------
+    /// 把当前查找命中的**所在行**全部标成书签（去重；不改正文、不置脏）。
+    /// 执行体 EditorCore::mark_hit_lines_as_bookmarks，返回的新增条数由消息层取
+    MarkHitLinesAsBookmarks,
+    /// 复制全部命中行的文本（升序去重；不改文档、不置脏）。
+    /// 与 CopyBookmarkedLines 同款在消息层前置拦截，apply_edit 分支仅兜底
+    CopyHitLines,
     // ---------- 括号匹配（第 61 轮） ----------
     /// 跳到配对括号的另一侧（光标须邻接括号；纯光标移动不产快照）
     JumpToMatchingBracket,
@@ -1835,6 +1842,7 @@ mod block_tests;
 #[cfg(test)]
 #[path = "click_tests.rs"]
 mod click_tests;
+// P310（A6）：查找命中 ↔ 书签联动
 #[cfg(test)]
 #[path = "cursors_tests.rs"]
 mod cursors_tests;
@@ -1844,6 +1852,9 @@ mod edit_tests;
 #[cfg(test)]
 #[path = "highlight_tests.rs"]
 mod highlight_tests;
+#[cfg(test)]
+#[path = "hits_tests.rs"]
+mod hits_tests;
 #[cfg(test)]
 #[path = "motion_tests.rs"]
 mod motion_tests;
