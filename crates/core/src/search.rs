@@ -1105,6 +1105,76 @@ mod tests {
         assert!(!ascii_case_eq('中', '文', false));
     }
 
+    /// 第 208 轮 L-15：这张命中表是否"按行升序、且同行内按列不重叠"。
+    /// 这正是 app 层 `FindHitTable::windowable` 用的那条判据——P296 的绘制窗口与
+    /// P297 的刻度跳扫都挂在它上面，判据为假时两处都**静默**退回整表线性扫。
+    fn windowable(t: &[MatchPos]) -> bool {
+        t.windows(2).all(|w| {
+            w[0].line <= w[1].line
+                && (w[0].line != w[1].line || w[0].col + w[0].len_chars <= w[1].col)
+        })
+    }
+
+    /// L-15 的现量结论：**每个**命中表生产者的输出都满足 `windowable`。
+    ///
+    /// 逐个生产者过一遍（含三条最容易出乱序的形状：同行多命中、跨行查询、
+    /// 混合行尾 CRLF/LF/CR），并在报告里留下各自的命中数——"生产侧天然升序"
+    /// 这句话此前只是眼力判断。
+    #[test]
+    fn p299_every_hit_producer_keeps_scan_order() {
+        // 每行 "abc" 出现 3 次（同行多命中），共 5 行，行尾故意混着 CRLF/LF/CR
+        let mut text = String::new();
+        for i in 0..5 {
+            text.push_str(&format!("row{i} abc deb abc xyz abc"));
+            text.push_str(match i % 3 {
+                0 => "\r\n",
+                1 => "\n",
+                _ => "\r",
+            });
+        }
+        let doc = Document::from_str(&text);
+
+        let cases: Vec<(&str, Vec<MatchPos>)> = vec![
+            ("find_all(同行多命中)", find_all(&text, "abc", true)),
+            ("find_all(忽略大小写)", find_all(&text, "ABC", false)),
+            ("find_all(跨行查询)", find_all(&text, "abc\nrow1", true)),
+            ("find_all_limited", find_all_limited(&text, "abc", true, 6)),
+            ("find_all_document", find_all_document(&doc, "abc", true)),
+            (
+                "find_all_document(跨行查询)",
+                find_all_document(&doc, "abc\r\nrow1", true),
+            ),
+            (
+                "filter_whole_word",
+                filter_whole_word(&doc, find_all_document(&doc, "abc", true)),
+            ),
+            (
+                "find_all_regex",
+                find_all_regex(&text, "a(b|b)c", true).unwrap(),
+            ),
+            (
+                "find_all_regex(跨行模式)",
+                find_all_regex(&text, "abc\\s+deb", true).unwrap(),
+            ),
+            (
+                "find_all_regex(空匹配)",
+                find_all_regex(&text, "x*", true).unwrap(),
+            ),
+        ];
+        for (name, hits) in &cases {
+            eprintln!(
+                "[L-15] {name}: {} 条命中，windowable={}",
+                hits.len(),
+                windowable(hits)
+            );
+            assert!(!hits.is_empty(), "{name} 这一格夹具没产出命中，等于没测");
+            assert!(
+                windowable(hits),
+                "{name} 产出的命中表不满足「按行升序＋同行不重叠」——app 层两处快速路径会静默退回线性扫"
+            );
+        }
+    }
+
     #[test]
     fn find_all_basic_and_case_folding() {
         let text = "ab AB ab\nbaba\n";

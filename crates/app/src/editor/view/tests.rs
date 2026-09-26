@@ -2209,6 +2209,57 @@ fn p296_find_hit_starting_above_the_viewport_is_still_examined() {
     );
 }
 
+/// 第 208 轮 L-15：**后果**守卫。core 侧那条（`p299_every_hit_producer_keeps_scan_order`）
+/// 守的是"每个命中表生产者都按扫描序输出"这条前提；这里守前提破了会怎样——
+/// P296 的绘制窗口与 P297 的刻度跳扫都挂在 `windowable` 上，为假时两处**静默**退回
+/// 整表线性扫（不会有任何报错）。所以用**真实生产者**（rope 流式扫描）产出的表走一遍
+/// 应用层边界，断窗口与跳扫确实生效。
+#[test]
+fn p299_scanned_hit_table_engages_the_window_and_the_mark_skip() {
+    let text: String = (0..5_000).map(|i| format!("row-{i:04} abc\n")).collect();
+    let doc = editpad_core::Document::from_str(&text);
+    let hits = editpad_core::find_all_document(&doc, "abc", true);
+    assert_eq!(hits.len(), 5_000, "夹具自检：真实扫描每行一条命中");
+
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(doc);
+        c.set_find_highlights(hits);
+    }
+    let (lo, hi) = {
+        let c = core.borrow();
+        assert!(
+            c.find_hl.windowable(),
+            "真实扫描的命中表不满足 windowable ⇒ P296/P297 两处快速路径静默退回线性扫"
+        );
+        c.find_hit_window(2_000, 2_015)
+    };
+    eprintln!(
+        "[L-15] 真实扫描 5 000 条命中 ⇒ 绘制窗口 [{lo},{hi}) 共 {} 条",
+        hi - lo
+    );
+    assert!(
+        hi - lo <= 24,
+        "视口 16 行只该取到二十来条候选，实测 {} 条 ⇒ 窗口没吃到有序表的红利",
+        hi - lo
+    );
+
+    core.borrow_mut().take_visual_row_calls();
+    let marks = core.borrow().scrollbar_hit_marks();
+    let calls = core.borrow().take_visual_row_calls();
+    eprintln!(
+        "[L-15] 同一张表 ⇒ 刻度跳扫换算 {calls} 次 / 产出 {} 颗",
+        marks.len()
+    );
+    assert_eq!(marks.len(), 1_000, "夹具自检：这一档该被刻度封顶截住");
+    assert!(
+        calls <= marks.len() * 2 + 4,
+        "换算 {calls} 次远超刻度数 {} ⇒ 跳扫没生效",
+        marks.len()
+    );
+}
+
 /// P278 护栏：缩进参考线一圈**不许整行取串**。同一份带行首缩进的夹具、同一
 /// 个视口，只切参考线这一个开关，两帧的整行取串次数必须相同。
 ///
