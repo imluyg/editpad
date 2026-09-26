@@ -144,7 +144,7 @@ With a selection only the touched lines are processed; without one the operation
 | Ctrl+Shift+A | "Find All" ("查找全部") results panel (line:col + line excerpt, click to jump; huge result sets show only the first 500) |
 | Ctrl+G | Go to line (accepts `line:column`; column optional, full-width colon works, out-of-range clamps to the line end) |
 | Ctrl+Home / Ctrl+End | Go to start / end of document |
-| Home / End | Start / end of line (with soft wrap on: start / end of the current **visual** row) |
+| Home / End | Smart line start (toggles between the first non-blank and the real column 0; equals line start when there is no indent) / line end (with soft wrap on: start / end of the current **visual** row) |
 | Alt+Home / Alt+End | Start / end of the **logical** line (crosses wrapped segments; fixed semantics, not remappable) |
 | Ctrl+Shift+M | Jump to the other side of a matching bracket (works when the cursor is adjacent to `()` `[]` `{}`; both sides show an underline simultaneously) |
 | Ctrl+F2 / F2 / Shift+F2 | Toggle bookmark on current line / Next / Previous (wraps around at the edges; amber dot on the left of the line-number gutter) |

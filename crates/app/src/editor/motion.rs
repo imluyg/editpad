@@ -273,14 +273,29 @@ impl EditorCore {
                 self.goal_px = None;
                 // P134（路线图 C8）：软换行开态到**视觉行**首（主流
                 // wrapping-aware 口径）；关态恒等退化为逻辑行首
-                if self.wrap_enabled() {
+                let (line, seg_start, seg_end) = if self.wrap_enabled() {
                     let v = self.visual_row_of(self.cursor.line, self.cursor.col);
-                    let (line, _, seg_start, _) = self.locate_visual(v);
-                    self.cursor.line = line;
-                    self.cursor.col = seg_start;
+                    let (line, _, seg_start, seg_end) = self.locate_visual(v);
+                    (line, seg_start, seg_end)
                 } else {
-                    self.cursor.col = 0
-                }
+                    (self.cursor.line, 0, self.line_display_len(self.cursor.line))
+                };
+                // P311（智能 Home）：在「缩进后的第一个非空白」与「真行首」两档
+                // 之间切换（对标项目 A 的 Smart Home 口径）。判据**无状态**——只看
+                // 当前列落在哪一档，所以鼠标点一下再按 Home 不会有"上次按到哪"的
+                // 错觉；行首无缩进（或整行皆空白）时两档重合，落点与改前逐字相同。
+                // Alt+Home（LogicalHome）仍是"直达逻辑行首"，不受影响。
+                let indent = self
+                    .first_non_blank_col(line)
+                    .map(|i| i.clamp(seg_start, seg_end))
+                    .unwrap_or(seg_start);
+                let col = self.cursor.col;
+                self.cursor.line = line;
+                self.cursor.col = if col == seg_start || col > indent {
+                    indent
+                } else {
+                    seg_start
+                };
             }
             Motion::End => {
                 self.goal_px = None;
@@ -752,6 +767,21 @@ impl EditorCore {
         // 行尾并顺手物化整行——20 行 × 2 万字符的文档就是每帧两百万步整行扫描。
         // 口径与 `line_text(line).chars().count()` 逐字符等价（用例对拍钉住）。
         self.doc.line_body_len_chars(line)
+    }
+
+    /// 第 `line` 行「行首空白之后」的第一个非空白字符列（P311 智能 Home 的
+    /// 高档落点）。整行皆空白（或空行）⇒ `None`：这种行没有缩进可去，
+    /// 两档落点必须重合到行首，否则按 Home 会往**右**跑。
+    /// 走 `chars_from` 惰性取字符：`Home` 可能被连按，不整行物化。
+    pub(crate) fn first_non_blank_col(&self, line: usize) -> Option<usize> {
+        let start = self.doc.line_to_char(line);
+        let body = self.line_display_len(line);
+        for (i, c) in self.doc.chars_from(start).take(body).enumerate() {
+            if c != ' ' && c != '\t' {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// 软换行开关（设置项 word_wrap 下发）。

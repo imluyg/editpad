@@ -1855,6 +1855,10 @@ mod highlight_tests;
 #[cfg(test)]
 #[path = "hits_tests.rs"]
 mod hits_tests;
+// P311：智能 Home 的两档边界
+#[cfg(test)]
+#[path = "home_tests.rs"]
+mod home_tests;
 #[cfg(test)]
 #[path = "motion_tests.rs"]
 mod motion_tests;
