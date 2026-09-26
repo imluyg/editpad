@@ -902,6 +902,33 @@ pub fn invalidate_clip_mask_cache() {
 /// 用于事后复核"缓存到底省掉了多少整窗 memset"。测量口径见 `adjust_clip_mask_cached`
 /// 的头（同族门控探针先例是本文件里的 `EDITPAD_QUAD_LOG`）。
 #[track_caller]
+/// P288 快速路径的判据：**只有**四条边都恰好落在整数上、宽高非负、坐标有限时
+/// 接管，返回已经夹到掩码尺寸的行区间；其余一律 `None` ⇒ 原样交给上游。
+fn integral_rect(bounds: &Rectangle, mw: u32, mh: u32) -> Option<(usize, usize, usize, usize)> {
+    let (x0f, y0f) = (bounds.x, bounds.y);
+    let (x1f, y1f) = (bounds.x + bounds.width, bounds.y + bounds.height);
+    if !(x0f.is_finite() && y0f.is_finite() && x1f.is_finite() && y1f.is_finite()) {
+        return None;
+    }
+    if bounds.width < 0.0 || bounds.height < 0.0 {
+        return None;
+    }
+    if x0f.fract() != 0.0 || y0f.fract() != 0.0 || x1f.fract() != 0.0 || y1f.fract() != 0.0 {
+        return None;
+    }
+    let mw = mw as i64;
+    let mh = mh as i64;
+    let x0 = (x0f as i64).clamp(0, mw);
+    let x1 = (x1f as i64).clamp(0, mw);
+    let y0 = (y0f as i64).clamp(0, mh);
+    let y1 = (y1f as i64).clamp(0, mh);
+    if x1 <= x0 || y1 <= y0 {
+        // 与掩码无交集（或零面积）：上游也是"什么都不写"，掩码已被 clear 成全 0
+        return Some((0, 0, 0, 0));
+    }
+    Some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
+}
+
 pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
     if std::env::var_os("EDITPAD_CLIP_PROBE").is_some() {
         let loc = std::panic::Location::caller();
@@ -919,27 +946,44 @@ pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
     }
     clip_mask.clear();
 
-    let path = {
-        let mut builder = tiny_skia::PathBuilder::new();
-        builder.push_rect(
-            tiny_skia::Rect::from_xywh(
-                bounds.x,
-                bounds.y,
-                bounds.width,
-                bounds.height,
-            )
-            .unwrap(),
+    // P288：整数对齐矩形走**逐行 memset**。上游 `fill_path` 哪怕只画一张矩形，
+    // 也要 clone 路径 + 按 8K 瓦片切开 + 每片重建 blitter 跑一般扫描线：实测
+    // 700×500 掩码一次 1.5ms，一帧 4 次 ⇒ 6.1ms，占合成阶段（24ms）的 25%。
+    // 整数边下"像素中心"与"任意覆盖"两种判据重合，且非抗锯齿填充分子就是
+    // 255 ⇒ 逐行填 255 与改前逐字节相同。判据收窄到 [`integral_rect`]：非整边、
+    // 负宽高、NaN、超大坐标一律退回下面那条上游路径（连路径都不构建）。
+    if let Some((x0, y0, x1, y1)) = integral_rect(&bounds, clip_mask.width(), clip_mask.height()) {
+        if x1 > x0 && y1 > y0 {
+            let stride = clip_mask.width() as usize;
+            let run = x1 - x0;
+            for row in y0..y1 {
+                let s = row * stride + x0;
+                clip_mask.data_mut()[s..s + run].fill(u8::MAX);
+            }
+        }
+    } else {
+        let path = {
+            let mut builder = tiny_skia::PathBuilder::new();
+            builder.push_rect(
+                tiny_skia::Rect::from_xywh(
+                    bounds.x,
+                    bounds.y,
+                    bounds.width,
+                    bounds.height,
+                )
+                .unwrap(),
+            );
+
+            builder.finish().unwrap()
+        };
+
+        clip_mask.fill_path(
+            &path,
+            tiny_skia::FillRule::EvenOdd,
+            false,
+            tiny_skia::Transform::default(),
         );
-
-        builder.finish().unwrap()
-    };
-
-    clip_mask.fill_path(
-        &path,
-        tiny_skia::FillRule::EvenOdd,
-        false,
-        tiny_skia::Transform::default(),
-    );
+    }
 
     if let Some(key) = clip_mask_key(clip_mask, bounds) {
         CLIP_MASK_HELD.with(|c| *c.borrow_mut() = Some(key));

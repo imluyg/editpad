@@ -3,6 +3,7 @@
 pub mod window;
 
 mod engine;
+pub use engine::adjust_clip_mask;
 mod layer;
 mod primitive;
 mod settings;

@@ -2215,6 +2215,61 @@ fn p285_negative_glyph_cache_does_not_change_pixels() {
 /// 裁掉"的那些落笔**不在跳过范围内**。⇒ 本用例守得住"落笔判据写宽了把该画的字裁掉"
 /// （同帧拿 `set_blit_cull_for_test(false)` 当老口径逐像素对拍），**守不住**掩码那头的
 /// 浪费（那一头一行未改）。
+/// P288：整数对齐矩形走逐行 memset 快速路径，**必须与上游扫描线填充逐字一致**。
+///
+/// 为什么要这么 narrow：`adjust_clip_mask` 的"清空整张掩码 + 填一个矩形"在
+/// tiny-skia 0.11 里走的是一般路径——clone 路径、按 8K 瓦片切开、每片重建 blitter
+/// 再跑扫描线。实测 700×500 掩码一次 1.5ms、一帧 4 次 ⇒ 6.1ms，占合成阶段 25%。
+/// 快速路径只在**四条边都是整数、宽高非负、坐标有限**时接管；非整边 / 负宽高 /
+/// NaN / 超大坐标全部退回上游同一段代码，连路径都不构建。⇒ 判据边界由本用例
+/// 逐格钉住（含"完全在掩码外""单像素贴边""左上越界"这些容易被差一像素的格子）。
+///
+/// 快速路径真的被走到了吗？由性能读数佐证而不是由本用例断言：同一帧掩码重建
+/// 6110µs → 58µs（一次性仪表，仪表已撤）。本用例只管"走了以后一模一样"。
+#[test]
+fn p288_clip_mask_integral_rect_matches_scanline_fill() {
+    let (mw, mh) = (700u32, 500u32);
+    let rects: [(f32, f32, f32, f32); 12] = [
+        (0.0, 0.0, 700.0, 500.0),     // 整窗
+        (12.0, 30.0, 300.0, 100.0),   // 内部整数
+        (0.0, 0.0, 0.0, 0.0),         // 零面积（上游：空路径直接 return）
+        (350.0, 250.0, 0.0, 60.0),    // 零宽
+        (-40.0, -50.0, 200.0, 120.0), // 左上越界
+        (650.0, 470.0, 300.0, 200.0), // 右下越界
+        (699.0, 499.0, 1.0, 1.0),     // 单像素贴右下角
+        (700.0, 10.0, 50.0, 20.0),    // 完全在右外侧
+        (-100.0, 10.0, 50.0, 20.0),   // 完全在左外侧
+        (0.5, 0.5, 100.0, 50.0),      // 非整边 ⇒ 退回上游
+        (2.5, 3.0, 40.0, 20.0),       // 只有左边非整 ⇒ 也退回
+        (-0.25, 4.0, 60.0, 30.0),     // 负分数 ⇒ 退回
+    ];
+    for (x, y, w, h) in rects {
+        let bounds = Rectangle::new(Point::new(x, y), Size::new(w, h));
+        // 新：走 vendor 的快速路径分派
+        let mut fast = tiny_skia::Mask::new(mw, mh).expect("mask");
+        iced_tiny_skia::adjust_clip_mask(&mut fast, bounds);
+        // 参照：改前那段（clear + 非抗锯齿 EvenOdd 矩形填充）
+        let mut slow = tiny_skia::Mask::new(mw, mh).expect("mask");
+        slow.clear();
+        let path = {
+            let mut b = tiny_skia::PathBuilder::new();
+            b.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h).unwrap());
+            b.finish().unwrap()
+        };
+        slow.fill_path(
+            &path,
+            tiny_skia::FillRule::EvenOdd,
+            false,
+            tiny_skia::Transform::default(),
+        );
+        assert_eq!(
+            fast.data(),
+            slow.data(),
+            "矩形 ({x},{y},{w}x{h}) 的快速路径与上游扫描线不一致"
+        );
+    }
+}
+
 #[test]
 fn p287_offscreen_glyph_blits_are_culled_without_changing_pixels() {
     let font = Font {
