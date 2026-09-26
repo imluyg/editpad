@@ -29,6 +29,8 @@ mod undo;
 mod cursors;
 
 mod dnd;
+// P307：连击选择（双击选词 / 三击选行 / 按词按行拖选 / Shift+点击扩展）
+mod click;
 mod links;
 mod metrics;
 mod scrollbars;

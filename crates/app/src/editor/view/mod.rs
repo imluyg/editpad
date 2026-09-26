@@ -2480,6 +2480,39 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             return;
                         }
                     }
+                    // P307：连击裁决——必须在 dnd 候选**之前**。双击落在已经
+                    // 选中的词上（用户对同一个词再双击一次）若先被 dnd 拦下，
+                    // 选词就永远不成立。Shift+点击同理先接。
+                    // Alt/Alt+Shift 不在此列：Alt+Click 上面已返回，Alt+Shift
+                    // 归列块（既有语义），只断链不计数。
+                    {
+                        let mut core = self.core.borrow_mut();
+                        let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                        if core.mods.alt() {
+                            core.click_last = None;
+                        } else if core.mods.shift() {
+                            core.extend_selection_to(hit);
+                            drop(core);
+                            shell.publish(crate::Message::EditorNavChanged);
+                            shell.request_redraw();
+                            shell.capture_event();
+                            return;
+                        } else {
+                            let count = core.register_click(hit, std::time::Instant::now());
+                            let selected = match count {
+                                2 => core.select_word_at(hit),
+                                3 => core.select_line_at(hit),
+                                _ => false,
+                            };
+                            if selected {
+                                drop(core);
+                                shell.publish(crate::Message::EditorNavChanged);
+                                shell.request_redraw();
+                                shell.capture_event();
+                                return;
+                            }
+                        }
+                    }
                     // P135（B8）：选区内左键按下 = 拖拽候选——不动光标
                     // 不清选区；超阈值成拖拽，原地释放由 ButtonReleased
                     // 按普通点击兜底
@@ -2506,6 +2539,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         // （普通点击 = 重置为单光标，主流口径）
                         core.clear_block();
                         core.collapse_multi();
+                        core.end_click_drag(); // P307：单击回落逐字符拖选
                         core.dragging = true;
                         core.anchor = None;
                         core.cursor = hit;
@@ -2667,6 +2701,15 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     core.scroll_by_lines(dy_lines);
                 }
                 let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                // P307：双击/三击之后的拖动按整词、整行边界扩展选区。逐字符
+                // 粒度（普通拖选）下 apply_click_drag 恒返回 false，原样落到
+                // 下面的既有路径。
+                if core.apply_click_drag(hit) {
+                    drop(core);
+                    shell.publish(crate::Message::EditorNavChanged);
+                    shell.request_redraw();
+                    return;
+                }
                 if core.cursor != hit {
                     // 拖选：锚点固定在按下时的位置（即移动前的光标）
                     if core.anchor.is_none() {
@@ -2685,6 +2728,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 // 第 67 轮 ⑮：块拖拽收尾——空块自动清除，有效块保留
                 core.finish_block_select();
                 core.dragging = false;
+                core.end_click_drag(); // P307：按词/按行粒度只活在一次按下—释放内
                 core.scrollbar_grab = None;
                 core.hscrollbar_grab = None;
                 // P135：拖拽释放分流——拖拽中 = 执行（copy 随 Ctrl），

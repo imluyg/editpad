@@ -810,6 +810,14 @@ pub struct EditorCore {
     /// P135：拖拽移动/复制选区的瞬态会话（None = 无拖拽）。仅会话内，
     /// 不入快照；编辑后随失效汇点自然作废（finish 时清）。
     pub(crate) dnd: Option<super::dnd::DndState>,
+    /// P307：连击记账 `(序号, 行, 列, 时刻)`——最近一次正文左键按下。
+    /// 序号活过释放（双击 = 按下—释放—按下），换文档/失焦不复位也无害：
+    /// 判定同时要求同行且列距在容差内。
+    pub(crate) click_last: Option<(u8, usize, usize, std::time::Instant)>,
+    /// P307：拖选粒度（双击后按词、三击后按行；释放回落逐字符）。
+    pub(crate) drag_gran: super::click::DragGran,
+    /// P307：本次连击的按下点——拖选时以它为基准扩整词/整行，释放清空。
+    pub(crate) click_base: Option<CursorPos>,
     /// P132：缩进参考线开关（路线图 C4）。经 set_indent_guides 由应用层
     /// 从 Settings 下发，仅影响绘制。
     pub(crate) indent_guides: bool,
@@ -960,6 +968,10 @@ impl Default for EditorCore {
             base_dir: None,
             // P135：无拖拽会话
             dnd: None,
+            // P307：无连击、逐字符拖选
+            click_last: None,
+            drag_gran: super::click::DragGran::Char,
+            click_base: None,
             block_sel: None,
             block_dragging: false,
             // B10：多光标附加集默认空 = 恒等退化（既有全量测试守护）
@@ -1387,6 +1399,10 @@ impl EditorCore {
         self.clear_block();
         self.goal_px = None;
         self.dnd = None;
+        // P307：连击记账与按词/按行拖选同样属于旧坐标系
+        self.click_last = None;
+        self.click_base = None;
+        self.drag_gran = super::click::DragGran::Char;
     }
 
     /// 用新文档整体替换（加载文件时用），清空历史。
@@ -1815,6 +1831,10 @@ mod tests;
 #[cfg(test)]
 #[path = "block_tests.rs"]
 mod block_tests;
+// P307：连击选择（双击选词 / 三击选行 / 按词按行拖选 / Shift+点击扩展）
+#[cfg(test)]
+#[path = "click_tests.rs"]
+mod click_tests;
 #[cfg(test)]
 #[path = "cursors_tests.rs"]
 mod cursors_tests;
