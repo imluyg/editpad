@@ -735,3 +735,204 @@ fn random_column_block_inserts_match_oracle() {
         assert_eq!(c.doc.to_text(), final_text, "seed={seed} 重放终态发散");
     }
 }
+
+// ---------- P304（第 214 轮）：撤销只作废改动点之后的高亮状态 ----------
+
+/// 600 行 Rust，铺建到位后在第 300 行插一个字符再撤销。
+///
+/// 判据（次数档，不是 ms）：改前 `undo()` 一律 `invalidate_highlight_from(0)`
+/// ⇒ 检查点只剩初始那一个，后台补建从文档开头重来；改后失效点挪到
+/// "新旧正文第一处不同的字符"，撤销一步之前的那几百行配色状态全部留着。
+/// 正确性由**同帧 oracle** 钉住：撤销之后，改动点之前若干行的着色片段必须
+/// 与"从空白新建一个高亮器、全文铺建"逐格相同（少了这句，"检查点没丢"
+/// 可能只是"留了个错的检查点"）。
+#[test]
+fn undo_only_voids_highlight_after_the_change_point() {
+    let text: String = (0..600)
+        .map(|i| format!("fn f{i}() {{ let x = {i}; }}\n"))
+        .collect();
+    let line_of = |i: usize| -> String { text.lines().nth(i).unwrap_or("").to_owned() };
+
+    let mut c = core_with(&text);
+    c.set_language(Some("rs"));
+    let (gen, snapshot) = c.highlight_pave_snapshot().expect("已启用高亮");
+    let mut worker = snapshot.clone();
+    worker.advance_checkpoints(16, c.doc.line_count(), &mut |i| line_of(i));
+    assert!(
+        c.install_highlighter_if_current(gen, worker),
+        "夹具自证：铺建结果装得回去"
+    );
+    let paved = c.highlight_checkpoints_len().expect("有高亮器");
+    assert!(paved >= 3, "夹具自证：600 行铺到位应有 ≥3 档，实际 {paved}");
+
+    // 在中间一行插入一个字符（打断打字成组，快照已在那一步开好）
+    c.cursor = CursorPos { line: 300, col: 0 };
+    c.anchor = None;
+    c.insert_str("z");
+    assert!(
+        c.doc.line_str(300).starts_with('z'),
+        "夹具自证：改动落在第 300 行"
+    );
+    let after_edit = c.highlight_checkpoints_len().expect("编辑后");
+    assert!(
+        after_edit < paved,
+        "夹具自证：编辑本身已作废改动点之后的档（{after_edit} < {paved}）"
+    );
+
+    assert!(c.undo());
+    assert_eq!(
+        c.doc.line_str(300),
+        format!("{}\n", line_of(300)),
+        "夹具自证：正文已回到撤销前"
+    );
+    let after_undo = c.highlight_checkpoints_len().expect("撤销后");
+    assert!(
+        after_undo > 1,
+        "撤销不得把改动点**之前**的检查点一起丢光（改前这里恒为 1＝整篇重来），实际 {after_undo}"
+    );
+    assert!(
+        after_undo >= after_edit,
+        "撤销回到的是同一处改动点，作废面不该比编辑时更宽（{after_undo} < {after_edit}）"
+    );
+
+    // 同帧 oracle：另一份"从空白建好、全文铺到位"的高亮器，逐格比配色
+    let mut o = core_with(&text);
+    o.set_language(Some("rs"));
+    let (ogen, osnap) = o.highlight_pave_snapshot().expect("已启用高亮");
+    let mut oworker = osnap.clone();
+    oworker.advance_checkpoints(16, o.doc.line_count(), &mut |i| line_of(i));
+    assert!(o.install_highlighter_if_current(ogen, oworker));
+    let mut compared = 0usize;
+    for line in [0usize, 127, 128, 200, 299, 300, 301, 420] {
+        let mine = c.highlight_runs(line, &line_of(line));
+        let theirs = o.highlight_runs(line, &line_of(line));
+        assert!(
+            !theirs.is_empty(),
+            "夹具自证：oracle 第 {line} 行就该有着色片段，否则整段比较是空话"
+        );
+        assert_eq!(mine, theirs, "第 {line} 行配色与全新解析不一致");
+        compared += 1;
+    }
+    assert!(compared >= 8, "覆盖面自证：比了 {compared} 行");
+
+    // 重做对称：redo 回到"第 300 行多了 z"的那份正文，也只作废那一处之后
+    assert!(c.redo());
+    assert!(c.doc.line_str(300).starts_with('z'), "夹具自证：重做已生效");
+    assert!(
+        c.highlight_checkpoints_len().expect("重做后") > 1,
+        "重做同样不得把改动点之前的检查点丢光"
+    );
+
+    // ⚠️ 上面那段只盯得住"别把前缀丢光"这一头。**反方向的失效（作废得不够）
+    // 才是这份新算法的真风险**，而它需要一个特定的两级形状才暴露得出来：
+    // 缓存里"看起来有效"的前缀一直延伸到第 300 行，而真正的改动点在第 100 行
+    // ⇒ 若失效点报大了，100..300 这些档会带着**另一份正文**的语法状态被留下，
+    // 之后铺建从这个错档往前推，整片配色就错了（全新解析给不出同样的结果）。
+    c.cursor = CursorPos { line: 100, col: 0 };
+    c.anchor = None;
+    c.insert_str("y");
+    assert!(
+        c.doc.line_str(100).starts_with('y'),
+        "夹具自证：第二次改动落在第 100 行"
+    );
+    assert!(c.undo());
+    assert!(
+        c.doc.line_str(100) == line_of(100) + "\n",
+        "夹具自证：已撤销第二次改动"
+    );
+    // 重新铺满：从**留下的**检查点往前推——留错档就会把错色推到全篇
+    let (g2, s2) = c.highlight_pave_snapshot().expect("已启用高亮");
+    let mut w2 = s2.clone();
+    w2.advance_checkpoints(16, c.doc.line_count(), &mut |i| line_of(i));
+    assert!(
+        c.install_highlighter_if_current(g2, w2),
+        "夹具自证：二次铺建装得回去"
+    );
+    for line in [50usize, 99, 100, 101, 200, 299, 300, 420, 599] {
+        assert_eq!(
+            c.highlight_runs(line, &line_of(line)),
+            o.highlight_runs(line, &line_of(line)),
+            "第 {line} 行：撤销之后仍与全新解析同色（两级撤销后）"
+        );
+    }
+}
+
+/// 上一条守的是"别把前缀丢光"。**反方向（作废不足）要有东西可坏才测得出来**：
+/// 撤销之前必须先把改动点之后的检查点**真的铺回去**（真实编辑里这是常态——
+/// 编辑之后的每一帧都会顺手补档）。不铺的话改动点之后压根没有档，"少作废"
+/// 无从留下错色，护栏就是瞎的（第 214 轮第一次写这条时正是这样，变异跑绿）。
+///
+/// 判据两头条：撤销之后 ①改动点之前那截档还在（不比改前差），②改动点之后
+/// 重新铺出来的档**必须被作废**（把失效点报大＝"两串相同"这一发变异当场红），
+/// ③整篇配色与"从空白新建、全文铺到位"的 oracle 逐格相同。
+#[test]
+fn undo_voids_the_checkpoints_rebuilt_after_the_change_point() {
+    let text: String = (0..600)
+        .map(|i| format!("fn f{i}() {{ let x = {i}; }}\n"))
+        .collect();
+    let line_of = |i: usize| -> String { text.lines().nth(i).unwrap_or("").to_owned() };
+
+    /// 从"当前留下的档"往前把整篇铺到位（生产里由后台补建完成）。
+    fn repave(c: &mut EditorCore, src: &str, total: usize) {
+        let owned = src.to_owned();
+        let (gen, snap) = c.highlight_pave_snapshot().expect("已启用高亮");
+        let mut worker = snap.clone();
+        worker.advance_checkpoints(16, total, &mut |i| {
+            owned.lines().nth(i).unwrap_or("").to_owned()
+        });
+        assert!(
+            c.install_highlighter_if_current(gen, worker),
+            "夹具自证：铺建结果装得回去"
+        );
+    }
+
+    let mut c = core_with(&text);
+    c.set_language(Some("rs"));
+    let total = c.doc.line_count();
+    repave(&mut c, &text, total);
+    let paved = c.highlight_checkpoints_len().expect("有高亮器");
+    assert!(paved >= 4, "夹具自证：600 行铺到位应有 ≥4 档，实际 {paved}");
+
+    c.cursor = CursorPos { line: 300, col: 0 };
+    c.anchor = None;
+    c.insert_str("z");
+    // 编辑那一步自己作废之后的档数（改动点之前的留着、之后的丢了）
+    let after_edit = c.highlight_checkpoints_len().expect("编辑后");
+    // ★ 关键一步：撤销**之前**先把改动点之后的档真的铺回去。真实编辑里这是常态
+    //   （编辑后的每一帧都会顺手补档）。不铺，"作废不足"就没有东西可坏。
+    let edited_text = c.doc.to_text();
+    repave(&mut c, &edited_text, total);
+    let repaved = c.highlight_checkpoints_len().expect("二次铺建后");
+    assert!(
+        repaved > after_edit,
+        "夹具自证：二次铺建确实把档推到了改动点之后（{after_edit} → {repaved}）；\
+         没推开就说明这条护栏测不到东西"
+    );
+
+    assert!(c.undo());
+    let after_undo = c.highlight_checkpoints_len().expect("撤销后");
+    assert!(
+        after_undo > 1,
+        "撤销不该把改动点**之前**的档一起丢光（改前恒 1），实际 {after_undo}"
+    );
+    assert!(
+        after_undo < repaved,
+        "改动点之后**重新铺出来的**档必须作废——它们是照着带 `z` 的正文算的，\
+         留下就把错状态往前推（把失效点报大成\"两串相同\"这一发变异在此当场红）。\
+         实际 {after_undo}，二次铺建后 {repaved}"
+    );
+
+    let mut o = core_with(&text);
+    o.set_language(Some("rs"));
+    let o_total = o.doc.line_count();
+    repave(&mut o, &text, o_total);
+    for line in [0usize, 129, 299, 300, 301, 420, 599] {
+        let mine = c.highlight_runs(line, &line_of(line));
+        let theirs = o.highlight_runs(line, &line_of(line));
+        assert!(
+            !theirs.is_empty(),
+            "夹具自证：oracle 第 {line} 行该有着色片段"
+        );
+        assert_eq!(mine, theirs, "第 {line} 行与全新解析不同色（撤销后）");
+    }
+}

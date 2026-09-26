@@ -55,6 +55,10 @@ impl EditorCore {
         let Some(snap) = self.undo_stack.pop() else {
             return false;
         };
+        // P304：新旧正文共同的开头（字节相同 ⇒ 行界与语法状态链逐格相同）。
+        // 改前一律从第 0 行失效：撤销一个字符＝丢光全部检查点、后台补建从
+        // 文档开头重来。失效点挪到这里之后，只有改动点之后的档需要重建。
+        let same_upto = self.doc.first_diff_char(&snap.doc);
         self.redo_stack.push(Snapshot {
             doc: std::mem::replace(&mut self.doc, snap.doc),
             cursor: self.cursor,
@@ -65,9 +69,10 @@ impl EditorCore {
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;
-        // 文档被整体替换，高亮状态全量失效；第 61 轮：经唯一汇点，
-        // 括号匹配缓存一并清（撤销落点恰为缓存键时防陈旧命中）
-        self.invalidate_highlight_from(0);
+        // 正文换成了历史快照：只有**改动点之后**的高亮状态作废（P304，改前
+        // 一律从第 0 行作废）。第 61 轮那条口径未动：仍经唯一汇点，括号匹配
+        // 等偏移键控的缓存整清（撤销落点恰为缓存键时防陈旧命中）。
+        self.invalidate_highlight_from(same_upto);
         // P45：撤销 = 整个文档替换，宽度结构可能缩短——标记惰性收敛
         self.max_cols_stale = true;
         self.ensure_visible();
@@ -82,6 +87,7 @@ impl EditorCore {
         let Some(snap) = self.redo_stack.pop() else {
             return false;
         };
+        let same_upto = self.doc.first_diff_char(&snap.doc); // 同 undo（P304）
         self.undo_stack.push(Snapshot {
             doc: std::mem::replace(&mut self.doc, snap.doc),
             cursor: self.cursor,
@@ -92,8 +98,9 @@ impl EditorCore {
         });
         self.cursor = snap.cursor;
         self.anchor = snap.anchor;
-        // 第 61 轮：经唯一汇点失效（同 undo，清括号匹配缓存）
-        self.invalidate_highlight_from(0);
+        // 第 61 轮：经唯一汇点失效（同 undo，清括号匹配缓存）；P304：只作废旧
+        // 正文与新正文改动点之后的那一段
+        self.invalidate_highlight_from(same_upto);
         // P45：重做同样整体替换文档——标记惰性收敛（对称 undo）
         self.max_cols_stale = true;
         self.ensure_visible();

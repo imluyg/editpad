@@ -244,6 +244,54 @@ impl Document {
         self.rope.len_chars() == 0
     }
 
+    /// 两份文档**共同的开头**有多长，返回第一处不同的字符下标（按字符计）。
+    /// 两串逐字节相同、或一方是另一方的前缀时，返回较短那方的字符长度。
+    ///
+    /// 给 undo/redo 用：正文整体换成历史快照时，只要开头那段字节完全相同，
+    /// 那一段的高亮检查点就仍然有效（app 层 `EditorCore::undo` 据此将失效
+    /// 点从第 0 行挪到真正的改动点）。成本 **O(共同前缀)**、与文档总长无关；
+    /// 快路按存储块整段 `memcmp`，只在真正不同的那一块里逐字节定位。
+    ///
+    /// ⚠️ 判据是**字节**相同，不是"行数没变"：字节相同 ⇒ 字符相同 ⇒ 行界
+    /// 与语法解析状态链逐格相同（UTF-8 自同步，前缀里的字节序列一致时字符
+    /// 边界也一致，故返回的下标在两份文档里都落在合法字符边界上）。
+    pub fn first_diff_char(&self, other: &Document) -> usize {
+        let mut ait = self.rope.chunks();
+        let mut bit = other.rope.chunks();
+        let mut ac = ait.next();
+        let mut bc = bit.next();
+        let mut aoff = 0usize;
+        let mut boff = 0usize;
+        let mut pos = 0usize; // 已确认相同的字节数
+        while let (Some(a), Some(b)) = (ac, bc) {
+            // ⚠️ 必须**先转字节再切**：两块的剩余长度不等时，`min(len)` 那个
+            // 切点可能落在较长一方的多字节字符中间，按 `&str` 切会直接 panic
+            // （全量池里的三条 undo 模糊对拍用例就是这么逮到的）。
+            let (ab, bb) = (&a.as_bytes()[aoff..], &b.as_bytes()[boff..]);
+            let n = ab.len().min(bb.len());
+            if ab[..n] == bb[..n] {
+                pos += n;
+                aoff += n;
+                boff += n;
+                if aoff == a.len() {
+                    ac = ait.next();
+                    aoff = 0;
+                }
+                if boff == b.len() {
+                    bc = bit.next();
+                    boff = 0;
+                }
+                continue;
+            }
+            // 唯一会逐字节走的一段：至多一块
+            let k = (0..n).find(|&i| ab[i] != bb[i]).expect("上面已判不等");
+            return self.rope.byte_to_char(pos + k);
+        }
+        // 一方是另一方的前缀：较短那方的末尾字节在较长那方里同样是字符边界
+        let tail = pos.min(self.rope.len_bytes()).min(other.rope.len_bytes());
+        self.rope.byte_to_char(tail)
+    }
+
     /// 与另一文档做内容相等比较（P38 撤销回基线判定用）：长度不等直接
     /// 短路；等长时按底层存储块逐字节比对（ropey 的块级 ==，memcmp 量级），
     /// 全程无全文 String 分配。行尾元数据一并参与——编辑层虽不会原地
@@ -332,6 +380,64 @@ impl Default for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P304：`first_diff_char` 是"撤销只作废改动点之后"那步的地基，逐格钉住：
+    /// 两串相同／一方是另一方的前缀／中间不同／交界处在多字节字符里／
+    /// **两份 rope 的块边界不对齐**（编辑后 rope 会重排叶片——这是最容易
+    /// 写成"逐块比第 k 块 vs 第 k 块"的地方，必须按绝对偏移对齐）。
+    #[test]
+    fn first_diff_char_aligns_across_uneven_chunk_bounds() {
+        let cases: &[(&str, &str, usize)] = &[
+            ("", "", 0),
+            ("", "x", 0),
+            ("abc", "abc", 3),
+            ("abc", "abd", 2),
+            ("abc", "abcd", 3),
+            ("abcd", "abc", 3),
+            ("中x", "中y", 1),
+            ("中x", "文x", 0),
+            ("\u{1F680}\u{1F680}b", "\u{1F680}\u{1F680}c", 2),
+            ("a\r\nb", "a\nb", 1),
+            // ⚠️ 两串字节长度不等、且切点（=较短者的长度）落在较长一方的
+            // 多字节字符中间：这一格专门钉"先转字节再切"那句——按 `&str`
+            // 切会 panic，而模糊对拍用例曾真的 panic 过。
+            ("中文a", "中x", 1),
+            ("中x", "中文a", 1),
+        ];
+        for (x, y, want) in cases {
+            let a = Document::from_str(x);
+            let b = Document::from_str(y);
+            assert_eq!(a.first_diff_char(&b), *want, "{x:?} vs {y:?}");
+            assert_eq!(b.first_diff_char(&a), *want, "反向必须同值：{x:?}/{y:?}");
+        }
+
+        // 块边界不对齐：5000 行文档在第 4000 行中间插一个字符，
+        // 编辑后的 rope 叶片与原树不再逐块对齐，共同前缀必须精确等于插入点。
+        let text = "line\n".repeat(5_000);
+        let before = Document::from_str(&text);
+        let mut after = Document::from_str(&text);
+        let at = after.line_to_char(4_000) + 2;
+        after.insert(at, "Z");
+        assert_eq!(before.first_diff_char(&after), at, "插入点之前逐字符相同");
+        assert_eq!(after.first_diff_char(&before), at, "反向同值");
+        // 同一形状的不对齐，但正文是多字节 ⇒ 块边界落点与字符边界互相错开
+        let cjk = "中文行\n".repeat(3_000);
+        let cbefore = Document::from_str(&cjk);
+        let mut cafter = Document::from_str(&cjk);
+        let cat = cafter.line_to_char(2_500) + 1;
+        cafter.insert(cat, "Z");
+        assert_eq!(
+            cbefore.first_diff_char(&cafter),
+            cat,
+            "多字节正文＋块不对齐"
+        );
+        assert_eq!(cafter.first_diff_char(&cbefore), cat, "反向同值");
+        assert_eq!(
+            before.first_diff_char(&before),
+            before.text_len(),
+            "同一份文档 ⇒ 差异落在末尾"
+        );
+    }
 
     #[test]
     fn line_body_len_chars_matches_the_trimmed_string_on_every_ending() {
