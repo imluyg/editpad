@@ -5381,6 +5381,28 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
         c.set_word_wrap(true);
         c.reconcile_wrap_index();
         c.scroll_top = 0.0;
+        // P294：钉掉两处时钟层（跨帧像素差分的既定规矩，见 P280/P281）。
+        // 本夹具真正需要钉的是**光标层**：`caret_visible()` 在 `last_activity` 的 450ms
+        // 活动窗之内恒可见、过了就交给 `blink_on` 相位 ⇒ 同一个 core 画的四帧之间
+        // 只要跨过那个阈值，光标列就"这几帧有、那几帧没"，而它正落在首段命中那一行上。
+        // 滚动条层在这里没有东西可画（见下面的自证），钉它只是防夹具日后变长。
+        c.sb_activity = None;
+        c.last_activity = None;
+        c.blink_on = false;
+    }
+    // 夹具自证（P294 现量）：本文档折行后只有 4 个视觉行 **少于** 视口的 ~14 行 ⇒
+    // 竖直滚动条根本不出现。本轮一度按 P280/P281 的同族形状怀疑"滚动条淡出"，
+    // 是这条自证把它拦下来的——第 187 轮那次否证（未钉时钟时两帧差 0 px）因此仍然成立，
+    // 但它只排除了滚动条，**没有**排除光标层（那次实验同样跑在空载机器上，450ms 阈值
+    // 根本没被跨过，所以它对光标层也是不敏感的）。
+    {
+        let c = core.borrow();
+        let rows = c.scroll_content_lines();
+        assert!(
+            rows <= 14,
+            "夹具变了：本用例原本不经过滚动条淡出层（视觉行 {rows} > 视口 14），\
+             偶红的归因要连滚动条一起重查"
+        );
     }
     // 夹具自证：这一行必须真的折出 ≥3 段，且记下末段的起始列
     let segs = core.borrow().line_visual_segments(0);
@@ -5400,6 +5422,13 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
     );
 
     // 画一帧（含两次前置预热帧），返回像素缓冲
+    //
+    // ⚠️ 这里**故意**继续用 `BODY_FONT`，别顺手改成显式族名：本轮试过，改成
+    // `Family::Name("NSimSun")` 之后本用例从"偶发红"变成**恒红**在
+    // `续段命中左缘 x=310 与首段 x=46 相差 >3px`——也就是说"续行按段首左缘起排"
+    // 这条断言目前只在 BODY_FONT 实际解析到的那个族下成立。那是另一条更尖的线索
+    // （字体相关？还是段映射相关？），已单独记进 §2/日档，要修得另开一轮，
+    // 不是在本用例里换个字体就能收的。
     let frame = |hits: Vec<editpad_core::MatchPos>| -> Vec<u8> {
         core.borrow_mut().find_hl = hits;
         let mut view = EditorView {
@@ -5444,17 +5473,44 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
     // 与真实渲染循环同构的最小无头管线：底色差 = 两次帧像素之差（正文两帧完全相同）
     let (w, h) = (620usize, 340usize);
     let base = frame(Vec::new());
-    let ink_rows = |a: &[u8], b: &[u8]| -> (Vec<usize>, usize) {
+    // P294 采集手段（红过一次、两次都没留下证据的那条偶发红的下一步）：先**确定性地**
+    // 量出"光标层在这个夹具里到底画不画得出像素"——同一份内容只切 `blink_on` 相位再画
+    // 一帧。画得出 ⇒ 450ms 活动窗跨过与否确实会改变本用例比对的像素，钉它不是空修；
+    // 画不出 ⇒ 光标层也可以排除，本用例的 red 另有因，别把钉子留在这儿当安慰剂。
+    core.borrow_mut().blink_on = true;
+    let base_caret = frame(Vec::new());
+    core.borrow_mut().blink_on = false;
+    let mut caret_pix = 0usize;
+    for i in (0..base.len()).step_by(4) {
+        if base[i..i + 4] != base_caret[i..i + 4] {
+            caret_pix += 1;
+        }
+    }
+    // 实测：只切 `blink_on` 的两帧差 **42 px**（P294 现量）⇒ 光标层在本夹具里确实
+    // 画得出像素，钉它不是空修。⚠️ 这不等于"那条偶发红就是光标层造成的"——本用例的
+    // 红从没被稳定复现过；本断言立的只是"这个变量活着，跨帧比较不能不管它"。
+    assert!(
+        caret_pix > 0,
+        "采集结论：光标层在本夹具里画不出任何像素差 ⇒ 它不是偶红的原因，\
+         钉 `last_activity`/`blink_on` 成了空修（此时本用例的红要往别处查，别留安慰剂）"
+    );
+    let ink_rows = |a: &[u8], b: &[u8]| -> (Vec<usize>, usize, usize, usize) {
         let mut rows: Vec<usize> = Vec::new();
         let mut min_x = usize::MAX;
+        let mut max_x = 0usize;
+        let mut npix = 0usize;
         for y in 0..h {
             let mut hit_row = false;
             for x in 0..w {
                 let i = (y * w + x) * 4;
                 if a[i..i + 4] != b[i..i + 4] {
                     hit_row = true;
+                    npix += 1;
                     if x < min_x {
                         min_x = x;
+                    }
+                    if x > max_x {
+                        max_x = x;
                     }
                 }
             }
@@ -5462,7 +5518,7 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
                 rows.push(y);
             }
         }
-        (rows, min_x)
+        (rows, min_x, max_x, npix)
     };
     let head = frame(vec![editpad_core::MatchPos {
         line: 0,
@@ -5474,27 +5530,36 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
         col: last_seg_start,
         len_chars: 3,
     }]);
-    let (rows_head, minx_head) = ink_rows(&base, &head);
-    let (rows_tail, minx_tail) = ink_rows(&base, &tail);
+    let (rows_head, minx_head, maxx_head, npix_head) = ink_rows(&base, &head);
+    let (rows_tail, minx_tail, maxx_tail, npix_tail) = ink_rows(&base, &tail);
     assert!(
         !rows_head.is_empty() && !rows_tail.is_empty(),
-        "两帧无差异＝命中底色根本没画出来（夹具或绘制路径失效）"
+        "两帧无差异＝命中底色根本没画出来（夹具或绘制路径失效）\
+         [首段 {npix_head} px / 续段 {npix_tail} px]"
     );
     let lh = core.borrow().line_height();
+    // 失败信息自带归因线索（P294）：行跨度 + x 范围 + 像素数，三者能当场分辨
+    // "底色多染了几行"（x 范围宽、行数略多）与"某层整块出现/消失"（x 范围是一条
+    // 窄带或集中在右缘），第 187/197 两轮红过却只能靠猜就是因为当时只报了行数。
     assert!(
         rows_head.len() as f32 <= lh * 1.9 && rows_tail.len() as f32 <= lh * 1.9,
-        "底色跨了多行：首段 {} 行 / 续段 {} 行（一条命中只应染一个视觉行，行高 {lh:.1}）",
+        "底色跨了多行：首段 {} 行 x=[{minx_head}..{maxx_head}] {npix_head} px / \
+         续段 {} 行 x=[{minx_tail}..{maxx_tail}] {npix_tail} px（行高 {lh:.1}；\
+         一条命中只应染一个视觉行。x 范围窄而行数多⇒怀疑整层出现/消失，\
+         x 范围与底色同宽⇒才是底色本身画错）",
         rows_head.len(),
-        rows_tail.len()
+        rows_tail.len(),
     );
     let overlap = rows_head.iter().filter(|y| rows_tail.contains(y)).count();
     assert_eq!(
         overlap, 0,
-        "首段与续段的命中墨迹行重叠 ⇒ 底色没有按视觉段定位（回到按逻辑行画一条带）"
+        "首段与续段的命中墨迹行重叠 ⇒ 底色没有按视觉段定位（回到按逻辑行画一条带）\
+         [重叠 {overlap} 行；首段行 {rows_head:?} 续段行 {rows_tail:?}]"
     );
     assert!(
         (minx_head as i64 - minx_tail as i64).abs() <= 3,
-        "续段命中左缘 x={minx_tail} 与首段 x={minx_head} 相差 >3px ⇒ 续行仍按绝对列偏移起排"
+        "续段命中左缘 x={minx_tail} 与首段 x={minx_head} 相差 >3px ⇒ 续行仍按绝对列\
+         偏移起排 [首段 x 范围 [{minx_head}..{maxx_head}]，续段 [{minx_tail}..{maxx_tail}]]"
     );
 }
 
