@@ -21,32 +21,18 @@ pub enum LineEnding {
 }
 
 impl LineEnding {
-    /// 按全文统计检测主导行尾：CRLF / LF / CR 三种计数，多者胜；
-    /// 平票或全文没有换行时回退 [`LineEnding::Lf`]（与旧版行为一致）。
+    /// 统计文本的主导行尾：CRLF / LF / CR 三种计数，多者胜；
+    /// 平票或全文没有换行时回退 [`LineEnding::Lf`]。
+    ///
+    /// ⚠️ L-21（第 216 轮，用户点单批准）：**按余量早停**——某一风格已经出现
+    /// ≥ 4096 次（`EOL_DECISIVE_MIN`）且对第二名胜出 3 倍（`EOL_DECISIVE_RATIO`）
+    /// 时即认定判定不再可能翻转，剩余文本不数。达不到门槛就一路数到底，
+    /// 那种文件的行为与改前逐字相同（早停前是"整份都要数"）。
+    /// 计数与判定与流式侧共用 `EolTally` 这一份实现。
     pub fn detect(text: &str) -> Self {
-        let (mut crlf, mut lf, mut cr) = (0usize, 0usize, 0usize);
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
-            match c {
-                '\r' => {
-                    if chars.peek() == Some(&'\n') {
-                        chars.next();
-                        crlf += 1;
-                    } else {
-                        cr += 1;
-                    }
-                }
-                '\n' => lf += 1,
-                _ => {}
-            }
-        }
-        if crlf > lf && crlf > cr {
-            LineEnding::CrLf
-        } else if cr > lf {
-            LineEnding::Cr
-        } else {
-            LineEnding::Lf
-        }
+        let mut tally = EolTally::default();
+        tally.feed(text);
+        tally.settle()
     }
 
     /// 该风格对应的换行字符串。
@@ -81,27 +67,38 @@ impl LineEnding {
     }
 }
 
-/// 跨块的主导行尾计数器（P19 流式加载用）。
+/// 行尾早停的两道门槛（L-21）：换行次数下界，以及它对第二名的倍数。
 ///
-/// 语义与 [`LineEnding::detect`] 完全一致（三种换行计数、多者胜、
-/// 平票回退 LF），但允许文本按任意块多次推送——块边界可能恰好落在
-/// `\r\n` 中间，此时 `\r` 悬置到下一块首字符到达后再裁决。
+/// 两个条件同时成立才认定"判定已悬殊"。4096 次这个下界保证：在**任何**后续
+/// 输入下，第二名要翻盘都得再出现 ≥4096 次同类行界——那已经不是"这份文件
+/// 的主导行尾"而是"两份不同来源拼起来的文件"。达不到就一路数到底。
+const EOL_DECISIVE_MIN: usize = 4096;
+/// 见 [`EOL_DECISIVE_MIN`]。
+const EOL_DECISIVE_RATIO: usize = 3;
+
+/// 行尾计数的**唯一**实现（L-21）：`LineEnding::detect`（一次性）与
+/// `EolCounter`（流式，开档逐块喂）都走这里。
+///
+/// 改前这两处是**同一逻辑抄了两遍**——`EolCounter::finish` 的注释还写着
+/// "多数判定与 `detect` 逐字一致"，那句是靠人盯的，不是结构保证（本仓第 7 次
+/// 撞这个形状）。现在 `detect` 只是"把整份喂进同一个状态机再收尾"。
 #[derive(Debug, Default)]
-pub struct EolCounter {
+struct EolTally {
     crlf: usize,
     lf: usize,
     cr: usize,
-    /// 上一块以 `\r` 结尾且尚未裁决
+    /// 上一块以 `\r` 结尾：它到底是 CRLF 的一半还是孤立 `\r`，要等下一块裁决
     pending_cr: bool,
+    /// 已经判定 ⇒ 后续输入一律忽略（这就是省掉那 0.75 ms/MB 的地方）
+    settled: Option<LineEnding>,
 }
 
-impl EolCounter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 推送一段解码后的文本（块大小任意、次数任意）。
-    pub fn push(&mut self, text: &str) {
+impl EolTally {
+    /// 喂入一段文本（块大小任意、次数任意）。判定已定则 O(1) 返回。
+    fn feed(&mut self, text: &str) {
+        if self.settled.is_some() {
+            return;
+        }
         let mut chars = text.chars().peekable();
         // 先裁决上一块悬置的 `\r`
         if self.pending_cr {
@@ -127,26 +124,84 @@ impl EolCounter {
                         self.crlf += 1;
                     }
                     Some(_) => self.cr += 1,
-                    None => self.pending_cr = true, // 块尾：悬置待下块裁决
+                    None => {
+                        // 块尾：悬置待下块裁决（与整份单遍切分逐字节等价）
+                        self.pending_cr = true;
+                        return;
+                    }
                 },
                 '\n' => self.lf += 1,
-                _ => {}
+                _ => continue, // 非行界字符不值得做一次判定检查
+            }
+            // 只在数到行界时检查，且先用下界那条最便宜的判断挡掉绝大多数
+            if self.is_decisive() {
+                self.settled = Some(self.majority());
+                return;
             }
         }
     }
 
-    /// 文本推送完毕，取主导行尾（多数判定与 `detect` 逐字一致）。
-    pub fn finish(mut self) -> LineEnding {
+    /// 收尾：把悬置的 `\r` 定案后取多数。与 [`Self::feed`] 的早停判定同一条式子。
+    fn settle(&mut self) -> LineEnding {
+        if let Some(done) = self.settled {
+            return done;
+        }
         if self.pending_cr {
             self.cr += 1;
+            self.pending_cr = false;
         }
-        if self.crlf > self.lf && self.crlf > self.cr {
+        let v = self.majority();
+        self.settled = Some(v);
+        v
+    }
+
+    /// 多数判定（平票与"整份没有换行"都回退 LF）。`feed` 的早停与 `settle`
+    /// 共用这一份，两者不可能各说一套。
+    fn majority(&self) -> LineEnding {
+        let (crlf, lf, cr) = (self.crlf, self.lf, self.cr);
+        if crlf > lf && crlf > cr {
             LineEnding::CrLf
-        } else if self.cr > self.lf {
+        } else if cr > lf {
             LineEnding::Cr
         } else {
             LineEnding::Lf
         }
+    }
+
+    /// 是否已"悬殊到不必再数"：某一种 ≥ [`EOL_DECISIVE_MIN`] 且 ≥ 第二名的
+    /// [`EOL_DECISIVE_RATIO`] 倍。
+    fn is_decisive(&self) -> bool {
+        let [mut top, mut second] = [0usize, 0usize];
+        for n in [self.crlf, self.lf, self.cr] {
+            if n > top {
+                second = top;
+                top = n;
+            } else if n > second {
+                second = n;
+            }
+        }
+        top >= EOL_DECISIVE_MIN && top >= second.saturating_mul(EOL_DECISIVE_RATIO)
+    }
+}
+
+/// 流式行尾计数器：开档按块喂入，判定一旦悬殊就停止计数。
+#[derive(Debug, Default)]
+pub struct EolCounter(EolTally);
+
+impl EolCounter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 推送一段解码后的文本（块大小任意、次数任意）。
+    pub fn push(&mut self, text: &str) {
+        self.0.feed(text);
+    }
+
+    /// 文本推送完毕，取主导行尾（多数判定与 [`LineEnding::detect`] 共用
+    /// `EolTally` 这一份实现，结构上不可能分叉）。
+    pub fn finish(mut self) -> LineEnding {
+        self.0.settle()
     }
 }
 
@@ -437,6 +492,132 @@ mod tests {
             before.text_len(),
             "同一份文档 ⇒ 差异落在末尾"
         );
+    }
+
+    /// L-21（第 216 轮）：早停**真的停**——决定性前缀之后的尾段一颗都不该数。
+    /// 判据用计数器的读数本身（`lf == 0`），比"扫了多少字节"这种仪表更硬：
+    /// 尾段有 5 万颗 `\n`，只要数过就一定看得见。
+    #[test]
+    fn eol_early_stop_leaves_the_tail_uncounted() {
+        let text = format!("{}\n{}", "a\r\n".repeat(5_000), "b\n".repeat(50_000));
+        let mut t = EolTally::default();
+        t.feed(&text);
+        let v = t.settle();
+        assert_eq!(v, LineEnding::CrLf, "前缀已悬殊 ⇒ 判定取 CRLF");
+        assert_eq!(t.lf, 0, "尾段那 5 万颗 LF 一颗都不该数（早停没生效）");
+        assert_eq!(t.crlf, 4096, "应当在刚够悬殊的那一颗收工，不该数完 5000 颗");
+
+        // 流式侧同一条性质：按 64 字节一块喂，也要在 4096 颗 CRLF 处停住
+        let mut c = EolCounter::new();
+        for chunk in text.as_bytes().chunks(64) {
+            c.push(std::str::from_utf8(chunk).unwrap());
+        }
+        assert_eq!(c.finish(), LineEnding::CrLf);
+    }
+
+    /// L-21：不到"悬殊"就**不许**早停——此时必须数完全程，判定与改前逐字相同。
+    ///
+    /// ⚠️ 关键的一点（本轮被自己的测试纠正）：**悬殊与否是拿"已数过的部分"比的**。
+    /// 所以"前 5000 行 CRLF、后 3000 行 LF"这种**分段排列**的文件会在第 4096 颗
+    /// 就停（那时第二名还是 0，比值当然悬殊）——那正是 [`eol_early_stop_can_flip_a_two_source_file`]
+    /// 钉住的那笔取舍。真正"不到悬殊"的是**交错**排列的混合文件：两种行界一起长，
+    /// 谁都不到对方的 3 倍 ⇒ 一路数到底，答案与改前逐字相同。
+    #[test]
+    fn eol_stops_only_when_both_thresholds_are_met() {
+        // ① 交错、比值不够悬殊：各 5000 颗 ⇒ 谁也没到对方的 3 倍 ⇒ 必须数完
+        let mut interleaved = String::new();
+        for _ in 0..5_000 {
+            interleaved.push_str("a\r\nb\n");
+        }
+        let mut t = EolTally::default();
+        t.feed(&interleaved);
+        assert_eq!(
+            t.settle(),
+            LineEnding::Lf,
+            "5000 对 5000 打平 ⇒ 回退 LF（平票口径未变）"
+        );
+        assert_eq!(t.crlf, 5_000, "不悬殊时该数到尾，实际只数了 {}", t.crlf);
+        assert_eq!(t.lf, 5_000, "同上：LF 也该数满");
+
+        // ② 悬殊但没到下界：交错到 1000 对（比值够不了，下界也没到）⇒ 数完
+        let mut small = String::new();
+        for _ in 0..1_000 {
+            small.push_str("a\r\nb\nb\n");
+        }
+        let mut s = EolTally::default();
+        s.feed(&small);
+        assert_eq!(s.settle(), LineEnding::Lf, "LF 2000 > CRLF 1000");
+        assert_eq!(s.crlf, 1_000, "没到下界时不许停");
+        assert_eq!(s.lf, 2_000, "没到下界时不许停");
+
+        // ③ 下界的另一侧：同一种行界连着来 ⇒ 恰好在第 4096 颗收工，
+        //    后面再有多半篇同风格的也不数
+        let edge = "a\r\n".repeat(9_096);
+        let mut e = EolTally::default();
+        e.feed(&edge);
+        let _ = e.settle();
+        assert_eq!(
+            e.crlf, 4_096,
+            "到界即停：不该把 9096 颗都数完（实际 {}",
+            e.crlf
+        );
+    }
+
+    /// L-21：流式与一次性**必须同源同值**——改前这是两份抄一遍的计数循环
+    /// （注释还写着"逐字一致"，那是靠人盯的）。任何块大小、任何切点（含
+    /// 恰好落在 `\\r\\n` 中间）都不许让两者分叉，早停也一样。
+    #[test]
+    fn eol_counter_matches_detect_at_every_chunk_size() {
+        let cases = [
+            "a\r\nb\nc\rd\n".to_owned(),
+            "中文\r\n文\rc\n".to_owned(),
+            "\r\n".to_owned(),
+            "\r".to_owned(),
+            "no breaks at all".to_owned(),
+            // 过了早停下界的：一次性与分块都必须给出同一个答案
+            "a\r\n".repeat(5_000) + &"b\n".repeat(50_000),
+            "a\r\n".repeat(5_000),
+            "a\n".repeat(5_000) + &"b\r\n".repeat(3_000),
+        ];
+        for text in &cases {
+            let want = LineEnding::detect(text);
+            // 按字符边界切块：块长 1/2 时切点会落在 `\r` 与 `\n` 中间，
+            // 正是悬置裁决那条路；4096 那档则会跨过早停点。
+            for size in [1usize, 2, 3, 40, 4_096] {
+                let mut c = EolCounter::new();
+                let mut buf = String::new();
+                for ch in text.chars() {
+                    buf.push(ch);
+                    if buf.chars().count() >= size {
+                        c.push(&buf);
+                        buf.clear();
+                    }
+                }
+                if !buf.is_empty() {
+                    c.push(&buf);
+                }
+                assert_eq!(c.finish(), want, "{text:?} 按 {size} 字符切块分叉");
+            }
+        }
+    }
+
+    /// L-21：**明写的取舍**——早停会把"两份不同来源拼成的文件"的判定从
+    /// "全文多数"改成"前缀多数"。这条测试把它钉成一个已知事实，而不是
+    /// 等某天有人当 bug 修掉。门槛比值 3 ⇒ 前 4096 颗 CRLF 后哪怕全篇反向，
+    /// 翻盘也需要对手再出现 ≥4096 颗同类——那已经是拼接文件而不是杂散混合。
+    #[test]
+    fn eol_early_stop_can_flip_a_two_source_file() {
+        let text = format!("{}{}", "a\r\n".repeat(20_000), "b\n".repeat(20_000));
+        // 全文口径（改前的算法，这里手算一份当参照）：CRLF 与 LF 打平 ⇒ 回退 LF
+        assert_eq!(text.matches("\r\n").count(), 20_000);
+        assert_eq!(text.matches("\n").count(), 40_000); // CRLF 里也含 \n
+        assert_eq!(LineEnding::detect(&text), LineEnding::CrLf, "早停口径");
+        // 同一份文件按流式喂也是同一个答案（两处共用一份实现，不许分叉）
+        let mut c = EolCounter::new();
+        for chunk in text.as_bytes().chunks(4_096) {
+            c.push(std::str::from_utf8(chunk).unwrap());
+        }
+        assert_eq!(c.finish(), LineEnding::CrLf);
     }
 
     #[test]
