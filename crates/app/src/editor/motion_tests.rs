@@ -1681,6 +1681,65 @@ fn wrap_converge(c: &mut EditorCore) {
     }
 }
 
+/// P293b 护栏：**来回滚**不许让同一行在一帧里被物化两次（逐出窗口的外扩量是拍的，
+/// 这条就是它的仪表）。
+///
+/// 形状：先顺滚 12 屏、再原路退回 12 屏，每步按生产口径设窗口并问 14 行 ×2 次
+/// （正文 + 选区带两个消费者）。一行只该物化一次 ⇒ 每步上界就是行数 14。
+/// 实测（P293 之后的现行策略）：
+///
+/// - 每行 2000 字符：顺滚每步 14，退回每步 **0**（额度充裕，退回来的屏一条都不用重取）；
+/// - 每行 20000 字符：顺滚每步 14，退回每步 14（额度紧 ⇒ 重取一次是地板），
+///   其中一步 **3**（那一屏大部分还在表里）；**没有出现 28**。
+///
+/// 对照＝把逐出的筛选改成恒 `false`（等价于 P293 之前"满了就拒绝入表"）重跑：
+/// 顺滚自第 8 步起、以及退回的每一步都出现 **28**，本用例当场红。
+///
+/// ⚠️ 别把退回时的 14 读成浪费：那是被顺滚的逐出清掉之后的**重取地板**，一行一次；
+/// 真要降它得加大额度或改逐出策略，而加大额度是要按内存预算点单的决策，不是本用例的主张。
+#[test]
+fn p293b_pingpong_scroll_never_materializes_a_line_twice() {
+    let rows = 14usize;
+    for len in [2_000usize, 20_000] {
+        let lines = 400usize;
+        let text: String = (0..lines)
+            .map(|i| format!("{i:05}{}\n", "x".repeat(len - 5)))
+            .collect();
+        let mut c = core_with(&text);
+        assert_eq!(
+            c.doc.line_count(),
+            lines + 1,
+            "夹具自检：{lines} 行带尾换行 ⇒ ropey 数到 {}+1（少了 `\\n` 就变成一整行，\
+             越界早退不计入取串数，读数会假降为 0）",
+            lines
+        );
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        let mut worst = 0usize;
+        let mut per = Vec::new();
+        for step in (0..12).chain(0..12) {
+            let base = step * rows;
+            c.memo_window = (base, base + rows);
+            c.take_line_text_calls();
+            for l in base..base + rows {
+                let a = c.line_text_ref(l);
+                let b = c.line_text_ref(l);
+                assert_eq!(a.chars().count(), len, "夹具自检：第 {l} 行应有 {len} 字符");
+                assert_eq!(a, b, "同一行两次取串口径必须一致");
+            }
+            let n = c.take_line_text_calls();
+            worst = worst.max(n);
+            per.push(n);
+        }
+        eprintln!("[P293b] len={len} 来回 24 步逐步取串 = {per:?}");
+        assert!(
+            worst <= rows,
+            "来回滚中一步物化了 {worst} 次，超过行数上界 {rows}：同一行在一帧里被抄了两遍\
+             （逐出窗口太紧，或额度又被人改小了）"
+        );
+    }
+}
+
 /// P293 护栏 A：本帧窗口由 `refresh_visible_row_layouts` 刷新（短行夹具，走生产通路）。
 ///
 /// 窗口值是整行 memo 的**逐出依据**，它的生产写入点只有一处；这条把"写入点写的就是
