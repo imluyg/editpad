@@ -1929,14 +1929,19 @@ fn render_frame_cost_is_bounded_on_large_document() {
 /// 实际取串次数。视口固定在文档中部，`select_all` 后选区向两端各伸出
 /// 半个文档——改前即每帧「全文档行数 × 整行取串」。
 fn draw_once_and_count_line_text(lines: usize, select_all: bool, hits: usize) -> usize {
-    draw_frame_and_count_line_text(lines, select_all, hits, false, false)
+    draw_frame_and_count_line_text(lines, 0, select_all, hits, false, false)
 }
 
-/// 同款管线，多两个旋钮：`indent` 决定夹具是否带行首缩进，`guides` 决定
-/// 缩进参考线开关。给「某个绘制块不许整行取串」这类次数契约用——同一份
-/// 夹具只切一个开关，两帧的取串次数必须相同（该块一旦自己取串就会多出来）。
+/// 同款管线，多三个旋钮：`line_len` 把每行正文补到至少这么长（0 = 不补，
+/// 即原夹具），`indent` 决定夹具是否带行首缩进，`guides` 决定缩进参考线开关。
+/// 给「某个绘制块不许整行取串」这类次数契约用——同一份夹具只切一个开关，
+/// 两帧的取串次数必须相同（该块一旦自己取串就会多出来）。
+/// `line_len` 这一档是给**长行**夹具开的：整行物化 memo 按字节封顶，可见行
+/// 总字节超过封顶就缓存不住，代价只在长行上显形（短行夹具看不见它）。
+#[allow(clippy::too_many_arguments)]
 fn draw_frame_and_count_line_text(
     lines: usize,
+    line_len: usize,
     select_all: bool,
     hits: usize,
     indent: bool,
@@ -1947,8 +1952,13 @@ fn draw_frame_and_count_line_text(
         let mut c = core.borrow_mut();
         let pad = if indent { "    " } else { "" };
         let doc: String = (0..lines)
-            .map(|i| format!("{pad}row-{i:03} abc\n"))
+            .map(|i| {
+                let head = format!("{pad}row-{i:03} abc");
+                let fill = line_len.saturating_sub(head.len());
+                format!("{head}{}\n", "x".repeat(fill))
+            })
             .collect();
+
         c.reset_document(editpad_core::Document::from_str(&doc));
         c.set_viewport_width(600.0);
         c.set_viewport_height(300.0);
@@ -2050,8 +2060,8 @@ fn o1_find_hit_draw_cost_scales_with_viewport_not_document() {
 /// 守它的成本：换成 rope 行首字符流之后，开态相对关态应当一颗不多取。
 #[test]
 fn o3_indent_guides_add_no_whole_line_fetch() {
-    let off = draw_frame_and_count_line_text(2_000, false, 0, true, false);
-    let on = draw_frame_and_count_line_text(2_000, false, 0, true, true);
+    let off = draw_frame_and_count_line_text(2_000, 0, false, 0, true, false);
+    let on = draw_frame_and_count_line_text(2_000, 0, false, 0, true, true);
     eprintln!("[P278] 参考线开/关的单帧取串次数：关 {off} / 开 {on}");
     assert_eq!(
         on, off,
@@ -2068,7 +2078,7 @@ fn o3_indent_guides_add_no_whole_line_fetch() {
 /// 都取过（不是"什么都没画"的假绿），上界证明同一行不再被反复物化。
 #[test]
 fn p283_one_frame_materializes_each_visible_line_once() {
-    let calls = draw_frame_and_count_line_text(2_000, true, 0, false, false);
+    let calls = draw_frame_and_count_line_text(2_000, 0, true, 0, false, false);
     eprintln!("[P283] 单帧整行物化次数：{calls}（改前 47）");
     // 视口 300px / 行高 ≈22px ⇒ 14 个可见行；每行至少取一次是"这帧画了正文"的证据。
     assert!(
@@ -2078,6 +2088,37 @@ fn p283_one_frame_materializes_each_visible_line_once() {
     assert!(
         calls <= 22,
         "单帧物化 {calls} 次：同一行仍被多个绘制块各自取串（改前 47）"
+    );
+}
+
+/// P292 护栏：**长行**可见区下单帧整行物化次数不该高于短行基准。
+///
+/// P283 把"同一行一帧只物化一次"钉成了次数契约，但它用的夹具是短行
+/// （`row-042 abc`），而那正是这条契约**看不见**失效的形状：整行 memo 按字节封顶，
+/// 旧额度 256 KB 在 20000 字符 ×14 可见行＝280 KB 时就已经越过，越过的策略是
+/// **拒绝入表**——于是同一行又被正文、选区带、行布局各抄一遍，长行文档静默退回
+/// P283 改前那一档。实测（旧额度）：短行 17 / 2 万字符 21 / 6 万字符 **39**
+/// （改前对照是 47）。额度按"本帧要画的行"放宽到 2 MB 后三档一律 17。
+///
+/// ⚠️ 这条守的是**次数**（与机器无关），不是耗时；也不声明 2 MB 是终点——
+/// 越过新额度的形状（约 34 行 × 60000 字符）仍会退回拒绝入表，那一档留在 §2 L-13。
+#[test]
+fn p292_long_visible_lines_keep_the_one_fetch_per_line_contract() {
+    let base = draw_frame_and_count_line_text(80, 40, true, 0, false, false);
+    let long = draw_frame_and_count_line_text(80, 20_000, true, 0, false, false);
+    let vlong = draw_frame_and_count_line_text(80, 60_000, true, 0, false, false);
+    eprintln!("[P292] 单帧整行物化次数：短行 {base} / 2 万 {long} / 6 万 {vlong}");
+    assert!(
+        base >= 14,
+        "夹具自检：可见行没各取过一次（{base} < 14），上界断言就是空断言"
+    );
+    assert_eq!(
+        long, base,
+        "2 万字符长行单帧物化 {long} 次，高于短行基准 {base}（旧额度下是 21 次）"
+    );
+    assert_eq!(
+        vlong, base,
+        "6 万字符长行单帧物化 {vlong} 次，高于短行基准 {base}（旧额度下是 39 次）"
     );
 }
 
