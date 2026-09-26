@@ -172,8 +172,6 @@ impl Editpad {
                 let last = self.tabs.len() - 1;
                 self.assign_untitled_num(last);
                 self.set_active_tab(last);
-                // 查找态全局：切页即作废旧命中，防串页
-                self.cancel_find_scan();
                 // P28：页集合已变，右键菜单随之下收
                 self.tab_context_menu = None;
                 Task::none()
@@ -191,14 +189,12 @@ impl Editpad {
             Message::SwitchTabNext => {
                 let next = (self.active_tab + 1) % self.tabs.len();
                 self.set_active_tab(next);
-                self.cancel_find_scan();
                 self.tab_context_menu = None;
                 Task::none()
             }
             Message::SwitchTabPrev => {
                 let prev = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
                 self.set_active_tab(prev);
-                self.cancel_find_scan();
                 self.tab_context_menu = None;
                 Task::none()
             }
@@ -211,7 +207,6 @@ impl Editpad {
                 let dbl = is_double_click(self.last_tab_click, i, now);
                 if i < self.tabs.len() && i != self.active_tab {
                     self.set_active_tab(i);
-                    self.cancel_find_scan();
                     self.tab_context_menu = None;
                 }
                 if dbl {

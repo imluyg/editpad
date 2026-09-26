@@ -265,9 +265,17 @@ impl Editpad {
 
     /// 切换活动页并同步长期别名（所有 active_tab 变更必须经此或
     /// [`Self::refresh_cur_handle`])。
+    ///
+    /// 换页即作废命中表：`matches` 是**每窗口**的状态，而正文与视口高亮层是
+    /// **每页**的——留着上一页的表，Enter／「替换当前」会拿外地坐标动这一页
+    /// （第 213 轮的用例 `fif_goto_to_another_tab_voids_the_previous_pages_hit_table`
+    /// 量到的正是这一格）。改前这句话由四条用户切页路径各手写一遍
+    /// `cancel_find_scan()`，而 `FifGoto` 跳页那条漏了 ⇒ 收进唯一入口，
+    /// 从此不可能各守一边。
     pub(crate) fn set_active_tab(&mut self, idx: usize) {
         self.active_tab = idx.min(self.tabs.len() - 1);
         self.cur_handle = self.tabs[self.active_tab].editor.clone();
+        self.cancel_find_scan();
     }
 
     /// 与 tabs 对齐刷新别名（增删页后调用）。

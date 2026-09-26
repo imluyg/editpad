@@ -1622,3 +1622,145 @@ fn p301_scan_completion_never_rebuilds_or_copies_the_hit_table() {
         "正对照：自建表必须被记到"
     );
 }
+
+/// 第 213 轮：跨页跳转之后，上一页的命中表不得留给当前页。
+///
+/// 命中表是**每窗口**的状态（`Editpad::matches`），而正文与高亮层是**每页**的。
+/// 四条用户切页路径（NewTab／SwitchTabNext／SwitchTabPrev／SwitchTab）在
+/// `set_active_tab` 之后都紧跟 `cancel_find_scan()`，唯独 `FifGoto` 那条跳页
+/// 没有 ⇒ 查找栏开着时从「在文件中查找」面板跳进另一个已开页，`matches`
+/// 仍是上一页的表，此时按 Enter 会拿**外地坐标**在当前页里跳（本页没有那一行
+/// 也一样选），「替换当前」动的就是错字符却仍报成功。
+#[test]
+fn fif_goto_to_another_tab_voids_the_previous_pages_hit_table() {
+    use crate::find_scan::{FileHit, FileHits};
+    let mut app = Editpad::default();
+    // 页 A：4 行，"ab" 只在第 3 行（页 B 只有 1 行 ⇒ 外地坐标看得见）
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let sa = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            sa,
+            Ok((
+                editpad_core::Document::from_str("a1\na2\na3\nab x\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/b.txt")),
+    );
+    let sb = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            sb,
+            Ok((
+                editpad_core::Document::from_str("zz\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 回到 A 页，把一次扫描的结果装上（走真实装载入口，与 P301 同口径）
+    dispatch(&mut app, Message::SwitchTab(0));
+    app.find_visible = true;
+    app.find_query = "ab".to_owned();
+    app.find_scan = Some(7);
+    dispatch(
+        &mut app,
+        Message::FindScanDone(
+            7,
+            scanned(vec![editpad_core::MatchPos {
+                line: 3,
+                col: 0,
+                len_chars: 2,
+            }]),
+        ),
+    );
+    assert_eq!(
+        app.matches.hits().len(),
+        1,
+        "夹具自证：A 页挂上了一张命中表"
+    );
+    assert_eq!(app.active_tab, 0, "夹具自证：跳转前活动页是 A");
+
+    // 从结果面板跳进 B 页（已开页 ⇒ 只切页 + select_span，不走打开管线）
+    app.fif_results = vec![FileHits {
+        path: PathBuf::from("C:/doc/b.txt"),
+        hits: vec![FileHit {
+            pos: editpad_core::MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 2,
+            },
+            excerpt: "zz".into(),
+        }],
+    }];
+    dispatch(&mut app, Message::FifGoto(0, 0));
+    let jumped = {
+        let h = app.cur_handle.borrow();
+        (
+            h.ordered_selection()
+                .map(|(s, e)| (s.line, s.col, e.line, e.col)),
+            h.doc.line_count(),
+        )
+    };
+    assert_eq!(jumped.0, Some((0, 0, 0, 2)), "夹具自证：跳页本身生效");
+    assert_eq!(jumped.1, 2, "夹具自证：B 页只有一行正文＋幻影末行");
+    assert!(
+        app.matches.is_empty(),
+        "跨页之后命中表必须作废：留着它，Enter 会拿 A 页的 line 3 在只有 1 行的 B 页里跳"
+    );
+
+    // 用户级判据：按 Enter 不得用外地坐标移动选区，而要走既有的「懒触发」
+    // 补一次当前页的扫描（`step_match` 里 `matches.is_empty()` 那一支）
+    dispatch(&mut app, Message::FindNext);
+    let after = {
+        let h = app.cur_handle.borrow();
+        h.ordered_selection()
+            .map(|(s, e)| (s.line, s.col, e.line, e.col))
+    };
+    assert_eq!(
+        after,
+        Some((0, 0, 0, 2)),
+        "Enter 不得把选区挪到上一页的坐标上"
+    );
+    assert!(
+        app.find_scanning(),
+        "正对照：Enter 必须已为当前页补排一次扫描（否则上一条断言只是「什么都没发生」）"
+    );
+
+    // 另一条入口也钉住（同一个漏斗，但它是用户手切）：再装一张表，切回 A 页，
+    // 表必须同样作废。⚠️ 把 `set_active_tab` 里那句作废整体摘掉跑全量，app 622 条
+    // **只有本用例红** ⇒ 那四条用户切页路径原先各自手写的一句其实也没人守过，
+    // 不是只有 `FifGoto` 这一条漏。
+    app.find_scan = Some(11);
+    dispatch(
+        &mut app,
+        Message::FindScanDone(
+            11,
+            scanned(vec![editpad_core::MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 2,
+            }]),
+        ),
+    );
+    assert_eq!(
+        app.matches.hits().len(),
+        1,
+        "夹具自证：B 页又挂上一张命中表"
+    );
+    dispatch(&mut app, Message::SwitchTab(0));
+    assert!(
+        app.matches.is_empty(),
+        "手动切页同样要作废命中表（改前这条由四份手写副本维持）"
+    );
+}
