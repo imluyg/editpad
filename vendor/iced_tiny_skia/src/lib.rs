@@ -7,6 +7,7 @@ mod layer;
 mod primitive;
 mod settings;
 mod text;
+pub use text::take_glyph_probe_misses;
 
 #[cfg(feature = "image")]
 mod raster;

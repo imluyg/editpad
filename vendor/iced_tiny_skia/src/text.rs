@@ -8,7 +8,7 @@ use crate::graphics::text::paragraph;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map;
 
 #[derive(Debug)]
@@ -190,6 +190,25 @@ thread_local! {
         RefCell::new(cosmic_text::SwashCache::new());
 }
 
+thread_local! {
+    // P285 计量：本线程"真正的字形栅格未命中"次数，一次 = 走了一趟
+    // `get_image_uncached` 或零面积早退。测试用它把「同一内容重画一帧不该
+    // 再栅格任何字形」钉成断言，而不是注释里的一次手工计数。
+    // 恒开（不挂 env）：读一次 thread_local + `Cell` 自增，落在本来就要
+    // 分配像素缓冲的分支里，代价可忽略；挂 env 反而测不稳——并行测试下
+    // 谁先初始化门控，决定别人有没有计数。
+    static GLYPH_MISSES: Cell<usize> = Cell::new(0);
+}
+
+/// 取走并清零本线程的字形栅格未命中计数。
+pub fn take_glyph_probe_misses() -> usize {
+    GLYPH_MISSES.with(|c| {
+        let n = c.get();
+        c.set(0);
+        n
+    })
+}
+
 fn draw(
     font_system: &mut cosmic_text::FontSystem,
     glyph_cache: &mut GlyphCache,
@@ -285,13 +304,32 @@ impl GlyphCache {
         let key = (cache_key, [r, g, b]);
 
         if let hash_map::Entry::Vacant(entry) = self.entries.entry(key) {
+            GLYPH_MISSES.with(|c| c.set(c.get() + 1));
+            // EDITPAD_GLYPH_PROBE=1：打出未命中的字形键。关心它是因为 `cache_key`
+            // 含亚像素分箱、`key` 又含颜色三元组 ⇒ 滚动或高亮配色都可能让同一个
+            // 视觉字形变成新键、每帧重栅格。
+            if std::env::var_os("EDITPAD_GLYPH_PROBE").is_some() {
+                let sub = (cache_key.glyph_id, cache_key.x_bin, cache_key.y_bin);
+                eprintln!("GLYPHMISS {sub:?} rgb {r} {g} {b}");
+            }
             // TODO: Outline support
-            let image = swash.get_image_uncached(font_system, cache_key)?;
+            let Some(image) = swash.get_image_uncached(font_system, cache_key) else {
+                // P285：连"取不到图"也要记进缓存（空 buffer = 没什么可画）。
+                // 早退的话每帧都会重来一次 `get_image_uncached`（含分配）。
+                let _ = entry.insert((Vec::new(), cosmic_text::Placement::default()));
+                return None;
+            };
 
             let glyph_size = image.placement.width as usize
                 * image.placement.height as usize;
 
             if glyph_size == 0 {
+                // P285：空格这类"有放置、零面积"的字形以前直接 `return None`，
+                // 于是**永远不进缓存**——同一份内容重画一帧要为它们重跑一遍
+                // `get_image_uncached`（含分配）。本夹具实测：热帧未命中 42 次，
+                // 而像素与冷帧分毫不动 ⇒ 这 42 次栅格产不出一个像素。
+                // 这里插一条空 buffer 当负缓存，读取侧见下面的 `and_then`。
+                let _ = entry.insert((Vec::new(), image.placement));
                 return None;
             }
 
@@ -349,8 +387,10 @@ impl GlyphCache {
 
         let _ = self.recently_used.insert(key);
 
-        self.entries.get(&key).map(|(buffer, placement)| {
-            (bytemuck::cast_slice(buffer.as_slice()), *placement)
+        self.entries.get(&key).and_then(|(buffer, placement)| {
+            // 空 buffer = 负缓存命中（空格/取不到图）：不进栅格，也不交给
+            // `draw_pixmap`。像素与改前完全一致（这类字形本来就不落一个像素）。
+            (!buffer.is_empty()).then(|| (bytemuck::cast_slice(buffer.as_slice()), *placement))
         })
     }
 

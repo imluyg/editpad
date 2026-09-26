@@ -2081,6 +2081,110 @@ fn p283_one_frame_materializes_each_visible_line_once() {
     );
 }
 
+/// P285 护栏：vendor 给"零面积字形（空格）"补的**负缓存**不得改变像素。
+///
+/// 改前 `allocate()` 对 `glyph_size == 0` 直接 `return None` 而不入表 ⇒ 空格
+/// 每帧重跑一次未缓存栅格。本夹具实测（未命中计数，非耗时）：**改前冷帧 70 /
+/// 热帧 42，改后 29 / 0** —— 热帧归零即 P285 的全部主张。
+///
+/// 这条用例守的是什么、不守什么（都写清楚，别让它被误读成"负缓存的正确性证明"）：
+/// - **守得住**：① 空 buffer 被当成可画字形交给 `PixmapRef::from_bytes` ⇒ 直接 panic
+///   （探针实测：去掉 `!buffer.is_empty()` 过滤后本用例红在 `Create glyph pixel map`）；
+///   ② 冷/热两帧像素分叉（同一处绘制，缓存态不同就结果不同）；
+///   ③ 热帧的字形栅格未命中数必须为 0 —— 去掉负缓存即红（实测红在"热帧 42 次、
+///   冷帧 70 次"，且像素那条断言先过、不红），所以这半条不是装饰，是 P285 的成本
+///   契约本身。
+/// - **守不住**：一个对两帧**对称生效**的过度吞并（比如把真字形也判成"没什么可画"）
+///   在这里 cold==warm 且未命中仍为 0，照样绿。那一头由"空 buffer 只在
+///   `get_image_uncached` 取不到或 `w×h == 0` 两种情形写入"的结构保证，加上全量
+///   像素护栏（830 条）兜住 —— 真要硬钉得在 vendor 里写单测，而 vendor 不是
+///   workspace 成员、CI 不跑它的测试。
+///
+/// 计数入口：`iced_tiny_skia::take_glyph_probe_misses()`（取走并清零本线程计数）；
+/// 要看是哪个字形键在重复，用 `EDITPAD_GLYPH_PROBE=1` 打键。
+///
+/// 跨帧比较按 P280 的规矩钉掉两处时钟层，字体用显式族名。附带"帧不是空白"自证。
+#[test]
+fn p285_negative_glyph_cache_does_not_change_pixels() {
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        // 空格密集（每 6 个字符一个）+ 少量其他字形，正是负缓存覆盖的那一类
+        let doc: String = (0..20).map(|i| format!("ab {i:02} cd ef\n")).collect();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.sb_activity = None;
+        c.last_activity = None;
+        c.blink_on = true;
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let (w, h) = (700u32, 500u32);
+    let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+
+    let mut frame = || {
+        renderer.reset(rect);
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let mut px = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        px.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &rect,
+        );
+        renderer.draw(
+            &mut px.as_mut(),
+            &mut mask,
+            &viewport,
+            &[rect],
+            Color::WHITE,
+        );
+        px.data().to_vec()
+    };
+    iced_tiny_skia::take_glyph_probe_misses();
+    let cold = frame();
+    let cold_misses = iced_tiny_skia::take_glyph_probe_misses();
+    let warm = frame();
+    let warm_misses = iced_tiny_skia::take_glyph_probe_misses();
+    let ink = body_ink(&warm);
+    assert!(ink > 200, "夹具失效：正文带墨迹仅 {ink} px，比对无从谈起");
+    assert!(
+        cold_misses > 0,
+        "夹具失效：冷帧一次字形栅格都没发生（未命中 0），未命中计数无从比对"
+    );
+    assert!(
+        core.borrow().line_text_ref(0).contains(' '),
+        "夹具须含空格（负缓存覆盖的那一类字形）"
+    );
+    assert_eq!(
+        cold, warm,
+        "冷缓存帧与热缓存帧像素不同：负缓存吞掉了本该画的字形"
+    );
+    assert_eq!(
+        warm_misses, 0,
+        "同一份内容重画一帧仍栅格了 {warm_misses} 个字形（冷帧 {cold_misses} 个）：\
+         零面积/取不到图的字形没进负缓存，每帧白跑一趟未缓存栅格"
+    );
+}
+
 // ---------- 关态长行的**横向**剔除（O-1 的姊妹命题，第 157 轮勘出） ----------//
 // O-1 把绘制循环按视口**行**剔干净了，但一行只要有一列可见就整行进 shaping：
 // 视口 600px 装得下 ~60 个字符，4000 字符的行仍完整进 cosmic-text（第 157 轮
