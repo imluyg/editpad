@@ -830,6 +830,12 @@ fn rename_commit_targets_the_page_it_started_on_not_the_index() {
     std::fs::write(&pa, "A").unwrap();
     std::fs::write(&pb, "B").unwrap();
     std::fs::write(&pc, "C").unwrap();
+    // P290 夹具自证：地基必须干净。残留 `renamed-b.txt` 会让"改名成功"的三条磁盘断言
+    // 假绿、同时让提交被"目标已存在"静默拒绝——真凶却是上次运行，不是被测代码。
+    assert!(
+        !dir.join("renamed-b.txt").exists(),
+        "夹具地基不干净：上次运行留下 renamed-b.txt，本用例的断言会被残留替着通过"
+    );
 
     let mut app = Editpad::default();
     // 提交链路含 persist_settings：必须注入，绝不碰真实 %APPDATA%

@@ -10,6 +10,22 @@ fn scratch_dir(tag: &str) -> PathBuf {
         .join("editpad-app-tests")
         .join(format!("{tag}-{}", std::process::id()));
     fs_create_dir_all(&dir);
+    // P290：夹具地基隔离。目录名按进程 ID 拼，而 Windows **会回收 PID**——上一次运行
+    // 留下的文件会被下次运行当成"本次改名成功了"（实测：`rename_commit_...` 用例
+    // 因残留 `renamed-b.txt` 命中 `update/file.rs:913` 的"目标已存在"分支而静默拒绝
+    // 改名，磁盘侧三条断言却被残留替着通过，只有内存 path 那条红）。
+    // 只清**子项**、不动目录本身：若某条用例故意把这条路径占成文件（E-7 那类
+    // `remove_dir_all` 恒失败的情形），`read_dir` 报错即静默跳过，行为与改前一致。
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
     dir
 }
 
