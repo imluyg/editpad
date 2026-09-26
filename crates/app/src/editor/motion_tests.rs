@@ -2496,6 +2496,131 @@ fn p291_scrollbar_marks_do_not_reread_warm_lines() {
     assert_ne!(first, after, "预算变了，刻度所在视觉行就该变");
 }
 
+/// 第 206 轮 L-14 夹具：`lines` 行 × `line_len` 字符，命中表 `hits` 条均匀铺满
+/// （每行 `hits/lines` 条、彼此不重叠、按 (行, 列) 升序＝后台扫描快照的真实形状）。
+/// 三条夹具自证按第 199/200 轮那条仪表地雷写：计数类探针先断文档形状，行长与表长
+/// 写错都会把读数**假降**。
+fn marks_fixture(
+    lines: usize,
+    line_len: usize,
+    hits: usize,
+    hit_len: usize,
+    wrap_on: bool,
+) -> EditorCore {
+    let row = "x".repeat(line_len);
+    let text: String = (0..lines).map(|_| format!("{row}\n")).collect();
+    let mut c = if wrap_on {
+        wrap_core(&text)
+    } else {
+        core_with(&text)
+    };
+    assert_eq!(
+        c.doc.line_count(),
+        lines + 1,
+        "夹具自检：行数（每行都带行尾换行 ⇒ rope 还记一记空末行）"
+    );
+    assert_eq!(c.line_display_len(0), line_len, "夹具自检：行长");
+    let per_line = hits / lines;
+    c.set_find_highlights(
+        (0..hits)
+            .map(|k| editpad_core::MatchPos {
+                line: k / per_line,
+                col: (k % per_line) * hit_len,
+                len_chars: hit_len,
+            })
+            .collect(),
+    );
+    assert_eq!(c.find_hl.hits().len(), hits, "夹具自检：命中表长度");
+    c
+}
+
+/// 改前那条算法（整表逐条问过 + 相邻去重 + 封顶），同帧 oracle 用。
+fn marks_full_scan(c: &EditorCore) -> Vec<(u32, usize)> {
+    let cap = super::super::scrollbars::MARK_MAX_PER_KIND;
+    let mut out: Vec<(u32, usize)> = Vec::new();
+    for (i, hit) in c.find_hl.hits().iter().enumerate() {
+        if out.len() >= cap {
+            break;
+        }
+        let row = c.visual_row_of(hit.line, hit.col);
+        if out.last().is_none_or(|&(last_row, _)| last_row != row) {
+            out.push((row, i));
+        }
+    }
+    out
+}
+
+/// 三条形状：A＝长文档满命中、B＝单行＋换行开、C＝**场景①本体**（单行超长日志
+/// 关换行挂着查找面板）。
+const MARK_SHAPES: [(usize, usize, usize, usize, bool); 3] = [
+    (10, 20_000, 50_000, 3, true),
+    (1, 20_000, 5_000, 3, true),
+    (1, 20_000, 20_000, 1, false),
+];
+
+/// P297 护栏（第 206 轮，L-14 结案）：滚动条命中刻度的每帧换算**次数**只随产出的
+/// 刻度数，不随命中表长度。
+///
+/// 改前实测（debug、判据取次数）：A＝一帧换算 8_659 次产 1_000 颗刻度；B＝5_000 次
+/// 产 577 颗；C＝**20_000 次只产 1 颗**。封顶 `MARK_MAX_PER_KIND` 只在"行数够多、
+/// 刻度攒得满"时才早退，命中全落在少数行时封顶永远不触发——正是场景①＋③合体的形状。
+#[test]
+fn p297_scrollbar_marks_cost_scales_with_marks_not_hit_table() {
+    for (lines, line_len, hits, hit_len, wrap_on) in MARK_SHAPES {
+        let c = marks_fixture(lines, line_len, hits, hit_len, wrap_on);
+        c.take_visual_row_calls();
+        let marks = c.scrollbar_hit_marks();
+        let calls = c.take_visual_row_calls();
+        eprintln!(
+            "[P297] {lines} 行 ×{line_len} 字符、{hits} 条命中、换行{} ⇒ 换算 {calls} 次 / 刻度 {} 条",
+            if wrap_on { "开" } else { "关" },
+            marks.len()
+        );
+        assert!(!marks.is_empty(), "夹具自检：一颗刻度都没有就是空断言");
+        assert!(
+            calls >= marks.len(),
+            "读数自检：换算次数({calls})少于刻度数({})，两把尺子不同源",
+            marks.len()
+        );
+        assert!(
+            calls <= marks.len() * 2 + 4,
+            "{hits} 条命中产 {} 颗刻度却换算 {calls} 次：仍在按命中表长度结算",
+            marks.len()
+        );
+    }
+}
+
+/// P297 配套：快路径与"整表逐条问过"的旧算法**逐元素相等**（同帧 oracle 对拍），
+/// 并断它确实少算了——不然相等只说明两条在跑同一段代码。
+#[test]
+fn p297_scrollbar_marks_equal_the_full_scan_oracle() {
+    for (lines, line_len, hits, hit_len, wrap_on) in MARK_SHAPES {
+        let c = marks_fixture(lines, line_len, hits, hit_len, wrap_on);
+        c.take_visual_row_calls();
+        let fast = c.scrollbar_hit_marks();
+        let fast_calls = c.take_visual_row_calls();
+        c.take_visual_row_calls();
+        let slow = marks_full_scan(&c);
+        let slow_calls = c.take_visual_row_calls();
+        eprintln!(
+            "[P297] 对拍 {lines} 行 ×{line_len}、{hits} 条：快路径 {fast_calls} 次 vs 旧算法 {slow_calls} 次，刻度 {} 条",
+            fast.len()
+        );
+        assert_eq!(fast, slow, "跳扫后的刻度表与整表问过不该有差异");
+        assert!(
+            fast_calls <= slow_calls,
+            "快路径换算 {fast_calls} 次反而多于旧算法 {slow_calls} 次"
+        );
+        if !wrap_on {
+            // 场景①那一档：一行只有一个视觉行 ⇒ 旧算法把整表问完，快路径一次就跳到底
+            assert!(
+                fast_calls * 100 < slow_calls,
+                "单行关换行档没省下东西：{fast_calls} vs {slow_calls}"
+            );
+        }
+    }
+}
+
 // ---------- P134：折行视觉行 Home/End（路线图 C8） ----------
 
 #[test]

@@ -879,8 +879,22 @@ impl EditorCore {
 
     /// (line, col) 的视觉行号（开关关 = line）。
     pub fn visual_row_of(&self, line: usize, col: usize) -> u32 {
+        self.visual_row_and_next_seg(line, col).0
+    }
+
+    /// P297（第 206 轮 L-14）：与 [`Self::visual_row_of`] **同一份算式**，另外交出
+    /// 「本行内下一个视觉段的起始列」——`None` 表示这一行再无新视觉行（关软换行、
+    /// 已到最后一段、或行号越界）。
+    ///
+    /// 为什么要这一步：滚动条刻度按命中表整表换算，而第 200 段里的 50 条命中只产出
+    /// **一颗**刻度。拿到"下一段的起点"就能用二分把同段的其余命中一次跳掉，不必逐条
+    /// 问过（见 `EditorCore::scrollbar_hit_marks`）。算式只留一份，是为了不再造一次
+    /// "刻度说的段序"与"绘制说的段序"两套口径（本仓已第 5 次）。
+    pub(crate) fn visual_row_and_next_seg(&self, line: usize, col: usize) -> (u32, Option<usize>) {
+        #[cfg(test)]
+        self.visual_row_calls.set(self.visual_row_calls.get() + 1);
         if !self.wrap.borrow().enabled {
-            return line as u32;
+            return (line as u32, None);
         }
         let mut w = self.wrap.borrow_mut();
         w.ensure_synced(
@@ -892,7 +906,7 @@ impl EditorCore {
         let line = line.min(lines);
         let prefix = w.index.prefix_rows(line);
         if line >= lines {
-            return prefix;
+            return (prefix, None);
         }
         // P291：这里原先每次 `line_text` 物化整行、再数两遍字符数。滚动条刻度按
         // 命中表整表跑（一帧最多 `MARK_MAX_PER_KIND` 次）而那些行基本都不在视口
@@ -901,7 +915,8 @@ impl EditorCore {
         let real_xs = self.trusted_xs_len(line, lens);
         let breaks = w.segments_of_lazy(line, real_xs, || self.line_text_ref(line));
         let seg = segment_index(&breaks, col, lens);
-        prefix + seg as u32
+        let next_seg_col = breaks.get(seg + 1).copied();
+        (prefix + seg as u32, next_seg_col)
     }
 
     /// 逻辑行 `line` 的视觉段数（测试诊断用）。
@@ -1330,6 +1345,12 @@ impl EditorCore {
     #[cfg(test)]
     pub(crate) fn take_line_text_calls(&self) -> usize {
         self.line_text_calls.take()
+    }
+
+    /// 测试钩子（第 206 轮 L-14）：读取并清零 `visual_row_of` 的调用次数。
+    #[cfg(test)]
+    pub(crate) fn take_visual_row_calls(&self) -> usize {
+        self.visual_row_calls.take()
     }
 
     /// 第 `line` 行行首缩进的显示列数（缩进参考线定位）。

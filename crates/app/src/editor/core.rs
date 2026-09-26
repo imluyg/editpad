@@ -478,6 +478,12 @@ impl FindHitTable {
         self.hits.is_empty()
     }
 
+    /// P297：命中表是否"按行升序、同行内按列不重叠"（即能否二分跳扫）。
+    /// 判据在 [`FindHitTable::new`] 随表算好，与绘制窗口共用同一份前提。
+    pub(crate) fn windowable(&self) -> bool {
+        self.windowable
+    }
+
     /// 可能落进视口 `[vis_first, vis_last]` 的那一段 `[lo, hi)`。
     ///
     /// * `hi` = 首条 `line > vis_last`；
@@ -712,6 +718,11 @@ pub struct EditorCore {
     /// 生产构建整字段不参与编译。
     #[cfg(test)]
     pub(crate) line_text_calls: std::cell::Cell<usize>,
+    /// 测试钩子（第 206 轮 L-14）：`visual_row_of` 被调用的**次数**。
+    /// P291 去掉的是每次调用的整行取串，这一档问的是"每帧要调多少次"——
+    /// 开态下一次换算要走折行 memo 与段序定位，次数本身就是成本。
+    #[cfg(test)]
+    pub(crate) visual_row_calls: std::cell::Cell<usize>,
     /// 测试钩子（横向剔除契约）：整帧交给文本 shaping 的**字符数**合计。
     /// 取串次数管不住「单行超长」这一维（一行只取一次串，却可以有几百万
     /// 字符进 shaping），故另设本计数。生产构建整字段不参与编译。
@@ -878,6 +889,8 @@ impl Default for EditorCore {
             show_line_endings: false,
             #[cfg(test)]
             line_text_calls: std::cell::Cell::new(0),
+            #[cfg(test)]
+            visual_row_calls: std::cell::Cell::new(0),
             #[cfg(test)]
             shaped_chars: std::cell::Cell::new(0),
             #[cfg(test)]
@@ -1391,15 +1404,47 @@ impl EditorCore {
     /// （路线图 §7.6：禁逻辑行直乘行高）。
     pub(crate) fn scrollbar_hit_marks(&self) -> Vec<(u32, usize)> {
         let cap = super::scrollbars::MARK_MAX_PER_KIND;
+        let hits = self.find_hl.hits();
         let mut out: Vec<(u32, usize)> = Vec::new();
-        for (i, hit) in self.find_hl.hits().iter().enumerate() {
+        if !self.find_hl.windowable() {
+            // 乱序表（现有夹具里有这种形状）：没有可依赖的行/列序，只能逐条问过——
+            // 与改前逐字相同。
+            for (i, hit) in hits.iter().enumerate() {
+                if out.len() >= cap {
+                    break;
+                }
+                let row = self.visual_row_of(hit.line, hit.col);
+                if out.last().is_none_or(|&(last_row, _)| last_row != row) {
+                    out.push((row, i));
+                }
+            }
+            return out;
+        }
+        // P297（L-14）：一颗刻度对应一个视觉行，而同一段里剩下的命中再问也不会产出
+        // 新刻度，所以每条命中换算过一次就用二分跳过去：本行内跳到下一视觉段的首列，
+        // 本行再无新段就跳到下一行的第一条。
+        //
+        // 改前实测（debug、判据取次数）：单行 2 万字符、**关**软换行、挂 2 万条命中
+        // ⇒ 一帧换算 20_000 次只产出 **1** 颗刻度；10 行 ×2 万字符挂 5 万条命中
+        // ⇒ 8_659 次产 1_000 颗（8.7 倍浪费）。刻度封顶 1_000 只在"行数够多"时才
+        // 早退，命中全落在少数行时封顶永不触发——正是"50MB 单行日志挂着查找面板"
+        // 那一档（场景①＋③合体）。
+        let mut i = 0usize;
+        while i < hits.len() {
             if out.len() >= cap {
                 break;
             }
-            let row = self.visual_row_of(hit.line, hit.col);
+            let hit = hits[i];
+            let (row, next_seg_col) = self.visual_row_and_next_seg(hit.line, hit.col);
             if out.last().is_none_or(|&(last_row, _)| last_row != row) {
                 out.push((row, i));
             }
+            let rest = i + 1;
+            let line_end = rest + hits[rest..].partition_point(|h| h.line == hit.line);
+            i = match next_seg_col {
+                Some(col) => rest + hits[rest..line_end].partition_point(|h| h.col < col),
+                None => line_end,
+            };
         }
         out
     }
