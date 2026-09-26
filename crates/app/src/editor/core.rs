@@ -443,6 +443,70 @@ pub(crate) struct Snapshot {
 // 可读，语义见下方各字段文档（bracket_cache / sel_span_cache）。
 type BracketCache = RefCell<Option<(CursorPos, Option<(usize, usize)>)>>;
 type SelSpanCache = RefCell<Option<((usize, usize), Option<usize>)>>;
+
+/// P296（第 205 轮，场景③「5 万条命中的全文替换」）：查找命中表的容器。
+///
+/// 存在的理由只有一个：绘制块原先每帧**线性扫整张表**，实测一帧被逐条检查的
+/// 条目数恒等于表长（视口固定 16 行时，表长 1 千／5 千／5 万 ⇒ 检查 1 千／5 千／
+/// 5 万次；台账第 198 轮把这条判否过，当时明写「那是眼力判断不是实测」）。
+/// 收窄成二分窗口需要「按行升序」这个前提，而前提是**随表算出来的**——所以它
+/// 和表放在同一个结构里、只由 [`FindHitTable::new`] 产出，不给"表换了、前提没
+/// 换"留可表达的空间（本仓派生量与数据分家的口径分叉已第 5 次）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FindHitTable {
+    hits: Vec<editpad_core::MatchPos>,
+    /// 可按行二分：表按 `line` 升序，且同行内按 `col` 不重叠。
+    /// 后台扫描（`find_all` / `find_all_document` / `find_all_regex` 与整词过滤）
+    /// 的扫描序天然满足；不满足时 [`Self::window`] 退回全表扫，语义与改前逐字相同。
+    windowable: bool,
+}
+
+impl FindHitTable {
+    fn new(hits: Vec<editpad_core::MatchPos>) -> Self {
+        let windowable = hits.windows(2).all(|w| {
+            w[0].line <= w[1].line
+                && (w[0].line != w[1].line || w[0].col + w[0].len_chars <= w[1].col)
+        });
+        Self { hits, windowable }
+    }
+
+    pub(crate) fn hits(&self) -> &[editpad_core::MatchPos] {
+        &self.hits
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hits.is_empty()
+    }
+
+    /// 可能落进视口 `[vis_first, vis_last]` 的那一段 `[lo, hi)`。
+    ///
+    /// * `hi` = 首条 `line > vis_last`；
+    /// * `lo` = 首条 `line >= vis_first`，再往回退掉「起点在视口上方、却跨行进
+    ///   来」的命中——绘制块的先判据 `line + len_chars` 正是这个形状（多行查询
+    ///   的快照），退到第一条够不着视口的为止。回退之所以只看一条就够，靠的是
+    ///   命中互不重叠：`j` 在停住那条之前 yet 真跨进视口 ⇒ `j` 必然盖住停住那条
+    ///   的起点，与不重叠矛盾。
+    ///
+    /// 窗口只是**取候选**，绘制块里那句精确判据仍是唯一裁决，所以收窄不改变
+    /// 画出来的东西——这条由 `p296_find_hit_scan_examines_only_the_viewport_window`
+    /// （上界＋下界）与两条既有的开/关态逐像素护栏共同看守。
+    fn window(&self, vis_first: usize, vis_last: usize) -> (usize, usize) {
+        if !self.windowable {
+            return (0, self.hits.len());
+        }
+        let hi = self.hits.partition_point(|h| h.line <= vis_last);
+        let mut lo = self.hits.partition_point(|h| h.line < vis_first);
+        while lo > 0 {
+            let prev = &self.hits[lo - 1];
+            if prev.line + prev.len_chars < vis_first {
+                break;
+            }
+            lo -= 1;
+        }
+        (lo, hi)
+    }
+}
+
 /// P283：整行文本的纪元键控 memo（`EditorCore::line_text_ref` 的存储）。
 /// `bytes` 是已缓存字符串的字节数之和，用来封顶——长行文档里一行就能有几万字符。
 #[derive(Default)]
@@ -610,7 +674,13 @@ pub struct EditorCore {
     /// 编辑后命中位置可能短暂漂移（防抖重扫完成前为旧位置），与主流
     /// 编辑器一致可接受；不参与撤销/快照/置脏，换文档（reset_document）
     /// 与关栏即清空。
-    pub(crate) find_hl: Vec<editpad_core::MatchPos>,
+    pub(crate) find_hl: FindHitTable,
+    /// 测试钩子（命中表剔除契约，第 205 轮）：整帧 `draw_find_hits` 被**逐条
+    /// 检查**的命中条目数。取串次数管不住「命中表本身多长」这一维——视口外的
+    /// 命中一条正文都不碰，却每条都要过一遍行界比较，所以表长 5 万时那是每帧
+    /// 5 万次白比较。本计数与机器负载无关。生产构建整字段不参与编译。
+    #[cfg(test)]
+    pub(crate) find_hit_checks: std::cell::Cell<usize>,
     /// 括号匹配查询缓存（第 61 轮）：键 = 光标位置，值 = 该位置的匹配
     /// 结果（含 None）。draw 每帧查询、命中即零扫描——孤立括号的封顶
     /// 扫描（MAX_BRACKET_SCAN_CHARS）只在新光标位付一次。RefCell 让
@@ -797,7 +867,9 @@ impl Default for EditorCore {
             wrap_sweep_next: 0,
             wrap_sweep_px: 0.0,
             bookmarks: BTreeSet::new(),
-            find_hl: Vec::new(),
+            find_hl: FindHitTable::default(),
+            #[cfg(test)]
+            find_hit_checks: std::cell::Cell::new(0),
             bracket_cache: RefCell::new(None),
             sel_span_cache: RefCell::new(None),
             line_text_memo: RefCell::new(LineTextMemo::default()),
@@ -1277,7 +1349,7 @@ impl EditorCore {
         self.bookmarks.clear();
         // P123：旧文档的查找命中表一并作废（查找栏仍开时由下一次
         // FindScanDone 重新下发）
-        self.find_hl.clear();
+        self.find_hl = FindHitTable::default();
         // P125：换文档复位覆写模式（新文档默认插入）
         self.overwrite = false;
         self.recompute_max_line_cols();
@@ -1290,8 +1362,26 @@ impl EditorCore {
     /// P123：下发查找命中高亮表（查找栏开态的全部命中快照）。表内容
     /// 完全由应用层维护（扫描完成时替换、关栏/换文档清空），编辑器层
     /// 只读绘制，不做失效推断。
+    ///
+    /// P296：这是唯一的写入点，命中表连同「能否按行二分」的那一次判定一起
+    /// 换（判据见 [`FindHitTable::new`]）——派生量与表分家迟早会各说一套，
+    /// 本仓这类口径分叉已经五次了。
     pub fn set_find_highlights(&mut self, hits: Vec<editpad_core::MatchPos>) {
-        self.find_hl = hits;
+        self.find_hl = FindHitTable::new(hits);
+    }
+
+    /// P296：命中表中可能落进视口 `[vis_first, vis_last]` 的那一段 `[lo, hi)`。
+    /// 见 [`FindHitTable::window`]。
+    pub(crate) fn find_hit_window(&self, vis_first: usize, vis_last: usize) -> (usize, usize) {
+        self.find_hl.window(vis_first, vis_last)
+    }
+
+    /// 测试钩子（第 205 轮）：读取并清零「整帧被逐条检查的命中条目数」。
+    /// 与 `take_line_text_calls` 同用法——绘制前清零、绘制后取值，断的是**次数**
+    /// 上界而非耗时。
+    #[cfg(test)]
+    pub(crate) fn take_find_hit_checks(&self) -> usize {
+        self.find_hit_checks.take()
     }
 
     /// P131：滚动条标记条数据源——命中刻度 `(视觉行, find_hl 索引)`。
@@ -1302,7 +1392,7 @@ impl EditorCore {
     pub(crate) fn scrollbar_hit_marks(&self) -> Vec<(u32, usize)> {
         let cap = super::scrollbars::MARK_MAX_PER_KIND;
         let mut out: Vec<(u32, usize)> = Vec::new();
-        for (i, hit) in self.find_hl.iter().enumerate() {
+        for (i, hit) in self.find_hl.hits().iter().enumerate() {
             if out.len() >= cap {
                 break;
             }

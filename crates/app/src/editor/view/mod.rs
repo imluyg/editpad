@@ -1422,7 +1422,13 @@ impl EditorView {
         // 后台扫描快照，编辑后至下一次扫描完成前位置可能漂移（可接受，
         // 主流同口径），绘制时对超界行列做钳制防御。
         if !core.find_hl.is_empty() {
-            for hit in &core.find_hl {
+            // P296：先按视口行区间把候选收到一段连续窗口里，再逐条过精确判据。
+            // 窗口只是**取候选**的方式，下面那句 `hit.line > vis_last || …` 仍是
+            // 唯一的裁决，所以收窄与否不可能改变画出来的东西。
+            let (hit_lo, hit_hi) = core.find_hit_window(vis_first, vis_last);
+            for hit in &core.find_hl.hits()[hit_lo..hit_hi] {
+                #[cfg(test)]
+                core.find_hit_checks.set(core.find_hit_checks.get() + 1);
                 // 命中片段一律从 `hit.line` 起向**后**展开（`match_line_pieces`
                 // 每步至少吃掉 1 字符，故末片行号 ≤ hit.line + len_chars）。
                 // 据此可在拆片之前先否掉整个不在视口内的命中。

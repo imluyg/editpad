@@ -1967,13 +1967,15 @@ fn draw_frame_and_count_line_text(
             c.select_all();
         }
         // 命中表按行均匀铺满全文档（后台扫描快照的形状，也是改前最贵的分布）
-        c.find_hl = (0..hits)
-            .map(|k| editpad_core::MatchPos {
-                line: (k * lines / hits.max(1)).min(lines.saturating_sub(1)),
-                col: 0,
-                len_chars: 3,
-            })
-            .collect();
+        c.set_find_highlights(
+            (0..hits)
+                .map(|k| editpad_core::MatchPos {
+                    line: (k * lines / hits.max(1)).min(lines.saturating_sub(1)),
+                    col: 0,
+                    len_chars: 3,
+                })
+                .collect(),
+        );
         // select_all 会把滚动推到文末，视口位置必须在它之后设定
         c.scroll_top = (lines / 2) as f32;
         c.take_line_text_calls();
@@ -2047,6 +2049,163 @@ fn o1_find_hit_draw_cost_scales_with_viewport_not_document() {
     assert!(
         large <= small * 3 + 50,
         "命中表 ×10 使单帧取串次数 {small} → {large}：未按视口粗筛"
+    );
+}
+
+/// 第 205 轮夹具：与真实渲染循环同构的最小无头管线，画一帧，返回
+/// `(整帧被逐条检查的命中条目数, 本帧视口首行, 本帧视口末行)`。
+///
+/// 与 `draw_frame_and_count_line_text` 的分工：那条结算的是**整行取串**次数，
+/// 命中循环在否掉视口外命中之前不碰正文，所以表长那一维它看不见（第 198 轮
+/// 明写过「那是眼力判断不是实测」）。这里问的是另一维：一帧到底把命中表里
+/// 多少条目拿到过判据前。视口行区间一并返回，判据按它算而不是拍常数。
+fn draw_frame_and_count_hit_table(
+    lines: usize,
+    table: Vec<editpad_core::MatchPos>,
+) -> (usize, usize, usize) {
+    let core = EditorHandle::default();
+    let vis;
+    {
+        let mut c = core.borrow_mut();
+        // 每行 64 个填充字符：保证夹具里每条命中的列都落在真实正文内，
+        // 不至于被行尾钳成零宽（零宽条目会在计数之后才被判掉，读数失真）。
+        let doc: String = (0..lines)
+            .map(|i| format!("row-{i:05} abc{}\n", "q".repeat(64)))
+            .collect();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.set_find_highlights(table);
+        c.scroll_top = (lines / 2) as f32;
+        vis = c.visible_range();
+        c.take_find_hit_checks();
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font: BODY_FONT,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let (w, h) = (700u32, 500u32);
+    let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &viewport_rect,
+    );
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut mask,
+        &viewport,
+        &[viewport_rect],
+        Color::WHITE,
+    );
+    let examined = core.borrow().take_find_hit_checks();
+    assert!(
+        body_ink(pixels.data()) > 0,
+        "探针失效：整帧一颗正文墨迹都没画，命中循环根本没走到"
+    );
+    (examined, vis.0, vis.1)
+}
+
+/// 把 `hits` 条命中均匀铺在 `lines` 行上（每行 `⌈hits/lines⌉` 条、列间隔 4），
+/// 即后台扫描快照的形状，也是表长维度最贵的分布。
+fn spread_hits(lines: usize, hits: usize, len_chars: usize) -> Vec<editpad_core::MatchPos> {
+    let per_line = hits.div_ceil(lines).max(1);
+    (0..hits)
+        .map(|k| editpad_core::MatchPos {
+            line: (k / per_line).min(lines - 1),
+            col: (k % per_line) * 4,
+            len_chars,
+        })
+        .collect()
+}
+
+/// P296 护栏（第 205 轮，场景③「5 万条命中的全文替换」）：一帧被逐条检查的
+/// 命中条目数只随**视口**规模，不随**命中表**规模。
+///
+/// 台账第 198 轮给这块留过一句判否：「`draw_find_hits` 每帧线性扫全量命中表——
+/// 每次迭代只做两次整数比较、不触正文，过了剔除才取串 ⇒ 不做」，并当场标注
+/// 「那是眼力判断不是实测，命中表封顶若放开需重量」。本用例先把那句话量掉：
+/// 1 千／5 千／5 万三档表长，文档行数与视口固定，只切表长一个维度。
+///
+/// ⚠️ 为什么取串次数（`o1_find_hit_draw_cost_scales_with_viewport_not_document`）
+/// 挡不住这一维：视口外的命中在否掉之前一次正文都不碰，所以那条的读数对表长
+/// 完全不敏感——两条用例结算的是同一循环的两个不同成本。
+#[test]
+fn p296_find_hit_scan_examines_only_the_viewport_window() {
+    let mut readings: Vec<(usize, usize)> = Vec::new();
+    // 每档都是"每行 10 条命中"的同一密度，只有表长（连同文档行数）×50：
+    // 视口窗口按行取，所以三档的检查条目数应当**一模一样**。
+    for hits in [1_000usize, 5_000, 50_000] {
+        let lines = hits / 10;
+        let table = spread_hits(lines, hits, 3);
+        let (examined, first, last) = draw_frame_and_count_hit_table(lines, table.clone());
+        let rows = last - first + 1;
+        eprintln!(
+            "[P296] 表长 {hits}（文档 {lines} 行）→ 单帧检查 {examined} 条，视口 {rows} 行 {first}..{last}"
+        );
+        // 精确判据自己数一遍"本该被检查的条目"：窗口既不许多查（上界＝表长
+        // 那一维没有脱钩就是白扫），也不许少查（少查＝视口内少一块底色）。
+        let expect = table
+            .iter()
+            .filter(|h| h.line <= last && h.line + h.len_chars >= first)
+            .count();
+        assert_eq!(
+            examined, expect,
+            "表长 {hits}：窗口检查了 {examined} 条，而按精确判据该检查 {expect} 条（视口 {rows} 行）"
+        );
+        assert!(
+            expect > 0,
+            "夹具失效：视口 {first}..{last} 里一条命中都没有，上面的相等是空断言"
+        );
+        readings.push((hits, examined));
+    }
+    let small = readings[0].1;
+    let large = readings[2].1;
+    assert_eq!(
+        small, large,
+        "表长 ×50 使单帧检查条目数 {small} → {large}：成本没跟视口挂钩"
+    );
+    // 场景③的抬头读数：5 万条命中、16 行视口，改前一帧查 50_000 条。
+    assert!(
+        large <= 400,
+        "5 万条命中一帧检查 {large} 条：改前实测＝表长本身（50_000）"
+    );
+}
+
+/// P296 配套下界：从**视口上方**起排、跨进行内的命中（多行查询的快照形状）
+/// 必须仍被检查到。二分窗口的下沿只要收得比"最长命中的跨度"更紧，这条就丢画，
+/// 而上一条只断上界、看不见它。
+#[test]
+fn p296_find_hit_starting_above_the_viewport_is_still_examined() {
+    // 先量本帧视口行区间（空表 ⇒ 只画正文，区间与下一帧同夹具同滚动一致）
+    let (_, first, last) = draw_frame_and_count_hit_table(5_000, Vec::new());
+    assert!(first >= 3, "夹具假设视口上方还有行，实测首行 {first}");
+    // 一条 line = first-2 起排、跨 5 行的命中：先判据 `line + len_chars < vis_first`
+    // 不成立（first-2+5 ≥ first），所以它落在窗口内、必须被检查一次。
+    let table = vec![editpad_core::MatchPos {
+        line: first - 2,
+        col: 0,
+        len_chars: 5,
+    }];
+    let (examined, _, _) = draw_frame_and_count_hit_table(5_000, table);
+    eprintln!("[P296] 视口上方起排的跨行命中：单帧检查 {examined} 条（视口 {first}..{last}）");
+    assert_eq!(
+        examined, 1,
+        "跨行命中被二分窗口下沿切掉了：检查 {examined} 条（应为 1），视口内会少一块底色"
     );
 }
 
@@ -5445,7 +5604,7 @@ fn wrap_find_highlight_paints_on_the_hit_visual_segment() {
     // 第 203 轮换字体后本用例恒红，怀疑的不是字体而是**夹具读的是列模型断点**——
     // 上面已按生产口径先注入行字形位置再读表，这里才敢用显式族名。
     let frame = |hits: Vec<editpad_core::MatchPos>| -> Vec<u8> {
-        core.borrow_mut().find_hl = hits;
+        core.borrow_mut().set_find_highlights(hits);
         let mut view = EditorView {
             core: core.clone(),
             font,
@@ -5604,7 +5763,7 @@ fn find_highlight_paints_only_the_hit_span_when_wrap_off() {
     let hit_line = 5usize;
 
     let frame = |hits: Vec<editpad_core::MatchPos>| -> Vec<u8> {
-        core.borrow_mut().find_hl = hits;
+        core.borrow_mut().set_find_highlights(hits);
         let mut view = EditorView {
             core: core.clone(),
             // 显式字体名：底色差分是跨两帧比对，P33 的一次性全局钉字若落在两帧

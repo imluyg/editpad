@@ -743,7 +743,7 @@ fn find_scan_done_syncs_viewport_highlights_and_close_clears() {
         ),
     );
     assert_eq!(
-        app.cur_handle.borrow().find_hl.len(),
+        app.cur_handle.borrow().find_hl.hits().len(),
         2,
         "扫描完成后命中表同步进编辑器高亮层"
     );
