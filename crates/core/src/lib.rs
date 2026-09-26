@@ -47,8 +47,9 @@ pub use saver::{
 };
 pub use search::{
     ascii_case_eq, compile_regex, expand_regex_at, filter_whole_word, find_all, find_all_document,
-    find_all_regex, find_all_regex_compiled, for_each_line, is_word_char, next_from, prev_from,
-    replace_all, replace_all_document, replace_all_regex, replace_all_word, MatchPos,
+    find_all_regex, find_all_regex_compiled, find_all_regex_document, for_each_line, is_word_char,
+    next_from, prev_from, replace_all, replace_all_document, replace_all_regex, replace_all_word,
+    MatchPos,
 };
 pub use settings::{
     normalize_combo, normalize_settings_page, RecentView, Settings, EXIT_MODE_ASK,

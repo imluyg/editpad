@@ -123,8 +123,9 @@ impl Editpad {
             drive_find_scan(payload, move |doc, q, cs, rx| {
                 if rx {
                     // P70：正则走全文扫描（to_text 拷贝发生在后台线程）；
-                    // 编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
-                    editpad_core::find_all_regex(&doc.to_text(), q, cs).unwrap_or_default()
+                    // L-17 起跨度换算按密度选档——命中稀疏时不再把整份正文
+                    // 再走一遍。编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
+                    editpad_core::find_all_regex_document(doc, q, cs).unwrap_or_default()
                 } else {
                     let hits = editpad_core::find_all_document(doc, q, cs);
                     if whole_word {

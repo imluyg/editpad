@@ -926,6 +926,107 @@ pub fn find_all_regex_compiled(
     Ok(spans_to_matchpos(text, &spans))
 }
 
+/// 跨度序列 → [`MatchPos`] 的**稀疏档**：逐命中问 rope 的索引树，
+/// O(命中数 × log 文档)，**不再随文档长度增长**。
+///
+/// 与 [`spans_to_matchpos`]（游标档，O(文档)）逐格等价，口径由三处钉住：
+/// * 行号＝ropey `unicode_lines` 的行界全集，与游标档用的
+///   [`line_break_byte_len`] 是同一个集合（ropey 的 `unicode_lines` 特征
+///   即 UAX#14 换行准则）；
+/// * 命中起于 CRLF 的 `\n` 那一格＝N-09 的「行界单元归属于它终止的那一行」，
+///   这里靠「前一字节是 `\r`」减一列，而 `\r` 在 UAX#14 里永远是行界，
+///   故该判据与游标档的 `inside` 分支同集；
+/// * `len_chars` 与游标档共用 [`span_unit_count`]，算式只有一份。
+///
+/// 两档的选择见 [`find_all_regex_document`] 的密度判据。
+fn spans_to_matchpos_rope(doc: &Document, text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
+    let mut out = Vec::with_capacity(spans.len());
+    for &(start, end) in spans {
+        let char_at = doc.byte_to_char(start);
+        let line = doc.char_to_line(char_at);
+        let mut col = char_at - doc.line_to_char(line);
+        // 命中恰起于 CRLF 的 `\n`：该单元归上一行、列取行尾列（N-09/core-B）。
+        // 游标档在这一格会返回 (上一行, 行尾列)，而 ropey 把 `\r`、`\n` 记在
+        // 同一行内且各占一字符 ⇒ 不减这一列就会多出一列。
+        if start > 0 && text.as_bytes()[start - 1] == b'\r' && text[start..].starts_with('\n') {
+            col -= 1;
+        }
+        out.push(MatchPos {
+            line,
+            col,
+            len_chars: span_unit_count(text, start, end),
+        });
+    }
+    out
+}
+
+/// 一个命中跨度内的**选区显示长度**（单位与光标列一致，`\r\n` 计 1 字符）。
+/// 游标档与稀疏档共用（口径仅此一份）。
+fn span_unit_count(text: &str, start: usize, end: usize) -> usize {
+    let mut len_chars = 0usize;
+    let mut b = start;
+    while b < end {
+        let c = text[b..].chars().next().unwrap_or('\0');
+        b += c.len_utf8();
+        if c == '\r' && text[b..].starts_with('\n') {
+            b += 1;
+        }
+        len_chars += 1;
+    }
+    len_chars
+}
+
+/// 稀疏档的门槛：平均命中间隔小于这么多字节时，游标档「顺着走过去」比
+/// 每命中三次树查询更便宜，仍走游标档。
+///
+/// 数值是**量出来的**，不是估的：`examples/regex_scan_bench` 在 49MB 档扫一遍
+/// 密度轴（release，同一次运行内对比，两边都算上那份 `to_text`）⇒
+/// 间隔 200 字节处树查表**更慢**（92.6 → 116.9 ms），间隔 500 字节处已经开始赚
+/// （89.4 → 60.6 ms），1 字节/百万字节处 94.2 → 17.7 ms（**5.3×**）。
+/// 交叉点落在 200~500 之间，取靠下的 256 ⇒ 判据宁可保守：选错成"走游标档"
+/// 只是没赚到，选错成"走树查表"是真的变慢。
+///
+/// ⚠️ 同一张表在间隔 ≤200 的几格里，「新」比「旧＋拷贝」高 ≈10%，两个构建档
+/// 一致。成因是仪表自身：那一行同时存着两份 49MB 缓冲（`旧` 复用的那份 +
+/// `新` 内部新分配的那份），不是产品侧的回退，故**不据此下结论**，也不给
+/// 这些格子配护栏。
+const MATCHPOS_ROPE_MIN_GAP_BYTES: usize = 256;
+
+/// L-17：文档版正则扫描——与 [`find_all_regex_compiled`] 同一份引擎调用，
+/// 但**跨度换算按密度选档**：命中稀疏时改走 rope 索引树，换算成本从
+/// O(文档) 降到 O(命中数)。
+///
+/// 为什么值得分档（50MB 档实测，release）：全文单遍正则引擎本身 180~350 ms
+/// 是硬账，而原来的换算无论几条命中都要把正文再走一遍——**一条**命中落在
+/// 53MB 单行日志末尾时，换算仍要 160 ms。改后该格换算 ≈0 ms。
+/// 那份 `to_text()` 全文拷贝（53MB）引擎仍必需，本轮只把它自己快了 2 倍
+/// （见 [`Document::to_text`]）。
+pub fn find_all_regex_document(
+    doc: &Document,
+    pattern: &str,
+    case_sensitive: bool,
+) -> Result<Vec<MatchPos>, String> {
+    let re = compile_regex(pattern, case_sensitive)?;
+    let text = doc.to_text();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for m in re.find_iter(&text) {
+        let m = m.map_err(|e| e.to_string())?;
+        spans.push((m.start(), m.end()));
+    }
+    Ok(matchpos_for_document(doc, &text, &spans))
+}
+
+/// 两档的分派（单独抽出，便于测试直接对拍同一批跨度）。
+fn matchpos_for_document(doc: &Document, text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
+    // 命中互不重叠 ⇒ spans.len() ≤ text.len()+1 ⇒ 乘 256 后仍远小于 usize
+    // 上限（文档得接近 70 PB 才溢出）。
+    if spans.len() * MATCHPOS_ROPE_MIN_GAP_BYTES < text.len() {
+        spans_to_matchpos_rope(doc, text, spans)
+    } else {
+        spans_to_matchpos(text, spans)
+    }
+}
+
 /// P70：正则替换——`replacement` 用 fancy-regex 语法（`$1`/`${1}` 组
 /// 引用，`$$` 为字面 `$；与字面模式的 `\n` 转义不同语法，UI 需提示）。
 /// 返回 `(新文本, 替换次数)`。
@@ -986,15 +1087,31 @@ pub fn expand_regex_at(
     Ok(out)
 }
 
-/// 字节跨度序列 → [`MatchPos`]：单遍游标推进（避免每命中一次
+// 测试仪表（L-17）：游标档在两次命中之间走过多少个字符。
+// 判据要的是「换算这一程不再随文档长度走」，用次数而不是 ms（定案 R-1）。
+#[cfg(test)]
+thread_local! {
+    static CURSOR_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 取走并清零 [`CURSOR_STEPS`]（测试仪表）。
+#[cfg(test)]
+pub(crate) fn take_cursor_steps() -> usize {
+    CURSOR_STEPS.with(|s| s.replace(0))
+}
+
+/// 跨度序列 → [`MatchPos`]：单遍游标推进（避免每命中一次
 /// `text[..start].chars().count()` 的 O(命中×文档) 复杂度）。
-/// 行界按 ropey `unicode_lines` 全集（`\r\n` 计 1 字符）；命中内容内
-/// 的换行推进行号、列号回到行首计数。
+/// 行尾 `\r\n` 计 1 字符（与 P26 选区跨度口径一致，跨行命中可直接喂 `select_span`）。
+///
+/// 这是**密集档**：成本 O(文档长度)，与命中数无关。命中稀疏时改走
+/// [`spans_to_matchpos_rope`]（O(命中数)），两者由 [`matchpos_for_document`]
+/// 按密度择一，且必须逐格等价（对拍见测试）。
 ///
 /// **行界归属口径（N-09）**：行界单元归属于它**终止**的那一行，故起于单元
 /// 内部或本体的命中（正则 `\n` 打在 CRLF 上是最典型的一种）归上一行、列取
-/// 上一行的行尾列。本函数是字节 → (line,col) 的唯一换算处，`替换当前` 与
-/// 选中两侧共用它，不存在第二份口径可漂。
+/// 上一行的行尾列。`替换当前` 与选中两侧共用的换算入口在 app 层只有一个
+/// （[`find_all_regex_document`]），两档只是同一口径的两种走法，不是第二份口径。
 fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
     let mut out = Vec::with_capacity(spans.len());
     let mut byte_pos = 0usize;
@@ -1010,6 +1127,8 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
                       target: usize|
      -> Option<(usize, usize)> {
         while *byte_pos < target {
+            #[cfg(test)]
+            CURSOR_STEPS.with(|s| s.set(s.get() + 1));
             let c = text[*byte_pos..].chars().next().unwrap_or('\0');
             let unit_line = *line;
             let unit_col = *char_pos - *line_start_char;
@@ -1019,15 +1138,21 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
                 // target 已在 `\r` 之后，若恰指在那个 `\n` 上（inside）就落在
                 // 单元**内部**：按「行界单元归属于它终止的那一行」交回上一行
                 // 的行尾列，而不是越过单元后的下一行 col 0——core-B。
-                // 游标本身仍整格跨过该单元，故后续命中的归属不受影响。
-                let inside = *byte_pos == target;
+                //
+                // ⚠️ 这一格还必须**把游标停住、不跨过去**：跨过去就把游标推到了
+                // target 之后，下一条命中若起于同一单元（`\s` 先吃掉 `\r`、再吃掉
+                // `\n` 正是这种，L-17 的两档对拍第一次量到这个形状），
+                // 游标已在它前面 ⇒ 报出「下一行 col 0」＝同一个命中同一处偏移
+                // 却给出两个归属，选中/替换当前会动到行首那个字符。
+                // 停在 `\n` 上是安全的：`\r` 已在上一轮计入本单元，下一轮从 `\n`
+                // 续走仍只加一个字符、只进一次行号。
+                if *byte_pos == target {
+                    return Some((unit_line, unit_col));
+                }
                 *byte_pos += 1;
                 *char_pos += 1;
                 *line += 1;
                 *line_start_char = *char_pos;
-                if inside {
-                    return Some((unit_line, unit_col));
-                }
                 continue;
             }
             *char_pos += 1;
@@ -1052,21 +1177,11 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
             Some(pos) => pos,
             None => (line, char_pos - line_start_char),
         };
-        // 命中跨度：同口径计数（\r\n 计 1）
-        let mut len_chars = 0usize;
-        let mut b = start;
-        while b < end {
-            let c = text[b..].chars().next().unwrap_or('\0');
-            b += c.len_utf8();
-            if c == '\r' && text[b..].starts_with('\n') {
-                b += 1;
-            }
-            len_chars += 1;
-        }
+        // 命中跨度：与稀疏档共用 span_unit_count（算式仅此一份）
         out.push(MatchPos {
             line: hit_line,
             col,
-            len_chars,
+            len_chars: span_unit_count(text, start, end),
         });
         advance_to(
             text,
@@ -1160,6 +1275,10 @@ mod tests {
                 "find_all_regex(空匹配)",
                 find_all_regex(&text, "x*", true).unwrap(),
             ),
+            (
+                "find_all_regex_document",
+                find_all_regex_document(&doc, "a(b|b)c", true).unwrap(),
+            ),
         ];
         for (name, hits) in &cases {
             eprintln!(
@@ -1173,6 +1292,161 @@ mod tests {
                 "{name} 产出的命中表不满足「按行升序＋同行不重叠」——app 层两处快速路径会静默退回线性扫"
             );
         }
+    }
+
+    /// L-17：跨度换算的两档必须逐格等价。
+    ///
+    /// 稀疏档是**新增的第二份走法**（rope 索引树 vs 游标走过去），一旦与游标档
+    /// 分叉，正则查找的行列就会错——正是本仓反复咬人的"口径分叉"形状，所以判据
+    /// 取"每条命中逐个对"，且每格先断"确实扫出了命中"（空表会让相等变成空话）。
+    /// 夹具把行界形态铺满：CRLF／LF／CR／VT／FF／NEL／LS／PS、纯空行、无行尾的
+    /// 末行、多字节与 emoji 列号，外加一条"命中起于 CRLF 的 `\n`"的 N-09 特例。
+    #[test]
+    fn l17_matchpos_rope_map_matches_the_cursor_walk_hit_for_hit() {
+        let fixtures = [
+            "a\r\nb\nc\rd\n",
+            "a\r\n\r\nb",
+            "abc",
+            "abc\n",
+            "\n",
+            "\r\n",
+            "a\n\n\nb",
+            "x\u{000B}y\u{000C}z\u{0085}w\u{2028}v\u{2029}u",
+            "中\r\n文\ncr\rls\u{2028}end",
+            "\u{1F680}\r\na\u{1F680}b\n",
+            "aaa\r\naaa\naaa\r\n",
+        ];
+        let patterns = [
+            "a",
+            ".",
+            "\\s",
+            "\\S",
+            "x*",
+            "a*",
+            "^a",
+            "a$",
+            "(?m)^a",
+            "\\r",
+            "\\n",
+            "\\r?\\n",
+            "\\d+",
+            "[^x]+",
+            "\\b\\w+\\b",
+            ".*",
+            "\\v",
+            "\\u{2028}",
+            "a.c",
+            "中",
+            "\\p{Emoji}",
+        ];
+        let mut pairs = 0usize;
+        for text in fixtures {
+            let doc = Document::from_str(text);
+            for p in patterns {
+                let re = compile_regex(p, true).expect("合法模式");
+                let spans: Vec<(usize, usize)> = re
+                    .find_iter(text)
+                    .filter_map(|m| m.ok())
+                    .map(|m| (m.start(), m.end()))
+                    .collect();
+                if spans.is_empty() {
+                    continue;
+                }
+                pairs += 1;
+                let walk = spans_to_matchpos(text, &spans);
+                let rope = spans_to_matchpos_rope(&doc, text, &spans);
+                assert_eq!(
+                    rope, walk,
+                    "模式 {p:?} 在 {text:?} 上两档分叉：稀疏档 {rope:?} vs 游标档 {walk:?}"
+                );
+            }
+        }
+        // 每一格都要"有命中"才作数；这个下界由夹具本身钉住（不是凑的）。
+        assert!(
+            pairs >= fixtures.len() * patterns.len() / 2,
+            "只有 {pairs} 格产生命中，覆盖面太薄"
+        );
+    }
+
+    /// L-17 的**次数**判据（不报 ms 之外的东西；ms 见日档两档读数）：
+    /// 命中稀疏时，跨度换算一步都不该走；同时留一条正对照——密集模式必须
+    /// 走过大量字符，否则"稀疏档 0 步"这句是瞎的。
+    #[test]
+    fn l17_sparse_hits_do_not_rewalk_the_document() {
+        let mut text = String::new();
+        for i in 0..20_000 {
+            text.push_str("line without hits ");
+            text.push_str(&i.to_string());
+            text.push('\n');
+        }
+        text.push_str("TAIL_ZZ_END\n");
+        let doc = Document::from_str(&text);
+        assert_eq!(doc.line_count(), 20_002, "夹具自检：行数");
+        assert_eq!(doc.text_len(), text.len(), "夹具自检：纯 ASCII");
+
+        let _ = take_cursor_steps();
+        // 正对照：每行都命中 ⇒ 密度判据选游标档，且确实重走了正文
+        let dense = find_all_regex_document(&doc, "line", true).unwrap();
+        let dense_steps = take_cursor_steps();
+        assert_eq!(dense.len(), 20_000, "正对照夹具自检：命中数");
+        assert!(
+            dense_steps > text.len() / 2,
+            "正对照失效：密集档只走了 {dense_steps} 步"
+        );
+
+        // 稀疏档：唯一一条命中落在 48 万字符之外 ⇒ 一步都不该走
+        let sparse = find_all_regex_document(&doc, "TAIL_ZZ_END", true).unwrap();
+        assert_eq!(
+            take_cursor_steps(),
+            0,
+            "稀疏档仍重走了正文（改前这一步＝整份文档长度）"
+        );
+        assert_eq!(
+            sparse,
+            vec![MatchPos {
+                line: 20_000,
+                col: 0,
+                len_chars: 11
+            }],
+            "稀疏档的行列换算必须与游标档同值"
+        );
+    }
+
+    /// core-B 的**残留一格**（本轮两档对拍量出来的，不是推出来的）：`\s` 在一个
+    /// CRLF 上会先吃掉 `\r`、再吃掉 `\n` ⇒ 同一个行界单元里落进两条命中。两条都
+    /// 该归上一行的行尾列；改前第二条报成「下一行 col 0」，于是「选中/替换当前」
+    /// 会动到下一行第一个字符却仍报成功——正是 N-09 当年要关的那个洞，只关了一半。
+    #[test]
+    fn two_hits_on_the_two_bytes_of_one_crlf_both_belong_to_the_previous_line() {
+        let text = "a\r\nb\n";
+        let doc = Document::from_str(text);
+        let want = vec![
+            MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1,
+            },
+            MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1,
+            },
+            MatchPos {
+                line: 1,
+                col: 1,
+                len_chars: 1,
+            },
+        ];
+        assert_eq!(
+            find_all_regex(text, r"\s", true).unwrap(),
+            want,
+            "游标档：同一 CRLF 的两条命中归属必须一致"
+        );
+        assert_eq!(
+            find_all_regex_document(&doc, r"\s", true).unwrap(),
+            want,
+            "文档版入口必须与 `&str` 版同值"
+        );
     }
 
     #[test]
