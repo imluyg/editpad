@@ -335,7 +335,7 @@ key_table! {
     { HintNoBracketPair => "光标不在括号旁（或未找到配对）", "Cursor is not next to a bracket (or no match found)" },
     { GotoTitle => "跳转到行：", "Go to line:" },
     { GotoButton => "跳转", "Go" },
-    { GotoInvalidLine => "请输入有效行号（从 1 开始）", "Enter a valid line number (starting from 1)" },
+    { GotoInvalidLine => "请输入有效行号（可选「:列」，都从 1 开始）", "Enter a valid line number (optional \":column\", both start at 1)" },
     { CloseConfirmDirty => "文档有未保存的更改，确定要关闭吗？", "This document has unsaved changes. Close it anyway?" },
     { ButtonSaveAndClose => "保存并关闭", "Save and Close" },
     { ButtonDiscardChanges => "放弃更改", "Discard Changes" },
@@ -546,7 +546,7 @@ key_table! {
 
     // ---- 名称输入框 / 占位符 ----
     { RenamePlaceholder => "新名称", "New name" },
-    { GotoPlaceholder => "行号", "Line number" },
+    { GotoPlaceholder => "行号[:列号]", "Line[:col]" },
     { PalettePlaceholder => "输入命令或标签名…", "Type a command or tab name…" },
     { FindQueryPlaceholder => "查找内容", "Find" },
     { ReplaceQueryPlaceholder => "替换为", "Replace with" },

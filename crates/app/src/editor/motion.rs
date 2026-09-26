@@ -424,6 +424,18 @@ impl EditorCore {
         self.ensure_visible();
     }
 
+    /// 跳转到第 `line_1based` 行的第 `col_1based` 列（都从 1 起）。
+    /// 行列越界一律夹紧而不是拒绝（行夹紧由 [`Self::jump_to_line`] 负责，
+    /// 列夹到该行行尾）——「转到行:列」是定位工具，报错过界没有意义。
+    pub fn jump_to_line_col(&mut self, line_1based: usize, col_1based: usize) {
+        self.jump_to_line(line_1based);
+        let line = self.cursor.line;
+        self.cursor.col = col_1based
+            .saturating_sub(1)
+            .min(self.line_display_len(line));
+        self.ensure_visible();
+    }
+
     /// 会话恢复的无副作用定位入口（P30）：把光标与滚动放回上次退出时的位置。
     ///
     /// 与编辑/移动入口的区别：不产生撤销快照、不触发置脏、不唤醒光标闪烁；

@@ -181,7 +181,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 |------|------|
 | Ctrl+F / F3 / Shift+F3 | 查找替换栏（有选区自动带入） / 查找下一个 / 上一个 |
 | Ctrl+Shift+A | 「查找全部」结果面板（行:列 + 行摘录，点击跳转；超大结果集只显示前 500 条） |
-| Ctrl+G | 跳转到行 |
+| Ctrl+G | 跳转到行（支持「行:列」，列可省；全角冒号同权，越界夹到行尾） |
 | Ctrl+Home / Ctrl+End | 跳到文档首 / 尾 |
 | Home / End | 行首 / 行尾（软换行开态 = 当前视觉行首 / 尾） |
 | Alt+Home / Alt+End | 逻辑行首 / 行尾（软换行开态穿越折行段；固定语义不入注册表） |

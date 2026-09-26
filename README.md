@@ -142,7 +142,7 @@ With a selection only the touched lines are processed; without one the operation
 |------|------|
 | Ctrl+F / F3 / Shift+F3 | Find/replace bar (auto-fills the selection if any) / Find next / Find previous |
 | Ctrl+Shift+A | "Find All" ("查找全部") results panel (line:col + line excerpt, click to jump; huge result sets show only the first 500) |
-| Ctrl+G | Go to line |
+| Ctrl+G | Go to line (accepts `line:column`; column optional, full-width colon works, out-of-range clamps to the line end) |
 | Ctrl+Home / Ctrl+End | Go to start / end of document |
 | Home / End | Start / end of line (with soft wrap on: start / end of the current **visual** row) |
 | Alt+Home / Alt+End | Start / end of the **logical** line (crosses wrapped segments; fixed semantics, not remappable) |

@@ -94,6 +94,54 @@ fn goto_line_beyond_document_and_invalid_input_are_clamped() {
 }
 
 #[test]
+fn goto_accepts_line_col_forms_and_clamps_the_column() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("abcd\nefghij\nkl".into())),
+    );
+    let cur = |app: &Editpad| {
+        let c = app.cur_handle.borrow();
+        (c.cursor.line, c.cursor.col)
+    };
+    // 「行:列」都从 1 起 ⇒ 第 2 行第 3 个字符之前（0 起列 = 2）
+    dispatch(&mut app, Message::GotoInputChanged("2:3".into()));
+    dispatch(&mut app, Message::GotoSubmit);
+    assert_eq!(cur(&app), (1, 2));
+    assert!(!app.goto_visible, "有效跳转后收起输入条");
+
+    // 全角冒号 + 两侧空格同权（中文界面下打全角是常态）
+    dispatch(&mut app, Message::GotoToggled);
+    dispatch(&mut app, Message::GotoInputChanged(" 1 ： 3 ".into()));
+    dispatch(&mut app, Message::GotoSubmit);
+    assert_eq!(cur(&app), (0, 2));
+
+    // 列越界 → 夹到该行行尾（不报错：定位工具报越界没有意义）
+    dispatch(&mut app, Message::GotoToggled);
+    dispatch(&mut app, Message::GotoInputChanged("2:9999".into()));
+    dispatch(&mut app, Message::GotoSubmit);
+    assert_eq!(cur(&app), (1, 6), "夹到第 2 行行尾");
+
+    // 「3:」= 只想跳行
+    dispatch(&mut app, Message::GotoToggled);
+    dispatch(&mut app, Message::GotoInputChanged("3:".into()));
+    dispatch(&mut app, Message::GotoSubmit);
+    assert_eq!(cur(&app), (2, 0));
+    assert!(!app.goto_visible, "用例前提：成功跳转后输入条已收起");
+
+    // 列那一段打错 → 整体拒绝（悄悄跳到别的行比不跳更难发现）。
+    // 输入条此时是收起的（上一笔成功跳转），开一次后连打多次非法值
+    dispatch(&mut app, Message::GotoToggled);
+    for bad in ["2:0", "2:abc", ":3", "1:2:3", ""] {
+        dispatch(&mut app, Message::GotoInputChanged(bad.to_owned()));
+        dispatch(&mut app, Message::GotoSubmit);
+        assert!(app.status_is_error, "非法输入 {bad:?} 应有错误提示");
+        assert!(app.goto_visible, "非法输入 {bad:?} 不收起输入条");
+        assert_eq!(cur(&app), (2, 0), "非法输入 {bad:?} 不动光标");
+    }
+}
+
+#[test]
 fn reopen_same_file_twice_lands_consistently() {
     let mut app = Editpad::default();
     let path = PathBuf::from("C:/same.txt");

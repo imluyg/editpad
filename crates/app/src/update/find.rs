@@ -640,14 +640,20 @@ impl Editpad {
                 Task::none()
             }
             Message::ColumnEditorConfirmed => self.column_editor_confirm(),
-            Message::GotoSubmit => match self.goto_input.trim().parse::<usize>() {
-                Ok(n) if n >= 1 => {
-                    self.cur_handle.borrow_mut().jump_to_line(n);
+            Message::GotoSubmit => match parse_goto_target(&self.goto_input) {
+                Some((line, col)) => {
+                    {
+                        let mut ed = self.cur_handle.borrow_mut();
+                        match col {
+                            Some(col) => ed.jump_to_line_col(line, col),
+                            None => ed.jump_to_line(line),
+                        }
+                    }
                     self.goto_visible = false;
                     self.status.clear();
                     Task::none()
                 }
-                _ => {
+                None => {
                     self.set_status_error(self.t(editpad_core::Key::GotoInvalidLine).to_owned());
                     Task::none()
                 }
@@ -655,4 +661,32 @@ impl Editpad {
             _ => Task::none(),
         }
     }
+}
+
+/// 「转到行」输入解析：`行` 或 `行:列`（都从 1 起；两侧空白忽略，全角冒号
+/// 与半角同权——中文界面下打全角是常态）。
+///
+/// 返回 `None` = 整体无效。列那一段打错（`12:abc`、`12:0`）也判整体无效，
+/// 而不是悄悄退化成「只跳行」：跳到错的行比不跳更难发现。`12:` 视作只跳行。
+fn parse_goto_target(input: &str) -> Option<(usize, Option<usize>)> {
+    let s = input.trim().replace('：', ":");
+    let (line_s, col_s) = match s.split_once(':') {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => (s.as_str(), None),
+    };
+    let line: usize = line_s.parse().ok()?;
+    if line < 1 {
+        return None;
+    }
+    let col = match col_s {
+        None | Some("") => None,
+        Some(c) => {
+            let c: usize = c.parse().ok()?;
+            if c < 1 {
+                return None;
+            }
+            Some(c)
+        }
+    };
+    Some((line, col))
 }
