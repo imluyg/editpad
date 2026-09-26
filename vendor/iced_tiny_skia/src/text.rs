@@ -190,6 +190,31 @@ thread_local! {
         RefCell::new(cosmic_text::SwashCache::new());
 }
 
+// P287：窗口外落笔的跳过开关与被跳过的次数（守卫用例拿它当"这帧真的跳了"的自证）。
+thread_local! {
+    static BLIT_CULL: Cell<bool> = Cell::new(true);
+    static GLYPH_CULLED: Cell<usize> = Cell::new(0);
+}
+
+fn blit_cull_on() -> bool {
+    BLIT_CULL.with(|c| c.get())
+}
+
+/// 取走并清零"本线程被跳过的窗口外落笔数"。
+pub fn take_blit_culls() -> usize {
+    GLYPH_CULLED.with(|c| {
+        let n = c.get();
+        c.set(0);
+        n
+    })
+}
+
+/// 测试用同帧老口径开关：`false` ⇒ 不跳窗口外落笔（与上游行为逐字相同）。
+/// 线程级 ⇒ 并行用例互不影响。
+pub fn set_blit_cull_for_test(on: bool) {
+    BLIT_CULL.with(|c| c.set(on));
+}
+
 thread_local! {
     // P285 计量：本线程"真正的字形栅格未命中"次数，一次 = 走了一趟
     // `get_image_uncached` 或零面积早退。测试用它把「同一内容重画一帧不该
@@ -221,6 +246,9 @@ fn draw(
 ) {
     let position = position * transformation;
 
+    // 目标像素图尺寸：P287 的窗口外落笔判据只用它（掩码矩形在这一层拿不到）。
+    let (pw, ph) = (pixels.width() as i32, pixels.height() as i32);
+
     SWASH_CACHE.with(|swash_cell| {
         let mut swash = swash_cell.borrow_mut();
 
@@ -244,6 +272,22 @@ fn draw(
                     )
                     .expect("Create glyph pixel map");
 
+                    let bx = physical_glyph.x + placement.left;
+                    let by = physical_glyph.y - placement.top
+                        + (run.line_y * transformation.scale_factor()).round() as i32;
+                    // P287：位图整体落在目标像素图之外的落笔**注定什么都不写**，
+                    // 直接跳过。判据只读落笔矩形与目标尺寸，不改任何落笔参数 ⇒
+                    // 像素与不跳完全相同（守卫用例用 `set_blit_cull_for_test(false)`
+                    // 当同帧老口径 oracle 逐像素对拍）。关态长行才吃得到：实测
+                    // 一帧 105/205 次落笔在窗口外（普通行与折行为 0）。
+                    let outside = bx + placement.width as i32 <= 0
+                        || by + placement.height as i32 <= 0
+                        || bx >= pw
+                        || by >= ph;
+                    if outside && blit_cull_on() {
+                        GLYPH_CULLED.with(|c| c.set(c.get() + 1));
+                        continue;
+                    }
                     let opacity = color.a
                         * glyph
                             .color_opt
@@ -251,10 +295,8 @@ fn draw(
                             .unwrap_or(1.0);
 
                     pixels.draw_pixmap(
-                        physical_glyph.x + placement.left,
-                        physical_glyph.y - placement.top
-                            + (run.line_y * transformation.scale_factor()).round()
-                                as i32,
+                        bx,
+                        by,
                         pixmap,
                         &tiny_skia::PixmapPaint {
                             opacity,

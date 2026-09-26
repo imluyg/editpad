@@ -8,6 +8,7 @@ mod primitive;
 mod settings;
 mod text;
 pub use text::take_glyph_probe_misses;
+pub use text::{set_blit_cull_for_test, take_blit_culls};
 
 #[cfg(feature = "image")]
 mod raster;

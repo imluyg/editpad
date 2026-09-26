@@ -2201,6 +2201,96 @@ fn p285_negative_glyph_cache_does_not_change_pixels() {
 /// 改成非整（`transformation.scale_factor()` 一乘就把整数偏移揉成小数）、
 /// 或每个字形带独立颜色（`key` 含颜色三元组 ⇒ 同字形不同色＝不同键）。
 /// 亚像素那一头只断"确实发生了重栅格 + 次数有上界"，不守任何成本优化。
+/// P287：关态长行里"整枚字形都落在目标像素图之外"的落笔要跳过，且**一个像素都不许变**。
+///
+/// 勘察数据（第 189 轮一次性仪表量出来的，仪表已撤）：普通 60 行关态一帧 28 个文本
+/// 图元 / 565 次落笔、真高亮 Rust 60 行 238 图元 / 755 落笔、开态折行 15 图元 / 771 落笔
+/// —— 这三种**窗口外落笔都是 0**；只有"单行 4400 字符 + 关态"这一族吃得到：
+/// `scroll_left=0` 时 47/135，`scroll_left=3000` 时 **105/205（51%）**。根因是横向裁剪
+/// 窗口左右各留 64 字符的 shaping 余量（P160 的口径，故意留的：跨边界的连字/字距要
+/// 有上下文），那些字符**必须进 shaping**，但它们那一笔落下去注定什么都不写。
+///
+/// 判据故意保守：**只比目标像素图的边界**，不看 `clip_mask` —— tiny-skia 0.11 的
+/// `Mask` 是视口尺寸、不带原点（掩码矩形在这一层拿不到），所以"在像素图内但被掩码
+/// 裁掉"的那些落笔**不在跳过范围内**。⇒ 本用例守得住"落笔判据写宽了把该画的字裁掉"
+/// （同帧拿 `set_blit_cull_for_test(false)` 当老口径逐像素对拍），**守不住**掩码那头的
+/// 浪费（那一头一行未改）。
+#[test]
+fn p287_offscreen_glyph_blits_are_culled_without_changing_pixels() {
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&"abcdefghij ".repeat(400)));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.scroll_left = 3000.0;
+        c.sb_activity = None;
+        c.last_activity = None;
+        c.blink_on = true;
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let (w, h) = (700u32, 500u32);
+    let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    // 画一帧（`cull` = 是否允许跳过窗口外落笔），返回像素与被跳过的次数
+    let mut frame = |cull: bool| -> (Vec<u8>, usize) {
+        iced_tiny_skia::set_blit_cull_for_test(cull);
+        let _ = iced_tiny_skia::take_blit_culls();
+        renderer.reset(rect);
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let mut px = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        px.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &rect,
+        );
+        renderer.draw(
+            &mut px.as_mut(),
+            &mut mask,
+            &viewport,
+            &[rect],
+            Color::WHITE,
+        );
+        (px.data().to_vec(), iced_tiny_skia::take_blit_culls())
+    };
+    let _ = frame(true); // 预热：吃掉冷缓存与 P33 的一次性钉字
+    let (on_px, on_culls) = frame(true);
+    let (off_px, off_culls) = frame(false);
+    iced_tiny_skia::set_blit_cull_for_test(true);
+    let ink = body_ink(&off_px);
+    assert!(ink > 200, "夹具失效：正文带墨迹仅 {ink} px，对拍无从谈起");
+    assert!(
+        on_culls > 0,
+        "夹具失效：一帧都没跳过窗口外落笔（{on_culls}）⇒ 下面的逐像素对拍是空转"
+    );
+    assert_eq!(
+        off_culls, 0,
+        "关掉开关后仍有 {off_culls} 次跳过 ⇒ 老口径没真的退回去"
+    );
+    assert_eq!(
+        on_px, off_px,
+        "跳过窗口外落笔改变了像素 ⇒ 判据把该画的字形也裁掉了"
+    );
+}
+
 #[test]
 fn p286_scroll_keeps_glyph_cache_on_integer_offsets() {
     let font = Font {
