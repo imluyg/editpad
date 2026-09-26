@@ -196,6 +196,8 @@ mod file;
 mod find;
 // P310（A6）：查找命中 ↔ 书签联动的应用层核对
 mod hits;
+// P312（C11）：Alt+←/→ 跳转历史的键位通道与只读守卫
+mod nav;
 mod robustness;
 mod session;
 mod settings;

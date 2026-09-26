@@ -212,6 +212,12 @@ pub enum EditOp {
     // ---------- 括号匹配（第 61 轮） ----------
     /// 跳到配对括号的另一侧（光标须邻接括号；纯光标移动不产快照）
     JumpToMatchingBracket,
+    // ---------- P312（路线图 C11）：光标跳转历史 ----------
+    /// 跳回上一个出发点（Alt+←，对标项目 A #1733 / VS「Go Back」）；
+    /// 栈空 ⇒ 静默 no-op。纯光标移动，不产快照
+    NavBack,
+    /// 前进到刚由 [`Self::NavBack`] 离开的落点（Alt+→）；栈空 ⇒ 静默 no-op
+    NavForward,
     // ---------- 第 63 轮：插入日期时间 ----------
     /// 在光标处插入当前本地日期时间（F5，记事本同款）
     InsertDateTime,
@@ -825,6 +831,13 @@ pub struct EditorCore {
     pub(crate) drag_gran: super::click::DragGran,
     /// P307：本次连击的按下点——拖选时以它为基准扩整词/整行，释放清空。
     pub(crate) click_base: Option<CursorPos>,
+    /// P312（路线图 C11）：光标跳转历史。「跳之前所在的落点」栈，
+    /// Alt+← 弹回、Alt+→ 弹进。只记**远距离跳转**（点击、转到行、
+    /// 书签跳、查找命中跳、连击选择），逐字符/逐词的键盘移动不入栈——
+    /// 否则按几下方向键就把历史冲满，"跳回去"再也找不到真正的出发点。
+    pub(crate) nav_back: Vec<CursorPos>,
+    /// P312：Alt+→ 的前进栈。任何**新的**跳转出发点会清空它（与浏览器同口径）。
+    pub(crate) nav_fwd: Vec<CursorPos>,
     /// P132：缩进参考线开关（路线图 C4）。经 set_indent_guides 由应用层
     /// 从 Settings 下发，仅影响绘制。
     pub(crate) indent_guides: bool,
@@ -979,6 +992,9 @@ impl Default for EditorCore {
             click_last: None,
             drag_gran: super::click::DragGran::Char,
             click_base: None,
+            // P312：跳转历史从空开始
+            nav_back: Vec::new(),
+            nav_fwd: Vec::new(),
             block_sel: None,
             block_dragging: false,
             // B10：多光标附加集默认空 = 恒等退化（既有全量测试守护）
@@ -1410,6 +1426,10 @@ impl EditorCore {
         self.click_last = None;
         self.click_base = None;
         self.drag_gran = super::click::DragGran::Char;
+        // P312：跳转历史同理——旧文档的落点在新文档里没有意义
+        //（书签集在 reset_document 里另有条目清空）
+        self.nav_back.clear();
+        self.nav_fwd.clear();
     }
 
     /// 用新文档整体替换（加载文件时用），清空历史。
@@ -1859,9 +1879,13 @@ mod hits_tests;
 #[cfg(test)]
 #[path = "home_tests.rs"]
 mod home_tests;
+// P312（C11）：光标跳转历史
 #[cfg(test)]
 #[path = "motion_tests.rs"]
 mod motion_tests;
+#[cfg(test)]
+#[path = "nav_tests.rs"]
+mod nav_tests;
 #[cfg(test)]
 #[path = "undo_tests.rs"]
 mod undo_tests;

@@ -104,7 +104,7 @@ The following are the default combos, all remappable on the **Settings → Keybo
 | Double-click | Select the word under the click (word and whitespace runs taken whole, punctuation single char; CJK runs count as one word; at line end it takes left). Keep holding and drag = extend by whole words |
 | Triple-click | Select the whole line (including its line break, same shape as "cut line"); keep holding and drag = extend by whole lines |
 | Shift+click | Extend the selection to the click; the anchor stays put (Shift+click inside a selection does not start a drag) |
-| Right-click in the text | In-place context menu: undo/redo, cut/copy/paste, select all, delete line, duplicate line, toggle comment, toggle bookmark, find/replace, go to line, find in files, bookmark the hit lines, copy all hit lines, copy file path (content-changing items are greyed out on read-only pages, and the two hit-link items until there are hits) |
+| Right-click in the text | In-place context menu: undo/redo, cut/copy/paste, select all, delete line, duplicate line, toggle comment, toggle bookmark, find/replace, go to line, go back / forward to the previous position, find in files, bookmark the hit lines, copy all hit lines, copy file path (content-changing items are greyed out on read-only pages, and the two hit-link items until there are hits) |
 | Ctrl+M | Multi-cursor: add next match (next occurrence of the current word / selection, cyclic search; unavailable with soft-wrap / column block / IME composing) |
 | F6 | Column editor dialog: insert repeated text or incrementing numbers into the block line-by-line (base / step / zero-padding adjustable) |
 | F5 | Insert current date/time at the cursor (`YYYY-MM-DD HH:MM`, local timezone) |
@@ -143,6 +143,7 @@ With a selection only the touched lines are processed; without one the operation
 | Ctrl+F / F3 / Shift+F3 | Find/replace bar (auto-fills the selection if any) / Find next / Find previous |
 | Ctrl+Shift+A | "Find All" ("查找全部") results panel (line:col + line excerpt, click to jump; huge result sets show only the first 500) |
 | Ctrl+G | Go to line (accepts `line:column`; column optional, full-width colon works, out-of-range clamps to the line end) |
+| Alt+Left / Alt+Right | Go back / forward to the previous editing position (clicks, go-to-line, bookmark jumps and find-hit jumps are recorded; typing and arrow keys are not. Fixed semantics — not in the hotkey registry, not remappable; AltGr i.e. Ctrl+Alt is not hijacked) |
 | Ctrl+Home / Ctrl+End | Go to start / end of document |
 | Home / End | Smart line start (toggles between the first non-blank and the real column 0; equals line start when there is no indent) / line end (with soft wrap on: start / end of the current **visual** row) |
 | Alt+Home / Alt+End | Start / end of the **logical** line (crosses wrapped segments; fixed semantics, not remappable) |

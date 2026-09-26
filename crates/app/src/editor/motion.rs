@@ -430,6 +430,7 @@ impl EditorCore {
     pub fn jump_to_line(&mut self, line_1based: usize) {
         self.break_typing(); // P37：跳转打断组
         self.goal_px = None; // 第 73 轮 ⑯：跳转 = 非竖向操作
+        self.note_nav_origin(); // P312：跳走之前先把出发点记进历史
         let target = (line_1based.saturating_sub(1)).min(self.doc.line_count().saturating_sub(1));
         self.anchor = None;
         self.cursor = CursorPos {
@@ -437,6 +438,72 @@ impl EditorCore {
             col: 0,
         };
         self.ensure_visible();
+    }
+
+    // ---------- P312（路线图 C11）：光标跳转历史 ----------
+
+    /// 历史栈上限（每页一份）。200 条 ≈ 4.8 KB，够覆盖"翻着看日志来回跳"
+    /// 一整天；再深就只是把内存换成没人会去按的按键。
+    pub(crate) const NAV_HISTORY_CAP: usize = 200;
+
+    /// 记一次「跳之前的落点」。三条规则让它不会被按两下方向键就冲满：
+    /// ①与栈顶相同 ⇒ 跳过（连续两次从同一处跳走只算一个出发点）；
+    /// ②新的跳转会清空前进栈（与浏览器同口径）；
+    /// ③超上限丢最旧。
+    pub(crate) fn note_nav_origin(&mut self) {
+        let at = self.cursor;
+        if self.nav_back.last() == Some(&at) {
+            return;
+        }
+        self.nav_fwd.clear();
+        self.nav_back.push(at);
+        if self.nav_back.len() > Self::NAV_HISTORY_CAP {
+            self.nav_back.remove(0);
+        }
+    }
+
+    /// Alt+← 的实现：弹回上一个出发点。栈空 ⇒ false 且原地不动（静默 no-op，
+    /// 与主流编辑器一致——"没地方可去"不需要一句状态栏来打扰）。
+    pub fn nav_back(&mut self) -> bool {
+        let Some(target) = self.nav_back.pop() else {
+            return false;
+        };
+        // 当前落点压进前进栈，供 Alt+→ 弹回（同一处不重复记）
+        if self.nav_fwd.last() != Some(&self.cursor) {
+            self.nav_fwd.push(self.cursor);
+            if self.nav_fwd.len() > Self::NAV_HISTORY_CAP {
+                self.nav_fwd.remove(0);
+            }
+        }
+        self.apply_nav_target(target)
+    }
+
+    /// Alt+→ 的实现：前进到刚被 [`Self::nav_back`] 离开的落点。
+    pub fn nav_forward(&mut self) -> bool {
+        let Some(target) = self.nav_fwd.pop() else {
+            return false;
+        };
+        if self.nav_back.last() != Some(&self.cursor) {
+            self.nav_back.push(self.cursor);
+            if self.nav_back.len() > Self::NAV_HISTORY_CAP {
+                self.nav_back.remove(0);
+            }
+        }
+        self.apply_nav_target(target)
+    }
+
+    /// 两条历史跳转的公共收尾：夹紧到文档范围、清选区、打断打字组。
+    fn apply_nav_target(&mut self, target: CursorPos) -> bool {
+        self.break_typing();
+        self.goal_px = None;
+        self.anchor = None;
+        let line = target.line.min(self.doc.line_count().saturating_sub(1));
+        self.cursor = CursorPos {
+            line,
+            col: target.col.min(self.line_display_len(line)),
+        };
+        self.ensure_visible();
+        true
     }
 
     /// 跳转到第 `line_1based` 行的第 `col_1based` 列（都从 1 起）。

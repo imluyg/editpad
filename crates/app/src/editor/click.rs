@@ -236,6 +236,7 @@ impl EditorCore {
         gran: DragGran,
     ) {
         self.break_typing();
+        self.note_nav_origin(); // P312：连击选择也是"跳过去"，记出发点
         self.clear_block(); // 块态与单选区互斥（第 67 轮口径）
         self.collapse_multi(); // 连击 = 重置为单光标（B10 主流口径）
         self.clear_vertical_goal(); // 点击类操作非竖向移动

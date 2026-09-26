@@ -198,6 +198,17 @@ impl Editpad {
                 Some("Ctrl+G"),
                 cmd(Message::GotoToggled).filter(|_| interactive)
             ),
+            // P312（C11）：跳转历史。空栈时点了给一句状态栏提示（不静默）
+            item(
+                K::MenuNavBack,
+                Some("Alt+←"),
+                edit(EditOp::NavBack).filter(|_| interactive)
+            ),
+            item(
+                K::MenuNavForward,
+                Some("Alt+→"),
+                edit(EditOp::NavForward).filter(|_| interactive)
+            ),
             item(
                 K::FifTitle,
                 Some("F12"),

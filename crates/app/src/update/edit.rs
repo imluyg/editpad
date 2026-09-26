@@ -648,6 +648,21 @@ impl Editpad {
                 }
                 false
             }
+            // ---------- P312（路线图 C11）：光标跳转历史 ----------
+            // 同样纯光标移动：恒 false（不置脏）。空栈给一条状态栏提示——
+            // 新按钮/新键位不该靠用户猜，与括号配对跳转同口径
+            E::NavBack => {
+                if !editor.nav_back() {
+                    hint = Some(self.t(editpad_core::Key::HintNavNothingBack).to_owned());
+                }
+                false
+            }
+            E::NavForward => {
+                if !editor.nav_forward() {
+                    hint = Some(self.t(editpad_core::Key::HintNavNothingFwd).to_owned());
+                }
+                false
+            }
             // ---------- 行操作扩充（第 62 轮） ----------
             E::ConvertTabsSpaces(kind) => editor.convert_tabs_spaces(kind),
             E::MergeLines => editor.merge_lines(),

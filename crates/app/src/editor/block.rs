@@ -1294,6 +1294,7 @@ impl EditorCore {
             return false;
         }
         self.break_typing();
+        self.note_nav_origin(); // P312：书签跳转 = 远距离跳转，记出发点
         self.anchor = None;
         self.cursor = CursorPos {
             line: target,

@@ -1112,6 +1112,9 @@ pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
             | EditOp::MarkHitLinesAsBookmarks
             | EditOp::CopyHitLines
             | EditOp::JumpToMatchingBracket
+            // P312：跳转历史两条同样是纯光标移动（只读页可用）
+            | EditOp::NavBack
+            | EditOp::NavForward
             | EditOp::CancelBlock
             // B10：添加下一匹配只动光标集，不改文档（只读页可用）
             | EditOp::AddNextMatch

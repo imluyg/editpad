@@ -754,8 +754,23 @@ pub(crate) fn handle_key(
         Key::Named(Named::Insert) => Some(Message::ToggleOverwrite),
         Key::Named(Named::Escape) => Some(Message::BarsDismissed),
 
-        Key::Named(Named::ArrowLeft) => edit(EditOp::Motion(Motion::Left, mods.shift())),
-        Key::Named(Named::ArrowRight) => edit(EditOp::Motion(Motion::Right, mods.shift())),
+        Key::Named(Named::ArrowLeft) => {
+            // P312（路线图 C11）：Alt+← = 跳回上一个出发点（对标项目 A #1733、
+            // VS「Go Back」）。Alt 系不入注册表（AltGr 保护，见上方注记）；
+            // ⚠️ 同时按下 Ctrl（AltGr 或用户自造组合）一律不接管。
+            if mods.alt() && !mods.control() {
+                Some(Message::Edit(EditOp::NavBack))
+            } else {
+                edit(EditOp::Motion(Motion::Left, mods.shift()))
+            }
+        }
+        Key::Named(Named::ArrowRight) => {
+            if mods.alt() && !mods.control() {
+                Some(Message::Edit(EditOp::NavForward))
+            } else {
+                edit(EditOp::Motion(Motion::Right, mods.shift()))
+            }
+        }
         Key::Named(Named::ArrowUp) => edit(EditOp::Motion(Motion::Up, mods.shift())),
         Key::Named(Named::ArrowDown) => edit(EditOp::Motion(Motion::Down, mods.shift())),
         // P134（C8）：Home/End 开态走视觉行（wrapping-aware）；Alt+Home/End

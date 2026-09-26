@@ -335,6 +335,11 @@ key_table! {
     { HintNoMoreUndo => "没有更多撤销历史", "No more undo history" },
     { HintAtLatest => "已在最新状态", "Already at the latest state" },
     { HintNoBracketPair => "光标不在括号旁（或未找到配对）", "Cursor is not next to a bracket (or no match found)" },
+    // P312（路线图 C11）：跳转历史两条空栈提示 + 菜单项
+    { HintNavNothingBack => "没有可返回的位置", "Nowhere to go back to" },
+    { HintNavNothingFwd => "没有可前进的位置", "Nothing to go forward to" },
+    { MenuNavBack => "跳回上一个位置", "Go Back" },
+    { MenuNavForward => "前进到下一个位置", "Go Forward" },
     { GotoTitle => "跳转到行：", "Go to line:" },
     { GotoButton => "跳转", "Go" },
     { GotoInvalidLine => "请输入有效行号（可选「:列」，都从 1 开始）", "Enter a valid line number (optional \":column\", both start at 1)" },

@@ -2540,6 +2540,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         core.clear_block();
                         core.collapse_multi();
                         core.end_click_drag(); // P307：单击回落逐字符拖选
+                        core.note_nav_origin(); // P312：点击落点前，先记旧位置
                         core.dragging = true;
                         core.anchor = None;
                         core.cursor = hit;
