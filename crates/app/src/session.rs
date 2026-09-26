@@ -1,14 +1,20 @@
 use super::*;
 
 /// 多开内存护栏上限（字节）：全部页内容 + 待载文件的保守估算。
-/// 约 2.56 亿字符 ≈ 数个 50MB 级大文档同时驻留的量级。
+/// 256 MiB ≈ 五份 50MB 级 ASCII 大文档同时驻留（rope 存的就是 UTF-8 字节）。
 pub(crate) const MULTI_TAB_MEM_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
-/// 内存护栏判定（纯函数便于测试）：现有页字符按 3 字节/字符保守
-/// 估算 UTF-8 上界，加上待载文件实际字节数后与上限比较。
-pub(crate) fn mem_guard_allows(existing_chars: usize, incoming_bytes: u64, cap_bytes: u64) -> bool {
-    let estimate = (existing_chars as u64).saturating_mul(3);
-    estimate.saturating_add(incoming_bytes) <= cap_bytes
+/// 内存护栏判定（纯函数便于测试）：现有页内容字节数 + 待载文件字节数与上限比较。
+///
+/// P300（第 209 轮，用户点单）：已打开侧原先按「字符数 ×3 字节」估算，而**待打开侧按
+/// 文件字节数**记 ⇒ 同一份 ASCII 文档"打开时算 1×、开完之后算 3×"，纯 ASCII 大文档的
+/// 有效容量被压到 2/5（50MB 那份只能开 2 份而非 5 份）。rope 里存的本就是 UTF-8 字节，
+/// 按字节记不是放宽估算，是把单位对准它一直在估的那个量。恢复链的
+/// [`plan_restore_order`] 从来就是按字节估（磁盘／快照文件长度），这次两条路径同单位。
+/// ⚠️ 仍未计入的是派生结构（折行索引、逐行缓存、字形表等）——上限管的是正文体量，
+/// 这句话别读成"256 MiB 就是进程总占用"。
+pub(crate) fn mem_guard_allows(existing_bytes: usize, incoming_bytes: u64, cap_bytes: u64) -> bool {
+    (existing_bytes as u64).saturating_add(incoming_bytes) <= cap_bytes
 }
 
 // ---------- 启动会话恢复（P30） ----------

@@ -1472,32 +1472,78 @@ fn p63_late_skip_after_own_manual_save_is_silently_dropped() {
 #[test]
 fn mem_guard_rejects_when_estimate_exceeds_cap() {
     let cap = 1_000u64;
-    // 现有 100 字符 ×3 字节估算 = 300；再开 500 字节文件 → 800 ≤ 1000 允许
-    assert!(mem_guard_allows(100, 500, cap));
-    // 再大一点就超
-    assert!(!mem_guard_allows(100, 900, cap));
+    // P300：两侧同单位＝字节。现有页 300 字节 + 待开 500 字节 → 800 ≤ 1000 允许
+    assert!(mem_guard_allows(300, 500, cap));
+    // 现有页 300 字节 + 待开 900 字节 → 1 200 > 1000 拒绝
+    assert!(!mem_guard_allows(300, 900, cap));
+    // 真实上限下的口径（改判记录：旧写法是「现有字符数 ×3」，同样的现有量会被
+    // 记成 3 倍，100M 字符 ASCII 在旧口径下 300MB > 268.4MB 直接拒开）
+    let real = MULTI_TAB_MEM_CAP_BYTES;
+    assert!(!mem_guard_allows(300_000_000, 0, real));
+    assert!(mem_guard_allows(250_000_000, 0, real));
     // 极端值不 panic（饱和运算）
     assert!(mem_guard_allows(usize::MAX, u64::MAX, u64::MAX));
     assert!(!mem_guard_allows(usize::MAX, u64::MAX, 0));
 }
 
+/// P300 护栏：护栏的加数必须是**实际 UTF-8 字节量**。
+/// 两份 1 千字符的小文档就能钉住单位——ASCII 记 1 000、汉字记 3 000；
+/// 端到端要验单位得造一份比 256MiB 还大的文档，那不值当。
+#[test]
+fn tab_content_bytes_counts_utf8_bytes_not_chars() {
+    let app = Editpad::default();
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str(&"x".repeat(1_000)));
+    assert_eq!(app.tab_content_bytes(), 1_000, "ASCII 每字符 1 字节");
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str(&"漢".repeat(1_000)));
+    assert_eq!(
+        app.tab_content_bytes(),
+        3_000,
+        "UTF-8 汉字每字符 3 字节——记成字符数就是把上限放宽 3 倍"
+    );
+}
+
+/// P300 端到端：纯 ASCII 大文档不再被按 3 倍估价。
+/// 100M 字符＝100MB ≤ 256MiB ⇒ 放行；**旧口径（×3＝300MB）会拒** ⇒ 这一格
+/// 就是"×3 别回来"的守卫。（改判记录：这一格原先断的是"200M 字符被拒"。）
+#[test]
+fn start_loading_allows_ascii_doc_that_fits_under_the_cap() {
+    let mut app = Editpad::default();
+    let big = editpad_core::Document::from_str(&"x".repeat(100_000_000));
+    app.cur_handle.borrow_mut().reset_document(big);
+    let _ = app.start_loading(PathBuf::from("C:/logs/next.bin"), app.tabs.len());
+    assert!(
+        app.active_load.is_some(),
+        "100MB ASCII 正文 + 一份不存在的待开文件必须放行，实际提示 {:?}",
+        app.status
+    );
+    assert_eq!(app.tabs.len(), 2, "放行时按原行为占位新页");
+}
+
+/// 拒绝那一侧仍然要有守卫（"被拒不登记任务、不占位新页"）——用**稀疏文件**当待开
+/// 文件：`set_len` 只写元数据不落盘，300 MB 的"文件大小"零成本，而护栏读的正是
+/// `fs::metadata(..).len()`。
 #[test]
 fn start_loading_enforces_mem_guard() {
     let mut app = Editpad::default();
-    // 预置一个超大字符量的当前页（直接改 doc 以绕过真实大文件）
-    let huge = editpad_core::Document::from_str(&"x".repeat(200_000_000));
-    app.cur_handle.borrow_mut().reset_document(huge);
-    // 当前页非空 → 打开会走新页，但护栏按全页合计判定
-    let big_path = PathBuf::from("C:/definitely/too/big.bin");
-    let task = app.start_loading(big_path.clone(), app.tabs.len());
-    let _ = task;
+    let dir = scratch_dir("p300-memguard");
+    let path = dir.join("sparse.bin");
+    std::fs::File::create(&path)
+        .expect("建稀疏文件")
+        .set_len(300_000_000)
+        .expect("置长度");
+    let _ = app.start_loading(path.clone(), app.tabs.len());
     assert!(
         app.status.contains("内存保护"),
-        "超限打开应被拒绝并提示，实际 {:?}",
+        "300MB 待开文件超 256MiB 上限，应拒绝并提示，实际 {:?}",
         app.status
     );
     assert!(app.active_load.is_none(), "被拒的打开不得登记任务");
     assert_eq!(app.tabs.len(), 1, "拒绝时不得占位新页");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------- P31 周期快照心跳 ----------

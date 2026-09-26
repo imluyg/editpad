@@ -762,6 +762,18 @@ impl Editpad {
         }
     }
 
+    /// 全部页当前正文的**实际 UTF-8 字节量**（P300，内存护栏的加数）。
+    ///
+    /// 单拆出来是为了让"记的是字节不是字符"这件事有一处能廉价钉住的口子：
+    /// 护栏端到端要造一份超过 256MiB 的文档才能验证单位，而这里两份 1 千字符的
+    /// 小文档就能钉死（ASCII 1 000 字节 vs 汉字 3 000 字节）。
+    pub(crate) fn tab_content_bytes(&self) -> usize {
+        self.tabs
+            .iter()
+            .map(|t| t.editor.borrow().doc.text_len_bytes())
+            .sum()
+    }
+
     /// 启动一次后台加载：登记任务后由 [`Editpad::subscription`] 的流接管。
     ///
     /// P21：`tab` 指明结果应落入的标签页（可能等于 `tabs.len()`，
@@ -771,14 +783,12 @@ impl Editpad {
         if self.busy {
             return Task::none();
         }
-        // P21 内存护栏（§3 P19 总则第 2 条的骨架实现）：全部页字符量
-        // 按 3 字节/字符保守估算，加上待载文件大小，超上限即拒开并提示
+        // P21 内存护栏（§3 P19 总则第 2 条的骨架实现）：全部页内容按**实际 UTF-8
+        // 字节量**（`text_len_bytes`）加待载文件字节数与上限比较。
+        // P300：这里原先累加 `text_len()`（字符数）再在判定里 ×3，与待打开侧按字节
+        // 记账不同单位 ⇒ ASCII 文档开完就被按 3 倍估价。判定函数见 `mem_guard_allows`。
         let incoming = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let existing: usize = self
-            .tabs
-            .iter()
-            .map(|t| t.editor.borrow().doc.text_len())
-            .sum();
+        let existing = self.tab_content_bytes();
         if !mem_guard_allows(existing, incoming, MULTI_TAB_MEM_CAP_BYTES) {
             self.status = self.t(editpad_core::Key::StMemoryGuard).to_owned();
             // P215：拒开即作废随本次打开登记的一次性意图——与「save() 的每个
