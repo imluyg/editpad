@@ -2185,6 +2185,107 @@ fn p285_negative_glyph_cache_does_not_change_pixels() {
     );
 }
 
+/// P286：横向滚动的**亚像素分箱**行为钉成护栏（第 188 轮为量 L-7 而设；量完
+/// 的结论是"不改"，所以把测得的事实留在这里当回归网）。
+///
+/// 字形缓存键含亚像素分箱（`CacheKey.x_bin`），于是"滚动一帧要不要重栅格"
+/// 完全取决于偏移落在哪个箱里。实测（本夹具 20 行 × 81 字符、600×300 视口）：
+/// 整数偏移 1px / 64px **未命中 0**（整像素平移与 0 同箱 ⇒ 全命中）；亚像素
+/// 偏移 0.5 / 64.25 各重栅格 **37** 次＝一整屏可见字形。⇒ 亚像素滚动确有代价，
+/// 但那是"把字形画在两个整像素之间"应付的工：37 个字形掩码 ≈ 4.7k px，对比
+/// 整帧 350k px 约 1%。要消除它只能把文本层原点强行取整，那会**改像素位置**
+/// ⇒ 为 1% 不值得单方面动视觉口径。复测入口：`take_glyph_probe_misses()`
+/// 或 `EDITPAD_GLYPH_PROBE=1` 打键。
+///
+/// 这条守的是"整数偏移不许产生未命中"，两个方向都可能被将来改坏：缩放系数
+/// 改成非整（`transformation.scale_factor()` 一乘就把整数偏移揉成小数）、
+/// 或每个字形带独立颜色（`key` 含颜色三元组 ⇒ 同字形不同色＝不同键）。
+/// 亚像素那一头只断"确实发生了重栅格 + 次数有上界"，不守任何成本优化。
+#[test]
+fn p286_scroll_keeps_glyph_cache_on_integer_offsets() {
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        let doc: String = (0..20)
+            .map(|i| format!("abcdefgh{i:02} ijklmnop qrstuvwxyz\n"))
+            .collect();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.sb_activity = None;
+        c.last_activity = None;
+        c.blink_on = true;
+    }
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let (w, h) = (700u32, 500u32);
+    let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    let mut misses_at = |sl: f32| -> usize {
+        core.borrow_mut().scroll_left = sl;
+        renderer.reset(rect);
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let lyt = Layout::new(&node);
+        let mut px = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        px.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &rect,
+        );
+        renderer.draw(
+            &mut px.as_mut(),
+            &mut mask,
+            &viewport,
+            &[rect],
+            Color::WHITE,
+        );
+        iced_tiny_skia::take_glyph_probe_misses()
+    };
+    let _ = misses_at(0.0); // 预热：吃掉冷缓存与 P33 一次性钉字
+    let repeat = misses_at(0.0);
+    assert_eq!(
+        repeat, 0,
+        "同一偏移重画一帧仍栅格 {repeat} 个字形（应为 0）"
+    );
+    for int_off in [1.0f32, 64.0] {
+        let m = misses_at(int_off);
+        assert_eq!(
+            m, 0,
+            "整数偏移 {int_off}px 重栅格了 {m} 个字形：整像素平移应与 0 同箱、全命中"
+        );
+    }
+    let back = misses_at(0.0);
+    assert_eq!(
+        back, 0,
+        "滚回用过的偏移仍重栅格 {back} 个字形：缓存跨帧不该被清"
+    );
+    let sub = misses_at(0.5);
+    assert!(
+        sub > 0,
+        "亚像素偏移 0.5px 未命中为 0 ⇒ 分箱根本没起作用，下面那条上界断言就成了空断言"
+    );
+    assert!(
+        sub <= 60,
+        "亚像素偏移一次重栅格 {sub} 个字形，远超一屏可见字形数：分箱粒度或缓存边界出了问题"
+    );
+}
+
 // ---------- 关态长行的**横向**剔除（O-1 的姊妹命题，第 157 轮勘出） ----------//
 // O-1 把绘制循环按视口**行**剔干净了，但一行只要有一列可见就整行进 shaping：
 // 视口 600px 装得下 ~60 个字符，4000 字符的行仍完整进 cosmic-text（第 157 轮
