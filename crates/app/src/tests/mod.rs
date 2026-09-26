@@ -2,6 +2,13 @@ use super::settings_ui::*;
 use super::*;
 use iced::futures::{executor::block_on, StreamExt};
 
+/// P301：夹具代做后台扫描线程那一步。`FindScanDone` 的载荷是**造好的**命中表
+/// （「能否按行二分」那趟 O(表长) 判序随表算完，生产里发生在扫描线程），
+/// 不再是裸命中向量——所以喂结果前都要过这一道。
+fn scanned(hits: Vec<editpad_core::MatchPos>) -> crate::editor::FindHitTable {
+    crate::editor::FindHitTable::new(hits)
+}
+
 /// 落盘夹具目录：`%TEMP%\editpad-app-tests\<tag>-<pid>`（P212 纠注释——
 /// 原文写「项目内落盘目录：系统 TEMP 在部分沙箱下不可写」，与代码相反；
 /// autosave.rs 的同款假注释已随体检项 E-7 改过，这处是它的出处）。

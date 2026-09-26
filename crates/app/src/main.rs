@@ -34,9 +34,11 @@ pub(crate) use iced::{
     border::Radius, stream, window, Alignment, Background, Border, Color, Element, Fill, Font,
     Padding, Point, Shadow, Subscription, Task, Theme,
 };
+pub(crate) use std::rc::Rc;
 
 use editor::{
-    BlankKind, CaseKind, EditOp, EditorHandle, Motion, SortOrder, TabSpaceKind, ToolKind, TrimMode,
+    BlankKind, CaseKind, EditOp, EditorHandle, FindHitTable, Motion, SortOrder, TabSpaceKind,
+    ToolKind, TrimMode,
 };
 
 fn main() -> iced::Result {
@@ -324,8 +326,10 @@ enum Message {
     /// 回溯引擎对病态模式 + 大文档会冻结整个应用（回溯限制的是单次尝试
     /// 步数，全文逐位置尝试的总量无界）
     ReplaceAllRegexDone(Result<(String, usize), String>),
-    /// 后台查找扫描完成：(任务序号, 命中表)。序号过期的结果直接丢弃（P10）
-    FindScanDone(u64, Vec<editpad_core::MatchPos>),
+    /// 后台查找扫描完成：(任务序号, 命中表)。序号过期的结果直接丢弃（P10）。
+    /// P301：载荷是**造好的** [`FindHitTable`]（连同「能否按行二分」的判定），
+    /// 那趟 O(表长) 判序发生在后台扫描线程，不在 UI 线程。
+    FindScanDone(u64, FindHitTable),
     /// P70：正则模式开关（开启/关闭都会触发重扫）
     RegexToggled(bool),
     // ---------- A8：在文件中查找（设计 docs/find-in-files-design.md） ----------

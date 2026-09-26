@@ -1,4 +1,5 @@
 use super::*;
+use std::rc::Rc;
 
 /// B9 列编辑器对话框草稿（Phase 2）。数值字段以字符串承载——输入框
 /// 原始态，确认时统一校验解析（无效输入不关闭对话框、状态栏提示）。
@@ -152,7 +153,9 @@ pub(crate) struct Editpad {
     pub(crate) find_query: String,
     pub(crate) replace_query: String,
     pub(crate) case_sensitive: bool,
-    pub(crate) matches: Vec<editpad_core::MatchPos>,
+    /// P301：命中表连同「能否按行二分」的判定一起在**后台扫描线程**造好，
+    /// 这里只是其中一个持有者；装上编辑器＝`Rc` 克隆（O(1)），不再整表抄。
+    pub(crate) matches: Rc<crate::editor::FindHitTable>,
     pub(crate) match_idx: Option<usize>,
     /// 在途后台扫描的序号；None 表示没有。迟到的旧结果按它丢弃（P10）
     pub(crate) find_scan: Option<u64>,
@@ -404,7 +407,7 @@ impl Default for Editpad {
             find_query: String::new(),
             replace_query: String::new(),
             case_sensitive: false,
-            matches: Vec::new(),
+            matches: Rc::new(crate::editor::FindHitTable::default()),
             match_idx: None,
             find_scan: None,
             find_seq: 0,

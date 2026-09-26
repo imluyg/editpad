@@ -462,7 +462,7 @@ pub(crate) struct FindHitTable {
 }
 
 impl FindHitTable {
-    fn new(hits: Vec<editpad_core::MatchPos>) -> Self {
+    pub(crate) fn new(hits: Vec<editpad_core::MatchPos>) -> Self {
         let windowable = hits.windows(2).all(|w| {
             w[0].line <= w[1].line
                 && (w[0].line != w[1].line || w[0].col + w[0].len_chars <= w[1].col)
@@ -680,13 +680,23 @@ pub struct EditorCore {
     /// 编辑后命中位置可能短暂漂移（防抖重扫完成前为旧位置），与主流
     /// 编辑器一致可接受；不参与撤销/快照/置脏，换文档（reset_document）
     /// 与关栏即清空。
-    pub(crate) find_hl: FindHitTable,
+    ///
+    /// P301：装的是 `Rc` 而不是表本体——查找链的两个持有者（应用层的
+    /// `Editpad::matches` 与本字段）共用同一份，安装＝引用计数 +1。改前每次
+    /// 扫描完成都为编辑器整表另抄一遍，并顺带在 UI 线程重跑一遍 O(表长) 的
+    /// 判序（50 万条命中＝抄 50 万条 + 问 499 999 对，读数见日档第 210 轮）。
+    pub(crate) find_hl: Rc<FindHitTable>,
     /// 测试钩子（命中表剔除契约，第 205 轮）：整帧 `draw_find_hits` 被**逐条
     /// 检查**的命中条目数。取串次数管不住「命中表本身多长」这一维——视口外的
     /// 命中一条正文都不碰，却每条都要过一遍行界比较，所以表长 5 万时那是每帧
     /// 5 万次白比较。本计数与机器负载无关。生产构建整字段不参与编译。
     #[cfg(test)]
     pub(crate) find_hit_checks: std::cell::Cell<usize>,
+    /// 测试钩子（P301）：编辑器层**自己造表**装上来的次数——每次都是 UI 线程
+    /// 上一遍 O(表长) 判序。生产链装的是后台线程造好的表（`install_find_hits`），
+    /// 本计数恒 0；它回到 1 就说明判序那趟又搬回 UI 线程了。
+    #[cfg(test)]
+    pub(crate) find_table_ui_builds: std::cell::Cell<usize>,
     /// 括号匹配查询缓存（第 61 轮）：键 = 光标位置，值 = 该位置的匹配
     /// 结果（含 None）。draw 每帧查询、命中即零扫描——孤立括号的封顶
     /// 扫描（MAX_BRACKET_SCAN_CHARS）只在新光标位付一次。RefCell 让
@@ -878,9 +888,11 @@ impl Default for EditorCore {
             wrap_sweep_next: 0,
             wrap_sweep_px: 0.0,
             bookmarks: BTreeSet::new(),
-            find_hl: FindHitTable::default(),
+            find_hl: Rc::new(FindHitTable::default()),
             #[cfg(test)]
             find_hit_checks: std::cell::Cell::new(0),
+            #[cfg(test)]
+            find_table_ui_builds: std::cell::Cell::new(0),
             bracket_cache: RefCell::new(None),
             sel_span_cache: RefCell::new(None),
             line_text_memo: RefCell::new(LineTextMemo::default()),
@@ -1362,7 +1374,7 @@ impl EditorCore {
         self.bookmarks.clear();
         // P123：旧文档的查找命中表一并作废（查找栏仍开时由下一次
         // FindScanDone 重新下发）
-        self.find_hl = FindHitTable::default();
+        self.find_hl = Rc::new(FindHitTable::default());
         // P125：换文档复位覆写模式（新文档默认插入）
         self.overwrite = false;
         self.recompute_max_line_cols();
@@ -1376,11 +1388,32 @@ impl EditorCore {
     /// 完全由应用层维护（扫描完成时替换、关栏/换文档清空），编辑器层
     /// 只读绘制，不做失效推断。
     ///
-    /// P296：这是唯一的写入点，命中表连同「能否按行二分」的那一次判定一起
-    /// 换（判据见 [`FindHitTable::new`]）——派生量与表分家迟早会各说一套，
-    /// 本仓这类口径分叉已经五次了。
-    pub fn set_find_highlights(&mut self, hits: Vec<editpad_core::MatchPos>) {
-        self.find_hl = FindHitTable::new(hits);
+    /// P296：命中表连同「能否按行二分」的那一次判定一起换（判据见
+    /// [`FindHitTable::new`]）——派生量与表分家迟早会各说一套，本仓这类
+    /// 口径分叉已经五次了。
+    ///
+    /// P301：**本入口是「现场造表」**，因此会在调用方所在的线程跑一遍
+    /// O(表长) 判序；生产链改走 [`Self::install_find_hits`]（表在后台扫描
+    /// 线程造好、这里只接引用）。留这个入口是给测试与夹具用最直接的形状
+    /// ——「给我一批命中，装上」，代价由 `find_table_ui_builds` 记账（生产链不走这里）。
+    #[cfg(test)]
+    pub(crate) fn set_find_highlights(&mut self, hits: Vec<editpad_core::MatchPos>) {
+        #[cfg(test)]
+        self.find_table_ui_builds
+            .set(self.find_table_ui_builds.get() + 1);
+        self.install_find_hits(Rc::new(FindHitTable::new(hits)));
+    }
+
+    /// P301：把**已经造好**的命中表装上——O(1)，不遍历表。查找链的两个持有者
+    /// （`Editpad::matches` 与 [`Self::find_hl`]）共享同一份，安装＝引用计数 +1。
+    pub(crate) fn install_find_hits(&mut self, table: Rc<FindHitTable>) {
+        self.find_hl = table;
+    }
+
+    /// 测试钩子（第 210 轮）：读取并清零「编辑器层现场造表的次数」。生产恒 0。
+    #[cfg(test)]
+    pub(crate) fn take_find_table_ui_builds(&self) -> usize {
+        self.find_table_ui_builds.take()
     }
 
     /// P296：命中表中可能落进视口 `[vis_first, vis_last]` 的那一段 `[lo, hi)`。

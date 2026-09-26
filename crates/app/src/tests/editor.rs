@@ -1140,7 +1140,7 @@ fn find_all_panel_toggles_and_goto_selects_hit() {
         &mut app,
         Message::Edit(EditOp::InsertText("foo bar\nbaz foo\n".into())),
     );
-    app.matches = vec![
+    app.matches = Rc::new(scanned(vec![
         editpad_core::MatchPos {
             line: 0,
             col: 0,
@@ -1151,7 +1151,7 @@ fn find_all_panel_toggles_and_goto_selects_hit() {
             col: 4,
             len_chars: 3,
         },
-    ];
+    ]));
     dispatch(&mut app, Message::FindAllGoto(1));
     assert_eq!(app.match_idx, Some(1));
     {

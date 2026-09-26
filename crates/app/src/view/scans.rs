@@ -144,7 +144,7 @@ impl Editpad {
         self.find_cancel.store(true, Ordering::Relaxed);
         self.find_seq += 1;
         self.find_scan = None;
-        self.matches.clear();
+        self.matches = Rc::new(FindHitTable::default());
         self.match_idx = None;
         self.sync_find_highlights();
     }
@@ -152,13 +152,18 @@ impl Editpad {
     /// P123：把当前命中表同步进编辑器的视口高亮层——查找栏开态下发
     /// 全部命中、关态清空。开/关/换结果的所有路径收口于此（关栏走
     /// cancel_find_scan，扫描完成走 FindScanDone）。
+    ///
+    /// P301：这里是 `Rc` 克隆，不是整表拷贝。改前每次扫描完成都要
+    /// `matches.clone()`（表长 50 万＝抄 50 万条）＋ `FindHitTable::new` 里那遍
+    /// O(表长) 判序，两处都压在 UI 线程上；判序现已随表搬到 [`drive_find_scan`]，
+    /// 整表拷贝则被共享引用替掉。
     pub(crate) fn sync_find_highlights(&mut self) {
-        let hits = if self.find_visible {
+        let table = if self.find_visible {
             self.matches.clone()
         } else {
-            Vec::new()
+            Rc::new(FindHitTable::default())
         };
-        self.cur_handle.borrow_mut().set_find_highlights(hits);
+        self.cur_handle.borrow_mut().install_find_hits(table);
     }
 
     pub(crate) fn find_scanning(&self) -> bool {

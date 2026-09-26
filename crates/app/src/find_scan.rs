@@ -24,34 +24,37 @@ pub(crate) struct FindScanPayload {
 ///
 /// 保证语义：无论扫描成功、被取消还是 **panic**，都恰好回一条 `FindScanDone`
 /// ——否则查找栏会永久停在「查找中…」。过期结果由 update 按 seq 二次过滤。
+///
+/// P301：命中表在这里（后台线程）就地造好——「能否按行二分」那趟 O(表长) 判序
+/// 刚扫完全文、表还热着，顺手算完；UI 线程收到的是成品，只把 `Rc` 挂上编辑器。
 pub(crate) async fn drive_find_scan<F>(payload: FindScanPayload, scan: F) -> Message
 where
     F: FnOnce(&editpad_core::Document, &str, bool, bool) -> Vec<editpad_core::MatchPos>
         + Send
         + 'static,
 {
-    let matches = await_on_thread(move || {
+    let table = await_on_thread(move || {
         // 防抖：真正的取消由 cancelled 标志完成——新输入排队时置位上一代，
         // 这里睡满窗口后检查，被作废的任务直接退出、不浪费一次全文扫描
         std::thread::sleep(std::time::Duration::from_millis(payload.debounce_ms));
         if payload.cancelled.load(Ordering::Relaxed) {
-            return Vec::new();
+            return FindHitTable::default();
         }
         // P5 同款兜底：扫描崩溃也要回消息（空表），不能让 UI 永久等待
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scan(
+            FindHitTable::new(scan(
                 &payload.doc,
                 &payload.query,
                 payload.case_sensitive,
                 payload.regex,
-            )
+            ))
         }))
         .unwrap_or_default()
     })
     .await
     // 线程没送回结果（panic 到断链）同样按空表收尾，保证「必回一条」
     .unwrap_or_default();
-    Message::FindScanDone(payload.seq, matches)
+    Message::FindScanDone(payload.seq, table)
 }
 
 /// 与 core::search 一致的大小写语义：实现已下沉到 core（P15 去重），

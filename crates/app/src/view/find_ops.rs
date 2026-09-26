@@ -9,7 +9,7 @@ impl Editpad {
     /// 与 [`Self::step_match`] 同一 select_span 口径（len_chars 自带
     /// 选区跨度），只是定位方式从光标相对序改为面板行号直选。
     pub(crate) fn goto_match_index(&mut self, index: usize) {
-        let Some(pos) = self.matches.get(index).copied() else {
+        let Some(pos) = self.matches.hits().get(index).copied() else {
             return;
         };
         self.match_idx = Some(index);
@@ -19,7 +19,7 @@ impl Editpad {
         self.set_find_status(editpad_core::fmt_match_counter(
             self.lang(),
             index + 1,
-            self.matches.len(),
+            self.matches.hits().len(),
         ));
     }
 
@@ -81,13 +81,16 @@ impl Editpad {
             }
         };
         let index = if forward {
-            editpad_core::next_from(&self.matches, origin_line, origin_col)
+            editpad_core::next_from(self.matches.hits(), origin_line, origin_col)
         } else {
-            editpad_core::prev_from(&self.matches, origin_line, origin_col)
+            editpad_core::prev_from(self.matches.hits(), origin_line, origin_col)
         };
         self.match_idx = index;
 
-        if let (Some(i), Some(pos)) = (index, index.and_then(|i| self.matches.get(i).copied())) {
+        if let (Some(i), Some(pos)) = (
+            index,
+            index.and_then(|i| self.matches.hits().get(i).copied()),
+        ) {
             // P26：选区跨度直接用命中自带的 len_chars（扫描器产出的
             // 「选区显示跨度」口径），不再按当前输入现算查询长度——
             // 单行命中两者相等，跨行命中的正确性由数据自身保证，
@@ -98,7 +101,7 @@ impl Editpad {
             self.set_find_status(editpad_core::fmt_match_counter(
                 self.lang(),
                 i + 1,
-                self.matches.len(),
+                self.matches.hits().len(),
             ));
         }
         Task::none()

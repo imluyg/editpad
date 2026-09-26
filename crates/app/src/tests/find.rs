@@ -155,7 +155,7 @@ fn p70_regex_replace_current_expands_single_match() {
     ];
     let seq = app.find_seq;
     app.find_scan = Some(seq); // 登记「在途扫描」：FindScanDone 的守卫条件
-    dispatch(&mut app, Message::FindScanDone(seq, hits));
+    dispatch(&mut app, Message::FindScanDone(seq, scanned(hits)));
 
     // 无当前命中：先跳到第一个（step_match 语义）
     dispatch(&mut app, Message::ReplaceCurrentRegex);
@@ -192,7 +192,7 @@ fn step_prev_from_selected_match_jumps_back_in_one_press() {
     ];
     let seq = app.find_seq;
     app.find_scan = Some(seq);
-    dispatch(&mut app, Message::FindScanDone(seq, hits));
+    dispatch(&mut app, Message::FindScanDone(seq, scanned(hits)));
 
     dispatch(&mut app, Message::FindNext); // 选中第 1 个命中
     dispatch(&mut app, Message::FindNext); // 选中第 2 个命中
@@ -262,7 +262,7 @@ fn p70_regex_replace_current_zero_width_expands_not_literal_fallback() {
     }];
     let seq = app.find_seq;
     app.find_scan = Some(seq);
-    dispatch(&mut app, Message::FindScanDone(seq, hits));
+    dispatch(&mut app, Message::FindScanDone(seq, scanned(hits)));
 
     dispatch(&mut app, Message::ReplaceCurrentRegex);
     assert_eq!(
@@ -318,8 +318,8 @@ fn find_scan_stream_emits_exactly_one_done_with_matches() {
         Message::FindScanDone(seq, hits) => {
             assert_eq!(*seq, 42);
             assert_eq!(
-                hits,
-                &vec![
+                hits.hits(),
+                vec![
                     editpad_core::MatchPos {
                         line: 0,
                         col: 0,
@@ -442,7 +442,7 @@ fn find_scan_future_parks_instead_of_blocking_the_worker() {
     match second {
         Poll::Ready(Message::FindScanDone(seq, hits)) => {
             assert_eq!(seq, 11);
-            assert_eq!(hits.len(), 1, "扫描结果应原样带回");
+            assert_eq!(hits.hits().len(), 1, "扫描结果应原样带回");
         }
         other => panic!("防抖窗过后应产出 FindScanDone，实际 {other:?}"),
     }
@@ -476,22 +476,22 @@ fn find_scan_results_are_filtered_by_sequence_number() {
     // 排队 → 采纳当前序号的结果
     dispatch(&mut app, Message::FindQueryChanged("a".into()));
     assert_eq!(app.find_scan, Some(1), "查询变化应排队一次后台扫描");
-    dispatch(&mut app, Message::FindScanDone(1, hit_a()));
-    assert_eq!(app.matches, hit_a());
+    dispatch(&mut app, Message::FindScanDone(1, scanned(hit_a())));
+    assert_eq!(app.matches.hits(), hit_a());
     assert_eq!(app.find_scan, None, "结果采纳后在途标记应清除");
     assert_eq!(app.match_idx, None, "新结果后跳转游标复位");
 
     // 已消费的序号再回来（重复投递）不得二次生效
-    dispatch(&mut app, Message::FindScanDone(1, hit_b()));
-    assert_eq!(app.matches, hit_a());
+    dispatch(&mut app, Message::FindScanDone(1, scanned(hit_b())));
+    assert_eq!(app.matches.hits(), hit_a());
 
     // 新输入换新序号；重扫期间保留旧命中（防闪烁），但旧序号的迟到结果不许覆盖
     dispatch(&mut app, Message::FindQueryChanged("ab".into()));
     assert_eq!(app.find_scan, Some(2));
-    dispatch(&mut app, Message::FindScanDone(1, hit_b()));
-    assert_eq!(app.matches, hit_a(), "过期结果必须被丢弃、不得覆盖");
-    dispatch(&mut app, Message::FindScanDone(2, hit_b()));
-    assert_eq!(app.matches, hit_b());
+    dispatch(&mut app, Message::FindScanDone(1, scanned(hit_b())));
+    assert_eq!(app.matches.hits(), hit_a(), "过期结果必须被丢弃、不得覆盖");
+    dispatch(&mut app, Message::FindScanDone(2, scanned(hit_b())));
+    assert_eq!(app.matches.hits(), hit_b());
     assert_eq!(app.find_scan, None);
 
     // 大小写切换同样触发重扫
@@ -506,7 +506,7 @@ fn find_scan_results_are_filtered_by_sequence_number() {
     dispatch(&mut app, Message::FindToggled);
     assert_eq!(app.find_scan, None);
     assert!(app.matches.is_empty());
-    dispatch(&mut app, Message::FindScanDone(4, hit_a()));
+    dispatch(&mut app, Message::FindScanDone(4, scanned(hit_a())));
     assert!(app.matches.is_empty(), "取消后的迟到结果必须被丢弃");
 
     // Esc 关栏同样取消（注意：上一步关栏的取消已把序号推到 5，本次排队为 6）
@@ -515,19 +515,19 @@ fn find_scan_results_are_filtered_by_sequence_number() {
     assert_eq!(app.find_scan, Some(6));
     dispatch(&mut app, Message::BarsDismissed);
     assert_eq!(app.find_scan, None);
-    dispatch(&mut app, Message::FindScanDone(6, hit_a()));
+    dispatch(&mut app, Message::FindScanDone(6, scanned(hit_a())));
     assert!(app.matches.is_empty());
 
     // 清空查询 = 取消而非空表扫描（BarsDismissed 取消后序号为 7，本次排队 8）
     app.find_visible = true;
     dispatch(&mut app, Message::FindQueryChanged("q".into()));
     assert_eq!(app.find_scan, Some(8));
-    dispatch(&mut app, Message::FindScanDone(8, hit_a()));
-    assert_eq!(app.matches, hit_a());
+    dispatch(&mut app, Message::FindScanDone(8, scanned(hit_a())));
+    assert_eq!(app.matches.hits(), hit_a());
     dispatch(&mut app, Message::FindQueryChanged(String::new()));
     assert_eq!(app.find_scan, None);
     assert!(app.matches.is_empty());
-    dispatch(&mut app, Message::FindScanDone(8, hit_a()));
+    dispatch(&mut app, Message::FindScanDone(8, scanned(hit_a())));
     assert!(
         app.matches.is_empty(),
         "清空查询取消后，同号迟到结果也必须被丢弃"
@@ -542,11 +542,11 @@ fn find_next_while_scanning_reports_progress_not_stale_jump() {
 
     // 有结果在途：不基于过期命中表跳转
     app.find_scan = Some(9);
-    app.matches = vec![editpad_core::MatchPos {
+    app.matches = Rc::new(scanned(vec![editpad_core::MatchPos {
         line: 0,
         col: 0,
         len_chars: 3,
-    }];
+    }]));
     let _ = app.update(Message::FindNext);
     assert_eq!(app.status, "查找中…", "扫描在途时 Enter 应提示进度");
 
@@ -597,8 +597,8 @@ fn multiline_match_selects_across_lines_on_crlf_document() {
         "命中跨度应为显示口径 5（2 字符 + 1 次跨行 + 2 字符），不是原始字符数 6"
     );
     let seq = app.find_scan.unwrap();
-    dispatch(&mut app, Message::FindScanDone(seq, hits));
-    assert!(app.matches.len() == 1);
+    dispatch(&mut app, Message::FindScanDone(seq, scanned(hits)));
+    assert!(app.matches.hits().len() == 1);
 
     // 跳到该命中：选区必须跨行且恰好覆盖「st\r\nse」（\r\n 只算一格）
     dispatch(&mut app, Message::FindNext);
@@ -620,7 +620,7 @@ fn replace_current_replaces_multiline_match_in_crlf_document() {
     let seq = {
         let hits = editpad_core::find_all_document(&doc, &query, true);
         let s = app.find_scan.unwrap();
-        dispatch(&mut app, Message::FindScanDone(s, hits));
+        dispatch(&mut app, Message::FindScanDone(s, scanned(hits)));
         s
     };
     let _ = seq;
@@ -728,7 +728,7 @@ fn find_scan_done_syncs_viewport_highlights_and_close_clears() {
         &mut app,
         Message::FindScanDone(
             scan_seq,
-            vec![
+            scanned(vec![
                 editpad_core::MatchPos {
                     line: 0,
                     col: 0,
@@ -739,7 +739,7 @@ fn find_scan_done_syncs_viewport_highlights_and_close_clears() {
                     col: 11,
                     len_chars: 3,
                 },
-            ],
+            ]),
         ),
     );
     assert_eq!(
@@ -1539,5 +1539,86 @@ fn find_drag_start_without_prior_move_does_not_jump_the_overlay() {
     assert!(
         (p.x - (default.x + 10.0)).abs() < 0.01 && (p.y - (default.y + 5.0)).abs() < 0.01,
         "跟手平移不对：{p:?}，default {default:?}"
+    );
+}
+
+/// P301（第 208 轮立的 L-16 结案）：扫描完成那一口，UI 侧既不重算判序、也不抄整表。
+///
+/// 拷贝（n 条）；表长 1 千／5 万／50 万三档实测判序 999／49 999／**499 999** 对、拷贝
+/// 1 千／5 万／**50 万** 条，查找框里连打 5 个字符就是 5 倍（50 万档＝2 499 995 对／
+/// 2 500 000 条）。改后这两笔账都不再存在：**装载既不现场造表（判序 0 对）也不抄表
+/// （拷贝 0 条）**——下面两句断言各盯一头，变异验证过它们不互相顶班。
+#[test]
+fn p301_scan_completion_never_rebuilds_or_copies_the_hit_table() {
+    let n = 50_000usize;
+    let doc = editpad_core::Document::from_str(&"x\n".repeat(n));
+    assert_eq!(doc.line_count(), n + 1, "夹具自证：n 行 ＋ 幻影末行");
+
+    // ① 真实生产入口：扫描 + 造表（含那遍 O(表长) 判序）都在后台线程里
+    let payload = FindScanPayload {
+        seq: 7,
+        doc: doc.clone(),
+        query: "x".to_owned(),
+        case_sensitive: true,
+        regex: false,
+        cancelled: Arc::new(AtomicBool::new(false)),
+        debounce_ms: 1,
+    };
+    let message = block_on(drive_find_scan(payload, |d, q, cs, _rx| {
+        editpad_core::find_all_document(d, q, cs)
+    }));
+    let table = match &message {
+        Message::FindScanDone(seq, table) => {
+            assert_eq!(*seq, 7);
+            table
+        }
+        other => panic!("应为 FindScanDone，实际 {other:?}"),
+    };
+    assert_eq!(table.hits().len(), n, "夹具自证：扫描确实产出 5 万条命中");
+    assert!(table.windowable(), "夹具自证：判序随表算好且为真");
+
+    // ② 装载这一口：不造表、不抄表，只多一次引用
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/big.txt")),
+    );
+    let load_seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(load_seq, Ok((doc, String::new(), "UTF-8".to_owned()))),
+    );
+    app.find_visible = true;
+    app.find_scan = Some(7);
+    app.cur_handle.borrow().take_find_table_ui_builds();
+    dispatch(&mut app, message);
+    assert_eq!(
+        app.cur_handle.borrow().take_find_table_ui_builds(),
+        0,
+        "扫描完成的装载不得在 UI 侧现场造表（改前每装一次＝一遍 O(表长) 判序）"
+    );
+    assert_eq!(app.matches.hits().len(), n, "命中必须原样到货");
+    assert!(
+        Rc::ptr_eq(&app.matches, &app.cur_handle.borrow().find_hl),
+        "编辑器装的必须是同一份表，不是整表拷贝（改前 `matches.clone()` 抄 5 万条）"
+    );
+    assert_eq!(
+        Rc::strong_count(&app.matches),
+        2,
+        "两个持有者（命中表与编辑器高亮层）各一份引用"
+    );
+
+    // ③ 正对照：现场造表那条路确实会被记账——否则上面那句 assert 是瞎的
+    app.cur_handle
+        .borrow_mut()
+        .set_find_highlights(vec![editpad_core::MatchPos {
+            line: 0,
+            col: 0,
+            len_chars: 1,
+        }]);
+    assert_eq!(
+        app.cur_handle.borrow().take_find_table_ui_builds(),
+        1,
+        "正对照：自建表必须被记到"
     );
 }

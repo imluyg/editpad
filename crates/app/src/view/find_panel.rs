@@ -8,7 +8,7 @@ use iced::widget::column;
 
 impl Editpad {
     pub(super) fn find_all_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
-        let total = self.matches.len();
+        let total = self.matches.hits().len();
         let scanning = self.find_scanning();
         let shown = total.min(FIND_ALL_MAX_ROWS);
         // 标题行：文本 width(Fill) 把关闭按钮推到右缘
@@ -35,7 +35,7 @@ impl Editpad {
         if shown > 0 {
             let editor = self.cur_handle.borrow();
             for i in 0..shown {
-                let m = self.matches[i];
+                let m = self.matches.hits()[i];
                 let raw = editor.line_text(m.line);
                 let excerpt = match_excerpt(&raw, m.col, FIND_ALL_EXCERPT_COLS);
                 rows = rows.push(
@@ -204,7 +204,7 @@ impl Editpad {
     /// ⑤结果面板（查找全部 / 目录命中，同槽互斥）——挂在浮层内下半区、
     /// 面板自身限高滚动。
     pub(super) fn find_overlay(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
-        let total = self.matches.len();
+        let total = self.matches.hits().len();
         // P10：扫描在途时明确显示状态，按钮基于过期结果禁用
         let scanning = self.find_scanning();
         let position_label = if scanning {

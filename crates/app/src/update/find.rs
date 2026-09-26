@@ -271,7 +271,10 @@ impl Editpad {
                     // step_match 恒返回 none，弃置安全
                     let _ = self.step_match(true);
                 }
-                let Some(pos) = self.match_idx.and_then(|i| self.matches.get(i).copied()) else {
+                let Some(pos) = self
+                    .match_idx
+                    .and_then(|i| self.matches.hits().get(i).copied())
+                else {
                     return Task::none();
                 };
                 // P146 防护：pos 来自上一轮扫描的陈旧命中表——编辑删行后
@@ -487,7 +490,8 @@ impl Editpad {
                 // 与 Loaded 按 job_id 过滤同构）
                 if self.find_scan == Some(seq) {
                     self.find_scan = None;
-                    self.matches = found;
+                    // P301：载荷已是后台线程造好的表，这里只多一次引用计数。
+                    self.matches = Rc::new(found);
                     self.match_idx = None;
                     // P123：新命中表同步视口高亮层
                     self.sync_find_highlights();
