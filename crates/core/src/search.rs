@@ -191,6 +191,19 @@ pub(crate) fn find_all_limited(
     out
 }
 
+// 测试仪表（L-19）：封顶档一共结算了多少行。
+// 判据要的是「取满即收工、剩余正文不扫」——只看返回条数分不清
+// "提前停了"和"扫完全程再截断"，这两者的内存一样但 CPU 差一个文档长度。
+#[cfg(test)]
+thread_local! {
+    static DOC_SCAN_LINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_doc_scan_lines() -> usize {
+    DOC_SCAN_LINES.with(|s| s.replace(0))
+}
+
 /// 在 [`Document`]（rope）上直接查找，语义与 [`find_all`] 完全一致（P10）。
 ///
 /// 与 `find_all(&doc.to_text(), ..)` 相比省掉整份全文 String：
@@ -198,8 +211,29 @@ pub(crate) fn find_all_limited(
 /// 缓冲（复用分配，长度 = 最长行）。行界口径与 ropey 一致（含孤立
 /// `\r` 等），与编辑器行号同源；`\r\n` 跨块悬置裁决保证逐字节等价。
 pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> Vec<MatchPos> {
+    find_all_document_limited(doc, query, case_sensitive, usize::MAX)
+}
+
+/// [`find_all_document`] 的**封顶档**（L-19）：收集到 `limit` 条就收工，
+/// 不再把剩余正文扫完。
+///
+/// 为什么要它：文档查找链此前**没有任何命中数上限**，`\d+` 打在 49MB 日志上
+/// 实测产 **630 万**条 ⇒ 单份 `Vec<MatchPos>` 151 MB（`MatchPos`＝3×usize＝24 B），
+/// 而查找框里连打 5 个字符就是 5 次到货。app 层按「探测式」用它：
+/// `limit = 上限 + 1`，回长度超过上限即证明"还有更多"（见 app 的
+/// `FIND_HITS_CAP`），这样封顶是**数出来的**而不是猜的。
+///
+/// 语义与 [`find_all_document`] 逐格相同，只是可能提前收尾：字面档按行流式
+/// 扫到第 `limit` 条即返回；跨行查询走的 `scan_multiline_chunks` 内核不接
+/// 封顶参数（与 `find_all_limited` 同一口径），故仍是一次全量后 `truncate`。
+pub fn find_all_document_limited(
+    doc: &Document,
+    query: &str,
+    case_sensitive: bool,
+    limit: usize,
+) -> Vec<MatchPos> {
     let mut out = Vec::new();
-    if query.is_empty() {
+    if query.is_empty() || limit == 0 {
         return out;
     }
     let q: Vec<char> = query.chars().collect();
@@ -208,6 +242,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
     // rope 按存储块流式喂入，窗口缓冲 O(查询长度)
     if query_is_multiline(&q) {
         scan_multiline_chunks(doc, &q, case_sensitive, &mut out);
+        out.truncate(limit);
         return out;
     }
 
@@ -227,8 +262,14 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
         // 块边界可能落在任意位置：行界前的残段累积进当前行缓冲，
         // 遇到完整行界才结算一行——保证与全文单遍切分逐字节等价
         while let Some((pos, blen)) = next_line_break(rest) {
+            // 只数主路（LF/CRLF 都走这里；以 `\r` 结尾的块是少数派分支）
+            #[cfg(test)]
+            DOC_SCAN_LINES.with(|s| s.set(s.get() + 1));
             line.push_str(&rest[..pos]);
-            scan_line(&line, &lq, line_idx, &mut out, usize::MAX);
+            scan_line(&line, &lq, line_idx, &mut out, limit);
+            if out.len() >= limit {
+                return out; // L-19：取满即收工，剩余正文不扫
+            }
             line.clear();
             line_idx += 1;
             rest = &rest[pos + blen..];
@@ -237,7 +278,10 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
             // 悬置 \r 必是行界（孤立或 CRLF 均然）：行内容到此结算，
             // 是否吞掉下块开头的 \n 交 pending_cr 裁决
             line.push_str(&rest[..rest.len() - '\r'.len_utf8()]);
-            scan_line(&line, &lq, line_idx, &mut out, usize::MAX);
+            scan_line(&line, &lq, line_idx, &mut out, limit);
+            if out.len() >= limit {
+                return out;
+            }
             line.clear();
             line_idx += 1;
             pending_cr = true;
@@ -245,7 +289,7 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
             line.push_str(rest);
         }
     }
-    scan_line(&line, &lq, line_idx, &mut out, usize::MAX);
+    scan_line(&line, &lq, line_idx, &mut out, limit);
     out
 }
 
@@ -1006,10 +1050,29 @@ pub fn find_all_regex_document(
     pattern: &str,
     case_sensitive: bool,
 ) -> Result<Vec<MatchPos>, String> {
+    find_all_regex_document_limited(doc, pattern, case_sensitive, usize::MAX)
+}
+
+/// [`find_all_regex_document`] 的**封顶档**（L-19）：收到 `limit` 条跨度就
+/// 停引擎，后面的正文不再匹配。
+///
+/// ⚠️ 这份拷贝（`doc.to_text()`）省不掉——正则引擎要一段连续 `&str`，
+/// 这是它与字面档的本质差别（第 211 轮量过：拷贝 13~15 ms，而跨度换算才是
+/// 大账）。本函数封的是**命中表**的规模（630 万条＝151 MB 那份），
+/// 顺带让引擎提前收工。
+pub fn find_all_regex_document_limited(
+    doc: &Document,
+    pattern: &str,
+    case_sensitive: bool,
+    limit: usize,
+) -> Result<Vec<MatchPos>, String> {
     let re = compile_regex(pattern, case_sensitive)?;
     let text = doc.to_text();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for m in re.find_iter(&text) {
+        if spans.len() >= limit {
+            break; // 取满即停：剩下的命中不收集，剩余正文不匹配
+        }
         let m = m.map_err(|e| e.to_string())?;
         spans.push((m.start(), m.end()));
     }
@@ -3059,5 +3122,62 @@ mod tests {
                 len_chars: 1
             }]
         );
+    }
+
+    /// L-19（第 215 轮）：封顶档的两件事——**是前缀**（同序同值，不能挑着留）
+    /// 与**真的提前收工**（不是"扫完全程再截断"）。
+    ///
+    /// 第二件用行结算次数当判据：只看返回条数分不清这两种，而它们内存一样、
+    /// CPU 差一个文档长度。正对照（不封顶时必须走完全程）挡住"计数器恒零"式假绿。
+    #[test]
+    fn find_all_document_limited_is_a_prefix_and_really_stops_early() {
+        let doc = Document::from_str(&"xx hello xx\n".repeat(4_000));
+        assert_eq!(doc.line_count(), 4_001, "夹具自证：行数");
+        let full = find_all_document(&doc, "hello", true);
+        assert_eq!(full.len(), 4_000, "夹具自证：每行一颗命中");
+
+        let _ = take_doc_scan_lines();
+        let capped = find_all_document_limited(&doc, "hello", true, 10);
+        assert_eq!(capped, full[..10], "封顶档必须是全量档的前缀");
+        let lines = take_doc_scan_lines();
+        assert!(lines <= 11, "取满 10 条就该收工，却结算了 {lines} 行");
+
+        // 正对照：不封顶时该走完全程，否则上面那句"少扫"是瞎的
+        let _ = take_doc_scan_lines();
+        let all = find_all_document_limited(&doc, "hello", true, usize::MAX);
+        assert_eq!(all, full, "limit 大于总数 ⇒ 与全量逐格相同");
+        assert!(
+            take_doc_scan_lines() >= 4_000,
+            "正对照失效：不封顶也没扫完整篇"
+        );
+
+        assert!(find_all_document_limited(&doc, "hello", true, 0).is_empty());
+        // 跨行查询那支内核不接封顶（与 find_all_limited 同口径）⇒ 全量后截断，
+        // 结果仍必须是前缀
+        let multi = find_all_document_limited(&doc, "xx\nxx", true, 7);
+        assert_eq!(
+            multi,
+            find_all_document(&doc, "xx\nxx", true)[..7].to_vec(),
+            "跨行查询的封顶档也该是前缀"
+        );
+        assert!(!multi.is_empty(), "夹具自证：跨行那格确实有命中");
+    }
+
+    /// L-19：正则档的封顶——引擎取满即停，产出同样是前缀。
+    #[test]
+    fn find_all_regex_document_limited_stops_at_the_probe() {
+        let doc = Document::from_str(&"a1 b\n".repeat(500));
+        let full = find_all_regex_document(&doc, r"\d", true).unwrap();
+        assert_eq!(full.len(), 500, "夹具自证：每行一颗数字");
+        assert_eq!(
+            find_all_regex_document_limited(&doc, r"\d", true, 20).unwrap(),
+            full[..20],
+            "正则封顶档也必须是前缀"
+        );
+        assert!(find_all_regex_document_limited(&doc, r"\d", true, 0)
+            .unwrap()
+            .is_empty());
+        // 无效模式在两种档位上同样报错（不因封顶而吞掉）
+        assert!(find_all_regex_document_limited(&doc, "(unclosed", true, 5).is_err());
     }
 }

@@ -707,6 +707,17 @@ pub fn fmt_match_total(lang: Lang, total: usize) -> String {
     }
 }
 
+/// L-19（第 215 轮）：命中数封顶的状态栏明示。
+///
+/// 措辞刻意说"扫描已停止、列表可能不完整"，而不是"仅显示前 N 条"——
+/// 整词过滤后的条数可以远小于上限，那时后者就是假话。宁多报不漏报。
+pub fn fmt_hits_capped(lang: Lang, cap: usize) -> String {
+    match lang {
+        Lang::ZhCn => format!("（已达 {cap} 处扫描上限，列表可能不完整）"),
+        Lang::En => format!(" (scan stopped at the {cap}-hit limit; list may be incomplete)"),
+    }
+}
+
 /// 查找浮层标题右侧的计数（`第 i/total 处` / `i of total`；无命中给总数）。
 pub fn fmt_find_counter(lang: Lang, index: Option<usize>, total: usize) -> String {
     match lang {

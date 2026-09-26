@@ -459,15 +459,50 @@ pub(crate) struct FindHitTable {
     /// 后台扫描（`find_all` / `find_all_document` / `find_all_regex` 与整词过滤）
     /// 的扫描序天然满足；不满足时 [`Self::window`] 退回全表扫，语义与改前逐字相同。
     windowable: bool,
+    /// L-19（第 215 轮）：**扫描是否因触到 `FIND_HITS_CAP` 而提前收工**。
+    /// 由扫描方如实带出（它手里有"多探一条"的证据），不由表自己猜——
+    /// 整词过滤后的条数可能远小于上限，那时"长度到没到上限"就不再是
+    /// "结果完不完整"的证据了。
+    capped: bool,
 }
 
+/// L-19：一次文档查找扫描最多收集多少条命中（导航用的表，不是"全部替换"）。
+///
+/// 为什么要有它：查找链此前**没有任何命中数上限**，而 `\d+` 打在 49MB 日志上
+/// 实测产 **630 万**条 ⇒ 单份表 151 MB（`MatchPos`＝3×usize＝24 B），查找框里
+/// 连打 5 个字符就是 5 次到货；`mem_guard_allows` 只按**正文**字节记账，
+/// 这份峰值对它完全隐形（第 211 轮现量）。
+///
+/// 取 100 000 的依据：表本身 2.4 MB；滚动条刻度早就封顶 1 000 颗（P297）、
+/// 「查找全部」面板另有 `FIND_ALL_MAX_ROWS`，所以导航侧真实用不满这个数。
+/// ⚠️ 这条上限**只影响导航**（底色、刻度、Enter 步进、替换当前），
+/// 不碰「全部替换」——那是 `replace_all_document` / `replace_all_regex` 另一条路，
+/// 且早有自己的 4 000 000 字符上限，因此**不会有人因为截断而少替换一处**。
+pub(crate) const FIND_HITS_CAP: usize = 100_000;
+
 impl FindHitTable {
-    pub(crate) fn new(hits: Vec<editpad_core::MatchPos>) -> Self {
+    /// 造表：截断到 `FIND_HITS_CAP`，并记住"扫描是否提前收工"。
+    ///
+    /// L-19 的截断放在这**唯一**一处——派生量（`windowable`/`capped`）与数据
+    /// 分家是本仓第 6 次踩的坑，不给"表截了、前提没跟着算"留可表达的空间。
+    /// 判序在**截断后**的表上算：留下的仍是原序的前缀，二分前提不受影响。
+    pub(crate) fn new(mut hits: Vec<editpad_core::MatchPos>, capped: bool) -> Self {
+        let capped = capped || hits.len() > FIND_HITS_CAP;
+        hits.truncate(FIND_HITS_CAP);
         let windowable = hits.windows(2).all(|w| {
             w[0].line <= w[1].line
                 && (w[0].line != w[1].line || w[0].col + w[0].len_chars <= w[1].col)
         });
-        Self { hits, windowable }
+        Self {
+            hits,
+            windowable,
+            capped,
+        }
+    }
+
+    /// L-19：结果是否因上限而不完整（状态栏据此明示，见 `fmt_hits_capped`）。
+    pub(crate) fn capped(&self) -> bool {
+        self.capped
     }
 
     pub(crate) fn hits(&self) -> &[editpad_core::MatchPos] {
@@ -1401,7 +1436,7 @@ impl EditorCore {
         #[cfg(test)]
         self.find_table_ui_builds
             .set(self.find_table_ui_builds.get() + 1);
-        self.install_find_hits(Rc::new(FindHitTable::new(hits)));
+        self.install_find_hits(Rc::new(FindHitTable::new(hits, false)));
     }
 
     /// P301：把**已经造好**的命中表装上——O(1)，不遍历表。查找链的两个持有者

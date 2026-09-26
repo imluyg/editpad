@@ -7,6 +7,19 @@ use super::*;
 use iced::widget::column;
 
 impl Editpad {
+    /// L-19（第 215 轮）：命中数封顶时的状态栏后缀；未截断时是空串。
+    ///
+    /// 两个渲染点（「查找全部」面板标题、查找浮层的计数）共用这一份——
+    /// 不给"一处明示、另一处不说"留可表达的空间（本仓口径分叉的老形状）。
+    /// 上限值也从 `FIND_HITS_CAP` 取，文案里不另抄一个数。
+    pub(crate) fn hits_capped_suffix(&self) -> String {
+        if self.matches.capped() {
+            editpad_core::fmt_hits_capped(self.lang(), crate::editor::FIND_HITS_CAP)
+        } else {
+            String::new()
+        }
+    }
+
     pub(super) fn find_all_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
         let total = self.matches.hits().len();
         let scanning = self.find_scanning();
@@ -18,7 +31,12 @@ impl Editpad {
             } else if total == 0 {
                 self.t(editpad_core::Key::FindNoMatch).to_owned()
             } else {
-                editpad_core::fmt_match_total(self.lang(), total)
+                // L-19：扫到上限就明示"列表可能不完整"，不让用户以为看全了
+                format!(
+                    "{}{}",
+                    editpad_core::fmt_match_total(self.lang(), total),
+                    self.hits_capped_suffix()
+                )
             })
             .size(uipx)
             .font(uifont)
@@ -213,8 +231,21 @@ impl Editpad {
             self.t(editpad_core::Key::FindNoMatch).to_owned()
         } else {
             match self.match_idx {
-                Some(i) => editpad_core::fmt_find_counter(self.lang(), Some(i), total),
-                None => editpad_core::fmt_find_counter(self.lang(), None, total),
+                Some(i) => {
+                    // L-19：浮层计数同样带后缀，与面板标题共用一份（不会一处说不完整）
+                    format!(
+                        "{}{}",
+                        editpad_core::fmt_find_counter(self.lang(), Some(i), total),
+                        self.hits_capped_suffix()
+                    )
+                }
+                None => {
+                    format!(
+                        "{}{}",
+                        editpad_core::fmt_find_counter(self.lang(), None, total),
+                        self.hits_capped_suffix()
+                    )
+                }
             }
         };
         let has_matches = !scanning && !self.matches.is_empty();

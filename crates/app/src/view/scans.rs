@@ -121,19 +121,7 @@ impl Editpad {
         self.find_scan = Some(self.find_seq);
         Task::perform(
             drive_find_scan(payload, move |doc, q, cs, rx| {
-                if rx {
-                    // P70：正则走全文扫描（to_text 拷贝发生在后台线程）；
-                    // L-17 起跨度换算按密度选档——命中稀疏时不再把整份正文
-                    // 再走一遍。编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
-                    editpad_core::find_all_regex_document(doc, q, cs).unwrap_or_default()
-                } else {
-                    let hits = editpad_core::find_all_document(doc, q, cs);
-                    if whole_word {
-                        editpad_core::filter_whole_word(doc, hits)
-                    } else {
-                        hits
-                    }
-                }
+                run_find_scan(doc, q, cs, rx, whole_word)
             }),
             |message| message,
         )
@@ -209,5 +197,42 @@ impl Editpad {
             cancelled,
             batch_strides: HL_PAVE_BATCH_STRIDES,
         }))
+    }
+}
+
+/// L-19（第 215 轮）：生产查找扫描的**唯一**执行体——正则档／字面档／整词三种
+/// 形态都在这一个函数里，`schedule_find_scan` 与测试调的是同一份，不留第二处
+/// 口径可漂（本仓"派生逻辑抄两遍"的老坑）。
+///
+/// **探测式**多要一条：回长度到了 `FIND_HITS_CAP + 1` 就是"正文里还有命中没被
+/// 收集"的证据。真正的截断与 `capped` 落库都收在 [`FindHitTable::new`] 那一处。
+pub(crate) fn run_find_scan(
+    doc: &editpad_core::Document,
+    q: &str,
+    case_sensitive: bool,
+    regex: bool,
+    whole_word: bool,
+) -> ScanOutcome {
+    let probe = crate::editor::FIND_HITS_CAP + 1;
+    if regex {
+        // P70：正则走全文扫描（to_text 拷贝发生在后台线程，跨度换算按密度选档
+        // ＝L-17）；编译已在 UI 线程预校验，此处 Err 视为竞态失效回空表
+        let hits = editpad_core::find_all_regex_document_limited(doc, q, case_sensitive, probe)
+            .unwrap_or_default();
+        ScanOutcome {
+            capped: hits.len() >= probe,
+            hits,
+        }
+    } else {
+        let hits = editpad_core::find_all_document_limited(doc, q, case_sensitive, probe);
+        let capped = hits.len() >= probe;
+        let hits = if whole_word {
+            editpad_core::filter_whole_word(doc, hits)
+        } else {
+            hits
+        };
+        // 整词过滤后可能远少于上限，但扫描确实提前收工了 ⇒ 仍报 capped
+        // （结果集确实可能不完整；方向上宁多报不漏报）
+        ScanOutcome { capped, hits }
     }
 }

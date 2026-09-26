@@ -20,6 +20,26 @@ pub(crate) struct FindScanPayload {
     pub(crate) debounce_ms: u64,
 }
 
+/// 一次文档扫描的产出（L-19）：命中 + 「扫描是否因触到上限而提前收工」。
+///
+/// `capped` 由扫描方给出——它手里有证据（探测式多要了一条），而造表时看到
+/// 整词过滤后的长度已经拿不到了。方向上**宁多报不漏报**：宁可说"结果可能
+/// 不完整"而其实完整，也不能反过来让人以为看全了。
+pub(crate) struct ScanOutcome {
+    pub(crate) hits: Vec<editpad_core::MatchPos>,
+    pub(crate) capped: bool,
+}
+
+impl From<Vec<editpad_core::MatchPos>> for ScanOutcome {
+    /// 只给命中的形态（测试注入的扫描函数大多如此）：视为"没触顶"。
+    fn from(hits: Vec<editpad_core::MatchPos>) -> Self {
+        Self {
+            hits,
+            capped: false,
+        }
+    }
+}
+
 /// 查找任务的事件驱动（扫描函数与防抖时长均可注入以便测试，同 [`drive_load`] 做法）。
 ///
 /// 保证语义：无论扫描成功、被取消还是 **panic**，都恰好回一条 `FindScanDone`
@@ -27,11 +47,14 @@ pub(crate) struct FindScanPayload {
 ///
 /// P301：命中表在这里（后台线程）就地造好——「能否按行二分」那趟 O(表长) 判序
 /// 刚扫完全文、表还热着，顺手算完；UI 线程收到的是成品，只把 `Rc` 挂上编辑器。
-pub(crate) async fn drive_find_scan<F>(payload: FindScanPayload, scan: F) -> Message
+///
+/// L-19：扫描产出改成 [`ScanOutcome`]（`O: Into<ScanOutcome>`，所以只回一串
+/// 命中的既有注入式夹具照样编译），上限截断与 `capped` 都收在
+/// [`FindHitTable::new`] 那一处。
+pub(crate) async fn drive_find_scan<F, O>(payload: FindScanPayload, scan: F) -> Message
 where
-    F: FnOnce(&editpad_core::Document, &str, bool, bool) -> Vec<editpad_core::MatchPos>
-        + Send
-        + 'static,
+    F: FnOnce(&editpad_core::Document, &str, bool, bool) -> O + Send + 'static,
+    O: Into<ScanOutcome>,
 {
     let table = await_on_thread(move || {
         // 防抖：真正的取消由 cancelled 标志完成——新输入排队时置位上一代，
@@ -42,12 +65,14 @@ where
         }
         // P5 同款兜底：扫描崩溃也要回消息（空表），不能让 UI 永久等待
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            FindHitTable::new(scan(
+            let out: ScanOutcome = scan(
                 &payload.doc,
                 &payload.query,
                 payload.case_sensitive,
                 payload.regex,
-            ))
+            )
+            .into();
+            FindHitTable::new(out.hits, out.capped)
         }))
         .unwrap_or_default()
     })

@@ -1764,3 +1764,75 @@ fn fif_goto_to_another_tab_voids_the_previous_pages_hit_table() {
         "手动切页同样要作废命中表（改前这条由四份手写副本维持）"
     );
 }
+
+/// L-19（第 215 轮）：文档查找的命中数封顶。
+///
+/// 三段各盯一头：**扫描真的提前收工**（多探一条当证据）、**表被截断并把
+/// "不完整"这件事留在表上**、**状态文案据此明示**。最后一段带负对照——
+/// 未触顶时那句明示必须是空串，否则"有明示"这句是恒真的安慰剂。
+#[test]
+fn hit_cap_truncates_the_table_and_says_so() {
+    use crate::editor::FIND_HITS_CAP;
+    let n = FIND_HITS_CAP + 5_000;
+    let doc = editpad_core::Document::from_str(&"x\n".repeat(n));
+    assert_eq!(doc.line_count(), n + 1, "夹具自证：行数");
+
+    // 生产扫描入口本体（`schedule_find_scan` 调的就是它，不是副本）
+    let out = crate::view::run_find_scan(&doc, "x", true, false, false);
+    assert_eq!(
+        out.hits.len(),
+        FIND_HITS_CAP + 1,
+        "探测式应多带回一条「还有更多」的证据"
+    );
+    assert!(out.capped, "扫描应因触顶提前收工");
+
+    let table = crate::editor::FindHitTable::new(out.hits, out.capped);
+    assert_eq!(table.hits().len(), FIND_HITS_CAP, "表应被截到上限");
+    assert!(table.capped(), "「结果可能不完整」这件事必须留在表上");
+    assert!(
+        table.windowable(),
+        "夹具自证：截的是前缀，二分前提不该被弄坏"
+    );
+
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/big.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("x\nx\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    app.find_visible = true;
+    app.find_scan = Some(9);
+    dispatch(&mut app, Message::FindScanDone(9, table));
+    let note = app.hits_capped_suffix();
+    assert!(
+        note.contains("上限") && note.contains(&FIND_HITS_CAP.to_string()),
+        "封顶明示要写进状态文案，且报的是同一个上限常量：{note}"
+    );
+
+    // 负对照：没触顶 ⇒ 那句必须是空串
+    app.find_scan = Some(11);
+    dispatch(
+        &mut app,
+        Message::FindScanDone(
+            11,
+            scanned(vec![editpad_core::MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 1,
+            }]),
+        ),
+    );
+    assert_eq!(app.hits_capped_suffix(), "", "未触顶不该明示");
+    assert_eq!(app.matches.hits().len(), 1, "夹具自证：未触顶的表原样");
+}

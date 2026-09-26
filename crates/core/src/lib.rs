@@ -31,9 +31,9 @@ pub use highlight::{resolve_language, syntax_for_extension, LazyHighlighter, Sty
 pub use json::{format_json, validate_json, JsonError};
 pub use lang::{
     fmt_core_error, fmt_fif_failed, fmt_fif_panel_title, fmt_fif_summary, fmt_file_hits,
-    fmt_find_counter, fmt_font_picker_more, fmt_match_counter, fmt_match_total, fmt_page_count,
-    fmt_replaced, fmt_restore_note, fmt_selection, fmt_suffix, fmt_wrapped, untitled_prefix, Key,
-    Lang, LangOption, LANG_NAME_EN, LANG_NAME_ZH_CN,
+    fmt_find_counter, fmt_font_picker_more, fmt_hits_capped, fmt_match_counter, fmt_match_total,
+    fmt_page_count, fmt_replaced, fmt_restore_note, fmt_selection, fmt_suffix, fmt_wrapped,
+    untitled_prefix, Key, Lang, LangOption, LANG_NAME_EN, LANG_NAME_ZH_CN,
 };
 pub use loader::{
     decode, load_document_streaming, load_file, load_file_streaming, LoadProgress, LoadedDocument,
@@ -47,9 +47,9 @@ pub use saver::{
 };
 pub use search::{
     ascii_case_eq, compile_regex, expand_regex_at, filter_whole_word, find_all, find_all_document,
-    find_all_regex, find_all_regex_compiled, find_all_regex_document, for_each_line, is_word_char,
-    next_from, prev_from, replace_all, replace_all_document, replace_all_regex, replace_all_word,
-    MatchPos,
+    find_all_document_limited, find_all_regex, find_all_regex_compiled, find_all_regex_document,
+    find_all_regex_document_limited, for_each_line, is_word_char, next_from, prev_from,
+    replace_all, replace_all_document, replace_all_regex, replace_all_word, MatchPos,
 };
 pub use settings::{
     normalize_combo, normalize_settings_page, RecentView, Settings, EXIT_MODE_ASK,

@@ -6,7 +6,8 @@ use iced::futures::{executor::block_on, StreamExt};
 /// （「能否按行二分」那趟 O(表长) 判序随表算完，生产里发生在扫描线程），
 /// 不再是裸命中向量——所以喂结果前都要过这一道。
 fn scanned(hits: Vec<editpad_core::MatchPos>) -> crate::editor::FindHitTable {
-    crate::editor::FindHitTable::new(hits)
+    // 夹具默认"没触顶"：要测封顶的格子自己走生产扫描入口（L-19）
+    crate::editor::FindHitTable::new(hits, false)
 }
 
 /// 落盘夹具目录：`%TEMP%\editpad-app-tests\<tag>-<pid>`（P212 纠注释——

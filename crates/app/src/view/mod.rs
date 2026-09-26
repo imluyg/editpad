@@ -33,6 +33,11 @@ mod lifecycle;
 pub(crate) mod overlays;
 mod restore;
 mod scans;
+// L-19：把查找扫描的执行体露给测试——测试与 `schedule_find_scan` 调同一份，
+// 不在测试里重抄一遍探测/封顶逻辑（那正是本仓反复的"第二份口径"）。
+// 只在测试构建里存在：生产构建没用它，留着会被 `unused_imports` 判红。
+#[cfg(test)]
+pub(crate) use scans::run_find_scan;
 mod snapshots;
 mod tab_menu;
 
