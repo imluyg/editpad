@@ -365,6 +365,13 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &[],
         desc: HkBookmarkPanel,
     },
+    // P319（功能队列④）：剪贴板历史面板。与 P318 同等待遇——号码位与
+    // Ctrl+Shift 字母都已占满，先无键入表（命令面板可见、设置页可赋键）。
+    HotkeyAction {
+        id: "clip_history",
+        default_combos: &[],
+        desc: HkClipHistory,
+    },
     HotkeyAction {
         id: "doc_start",
         default_combos: &["Ctrl+Home"],
@@ -810,6 +817,11 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         // P129：命令面板 / 快速标签切换
         "command_palette" => Some(Message::PaletteToggled(crate::state::PaletteMode::Commands)),
         "quick_switch_tab" => Some(Message::PaletteToggled(crate::state::PaletteMode::Tabs)),
+        // P319：剪贴板历史 = 命令面板的第三种模式（同一条开关消息，
+        // 打开/切换/关闭的口径与命令面板、快速切标签完全一致）
+        "clip_history" => Some(Message::PaletteToggled(
+            crate::state::PaletteMode::Clipboard,
+        )),
         // P130：文件监视开关
         "toggle_monitor_file" => Some(Message::ToggleMonitorFile),
         "column_editor" => Some(Message::ColumnEditorToggled),

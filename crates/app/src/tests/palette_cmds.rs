@@ -43,6 +43,8 @@ fn unassigned_actions_are_visible_in_the_palette() {
         "copy_hit_lines",
         // P318 新增的无默认键动作，同一条契约
         "bookmark_panel",
+        // P319 同等待遇：剪贴板历史先进面板，键位由用户自行赋
+        "clip_history",
     ] {
         assert!(ids.contains(&id), "{id} 应出现在命令面板里");
     }

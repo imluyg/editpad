@@ -195,6 +195,8 @@ pub(crate) use view_tree::ViewTree;
 
 mod bookmarks_panel;
 mod chrome;
+// P319：会话内剪贴板历史（记账／取用／面板预览）
+mod clip_history;
 // P308：正文右键菜单 + P307 连击选择的视图树接线核对
 mod ctx_menu;
 mod editor;

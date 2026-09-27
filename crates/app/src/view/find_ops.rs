@@ -51,7 +51,9 @@ impl Editpad {
             editpad_core::Key::StCopied,
             &payload,
         ));
-        iced::clipboard::write(payload)
+        // P319：路径/文件名也是"复制过的东西"——走同一个出口入历史，
+        // 不让第六个写入点游离在记账之外。
+        self.clip_write(payload)
     }
 
     pub(crate) fn step_match(&mut self, forward: bool) -> Task<Message> {

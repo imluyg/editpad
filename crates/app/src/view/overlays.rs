@@ -6,6 +6,10 @@
 use super::*;
 use iced::widget::column;
 
+/// P319：剪贴板历史条目在面板里显示多少个字符（超出补省略号）。
+/// 与命令面板 detail 的 48 字符截断同一族：展示侧封顶，存储侧不截断。
+const CLIP_PREVIEW_CHARS: usize = 60;
+
 /// P155：菜单项文案组装——「（✓ ）<当前语言的主标签>  <键位提示>」。
 ///
 /// 键位提示（`Ctrl+S` 之类）是**快捷键字面量**，不随界面语言变化，
@@ -543,7 +547,8 @@ impl Editpad {
         panel.into()
     }
     /// 面板全部条目（未过滤）：命令模式 = 注册表全量；标签模式 = 当前
-    /// 会话全部页。title 参与模糊匹配，detail 仅展示。
+    /// 会话全部页；P319 剪贴板模式 = 会话内历史（预览 + 规模，不带全文）。
+    /// title 参与模糊匹配，detail 仅展示。
     pub(crate) fn palette_all_entries(&self) -> Vec<crate::view::PaletteEntry> {
         match self.palette_mode {
             crate::state::PaletteMode::Commands => palette_commands(self.lang())
@@ -551,6 +556,7 @@ impl Editpad {
                 .map(|c| PaletteEntry {
                     command_id: Some(c.id),
                     tab_index: None,
+                    clip_index: None,
                     title: c.title.to_owned(),
                     detail: c.detail,
                 })
@@ -562,6 +568,7 @@ impl Editpad {
                 .map(|(i, t)| PaletteEntry {
                     command_id: None,
                     tab_index: Some(i),
+                    clip_index: None,
                     title: t.display_name_in(self.lang()),
                     detail: t
                         .path
@@ -570,7 +577,67 @@ impl Editpad {
                         .unwrap_or_else(|| self.t(editpad_core::Key::TabUnsaved).to_owned()),
                 })
                 .collect(),
+            // P319：会话内剪贴板历史。条目只带预览与规模——
+            // 本函数每帧重建，把全文抄进条目就是每帧抄一遍全文。
+            crate::state::PaletteMode::Clipboard => self
+                .clip_history
+                .iter()
+                .enumerate()
+                .map(|(i, t)| PaletteEntry {
+                    command_id: None,
+                    tab_index: None,
+                    clip_index: Some(i),
+                    title: self.clip_preview(t),
+                    detail: self.clip_meta(t),
+                })
+                .collect(),
         }
+    }
+    /// P319：一条历史的单行预览——前 [`CLIP_PREVIEW_CHARS`] 个字符，
+    /// 换行折成 `⏎`、制表折成 `⇥`、`\r` 丢掉（面板一行只显示一行）。
+    /// 超出则补一个省略号，所以「预览里没有 ⏎」等价于「这条本来就一行」。
+    pub(crate) fn clip_preview(&self, text: &str) -> String {
+        let mut out = String::new();
+        let mut clipped = false;
+        for (n, ch) in text.chars().enumerate() {
+            if n >= CLIP_PREVIEW_CHARS {
+                clipped = true;
+                break;
+            }
+            match ch {
+                '\n' => out.push('⏎'),
+                '\r' => {}
+                '\t' => out.push('⇥'),
+                c => out.push(c),
+            }
+        }
+        if clipped {
+            out.push('…');
+        }
+        out
+    }
+    /// P319：面板空态那句话。剪贴板模式说"还没复制过"而不是"搜不到"——
+    /// 第一次开这个面板必然两手空空，报"无匹配"会让人以为面板坏了。
+    /// 抽成方法而非写在绘制里，是因为视图树夹具读不到文本、只读得到几何，
+    /// 这句"哪个模式说哪句话"的裁决得有地方能被用例钉住。
+    pub(crate) fn palette_empty_label(&self) -> &'static str {
+        if self.palette_mode == crate::state::PaletteMode::Clipboard {
+            self.t(editpad_core::Key::ClipHistoryEmpty)
+        } else {
+            self.t(editpad_core::Key::PaletteNoMatch)
+        }
+    }
+    /// P319：一条历史的规模摘要「N 行 · M 字节」。行数按 `lines()`（正文
+    /// 末尾换行不多算一行），字节按**实际 UTF-8 长度**——与逐出侧同一个口径。
+    fn clip_meta(&self, text: &str) -> String {
+        use editpad_core::Key as K;
+        format!(
+            "{} {} · {} {}",
+            text.lines().count(),
+            self.t(K::ClipUnitLines),
+            text.len(),
+            self.t(K::ClipUnitBytes)
+        )
     }
     /// 面板过滤条目（fuzzy_filter 稳定降序）。查询串对 title 与 detail
     /// 拼接匹配——命令可用 id 片段检索（如 readonly），标签可用路径检索。
@@ -590,7 +657,8 @@ impl Editpad {
     }
     /// 执行当前选中条目并关闭面板。命令经 dispatch_action 复用既有
     /// 映射（空修饰键——Shift 选区透传不适用面板执行）；标签模式直接
-    /// SwitchTab；列表为空时 no-op（面板保持打开）。
+    /// SwitchTab；P319 剪贴板模式投 ClipPick（**存储**下标，过滤只改了
+    /// 显示顺序，不改历史本身的次序）；列表为空时 no-op（面板保持打开）。
     pub(crate) fn palette_execute(&mut self) -> Task<Message> {
         let entries = self.palette_filtered();
         if entries.is_empty() {
@@ -598,9 +666,10 @@ impl Editpad {
         }
         let idx = self.palette_idx.min(entries.len() - 1);
         let entry = &entries[idx];
-        let msg = match (entry.command_id, entry.tab_index) {
-            (Some(id), _) => dispatch_action(id, keyboard::Modifiers::empty()),
-            (_, Some(i)) => Some(Message::SwitchTab(i)),
+        let msg = match (entry.command_id, entry.tab_index, entry.clip_index) {
+            (Some(id), ..) => dispatch_action(id, keyboard::Modifiers::empty()),
+            (_, Some(i), _) => Some(Message::SwitchTab(i)),
+            (_, _, Some(i)) => Some(Message::ClipPick(i)),
             _ => None,
         };
         self.palette_visible = false;
@@ -623,12 +692,8 @@ impl Editpad {
         let win_start = sel.saturating_sub(11);
         let mut rows = column![].spacing(0).width(Fill);
         if total == 0 {
-            rows = rows.push(
-                text(self.t(editpad_core::Key::PaletteNoMatch))
-                    .size(uipx)
-                    .font(uifont)
-                    .width(Fill),
-            );
+            let empty = self.palette_empty_label();
+            rows = rows.push(text(empty).size(uipx).font(uifont).width(Fill));
         }
         for (i, e) in entries.iter().enumerate().skip(win_start).take(12) {
             let marker = if i == sel { "▶ " } else { "　 " };

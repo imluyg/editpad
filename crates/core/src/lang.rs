@@ -636,6 +636,13 @@ key_table! {
     { StBookmarkNotThere => "那一行已经没有书签", "That line no longer has a bookmark" },
     { StBookmarksMorePrefix => "…另有 ", "... plus " },
     { StBookmarksMoreSuffix => " 条未列出", " more not listed" },
+    // P319（功能队列④）：剪贴板历史面板。标题给命令面板与设置热键页共用；
+    // 两个单位词拼成条目的「N 行 · M 字节」规模摘要；空态单独一句
+    //（复用「无匹配」会把"还没复制过"说成"搜不到"）。
+    { HkClipHistory => "剪贴板历史", "Clipboard history" },
+    { ClipUnitLines => "行", "lines" },
+    { ClipUnitBytes => "字节", "bytes" },
+    { ClipHistoryEmpty => "还没有复制过的内容（Ctrl+C 之后再开这个面板）", "Nothing copied yet (copy something first)" },
     { HkCopyMarkedLines => "复制全部标记行", "Copy all bookmarked lines" },
     { HkDelMarkedLines => "删除全部标记行", "Delete all bookmarked lines" },
     { HkJumpBracket => "跳到配对括号", "Jump to the matching bracket" },

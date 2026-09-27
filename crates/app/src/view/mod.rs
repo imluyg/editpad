@@ -986,11 +986,16 @@ pub(crate) fn match_excerpt(line_text: &str, col: usize, max_cols: usize) -> Str
 }
 
 /// P129：命令面板条目——命令模式带 command_id（经 dispatch_action
-/// 执行），标签模式带 tab_index（SwitchTab 执行）。
+/// 执行），标签模式带 tab_index（SwitchTab 执行），P319 剪贴板历史模式
+/// 带 clip_index（ClipPick 执行）。
+///
+/// ⚠️ 条目只携带**下标与展示串**，绝不携带正文：`palette_all_entries` 每帧
+/// 重建这个 Vec，把几兆的历史文本抄进条目就是每帧抄几兆。
 #[derive(Clone)]
 pub(crate) struct PaletteEntry {
     pub(crate) command_id: Option<&'static str>,
     pub(crate) tab_index: Option<usize>,
+    pub(crate) clip_index: Option<usize>,
     pub(crate) title: String,
     pub(crate) detail: String,
 }

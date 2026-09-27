@@ -240,6 +240,9 @@ pub(crate) struct Editpad {
     pub(crate) palette_input: String,
     /// P129：当前选中行（过滤后列表下标）
     pub(crate) palette_idx: usize,
+    /// P319：会话内剪贴板历史（最近期在前，同内容只保栈顶一份）。
+    /// 只在内存、不跨重启、不落盘——里面可能是密码，所以既不写盘也不进快照。
+    pub(crate) clip_history: Vec<String>,
     // ---------- B9 列编辑器对话框（Phase 2） ----------
     /// 对话框可见性（居中模态，与设置弹窗/命令面板互斥——打开时关对方）
     pub(crate) column_editor_visible: bool,
@@ -447,6 +450,8 @@ impl Default for Editpad {
             palette_mode: PaletteMode::Commands,
             palette_input: String::new(),
             palette_idx: 0,
+            // P319：会话内剪贴板历史，启动为空（不跨重启、不落盘）
+            clip_history: Vec::new(),
             column_editor_visible: false,
             column_editor: ColumnEditorDraft::default(),
             monitor_pending: None,
@@ -523,6 +528,9 @@ pub(crate) enum PaletteMode {
     Commands,
     /// 当前会话标签页间跳转（Ctrl+P）
     Tabs,
+    /// P319：会话内剪贴板历史（数据源 = [`Editpad::clip_history`]，
+    /// 条目执行 = [`crate::Message::ClipPick`]）
+    Clipboard,
 }
 
 /// P209：查找浮层的拖动态（[`Editpad::find_drag`]）。

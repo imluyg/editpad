@@ -6,7 +6,59 @@
 
 use super::*;
 
+/// P319：会话内剪贴板历史的条数封顶（保新弃旧）。
+const CLIP_HISTORY_MAX: usize = 20;
+
+/// P319：历史文本的**总量**封顶（字节）。刻意不按条封顶：单条一律存全文，
+/// 因为「取回来的就是当时复制的那一份」是这项功能唯一的契约，截断即失信。
+/// 超总量时从最旧一侧逐出，但至少保住栈顶那一条（极端情形下历史只剩一条）。
+const CLIP_HISTORY_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// P319：剪贴板历史里一条记录占用的字节数（按实际 UTF-8 字节，与 P300
+/// 的内存记账口径一致——字符数×3 会把中文记录虚报三倍）。
+pub(crate) fn clip_bytes(text: &str) -> usize {
+    text.len()
+}
+
+/// P319：剪切的三种来源各自的后续删除（口径与改前逐条一致，只是收进了一个
+/// 出口，见 [`Editpad::clip_write`]）。
+enum CutFollow {
+    /// 列块态：删块，且同步递归 update（置脏/自动保存调度当场走完）
+    Block,
+    /// 有选区：删选区（`Delete` 在有选区时只删选区）
+    Range,
+    /// 无选区：删触及行（`DeleteLines`，幻影末行由它兜底）
+    Line,
+}
+
 impl Editpad {
+    /// P319：记一条剪贴板历史。最近期在前；同内容只保栈顶一份（重复复制
+    /// 同一段文字 = 把它挪到顶，不多出一条）；空文本不记（复制空行不该
+    /// 挤掉有用的记录）。
+    pub(crate) fn note_clip(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(pos) = self.clip_history.iter().position(|t| t == text) {
+            self.clip_history.remove(pos);
+        }
+        self.clip_history.insert(0, text.to_owned());
+        self.clip_history.truncate(CLIP_HISTORY_MAX);
+        let mut total: usize = self.clip_history.iter().map(|t| clip_bytes(t)).sum();
+        while total > CLIP_HISTORY_MAX_BYTES && self.clip_history.len() > 1 {
+            if let Some(evicted) = self.clip_history.pop() {
+                total -= clip_bytes(&evicted);
+            }
+        }
+    }
+
+    /// P319：**所有**剪贴板写入点的唯一出口——先记账，再写系统剪贴板。
+    /// 收在一处是为了「一次复制手势 ⇒ 恰好一条历史」不可能被某个分支漏掉
+    /// （此前五个写入点各自 `iced::clipboard::write`，新增任何一个都不会报警）。
+    pub(crate) fn clip_write(&mut self, text: String) -> Task<Message> {
+        self.note_clip(&text);
+        iced::clipboard::write(text)
+    }
     // ---------- 域方法（第 81 轮 Phase 1：update() 拆分） ----------
     /// 域：编辑器/剪贴板/光标/预览/高亮铺路。臂体自原 update() 逐字搬移，零行为变更。
     pub(super) fn update_editor(&mut self, msg: Message) -> Task<Message> {
@@ -18,8 +70,9 @@ impl Editpad {
                 if self.active_load.is_some() {
                     return Task::none();
                 }
-                match self.cur_handle.borrow().copy_bookmarked_lines() {
-                    Some(text) => iced::clipboard::write(text),
+                let text = self.cur_handle.borrow().copy_bookmarked_lines();
+                match text {
+                    Some(text) => self.clip_write(text),
                     None => Task::none(),
                 }
             }
@@ -55,7 +108,7 @@ impl Editpad {
                     Some(text) => {
                         let n = text.matches('\n').count();
                         self.set_status(format!("{} {n}", self.t(K::StHitsCopiedPrefix)));
-                        iced::clipboard::write(text)
+                        self.clip_write(text)
                     }
                     None => {
                         self.set_status_error(self.t(K::StNoFindHits).to_owned());
@@ -134,38 +187,37 @@ impl Editpad {
             }
             // ---------- 剪贴板（P4） ----------
             Message::CopyRequested => {
-                // 第 67 轮 ⑮：列块态优先复制块内容（各行 \n 连接）
-                if let Some(text) = self.cur_handle.borrow().block_copy_text() {
-                    return iced::clipboard::write(text);
-                }
-                let Some(text) = self.cur_handle.borrow().selected_text() else {
-                    // P122：无选区 Ctrl+C = 复制当前整行（含行尾，主流
-                    // VS 口径）；不改文档不置脏，幻影末行复制空串
-                    let text = self.cur_handle.borrow().current_line_copy_text();
-                    return iced::clipboard::write(text);
+                // P319：三种来源收进**一个**出口（第 67 轮 ⑮ 列块态优先复制块内容
+                // → 有选区复制选区 → P122 无选区复制整行含行尾）。分叉各写一次
+                // 剪贴板的话，「一次手势恰好一条历史」就要靠三个分支都不漏。
+                let text = {
+                    let ed = self.cur_handle.borrow();
+                    ed.block_copy_text()
+                        .or_else(|| ed.selected_text())
+                        .unwrap_or_else(|| ed.current_line_copy_text())
                 };
-                iced::clipboard::write(text)
+                self.clip_write(text)
             }
             Message::CutRequested => {
-                // 第 67 轮 ⑮：列块剪切 = 复制块内容 + 经编辑入口删块
-                // （同步递归 update，置脏/自动保存调度全继承——Pasted 先例）
-                let block_text = self.cur_handle.borrow().block_copy_text();
-                if let Some(text) = block_text {
-                    let write: Task<Message> = iced::clipboard::write(text);
-                    let edit = self.update(Message::Edit(EditOp::Delete));
-                    return write.chain(edit);
-                }
-                let Some(text) = self.cur_handle.borrow().selected_text() else {
-                    // P122：无选区 Ctrl+X = 剪切整行（复制含行尾 + 删触及
-                    // 行；幻影末行走 delete_current_lines 的幻影分支兜底）
-                    let text = self.cur_handle.borrow().current_line_copy_text();
-                    let write: Task<Message> = iced::clipboard::write(text);
-                    return write.chain(Task::done(Message::Edit(EditOp::DeleteLines)));
+                // P319：同 CopyRequested 的单出口口径；三种来源的**后续删除**
+                // 分叉一字未改：列块/选区删选区（列块那支仍走同步递归 update，
+                // 继承置脏与自动保存调度——Pasted 先例），无选区整行删触及行。
+                let (text, follow) = {
+                    let ed = self.cur_handle.borrow();
+                    if let Some(text) = ed.block_copy_text() {
+                        (text, CutFollow::Block)
+                    } else if let Some(text) = ed.selected_text() {
+                        (text, CutFollow::Range)
+                    } else {
+                        (ed.current_line_copy_text(), CutFollow::Line)
+                    }
                 };
-                // 先写剪贴板，再走统一编辑入口删除选区（Delete 在有选区时只删选区）。
-                // clipboard::write 是泛型 Task<T>，直接以 Message 实例化后 chain。
-                let write: Task<Message> = iced::clipboard::write(text);
-                write.chain(Task::done(Message::Edit(EditOp::Delete)))
+                let write = self.clip_write(text);
+                match follow {
+                    CutFollow::Block => write.chain(self.update(Message::Edit(EditOp::Delete))),
+                    CutFollow::Range => write.chain(Task::done(Message::Edit(EditOp::Delete))),
+                    CutFollow::Line => write.chain(Task::done(Message::Edit(EditOp::DeleteLines))),
+                }
             }
             Message::PasteRequested => {
                 // clipboard::read 返回 Task<Option<String>>
@@ -177,6 +229,20 @@ impl Editpad {
                 } else {
                     self.update(Message::Edit(EditOp::InsertText(text)))
                 }
+            }
+            // ---------- P319：从剪贴板历史面板取用一条 ----------
+            Message::ClipPick(i) => {
+                // 下标越界 = 面板那一帧之后历史变了（例如另一条消息逐出了旧项）。
+                // 静默 no-op 比"插入不相干的一条"好，也不许 panic。
+                let Some(text) = self.clip_history.get(i).cloned() else {
+                    return Task::none();
+                };
+                // 取用也是一次"用"：挪到栈顶（MRU），条数不变
+                self.clip_history.remove(i);
+                self.clip_history.insert(0, text.clone());
+                // 插入走既有粘贴路径 ⇒ 置脏、撤销、只读前置闸全部继承，
+                // 本功能不长第二个写正文的入口。
+                self.update(Message::Pasted(text))
             }
             // ---------- 正文右键菜单（P308） ----------
             Message::EditorContextMenu(x, y) => {

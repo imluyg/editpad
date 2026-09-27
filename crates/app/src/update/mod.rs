@@ -485,6 +485,8 @@ impl Editpad {
             | Message::CutRequested
             | Message::PasteRequested
             | Message::Pasted(..)
+            // P319：剪贴板历史取用（与复制/剪切同域，历史账目也在此维护）
+            | Message::ClipPick(..)
             | Message::KeyPressed(..)
             | Message::HighlightPaveNeeded
             | Message::FormatJson

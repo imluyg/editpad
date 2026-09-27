@@ -261,6 +261,10 @@ enum Message {
     /// 剪贴板读取完成：按普通插入入文
     /// （换行归一由 insert_str 按文档主导行尾完成，P9 起不再在 app 层预处理）
     Pasted(String),
+    /// P319：从剪贴板历史面板取用第 N 条。载荷是**存储下标**而非过滤后的行号
+    /// ——全文不进消息（一条几兆的历史会让每次投递抄一遍它），下标在
+    /// [`Editpad::clip_history`] 上现取；越界按 no-op 处理。
+    ClipPick(usize),
 
     /// P308：正文右键菜单——载荷 = 打开瞬间的指针位置（窗口系坐标）
     EditorContextMenu(f32, f32),
