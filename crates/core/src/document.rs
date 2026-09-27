@@ -432,6 +432,135 @@ impl Default for Document {
     }
 }
 
+/// P322（功能队列①）：把一段**多行**文本的整体缩进平移到 `target_indent`。
+///
+/// 规则一句话能说清：拿粘贴块**第一条非空行**的行首空白当基准，与目标行的行首空白
+/// 比——谁是谁的前缀就按那段差值平移（目标更深就补、更浅就剥）；两者互不为前缀
+/// （块用制表符、目标行用空格这类混合）⇒ **原样返回**。那种情况下"该平移多少"
+/// 没有定义，硬取一个数字就是在改坏用户粘进来的内容。
+///
+/// 三条刻意的边界：
+/// - 空行与纯空白行一律不动——给它们补缩进只会粘出一片行尾空白；
+/// - 行数 < 2 原样返回——单行没有相对结构可对齐；
+/// - 行尾（LF / CRLF / CR，含混用）逐字节留在原处，本函数只动每行的行首空白。
+pub fn align_paste_indent(text: &str, target_indent: &str) -> String {
+    let lines = split_lines_keep_ending(text);
+    if lines.len() < 2 {
+        return text.to_owned();
+    }
+    // 基准缩进 = 第一条非空行的行首空白（块首是空行就往后找）
+    let mut source: Option<&str> = None;
+    for line in &lines {
+        let (body, _) = split_line_ending(line);
+        if body.trim().is_empty() {
+            continue;
+        }
+        source = Some(leading_whitespace(body));
+        break;
+    }
+    let Some(source) = source else {
+        return text.to_owned(); // 整块都是空白行，没有基准可谈
+    };
+    // 补：目标是源的延长；剥：源是目标的延长。宽度一律按**字符**算——
+    // 全角空格这类 3 字节空白按字节差会剥错位数。
+    let (pad, strip) = if let Some(pad) = target_indent.strip_prefix(source) {
+        (pad, 0usize)
+    } else if source.starts_with(target_indent)
+        && source.chars().count() > target_indent.chars().count()
+    {
+        ("", source.chars().count() - target_indent.chars().count())
+    } else {
+        return text.to_owned(); // 互不为前缀 ⇒ 平移量无定义，不动内容
+    };
+    if pad.is_empty() && strip == 0 {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len() + lines.len() * pad.len());
+    for line in &lines {
+        let (body, ending) = split_line_ending(line);
+        if body.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        if pad.is_empty() {
+            out.push_str(drop_leading_whitespace(body, strip));
+        } else {
+            out.push_str(pad);
+            out.push_str(body);
+        }
+        out.push_str(ending);
+    }
+    out
+}
+
+/// 按 LF / CRLF / CR 切行，**行尾留在每段里**。
+///
+/// 判据与 `markdown::split_lines` 同一套（`\r\n` 整体消费），差别只在行尾：
+/// 那边丢掉了行尾，而粘贴对齐必须把行尾原样带回去（P322）。
+fn split_lines_keep_ending(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                out.push(&text[start..i + 1]);
+                start = i + 1;
+                i += 1;
+            }
+            b'\r' => {
+                let end = if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    i + 2
+                } else {
+                    i + 1
+                };
+                out.push(&text[start..end]);
+                start = end;
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// 一行拆成「内容 + 行尾」，CRLF 优先——与 [`split_lines_keep_ending`] 同一份口径。
+fn split_line_ending(line: &str) -> (&str, &str) {
+    if let Some(body) = line.strip_suffix("\r\n") {
+        return (body, "\r\n");
+    }
+    if let Some(body) = line.strip_suffix('\n') {
+        return (body, "\n");
+    }
+    if let Some(body) = line.strip_suffix('\r') {
+        return (body, "\r");
+    }
+    (line, "")
+}
+
+/// 行首空白段（调用方保证 `body` 非空白行；全空白时返回整段，无害）。
+fn leading_whitespace(body: &str) -> &str {
+    let end = body
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(body.len());
+    &body[..end]
+}
+
+/// 剥掉最多 `n` 个前导空白字符：不足就只剥到第一个非空白字符为止——
+/// 绝不越过内容（"  x" 剥 4 个得 "x"，不是把 "x" 也吃掉）。
+fn drop_leading_whitespace(body: &str, n: usize) -> &str {
+    let ws = body.chars().take_while(|c| c.is_whitespace()).count();
+    let at = n.min(ws);
+    body.char_indices()
+        .nth(at)
+        .map(|(i, _)| &body[i..])
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,5 +937,93 @@ mod tests {
         // 克隆快照（撤销栈的基础）必须带着同一行尾元数据
         let snapshot = doc.clone();
         assert_eq!(snapshot.line_ending(), LineEnding::CrLf);
+    }
+
+    // ---------- P322 粘贴缩进对齐 ----------
+
+    /// 平移量的两格（补／剥）＋"剥不满"那一格：规则只认前缀关系。
+    #[test]
+    fn align_paste_indent_shifts_the_block_by_the_prefix_difference() {
+        // 目标更深：块基准缩进为空，目标 4 空格 ⇒ 每条非空行补 4 空格
+        assert_eq!(
+            align_paste_indent("aaa\nbbb\n", "    "),
+            "    aaa\n    bbb\n"
+        );
+        // 目标更浅：块基准 4 空格、目标 2 ⇒ 每条剥 2 个前导空白
+        assert_eq!(
+            align_paste_indent("    aaa\n    bbb\nccc\n", "  "),
+            "  aaa\n  bbb\nccc\n",
+            "比基准还浅的行不该被倒剥——有多少空白剥多少"
+        );
+        // 制表符同族：源 \t、目标 \t\t ⇒ 补一个 \t
+        assert_eq!(align_paste_indent("\tx\n\ty\n", "\t\t"), "\t\tx\n\t\ty\n");
+        // 剥不满：行首只有 2 个空白却要剥 4 ⇒ 只剥到第一个非空白字符为止
+        assert_eq!(
+            align_paste_indent("      deep\n  shallow\n", ""),
+            "deep\nshallow\n",
+            "绝不越过内容去截（这一格把「剥」的第二头钉住）"
+        );
+    }
+
+    /// 三条刻意边界：单行不动、空行不补、行尾逐字节留在原处。
+    #[test]
+    fn align_paste_indent_leaves_single_line_blank_lines_and_endings_alone() {
+        assert_eq!(
+            align_paste_indent("solo", "    "),
+            "solo",
+            "单行没有相对结构可对"
+        );
+        assert_eq!(
+            align_paste_indent("solo\n", "    "),
+            "solo\n",
+            "一行加尾换行仍是一块（切分器不许多切出幻影行）"
+        );
+        let blank = align_paste_indent("a\n\n    \nb\n", "  ");
+        assert_eq!(
+            blank, "  a\n\n    \n  b\n",
+            "空行与纯空白行一律不补——否则粘完满片行尾空白"
+        );
+        // CRLF：行尾留在原处，只动行首空白
+        assert_eq!(
+            align_paste_indent("aaa\r\nbbb\r\n", "  "),
+            "  aaa\r\n  bbb\r\n"
+        );
+        // 混用行尾（LF + CR + CRLF）各自保留
+        assert_eq!(
+            align_paste_indent("a\nb\rc\r\n", " ->"),
+            " ->a\n ->b\r ->c\r\n",
+            "行尾混用的粘贴块只该被改了缩进，不该被统一行尾"
+        );
+        // 基准取第一条**非空**行（块首是空行时往后找），而那个空行本身照旧不动
+        assert_eq!(
+            align_paste_indent("\n  a\n  b\n", ""),
+            "\na\nb\n",
+            "基准该是「  」而不是第一行那个空行——第一版期望把空行本身丢了"
+        );
+    }
+
+    /// 互不为前缀（块用制表符、目标行用空格）⇒ 一个字节都不改。
+    #[test]
+    fn align_paste_indent_refuses_ambiguous_indent_pairs() {
+        let src = "\tx\n\ty\n";
+        assert_eq!(align_paste_indent(src, "  "), src, "混合风格必须原样");
+        assert_eq!(align_paste_indent("  x\n  y\n", "\t"), "  x\n  y\n");
+        // 缩进本来就相同 ⇒ 差值 0，也原样（不该多一次重建）
+        assert_eq!(align_paste_indent("  x\n  y\n", "  "), "  x\n  y\n");
+    }
+
+    /// 切分器地基：行尾留在段里、空文档不产生幻影一行。
+    #[test]
+    fn split_lines_keep_ending_keeps_terminators_and_never_invents_one() {
+        assert!(split_lines_keep_ending("").is_empty());
+        assert_eq!(
+            split_lines_keep_ending("no terminator"),
+            vec!["no terminator"]
+        );
+        assert_eq!(
+            split_lines_keep_ending("a\nb\rc\r\nd"),
+            vec!["a\n", "b\r", "c\r\n", "d"]
+        );
+        assert_eq!(split_lines_keep_ending("a\n"), vec!["a\n"]);
     }
 }

@@ -208,6 +208,8 @@ mod hits;
 mod nav;
 // P316：无默认键的命令（面板可见 + 点了要能动）
 mod palette_cmds;
+// P322：多行粘贴按光标行缩进对齐（默认关／目标取自哪一行／列块与多光标不动）
+mod paste_indent;
 mod robustness;
 mod session;
 mod settings;

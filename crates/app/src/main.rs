@@ -382,6 +382,9 @@ enum Message {
     SettingsWordWrapToggled(bool),
     /// 设置：缩进参考线开关（P132，外观页；默认开）
     SettingsIndentGuidesToggled(bool),
+    /// P322（功能队列①）：设置——多行粘贴按光标行缩进对齐（外观页；**默认关**，
+    /// 关着时粘贴与引入本设置前逐字节相同）
+    SettingsPasteAlignIndentToggled(bool),
     /// 设置：右缘标尺列步进（P132，外观页；0 = 关，±4 步进，上限
     /// core::settings::MAX_EDGE_COLUMN）
     SettingsEdgeColumnDelta(i32),

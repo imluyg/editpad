@@ -60,6 +60,31 @@ impl Editpad {
         iced::clipboard::write(text)
     }
 
+    /// P322（功能队列①）：粘贴前的缩进预处理。**开关关着＝一个字节都不改**
+    /// （用户点单：默认关——日志正文被改缩进是真实伤害）。
+    ///
+    /// 三格"不改"是刻意划出来的，不是漏掉：
+    /// - **列块态**：块插入有自己的几何，平移行首空白会把块拧歪；
+    /// - **多光标**：几条光标落在不同缩进的行上，"以哪一条为准"没有定义；
+    /// - 粘贴文本只有一行（core 那侧再判一次，两边都短路）。
+    ///
+    /// 算式只有一份，在 `editpad_core::document::align_paste_indent`；从剪贴板
+    /// 历史取用（P319 的 `ClipPick`）也走这一条 ⇒ 同一份行为，不长第二个粘贴入口。
+    pub(crate) fn paste_text_to_apply(&self, text: String) -> String {
+        if !self.settings.paste_align_indent {
+            return text;
+        }
+        let core = self.cur_handle.borrow();
+        // 列块态与多光标＝"以哪一处的缩进为准"没有定义，原样粘贴
+        if core.has_block() || core.has_multi() {
+            return text;
+        }
+        let indent = core.line_leading_whitespace(core.cursor.line);
+        drop(core);
+        // 空目标缩进是合法的一格：把块整体剥到列首
+        editpad_core::document::align_paste_indent(&text, &indent)
+    }
+
     /// P321：命令面板里给**当前选中的那条命令**直接开录键态——收起面板，随后一次
     /// 按键走既有的 `HotkeyCaptureKey` 通道（冲突校验、写映射、持久化、状态栏反馈
     /// 全是设置页那一条实现，这里零新逻辑）。
@@ -248,6 +273,8 @@ impl Editpad {
                 if text.is_empty() {
                     Task::none()
                 } else {
+                    // P322：缩进预处理（开关关着＝原样）
+                    let text = self.paste_text_to_apply(text);
                     self.update(Message::Edit(EditOp::InsertText(text)))
                 }
             }

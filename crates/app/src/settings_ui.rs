@@ -9,9 +9,9 @@ use iced::widget::column;
 pub(crate) use editpad_core::lang::{
     ROW_ABOUT_LICENSE, ROW_ABOUT_NAME, ROW_ABOUT_RENDERER, ROW_ABOUT_VERSION, ROW_AUTOSAVE,
     ROW_AUTOSAVE_DELAY, ROW_BACKUP_MODE, ROW_EDGE_COLUMN, ROW_EXIT_MODE, ROW_FONT_FAMILY,
-    ROW_FONT_SIZE, ROW_INDENT_GUIDES, ROW_LANGUAGE, ROW_REMEMBER_RECENT, ROW_REMEMBER_SESSION,
-    ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE, ROW_SNAPSHOTS, ROW_SNAPSHOT_INTERVAL, ROW_THEME,
-    ROW_WORD_WRAP,
+    ROW_FONT_SIZE, ROW_INDENT_GUIDES, ROW_LANGUAGE, ROW_PASTE_ALIGN_INDENT, ROW_REMEMBER_RECENT,
+    ROW_REMEMBER_SESSION, ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE, ROW_SNAPSHOTS,
+    ROW_SNAPSHOT_INTERVAL, ROW_THEME, ROW_WORD_WRAP,
 };
 
 /// 「正文字体」行的行键（控件匹配与字体挑选块挂载点共用同一常量）。
@@ -155,6 +155,13 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         key: ROW_EDGE_COLUMN,
         title: editpad_core::Key::RowEdgeColumn,
         desc: editpad_core::Key::RowEdgeColumnDesc,
+    },
+    // P322（功能队列①）：粘贴缩进对齐——与参考线/标尺同页（都是"排版辅助"一档）
+    StaticRow {
+        page: SettingsPage::Appearance,
+        key: ROW_PASTE_ALIGN_INDENT,
+        title: editpad_core::Key::RowPasteAlignIndent,
+        desc: editpad_core::Key::RowPasteAlignIndentDesc,
     },
     StaticRow {
         page: SettingsPage::Font,
@@ -1141,6 +1148,11 @@ impl Editpad {
             ROW_INDENT_GUIDES => checkbox(s.indent_guides)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsIndentGuidesToggled)
+                .into(),
+            // P322：粘贴缩进对齐（纯偏好，不碰渲染层，故无需通知各页编辑器）
+            ROW_PASTE_ALIGN_INDENT => checkbox(s.paste_align_indent)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsPasteAlignIndentToggled)
                 .into(),
             ROW_EDGE_COLUMN => self.settings_stepper(
                 if s.edge_column == 0 {

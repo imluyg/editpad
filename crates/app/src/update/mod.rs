@@ -534,6 +534,7 @@ impl Editpad {
             | Message::SettingsShowLineEndingsToggled(..)
             | Message::SettingsWordWrapToggled(..)
             | Message::SettingsIndentGuidesToggled(..)
+            | Message::SettingsPasteAlignIndentToggled(..)
             | Message::SettingsEdgeColumnDelta(..)
             | Message::HotkeyCaptureStarted(..)
             | Message::HotkeyCaptureKey(..)

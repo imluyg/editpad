@@ -49,6 +49,13 @@ impl Editpad {
                 self.persist_settings();
                 Task::none()
             }
+            // P322：粘贴缩进对齐——纯偏好，不碰渲染层也不碰文档模型，
+            // 所以只写设置并落盘；生效点在 `Message::Pasted` 那一个入口。
+            Message::SettingsPasteAlignIndentToggled(value) => {
+                self.settings.paste_align_indent = value;
+                self.persist_settings();
+                Task::none()
+            }
             Message::SettingsEdgeColumnDelta(delta) => {
                 let next = (self.settings.edge_column as i32 + delta)
                     .clamp(0, editpad_core::settings::MAX_EDGE_COLUMN as i32)

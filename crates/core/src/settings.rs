@@ -143,6 +143,14 @@ pub struct Settings {
     /// 0 = 关闭（默认）。加载归一钳到 [`MAX_EDGE_COLUMN`]。
     #[serde(default)]
     pub edge_column: u32,
+    /// P322（功能队列①）：多行粘贴按光标所在行的缩进对齐。
+    ///
+    /// **默认关**——关着时粘贴与引入本设置前逐字节相同（用户点单：日志正文被
+    /// 改缩进是真实伤害，这类行为变更必须显式开启）。开启后走
+    /// [`crate::document::align_paste_indent`]：目标与块基准互为前缀才平移，
+    /// 制表符块粘进空格行这类"平移量没有定义"的情形一律原样。
+    #[serde(default)]
+    pub paste_align_indent: bool,
     /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
     /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/
     /// [`BACKUP_MODE_TIMESTAMPED`]（`name.bak/` 目录内时间戳历史）。
@@ -207,6 +215,8 @@ impl Default for Settings {
             // P132：参考线默认开（主流同款），右缘标尺默认关（0）
             indent_guides: true,
             edge_column: 0,
+            // P322：粘贴缩进对齐默认关（关着＝与引入前逐字节相同）
+            paste_align_indent: false,
             // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
             backup_mode: BACKUP_MODE_NONE.to_string(),
             hotkeys: HashMap::new(),

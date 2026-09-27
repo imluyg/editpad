@@ -131,6 +131,8 @@ pub const ROW_SHOW_LINE_ENDINGS: &str = "show_line_endings";
 pub const ROW_WORD_WRAP: &str = "word_wrap";
 pub const ROW_INDENT_GUIDES: &str = "indent_guides";
 pub const ROW_EDGE_COLUMN: &str = "edge_column";
+/// P322：粘贴缩进对齐开关（行键与设置字段同名，控件匹配按它判等）
+pub const ROW_PASTE_ALIGN_INDENT: &str = "paste_align_indent";
 pub const ROW_FONT_FAMILY: &str = "font_family";
 pub const ROW_FONT_SIZE: &str = "font_size";
 pub const ROW_AUTOSAVE: &str = "autosave";
@@ -256,6 +258,9 @@ key_table! {
     { RowIndentGuidesDesc => "在行首缩进的每个制表位层级画淡竖线，辅助对齐嵌套层级。", "Draw a faint vertical line at every indent level for easier alignment." },
     { RowEdgeColumn => "右缘标尺列", "Right Edge Column" },
     { RowEdgeColumnDesc => "在指定显示列处画一条纵向辅助线（如 80 列限宽提醒）；0 = 关闭。", "Draw a vertical guide at a given display column (e.g. an 80-column reminder); 0 = off." },
+    // P322（功能队列①）：粘贴缩进对齐。文案把「默认关」与「改的是粘贴内容」两点写明白
+    { RowPasteAlignIndent => "粘贴时对齐缩进", "Align Indent on Paste" },
+    { RowPasteAlignIndentDesc => "开：粘多行文本时，整块按光标所在行的行首缩进平移——相对层次不变，行尾与空行不动，制表符块粘进空格行则原样不动。默认关：关着时粘进来的内容与剪贴板逐字节相同。", "On: shift a multi-line paste onto the indentation of the caret's line — relative structure kept, line endings and blank lines untouched, a tab-indented block pasted into space-indented lines left as it is. Off by default: off means the paste is byte-for-byte the clipboard." },
     { RowFontFamily => "正文字体", "Editor Font" },
     { RowFontFamilyDesc => "只作用于正文与 Markdown 预览；菜单/状态栏/行号等界面文字由\
                              「界面语言」与行号位候选链决定。建议选含中文字形的等宽字体，\
@@ -1061,6 +1066,7 @@ mod tests {
             ROW_WORD_WRAP,
             ROW_INDENT_GUIDES,
             ROW_EDGE_COLUMN,
+            ROW_PASTE_ALIGN_INDENT,
             ROW_FONT_FAMILY,
             ROW_FONT_SIZE,
             ROW_AUTOSAVE,

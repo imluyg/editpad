@@ -193,6 +193,33 @@ impl EditorCore {
         self.doc.line_str(self.cursor.line).to_string()
     }
 
+    /// P322：某行的**行首空白串**——走到第一个非空白字符为止。粘贴对齐拿这个
+    /// 当目标缩进（开关的生效点在 `Message::Pasted`，算式在 core 侧一份）。
+    ///
+    /// 两个形状是被本仓的既有账决定的：
+    /// - 走 `doc.chars_from` 的零拷贝字符流，**不物化整行**——主用例是单行
+    ///   50 MB 的日志，为拿"行首那点空白"去 `line_str` 会把整份文件抄一遍
+    ///   （P298 立下的口径）；
+    /// - 行尾符不算缩进：空行的字符流第一个就是 `\n`，它 `is_whitespace` 为真，
+    ///   不收口就会把换行当缩进粘进正文。
+    ///
+    /// 上限纯属兜底：正常缩进远到不了这么多字符。
+    pub(crate) fn line_leading_whitespace(&self, line: usize) -> String {
+        const MAX_INDENT_SCAN_CHARS: usize = 4096;
+        let line = line.min(self.doc.line_count().saturating_sub(1));
+        let mut out = String::new();
+        for c in self.doc.chars_from(self.doc.line_to_char(line)) {
+            if c == '\n' || c == '\r' || !c.is_whitespace() {
+                break;
+            }
+            if out.chars().count() >= MAX_INDENT_SCAN_CHARS {
+                break;
+            }
+            out.push(c);
+        }
+        out
+    }
+
     /// P122 删词：Ctrl+Backspace 删到词首 / Ctrl+Delete 删到词尾。
     ///
     /// - 有选区：退化为普通退格/删除（删选区，主流口径）；
