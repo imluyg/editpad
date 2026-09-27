@@ -641,6 +641,110 @@ fn assigning_a_key_to_a_keyless_action_flips_that_row_off_the_hint() {
     );
 }
 
+/// P323：冲突校验必须按**全部生效键位**判，与运行期匹配同一份判据。
+///
+/// 「重做」有两个同义默认键（`Ctrl+Y` / `Ctrl+Shift+Z`），而改前的校验只比
+/// **首个** ⇒ 把 `Ctrl+Shift+Z` 派给别的动作会被放行；按下时
+/// `effective_action` 先扫重映射表，新动作赢，重做就此少了这个同义键——
+/// 用户拿到的是一次"成功"的赋键加一次静默降级。
+#[test]
+fn a_second_synonym_default_key_still_belongs_to_its_action() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::HotkeyCaptureStarted("clip_history"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Shift+Z".into()));
+    assert!(
+        !app.settings.hotkeys.contains_key("clip_history"),
+        "Ctrl+Shift+Z 是「重做」的第二个同义默认键 ⇒ 该算冲突（改前只比首个，这一格会被放行）"
+    );
+    assert!(
+        app.status.contains("Ctrl+Shift+Z"),
+        "冲突提示要说出抢的是哪个键，实得 {:?}",
+        app.status
+    );
+    assert_eq!(
+        app.hotkey_capture,
+        Some("clip_history"),
+        "被拒后仍留在捕获态（用户可以直接再按一个别的键）"
+    );
+}
+
+#[test]
+fn the_first_synonym_default_key_is_still_a_conflict_too() {
+    // 反向对照：改成按集合判之后，本来拦得住的那一头不能被改松
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::HotkeyCaptureStarted("clip_history"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+Y".into()));
+    assert!(
+        !app.settings.hotkeys.contains_key("clip_history"),
+        "Ctrl+Y 是「重做」的主默认键 ⇒ 照旧拦"
+    );
+}
+
+#[test]
+fn a_remapped_key_conflicts_and_the_vacated_default_frees_up() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::HotkeyCaptureStarted("save"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("F10".into()));
+    assert_eq!(
+        app.settings.hotkeys.get("save").map(String::as_str),
+        Some("F10"),
+        "前提：先给「保存」派一个注册表里无主的键"
+    );
+    dispatch(&mut app, Message::HotkeyCaptureStarted("clip_history"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("F10".into()));
+    assert!(
+        !app.settings.hotkeys.contains_key("clip_history"),
+        "F10 已被重映射占用 ⇒ 拦"
+    );
+    // 同一份判据的另一头：重映射过的动作不再认领自己的默认键
+    dispatch(&mut app, Message::HotkeyCaptureKey("Ctrl+S".into()));
+    assert_eq!(
+        app.settings.hotkeys.get("clip_history").map(String::as_str),
+        Some("Ctrl+S"),
+        "「保存」已让出 Ctrl+S ⇒ 现在派给别人不该算冲突"
+    );
+}
+
+#[test]
+fn an_unowned_key_is_acceptable_and_rebinding_the_same_key_to_the_same_action_is_not_a_conflict() {
+    // ①没有主的键（F4 是面板手势，不入注册表）该放行
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::HotkeyCaptureStarted("bookmark_panel"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("F4".into()));
+    assert_eq!(
+        app.settings
+            .hotkeys
+            .get("bookmark_panel")
+            .map(String::as_str),
+        Some("F4"),
+        "F4 在注册表里无主 ⇒ 不该被拦"
+    );
+    // ⚠️ 这里不能用 tests/mod.rs 的 `handle_key_defaults`——它喂的是**空**重映射表，
+    // 看不见刚赋的键；本格要验的正是"派完键之后按下真的通到那条动作"。
+    assert!(
+        matches!(
+            crate::hotkeys::handle_key(
+                keyboard::Key::Named(keyboard::key::Named::F4),
+                keyboard::Modifiers::empty(),
+                &app.settings.hotkeys
+            ),
+            Some(Message::BookmarksToggled)
+        ),
+        "赋完键之后 F4 这条路要真的通到那条动作（注册表→handle_key 全链路）"
+    );
+    // ②把同一个键再派给同一个动作＝自我覆盖，不该被当成冲突
+    dispatch(&mut app, Message::HotkeyCaptureStarted("bookmark_panel"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("F4".into()));
+    assert_eq!(
+        app.settings
+            .hotkeys
+            .get("bookmark_panel")
+            .map(String::as_str),
+        Some("F4"),
+        "自己不算自己的冲突（判据里 a.id != id 那一格）"
+    );
+}
+
 #[test]
 fn font_size_delta_clamps_and_persists_to_injected_path() {
     // P48：工具栏 A-/A+ 移除后，FontSizeDelta 的入口 = 设置面板步进

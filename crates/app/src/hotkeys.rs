@@ -557,14 +557,11 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     },
 ];
 
-/// 动作 id 的首个默认组合（未重映射时的展示主键位）。
-pub(crate) fn default_combo_of(id: &str) -> Option<&'static str> {
-    HOTKEY_ACTIONS
-        .iter()
-        .find(|a| a.id == id)
-        .and_then(|a| a.default_combos.first())
-        .copied()
-}
+// P323 删掉了这里的 `default_combo_of(id)`（"动作 id → 首个默认组合"）：
+// 它是"这个动作现在按什么"的第二份实现，而运行期匹配按**全部**默认组合
+// （[`effective_action`]）——两份判据不同步的代价实测存在：把重做的第二个同义
+// 默认键 `Ctrl+Shift+Z` 派给别的动作，展示与冲突校验都放行、按下时却会抢键。
+// 唯一口径现在是 [`effective_combos`]（重映射优先，否则全部默认）。
 
 /// 过滤用户重映射表：动作 id 不在注册表中的条目删除（启动加载时调用）。
 pub(crate) fn sanitize_hotkeys(settings: &mut editpad_core::Settings) {

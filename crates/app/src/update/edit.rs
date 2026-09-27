@@ -916,13 +916,19 @@ impl Editpad {
         Task::none()
     }
 
-    /// 该动作的当前生效组合是否与 `combo` 相同（冲突判定用）。
+    /// P323：某动作**现在生效的键位集合**里有没有 `combo`。判据与运行期匹配
+    /// （`hotkeys::effective_action`）同一份，都走 [`effective_combos`]——两边一旦
+    /// 用不同判据，校验就会给出与按下时不一样的答案。
+    ///
+    /// 改前这里只比**首个**默认键，而运行期按**全部**默认键匹配 ⇒
+    /// 把 `Ctrl+Shift+Z`（重做的第二个同义默认键）派给别的动作会被放行：
+    /// 捕获侧说"不冲突"，`effective_action` 先扫重映射表让新动作赢，
+    /// 重做从此少了一个同义键——用户拿到的是一次"成功"的赋键加一次静默降级。
     pub(super) fn hotkey_capture_conflicts_with(&self, id: &str, combo: &str) -> bool {
-        self.settings
-            .hotkeys
-            .get(id)
-            .map(String::as_str)
-            .or_else(|| default_combo_of(id))
-            == Some(combo)
+        HOTKEY_ACTIONS
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| effective_combos(&self.settings.hotkeys, a))
+            .is_some_and(|combos| combos.contains(&combo))
     }
 }
