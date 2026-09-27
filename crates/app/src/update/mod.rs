@@ -540,6 +540,7 @@ impl Editpad {
             | Message::LanguageToggled
             | Message::LanguageOptionSelected(..)
             | Message::FontSizeDelta(..)
+            | Message::ZoomResetDefault
             | Message::TabFontSizeDelta(..)
             | Message::TabFontSizeReset
             | Message::TabWrapOverrideToggled

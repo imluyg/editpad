@@ -205,6 +205,10 @@ key_table! {
     { MenuToggleComment => "切换行注释", "Toggle Line Comment" },
     { MenuColumnEditor => "列编辑器…", "Column Editor…" },
     { MenuZoomIn => "放大", "Zoom In" },
+    // P313：键盘字号缩放三条（热键注册表说明列 + 命令面板标题）
+    { HkZoomIn => "放大字号", "Increase font size" },
+    { HkZoomOut => "缩小字号", "Decrease font size" },
+    { HkZoomReset => "重置字号到默认", "Reset font size to default" },
     { MenuZoomOut => "缩小", "Zoom Out" },
     { MenuZoomReset => "重置缩放", "Reset Zoom" },
     { MenuThemeToggle => "切换深浅主题", "Toggle Light/Dark Theme" },

@@ -139,6 +139,12 @@ impl Editpad {
                 }
                 Task::none()
             }
+            // P313：字号复位（Ctrl+Shift+0 与「查看 → 重置缩放」同一个入口）。
+            // 增量只有运行期知道，故复用上面那条全局链路而不复制它的循环
+            Message::ZoomResetDefault => {
+                let delta = editor::FONT_SIZE_DEFAULT - self.display_font_size();
+                self.update(Message::FontSizeDelta(delta))
+            }
             // ---------- P134：每页显示覆盖（C7） ----------
             Message::TabFontSizeDelta(delta) => {
                 // Ctrl+滚轮：当前页覆盖字号——不动全局默认、不落盘

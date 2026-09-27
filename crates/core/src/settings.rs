@@ -316,7 +316,11 @@ pub fn normalize_backup_mode(value: &str) -> &'static str {
 /// 可作热键的命名键（大小写不敏感匹配，规范形如列首大写形式）。
 /// P122 增补 `Backspace`（Ctrl+Backspace 删到词首）——与 app 侧
 /// combo_string 白名单同步（两侧契约一致，注册表合法性测试把关）。
-const COMBO_NAMED_KEYS: [&str; 24] = [
+/// P313 增补 `Plus` / `Minus` / `Equal`（字号缩放的 `Ctrl+=`、`Ctrl+-`、
+/// `Ctrl++`）：这三个符号在键盘上不是"一个字符键"那么整齐（`+` 多数布局要按
+/// Shift，小键盘又自带 `+`/`-`），故规范形一律用**名字**；`-` `=` 额外接受
+/// 符号字面写法（见 [`COMBO_SYMBOL_KEYS`]），`+` 因为本身就是分隔符而只能写名字。
+const COMBO_NAMED_KEYS: [&str; 27] = [
     "Home",
     "End",
     "PageUp",
@@ -329,6 +333,9 @@ const COMBO_NAMED_KEYS: [&str; 24] = [
     "Down",
     "Left",
     "Right",
+    "Plus",
+    "Minus",
+    "Equal",
     "F1",
     "F2",
     "F3",
@@ -342,6 +349,14 @@ const COMBO_NAMED_KEYS: [&str; 24] = [
     "F11",
     "F12",
 ];
+
+/// 单个符号 → 规范名（P313）。用户在配置里写 `Ctrl+=` 与写 `Ctrl+Equal`
+/// 必须归一到同一串，否则同一个组合能被登记两次而谁都失效。
+///
+/// ⚠️ 表里**没有** `+`：组合串以 `+` 为分隔符，`Ctrl++` 切出来是
+/// `["Ctrl", "", ""]`——那个加号永远成不了"键名"那一段，故字面写法在这套
+/// 语法里不可表达，只能写规范名 `Ctrl+Plus`（`combo_string` 上报的也正是它）。
+const COMBO_SYMBOL_KEYS: [(&str, &str); 2] = [("-", "Minus"), ("=", "Equal")];
 
 /// 组合键串归一（纯函数可单测）：`ctrl+shift+f` → `Ctrl+Shift+F`。
 ///
@@ -379,10 +394,18 @@ pub fn normalize_combo(value: &str) -> Option<String> {
                 }
                 if token.len() == 1 {
                     let ch = token.chars().next()?;
-                    if !ch.is_ascii_alphanumeric() {
-                        return None;
+                    if ch.is_ascii_alphanumeric() {
+                        key = Some(ch.to_ascii_uppercase().to_string());
+                    } else {
+                        // P313：`-` `=` 按规范名收进来（`+` 做不到，见
+                        // COMBO_SYMBOL_KEYS 的注记）
+                        key = Some(
+                            COMBO_SYMBOL_KEYS
+                                .iter()
+                                .find(|(sym, _)| *sym == token)
+                                .map(|(_, name)| (*name).to_string())?,
+                        );
                     }
-                    key = Some(ch.to_ascii_uppercase().to_string());
                 } else {
                     let hit = COMBO_NAMED_KEYS
                         .iter()
@@ -1691,6 +1714,24 @@ mod tests {
             Some("Ctrl+Shift+F".to_owned())
         );
         assert_eq!(normalize_combo("Ctrl+Home"), Some("Ctrl+Home".to_owned()));
+        // P313：三个符号键——符号写法与规范名写法必须归一到同一串，
+        // 否则同一个组合能被登记两次而两边都失效
+        assert_eq!(normalize_combo("ctrl+="), Some("Ctrl+Equal".to_owned()));
+        assert_eq!(normalize_combo("Ctrl+Equal"), Some("Ctrl+Equal".to_owned()));
+        assert_eq!(
+            normalize_combo("Ctrl+Shift+Plus"),
+            Some("Ctrl+Shift+Plus".to_owned())
+        );
+        // 字面 `Ctrl++` 不可表达：`+` 就是分隔符，切出来没有"键名"那一段
+        assert_eq!(normalize_combo("Ctrl++"), None);
+        assert_eq!(normalize_combo("Ctrl+-"), Some("Ctrl+Minus".to_owned()));
+        assert_eq!(
+            normalize_combo("ctrl+shift+minus"),
+            Some("Ctrl+Shift+Minus".to_owned())
+        );
+        // 其余符号仍一律拒绝（放行一个就多吞一次输入）
+        assert_eq!(normalize_combo("Ctrl+%"), None);
+        assert_eq!(normalize_combo("Ctrl+;"), None);
         assert_eq!(normalize_combo("ctrl+8"), Some("Ctrl+8".to_owned()));
         // 必须含 Ctrl
         assert_eq!(normalize_combo("shift+s"), None);

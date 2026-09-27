@@ -564,6 +564,9 @@ enum Message {
     LanguageToggled,
     /// 字号增减（±2.0，clamp 后写回设置并即时生效）
     FontSizeDelta(f32),
+    /// P313：字号复位到规范默认（Ctrl+Shift+0 与「查看 → 重置缩放」共用；
+    /// 增量要到运行期才知道，故单独一条消息而不是复用 FontSizeDelta 的常数）
+    ZoomResetDefault,
 
     // ---------- 设置弹窗（P27） ----------
     /// 打开/关闭设置弹窗（busy 时禁开；Esc 与关闭按钮退出）

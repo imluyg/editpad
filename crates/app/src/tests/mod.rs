@@ -154,6 +154,11 @@ fn parse_combo_for_test(combo: &str) -> (keyboard::Modifiers, keyboard::Key) {
         // P122：Ctrl+Backspace 删到词首（与 combo_string/normalize_combo
         // 白名单同步）
         "Backspace" => keyboard::Key::Named(Named::Backspace),
+        // P313：三个符号键的规范名解析回符号字符（注册表写名字、
+        // combo_string 报的是按下实际得到的字符，两边必须对得上）
+        "Plus" => keyboard::Key::Character("+".into()),
+        "Minus" => keyboard::Key::Character("-".into()),
+        "Equal" => keyboard::Key::Character("=".into()),
         // 第 60 轮：书签导航引入裸/Shift 功能键组合
         name if name.len() >= 2 && name.starts_with('F') => {
             let n: u8 = name[1..]
@@ -202,3 +207,5 @@ mod robustness;
 mod session;
 mod settings;
 mod tabs;
+// P313：键盘字号缩放与热键符号语法
+mod zoom;

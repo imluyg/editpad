@@ -199,6 +199,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 | 默认组合 | 功能 |
 |------|------|
 | Ctrl+滚轮 / Shift+滚轮 | 缩放**当前页**字号（10~48px，本页覆盖；全局默认在设置→字体调） / 横向滚动 |
+| Ctrl+= / Ctrl+- / Ctrl+Shift+0 | 放大 / 缩小 / 重置**全局默认**字号（复位回到 16px）——与「查看」菜单那三项同一条路，`Ctrl+Plus`、`Ctrl+Shift+Plus` 也放大；上面那行 Ctrl+滚轮仍只覆盖当前页 |
 | F11 / F9 | 切换全屏 / 窗口置顶 |
 | Ctrl+Shift+F | 格式化 JSON（仅 JSON 文件，错误定位到行列） |
 

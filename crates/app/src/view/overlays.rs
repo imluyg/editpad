@@ -438,9 +438,13 @@ impl Editpad {
                         interactive.then_some(Message::FontSizeDelta(-step)),
                     ))
                     .push(item(
-                        item_label(lang, editpad_core::Key::MenuZoomReset, false, None),
-                        interactive
-                            .then_some(Message::FontSizeDelta(16.0 - self.display_font_size())),
+                        item_label(
+                            lang,
+                            editpad_core::Key::MenuZoomReset,
+                            false,
+                            Some("Ctrl+Shift+0"),
+                        ),
+                        interactive.then_some(Message::ZoomResetDefault),
                     ))
                     .push(item(
                         item_label(lang, editpad_core::Key::MenuThemeToggle, false, None),

@@ -159,6 +159,7 @@ With a selection only the touched lines are processed; without one the operation
 | Default combo | Action |
 |------|------|
 | Ctrl+scroll / Shift+scroll | Zoom **current tab** font size (10–48px, per-tab override; the global default lives in Settings → Font) / horizontal scroll |
+| Ctrl+= / Ctrl+- / Ctrl+Shift+0 | Grow / shrink / reset the **global default** font size — keyboard twins of the View menu's three zoom items (`Ctrl+Plus` and `Ctrl+Shift+Plus` also grow; `Ctrl+scroll` above still overrides the current tab only) |
 | F11 / F9 | Toggle fullscreen / always-on-top |
 | Ctrl+Shift+F | Format JSON (JSON files only; errors point to line:col) |
 

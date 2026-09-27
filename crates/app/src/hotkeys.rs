@@ -263,6 +263,31 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+Shift+F"],
         desc: HkFormatJson,
     },
+    // P313：键盘字号缩放。此前缩放只有 Ctrl+滚轮与「查看」菜单两条路，
+    // 键盘用户没有入口。默认键位一次给全几种写法：`Ctrl+=`（主键盘不用
+    // 按 Shift）、`Ctrl++`（要按 Shift 的布局与小键盘）；缩小同理给
+    // `Ctrl+-`（小键盘与主键盘的 `-` 都归到 Minus）。复位取
+    // `Ctrl+Shift+0`——裸 `Ctrl+0` 已被「MD5」占着，号码位只剩这一格
+    HotkeyAction {
+        id: "zoom_in",
+        default_combos: &[
+            "Ctrl+Equal",
+            "Ctrl+Plus",
+            "Ctrl+Shift+Equal",
+            "Ctrl+Shift+Plus",
+        ],
+        desc: HkZoomIn,
+    },
+    HotkeyAction {
+        id: "zoom_out",
+        default_combos: &["Ctrl+Minus", "Ctrl+Shift+Minus"],
+        desc: HkZoomOut,
+    },
+    HotkeyAction {
+        id: "zoom_reset",
+        default_combos: &["Ctrl+Shift+0"],
+        desc: HkZoomReset,
+    },
     HotkeyAction {
         id: "doc_start",
         default_combos: &["Ctrl+Home"],
@@ -468,8 +493,8 @@ pub(crate) fn sanitize_hotkeys(settings: &mut editpad_core::Settings) {
 ///
 /// 契约（与 core `normalize_combo` 同步）：不得含 Alt（AltGr 保护，P8
 /// 同口径——AltGr 在 Windows 上报为 Ctrl+Alt）；
-/// - 含 Ctrl：键名 = 单个字母/数字（大写化）或白名单命名键，形如
-///   `Ctrl+F2`；
+/// - 含 Ctrl：键名 = 单个字母/数字（大写化）、`+ - =` 三个符号（P313 规范化为
+///   `Plus`/`Minus`/`Equal`）或白名单命名键，形如 `Ctrl+F2`；
 /// - 无 Ctrl：仅放行功能键 F1~F12（修饰键至多 Shift），形如 `F2` /
 ///   `Shift+F2`——书签导航的主流默认键位所需；其余无 Ctrl 按键返回
 ///   None（该按键不参与热键系统，交回普通编辑路径）。
@@ -489,6 +514,12 @@ pub(crate) fn combo_string(mods: keyboard::Modifiers, key: &keyboard::Key) -> Op
                 (Some(ch), None) if ch.is_ascii_alphanumeric() => {
                     ch.to_ascii_uppercase().to_string()
                 }
+                // P313（字号缩放的三个符号键）。规范名与 core `COMBO_SYMBOL_KEYS`
+                // 一一对应：`+` 在多数主键盘布局上要按 Shift 才出，用名字而不是
+                // 符号当规范形，注册表与用户重映射才有唯一写法
+                (Some('+'), None) => "Plus".to_string(),
+                (Some('-'), None) => "Minus".to_string(),
+                (Some('='), None) => "Equal".to_string(),
                 _ => return None,
             }
         }
@@ -649,6 +680,11 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "find_next" => Some(Message::FindNext),
         "find_prev" => Some(Message::FindPrev),
         "format_json" => Some(Message::FormatJson),
+        // P313：键盘字号缩放——与「查看」菜单项走同一条链路（同一动作、
+        // 同样的 clamp 与落盘），只是入口不同
+        "zoom_in" => Some(Message::FontSizeDelta(crate::editor::FONT_ZOOM_STEP)),
+        "zoom_out" => Some(Message::FontSizeDelta(-crate::editor::FONT_ZOOM_STEP)),
+        "zoom_reset" => Some(Message::ZoomResetDefault),
         "doc_start" => edit(EditOp::Motion(Motion::DocStart, mods.shift())),
         "doc_end" => edit(EditOp::Motion(Motion::DocEnd, mods.shift())),
         // P122：词级导航与删词（词边界与删词共用 word_neighbor 口径；

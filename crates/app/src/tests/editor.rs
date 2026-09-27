@@ -32,8 +32,15 @@ fn altgr_character_falls_through_to_text_insert() {
     // Ctrl+不可组合字符仍返回 None（不插入）。P129 后 26 个字母与数字
     // 全部入注册表（e 已是命令面板），探针改用组合键白名单外的字符——
     // combo_string 返回 None → 按键放行
+    // ⚠️ P313 起 `-` 已进白名单（Ctrl+- = 缩小字号），探针换成 `%`；
+    // 下面紧跟着断 `-` 确实被接管——否则"换探针"就成了把回归藏起来
+    let pct = keyboard::Key::Character("%".into());
+    assert!(handle_key_defaults(pct, ctrl).is_none());
     let dash = keyboard::Key::Character("-".into());
-    assert!(handle_key_defaults(dash, ctrl).is_none());
+    assert!(matches!(
+        handle_key_defaults(dash, ctrl),
+        Some(Message::FontSizeDelta(_))
+    ));
 
     // Shift+字符（无 Ctrl）照常插入
     let bang = keyboard::Key::Character("!".into());
