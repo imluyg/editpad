@@ -4093,19 +4093,20 @@ fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
     // 行 0 = 80 个 'a'（折 ~3 段），行 1 = 空幻影
     let doc = format!("{}\n", "a".repeat(80));
 
-    let render = |wrap: bool| -> (tiny_skia::Pixmap, f32) {
+    // 度量（行高 / 行号栏宽）一律在**画过一帧之后**从 core 取：layout 会把实测
+    // 列宽注入回 core，画之前读到的是固定假设值（与 P132 参考线用例同规矩）。
+    let render = |wrap: bool| -> (tiny_skia::Pixmap, f32, f32) {
         let core = EditorHandle::default();
-        let lh = {
+        {
             let mut c = core.borrow_mut();
             c.reset_document(editpad_core::Document::from_str(&doc));
             c.set_viewport_width(ew);
             c.set_viewport_height(eh);
             c.cursor = CursorPos { line: 0, col: 0 };
             c.set_word_wrap(wrap);
-            c.line_height()
-        };
+        }
         let mut view = EditorView {
-            core,
+            core: core.clone(),
             font: BODY_FONT,
             zoom_accum: 0.0,
         };
@@ -4137,13 +4138,19 @@ fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
             &damage,
             Color::WHITE,
         );
-        (pixels, lh)
+        let (lh, gw) = {
+            let c = core.borrow();
+            (c.line_height(), c.gutter_width())
+        };
+        (pixels, lh, gw)
     };
 
     let band_ink = |px: &tiny_skia::Pixmap, band: u32, lh: f32, gutter: f32| -> u32 {
         let y0 = (ey + band as f32 * lh).max(0.0) as u32;
         let y1 = (ey + (band + 1) as f32 * lh).min(h as f32) as u32;
-        let x0 = (ex + gutter).max(0.0) as u32;
+        // 向上取整：真实文本区左缘在 ex+gw 处，截断会把行号数字的最后一列
+        // 当成"正文墨迹"（本机 gw=50.125 时恰好漏 1 列 ⇒ 22px 假墨）
+        let x0 = (ex + gutter).max(0.0).ceil() as u32;
         let mut ink = 0u32;
         for y in y0..y1 {
             for x in x0..w {
@@ -4158,10 +4165,12 @@ fn headless_wrap_on_produces_segment_ink_in_lower_visual_rows() {
         ink
     };
 
-    let (off, lh) = render(false);
-    let (on, _) = render(true);
-    let gutter = 49.0f32; // 行号栏宽随行数/列宽（3 位数字 × 9px + 常量）
-                          // 关态：行 0 只占视觉行 0；行 1 = 空幻影 → 第 1 段带无墨迹
+    let (off, lh, gutter) = render(false);
+    let (on, _, _) = render(true);
+    // 行号栏宽取自本帧实测（旧夹具硬编码 49.0 = "3 位数字 × 9px + 常量"，
+    // 那是按 Consolas 估的假设；本机等宽解析到别族时真实宽 50.125，
+    // 扫描窗因而探进行号栏，把数字当成了正文墨迹）
+    // 关态：行 0 只占视觉行 0；行 1 = 空幻影 → 第 1 段带无墨迹
     assert_eq!(
         band_ink(&off, 1, lh, gutter),
         0,
@@ -5214,13 +5223,18 @@ fn headless_indent_guides_ink_at_tab_stops_and_toggle_off() {
     // 先渲染一帧让 layout 注入实测列宽（未注入前 char_width 是固定假设，
     // draw 实际用实测值），再取度量算期望 x
     let on = render(true);
-    let (gutter_w, char_w) = {
+    let (gutter_w, char_w, lh) = {
         let c = handle.borrow();
-        (c.gutter_width(), c.char_width())
+        (c.gutter_width(), c.char_width(), c.line_height())
     };
     // 制表位 4 列的参考线 x（与 draw 同源换算）
     let gx = (ex + gutter_w + 4.0 * char_w).round() as u32;
     let line0_top = ey as u32; // 行 0 首段 y（scroll_top=0）
+                               // 覆盖判据按**实测行高**算，不写死 30px：参考线是 1px 竖线，"贯穿行高"就是
+                               // 实测行高那么多行 × 1 列。旧阈值 30 悄悄假设了线落在半像素上、抗锯齿摊到
+                               // 两列（Consolas 列宽才那样）；列宽 9.375 的机器上线正好压在整列上＝22px，
+                               // 于是 30 这个数量的不是产品，是这台机器装了什么等宽字体。
+    let lh_rows = lh.round() as u32;
     let ink = |px: &tiny_skia::Pixmap, x0: u32, y0: u32, y1: u32| -> u32 {
         let mut n = 0u32;
         for y in y0..y1 {
@@ -5235,15 +5249,16 @@ fn headless_indent_guides_ink_at_tab_stops_and_toggle_off() {
         }
         n
     };
-    let g_ink = ink(&on, gx, line0_top, line0_top + 22);
-    eprintln!("[P132] 参考线墨迹 {g_ink}px @x={gx}");
+    let g_ink = ink(&on, gx, line0_top, line0_top + lh_rows);
+    eprintln!("[P132] 参考线墨迹 {g_ink}px @x={gx}（行高 {lh_rows} 行）");
     assert!(
-        g_ink >= 30,
-        "8 空格缩进行在制表位 4 列处应有贯穿行高的参考线（墨迹 {g_ink}px）"
+        g_ink >= lh_rows,
+        "8 空格缩进行在制表位 4 列处应有贯穿行高的参考线（墨迹 {g_ink}px，\
+         至少要覆盖整行高 {lh_rows} 行 × 1 列）"
     );
     let off = render(false);
     assert_eq!(
-        ink(&off, gx, line0_top, line0_top + 22),
+        ink(&off, gx, line0_top, line0_top + lh_rows),
         0,
         "关闭参考线后该列不应有任何墨迹（空白行首无字形）"
     );
