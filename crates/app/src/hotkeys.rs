@@ -372,6 +372,13 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &[],
         desc: HkClipHistory,
     },
+    // A7（功能队列②）：跨标签全部替换。号码位与 Ctrl+Shift 字母都已占满，
+    // 与 P318/P319 同等待遇——先无键入表（查找栏有按钮、命令面板可见、设置页可赋键）。
+    HotkeyAction {
+        id: "replace_all_in_tabs",
+        default_combos: &[],
+        desc: FindReplaceAllTabs,
+    },
     HotkeyAction {
         id: "doc_start",
         default_combos: &["Ctrl+Home"],
@@ -819,6 +826,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "clip_history" => Some(Message::PaletteToggled(
             crate::state::PaletteMode::Clipboard,
         )),
+        // A7：跨标签全部替换（条件取自查找面板当前状态）
+        "replace_all_in_tabs" => Some(Message::ReplaceAllInTabs),
         // P130：文件监视开关
         "toggle_monitor_file" => Some(Message::ToggleMonitorFile),
         "column_editor" => Some(Message::ColumnEditorToggled),

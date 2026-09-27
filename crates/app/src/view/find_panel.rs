@@ -430,6 +430,15 @@ impl Editpad {
                 )
                 .style(move |theme, status| find_button_style(theme, status, dim))
                 .on_press_maybe((!scanning).then_some(Message::ReplaceAll)),
+                // A7：对全部打开的标签页替换。禁用条件与「全部替换」同一条
+                // （扫描在途时全文快照可能过期）；只读页会被跳过并在状态栏点名。
+                button(
+                    text(self.t(editpad_core::Key::FindReplaceAllTabs))
+                        .size(uipx)
+                        .font(uifont)
+                )
+                .style(move |theme, status| find_button_style(theme, status, dim))
+                .on_press_maybe((!scanning).then_some(Message::ReplaceAllInTabs)),
             ]
             .spacing(8)
             .align_y(Alignment::Center)

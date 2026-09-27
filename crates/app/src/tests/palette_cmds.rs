@@ -45,6 +45,8 @@ fn unassigned_actions_are_visible_in_the_palette() {
         "bookmark_panel",
         // P319 同等待遇：剪贴板历史先进面板，键位由用户自行赋
         "clip_history",
+        // A7 同等待遇：跨标签全部替换（查找栏另有按钮，面板里也要看得见）
+        "replace_all_in_tabs",
     ] {
         assert!(ids.contains(&id), "{id} 应出现在命令面板里");
     }

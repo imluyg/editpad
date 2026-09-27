@@ -27,7 +27,9 @@ pub(crate) use super::*;
 mod bookmarks;
 mod edit;
 mod file;
-mod find;
+// A7：跨标签替换的正文上限常量由测试引用（夹具不许把同一个数字写第二遍），
+// 所以这个子模块对全 crate 可见；模块内条目的可见性一律未变。
+pub(crate) mod find;
 mod settings;
 mod tabs;
 
@@ -655,6 +657,8 @@ impl Editpad {
             | Message::ReplaceCurrent
             | Message::ReplaceCurrentRegex
             | Message::ReplaceAll
+            | Message::ReplaceAllInTabs
+            | Message::ReplaceAllTabsRegexDone(..)
             | Message::ReplaceAllRegexDone(..)
             | Message::FindScanDone(..)
             | Message::GotoToggled

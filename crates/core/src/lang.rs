@@ -380,6 +380,7 @@ key_table! {
     { FindBrowse => "浏览…", "Browse…" },
     { FindReplaceCurrent => "替换当前", "Replace" },
     { FindReplaceAll => "全部替换", "Replace All" },
+    { FindReplaceAllTabs => "全部标签替换", "Replace All In Tabs" },
     { FindFindAll => "查找全部", "Find All" },
     { FindAllTitle => "全部匹配", "All Matches" },
     { FindAllTruncatedPrefix => "", "" },
@@ -803,6 +804,44 @@ pub fn fmt_replaced(lang: Lang, count: usize) -> String {
             n => format!("Replaced {n} occurrences"),
         },
     }
+}
+
+/// A7：跨标签全部替换的结果摘要。**标签数与处数都要报**——只报处数，用户
+/// 无法知道这次动的是当前页还是全部页；两类"没动"各自单列，因为下一步动作
+/// 不同（解除只读锁定 / 关掉整词或换字面模式）。
+pub fn fmt_replaced_in_tabs(
+    lang: Lang,
+    tabs: usize,
+    total: usize,
+    skipped_read_only: usize,
+    skipped_unprocessed: usize,
+) -> String {
+    let (mut s, sep, ro, up): (String, &str, String, String) = match lang {
+        Lang::ZhCn => (
+            format!("共 {tabs} 个标签替换 {total} 处"),
+            "，",
+            format!("{skipped_read_only} 个只读标签未改"),
+            format!("{skipped_unprocessed} 个标签未处理（本次替换的正文上限，或正则运行期报错）"),
+        ),
+        Lang::En => (
+            match tabs {
+                1 => format!("Replaced {total} occurrence(s) in {tabs} tab"),
+                n => format!("Replaced {total} occurrence(s) in {n} tabs"),
+            },
+            "; ",
+            format!("{skipped_read_only} read-only tab(s) left untouched"),
+            format!("{skipped_unprocessed} tab(s) skipped (per-run text budget, or a regex runtime error)"),
+        ),
+    };
+    if skipped_read_only > 0 {
+        s.push_str(sep);
+        s.push_str(&ro);
+    }
+    if skipped_unprocessed > 0 {
+        s.push_str(sep);
+        s.push_str(&up);
+    }
+    s
 }
 
 /// 在文件中查找的扫描摘要（`在文件中查找：N 个文件 M 处`）。

@@ -4,6 +4,215 @@
 
 use super::*;
 
+/// 整词与正则两支都要把正文整体物化，沿用单页路径从 P70/P148 起就有的那道
+/// 防冻结上限。单页时它是「这一份文档」的上限；A7 跨标签正则时它还兼作
+/// **整批累计**预算 ⇒ N 个标签的峰值内存不超过今天 1 个文档已经花的量。
+pub(crate) const REPLACE_TEXT_MAX_CHARS: usize = 4_000_000;
+
+/// 一次「全部替换」的条件，从查找面板当前状态取出（A7）。
+struct ReplaceRequest {
+    /// 字面/整词模式已解析转义（`\n \r \t \\`）；正则模式**原样**，因为 `\n`
+    /// 在正则里有自己的含义——这是单页路径自 P70 起的口径，两个入口必须一致。
+    query: String,
+    replacement: String,
+    case_sensitive: bool,
+    /// 整词（正则模式下不参与，与扫描口径同一句话）
+    word: bool,
+    /// 正则：替换本体要离开 UI 线程
+    regex: bool,
+}
+
+/// 一页文档在给定条件下的替换结局。
+enum Replaced {
+    /// 新正文 + 处数（处数可能为 0，那时调用方不该落地，免得白占一步撤销栈）
+    Done(String, usize),
+    /// 这一页要物化正文而它超了上限——没动它，附上实测字符数
+    TooLarge(usize),
+}
+
+impl ReplaceRequest {
+    /// 取条件；查询为空 ⇒ `None`（「全部替换」与「全部标签替换」共用这条前置闸）。
+    fn from_panel(app: &Editpad) -> Option<Self> {
+        if app.find_query.is_empty() {
+            return None;
+        }
+        let (query, replacement) = if app.regex_enabled {
+            (app.find_query.clone(), app.replace_query.clone())
+        } else {
+            (
+                unescape_query(&app.find_query),
+                unescape_query(&app.replace_query),
+            )
+        };
+        Some(Self {
+            query,
+            replacement,
+            case_sensitive: app.case_sensitive,
+            word: app.whole_word && !app.regex_enabled,
+            regex: app.regex_enabled,
+        })
+    }
+
+    /// 在**当前线程**算一页的结果（正则不走这里）。字面支留在 rope 上流式跑，
+    /// 整词支按该页自己的主导行尾归一查询与替换文本——逐页各归一自己的，
+    /// 跨标签时才不会把 LF 页改成 CRLF 页。
+    fn apply_to(&self, doc: &editpad_core::Document) -> Replaced {
+        if self.word {
+            let chars = doc.text_len();
+            if chars > REPLACE_TEXT_MAX_CHARS {
+                return Replaced::TooLarge(chars);
+            }
+            let eol = doc.line_ending();
+            let (text, count) = editpad_core::replace_all_word(
+                &doc.to_text(),
+                &eol.normalize(&self.query),
+                &eol.normalize(&self.replacement),
+                self.case_sensitive,
+            );
+            return Replaced::Done(text, count);
+        }
+        // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
+        let (text, count) = editpad_core::replace_all_document(
+            doc,
+            &self.query,
+            &self.replacement,
+            self.case_sensitive,
+        );
+        Replaced::Done(text, count)
+    }
+}
+
+impl Editpad {
+    /// 只读锁原本只挡 `Edit(EditOp)` 那道闸（`update/edit.rs` 的
+    /// `edit_op_mutates` 分支），而替换是**直接换整份文档**的旁路：单页
+    /// 「全部替换」「替换当前」都不经那道闸。A7 要给跨标签路径定「只读页跳过」
+    /// 的口径，就不能留下「当前页改得动、别的页改不得」的矛盾 ⇒ 在此补闸，
+    /// 文案与 `Edit` 那条拒收分支同一句。
+    fn read_only_blocks_replace(&mut self) -> bool {
+        if !self.cur_handle.borrow().read_only {
+            return false;
+        }
+        self.set_status(self.t(editpad_core::Key::StDocReadOnlyLocked).to_owned());
+        true
+    }
+
+    /// 把一页的替换结果落地：整体换文（保留撤销链）＋置脏＋版本推进。
+    /// 四条投递点（单页/跨标签 × 同步/后台回报）共用这一份。
+    ///
+    /// 非活动页另需清掉视口高亮层：`replace_whole_document` 不动 `find_hl`，
+    /// 活动页随后有 [`Self::schedule_find_scan`] 替它刷新，而后台页不会有人
+    /// 替它重扫——留着就是拿旧内容的坐标画新内容（本仓反复量到的那类陈旧快照）。
+    fn apply_replaced_page(&mut self, idx: usize, new_contents: &str) {
+        let active = idx == self.active_tab;
+        {
+            let mut ed = self.tabs[idx].editor.borrow_mut();
+            ed.replace_whole_document(editpad_core::Document::from_str(new_contents));
+            if !active {
+                ed.install_find_hits(Rc::new(Default::default()));
+            }
+        }
+        let tab = &mut self.tabs[idx];
+        tab.dirty = true;
+        tab.note_mutation();
+    }
+
+    /// A7 跨标签正则的装料：算出要送后台的 `(页 id, 正文)`，以及两类没送去的页
+    /// （只读 / 未处理）。
+    ///
+    /// 做成**纯函数**并把上限当参数收进来，是因为后台 Task 在 headless 夹具里
+    /// 会被丢弃——累计预算那条线端到端看不见，只能直接钉这一层（同一课在
+    /// P293/P296 那两轮记过：策略层的判据别走渲染管线）。
+    ///
+    /// * 只读页不进任务，改由 `read_only` 计数（它一步都不该动）；
+    /// * `max_chars` 是**整批累计**预算：单文档正则路径今天就物化 4M 字符，
+    ///   让 N 个标签共用同一份 ⇒ 峰值不超过今天；装不下的页计 `unprocessed`。
+    pub(crate) fn pack_regex_jobs(
+        tabs: &[Tab],
+        max_chars: usize,
+    ) -> (Vec<(u64, String)>, usize, usize) {
+        let mut jobs: Vec<(u64, String)> = Vec::new();
+        let mut read_only = 0usize;
+        let mut unprocessed = 0usize;
+        let mut budget = max_chars;
+        for tab in tabs {
+            let ed = tab.editor.borrow();
+            if ed.read_only {
+                read_only += 1;
+                continue;
+            }
+            let chars = ed.doc.text_len();
+            if chars > budget {
+                unprocessed += 1;
+                continue;
+            }
+            budget -= chars;
+            jobs.push((tab.id, ed.doc.to_text()));
+        }
+        (jobs, read_only, unprocessed)
+    }
+
+    /// A7 跨标签正则：替换本体留在后台线程（P148 的理由在这里更强——一次要跑
+    /// N 份文档）。跳过的两类页随结果一起带回，回报落地时才有依据拼出摘要。
+    fn start_cross_tab_regex(&mut self, req: &ReplaceRequest) -> Task<Message> {
+        let (jobs, read_only, unprocessed) =
+            Self::pack_regex_jobs(&self.tabs, REPLACE_TEXT_MAX_CHARS);
+        if jobs.is_empty() {
+            // 一页都进不了任务（全只读，或全超上限）⇒ 不起后台活儿，直接给摘要，
+            // 也不留 busy：否则界面会一直"正则替换中…"而永远等不到回报。
+            return self.finish_cross_tab_replace(0, 0, read_only, unprocessed, false);
+        }
+        let pattern = req.query.clone();
+        let replacement = req.replacement.clone();
+        let case_sensitive = req.case_sensitive;
+        self.enter_busy();
+        self.set_status(self.t(editpad_core::Key::StRegexReplacing).to_owned());
+        Task::perform(
+            async move {
+                jobs.into_iter()
+                    .map(|(id, text)| {
+                        (
+                            id,
+                            editpad_core::replace_all_regex(
+                                &text,
+                                &pattern,
+                                &replacement,
+                                case_sensitive,
+                            ),
+                        )
+                    })
+                    .collect()
+            },
+            move |results| Message::ReplaceAllTabsRegexDone(results, read_only, unprocessed),
+        )
+    }
+
+    /// 跨标签替换的收尾：状态摘要 +（活动页被改过时）重扫 +（有改动时）防抖保存。
+    fn finish_cross_tab_replace(
+        &mut self,
+        changed_tabs: usize,
+        total: usize,
+        read_only: usize,
+        unprocessed: usize,
+        touched_active: bool,
+    ) -> Task<Message> {
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        if touched_active {
+            tasks.push(self.schedule_find_scan());
+        }
+        if total > 0 {
+            tasks.push(self.maybe_schedule_autosave());
+        }
+        self.set_status(editpad_core::fmt_replaced_in_tabs(
+            self.lang(),
+            changed_tabs,
+            total,
+            read_only,
+            unprocessed,
+        ));
+        Task::batch(tasks)
+    }
+}
+
 impl Editpad {
     // ---------- domain methods (round 81 Phase 1: update() split) ----------
     /// 域：查找/替换/跳转/查找全部。臂体自原 update() 逐字搬移，零行为变更。
@@ -258,8 +467,17 @@ impl Editpad {
                 self.replace_query = query;
                 Task::none()
             }
-            Message::ReplaceCurrent => self.replace_current(),
+            Message::ReplaceCurrent => {
+                // 「替换当前」直接改选区，不经 `Edit(EditOp)` 那道只读闸——在此补
+                if self.read_only_blocks_replace() {
+                    return Task::none();
+                }
+                self.replace_current()
+            }
             Message::ReplaceCurrentRegex => {
+                if self.read_only_blocks_replace() {
+                    return Task::none();
+                }
                 // P70：正则模式的「替换当前」——重选当前命中跨度（命中表
                 // 可能比选区新），用原始命中文本（含真实 \r\n）做单次展开
                 // 替换。无当前命中时先定位第一个（FindScanDone 会清
@@ -346,30 +564,35 @@ impl Editpad {
                     // 扫描在途时禁止全部替换：此刻的全文快照可能是过期的
                     return Task::none();
                 }
+                if self.read_only_blocks_replace() {
+                    return Task::none();
+                }
+                let Some(req) = ReplaceRequest::from_panel(self) else {
+                    return Task::none();
+                };
                 // P70：正则分支——全文 to_text + fancy-regex 替换（$1 组引用）。
                 // 与 FormatJson 同款防冻结上限（to_text + 结果双份内存）。
                 // P148：替换本体移出 UI 线程——回溯引擎对病态模式 + 大文档
                 // 曾冻结整个应用（回溯限制的是单次尝试步数，全文逐位置尝试
                 // 总量无界）。busy 包裹挡并发编辑 ⇒ 回报内容与发起时刻必然
                 // 一致，无需版本复核；「必回一条消息」纪律由 Task 语义保证。
-                if self.regex_enabled {
-                    const REGEX_REPLACE_MAX_CHARS: usize = 4_000_000;
-                    let (text, chars) = {
+                if req.regex {
+                    let (chars, text) = {
                         let ed = self.cur_handle.borrow();
-                        (ed.doc.to_text(), ed.doc.text_len())
+                        (ed.doc.text_len(), ed.doc.to_text())
                     };
-                    if chars > REGEX_REPLACE_MAX_CHARS {
+                    if chars > REPLACE_TEXT_MAX_CHARS {
                         self.set_status_error(format!(
-                            "{}{chars}{}{REGEX_REPLACE_MAX_CHARS}{}",
+                            "{}{chars}{}{REPLACE_TEXT_MAX_CHARS}{}",
                             self.t(editpad_core::Key::StTooLargeRegexPrefix),
                             self.t(editpad_core::Key::StTooLargeRegexMiddle),
                             self.t(editpad_core::Key::StTooLargeRegexSuffix)
                         ));
                         return Task::none();
                     }
-                    let pattern = self.find_query.clone();
-                    let replacement = self.replace_query.clone();
-                    let case_sensitive = self.case_sensitive;
+                    let pattern = req.query.clone();
+                    let replacement = req.replacement.clone();
+                    let case_sensitive = req.case_sensitive;
                     self.enter_busy();
                     self.set_status(self.t(editpad_core::Key::StRegexReplacing).to_owned());
                     return Task::perform(
@@ -384,71 +607,123 @@ impl Editpad {
                         Message::ReplaceAllRegexDone,
                     );
                 }
-                // 整词模式（仅字面查询）：rope 流式路径不做词边界判定，
-                // 改走全文两遍法；文档上限与正则分支同口径防冻结
-                if self.whole_word {
-                    const WHOLE_WORD_MAX_CHARS: usize = 4_000_000;
-                    let (text, chars, eol) = {
-                        let ed = self.cur_handle.borrow();
-                        (ed.doc.to_text(), ed.doc.text_len(), ed.doc.line_ending())
-                    };
-                    if chars > WHOLE_WORD_MAX_CHARS {
+                // 字面／整词两支：条件与落地都收进 ReplaceRequest／
+                // apply_replaced_page，与 A7 的跨标签入口共用同一份实现——
+                // 同一个面板状态在两个按钮下不可能给出不同结果。
+                // 整词上限的判据也在 apply_to 里（原来这两个分支各写一遍常数）。
+                let replaced = {
+                    let ed = self.cur_handle.borrow();
+                    req.apply_to(&ed.doc)
+                };
+                let (new_contents, count) = match replaced {
+                    Replaced::Done(text, count) => (text, count),
+                    Replaced::TooLarge(chars) => {
                         self.set_status_error(format!(
-                            "{}{chars}{}{WHOLE_WORD_MAX_CHARS}{}",
+                            "{}{chars}{}{REPLACE_TEXT_MAX_CHARS}{}",
                             self.t(editpad_core::Key::StTooLargeWordPrefix),
                             self.t(editpad_core::Key::StTooLargeWordMiddle),
                             self.t(editpad_core::Key::StTooLargeWordSuffix)
                         ));
                         return Task::none();
                     }
-                    let query = eol.normalize(&unescape_query(&self.find_query));
-                    let replacement = eol.normalize(&unescape_query(&self.replace_query));
-                    let (new_contents, count) = editpad_core::replace_all_word(
-                        &text,
-                        &query,
-                        &replacement,
-                        self.case_sensitive,
-                    );
-                    let mut tasks: Vec<Task<Message>> = Vec::new();
-                    if count > 0 {
-                        self.cur().borrow_mut().replace_whole_document(
-                            editpad_core::Document::from_str(&new_contents),
-                        );
-                        self.tab_mut().dirty = true;
-                        self.tab_mut().note_mutation();
-                        tasks.push(self.schedule_find_scan());
-                        tasks.push(self.maybe_schedule_autosave());
-                    }
-                    self.set_status(editpad_core::fmt_replaced(self.lang(), count));
-                    return Task::batch(tasks);
-                }
-                // P11：直接在 rope 上流式替换，省掉 to_text() 全文拷贝
-                // P22 补充：查询与替换文本先做转义解析（\n \r \t \\）
-                let (new_contents, count) = {
-                    let editor = self.cur_handle.borrow();
-                    editpad_core::replace_all_document(
-                        &editor.doc,
-                        &unescape_query(&self.find_query),
-                        &unescape_query(&self.replace_query),
-                        self.case_sensitive,
-                    )
                 };
+                let mut tasks: Vec<Task<Message>> = Vec::new();
                 if count > 0 {
-                    self.cur()
-                        .borrow_mut()
-                        .replace_whole_document(editpad_core::Document::from_str(&new_contents));
-                    self.tab_mut().dirty = true;
-                    // P18：内容版本与防抖起点同步推进
-                    self.tab_mut().note_mutation();
-                }
-                // P10：替换后的重扫走后台防抖，不再同步刷
-                let mut tasks = vec![self.schedule_find_scan()];
-                if count > 0 {
+                    self.apply_replaced_page(self.active_tab, &new_contents);
                     // P18：内容变了 → 排队一次防抖自动保存
                     tasks.push(self.maybe_schedule_autosave());
                 }
+                // P10：替换后的重扫走后台防抖，不再同步刷
+                tasks.push(self.schedule_find_scan());
                 self.set_status(editpad_core::fmt_replaced(self.lang(), count));
                 Task::batch(tasks)
+            }
+            Message::ReplaceAllInTabs => {
+                // 前置闸与单页「全部替换」同一条：busy 与在途扫描都意味着
+                // 「此刻的正文快照可能过期」，跨标签更是如此。
+                if self.busy || self.find_query.is_empty() || self.find_scanning() {
+                    return Task::none();
+                }
+                let Some(req) = ReplaceRequest::from_panel(self) else {
+                    return Task::none();
+                };
+                if req.regex {
+                    return self.start_cross_tab_regex(&req);
+                }
+                let mut changed_tabs = 0usize;
+                let mut total = 0usize;
+                let mut read_only = 0usize;
+                let mut unprocessed = 0usize;
+                let mut touched_active = false;
+                for idx in 0..self.tabs.len() {
+                    let replaced = {
+                        let ed = self.tabs[idx].editor.borrow();
+                        if ed.read_only {
+                            read_only += 1;
+                            continue;
+                        }
+                        req.apply_to(&ed.doc)
+                    };
+                    match replaced {
+                        // 没命中的页一个字节都不动：不置脏、不占一步撤销栈
+                        Replaced::Done(text, count) if count > 0 => {
+                            self.apply_replaced_page(idx, &text);
+                            changed_tabs += 1;
+                            total += count;
+                            touched_active |= idx == self.active_tab;
+                        }
+                        Replaced::Done(..) => {}
+                        Replaced::TooLarge(_) => unprocessed += 1,
+                    }
+                }
+                self.finish_cross_tab_replace(
+                    changed_tabs,
+                    total,
+                    read_only,
+                    unprocessed,
+                    touched_active,
+                )
+            }
+            Message::ReplaceAllTabsRegexDone(results, read_only, mut unprocessed) => {
+                // busy 包裹期间文档不可变 ⇒ 回报内容与发起时刻一致，按页 id
+                // 投递即可（下标会随关页漂移，与 HlPaved 同一口径）；找不到的
+                // id＝期间被关掉的那一页，直接丢弃。
+                self.busy = false;
+                let mut changed_tabs = 0usize;
+                let mut total = 0usize;
+                let mut touched_active = false;
+                for (tab_id, result) in results {
+                    let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                        continue;
+                    };
+                    let (new_contents, count) = match result {
+                        Ok(pair) => pair,
+                        // 运行期报错（回溯触限那类）：这一页不动，计入「未处理」
+                        Err(_) => {
+                            unprocessed += 1;
+                            continue;
+                        }
+                    };
+                    if count == 0 {
+                        continue;
+                    }
+                    // 结果按该页自己的主导行尾归一：正则替换文本里的裸换行
+                    // 不得在 CRLF 页里制造混合行尾（单页路径同口径）
+                    let eol = self.tabs[idx].editor.borrow().doc.line_ending();
+                    let new_contents = eol.normalize(&new_contents);
+                    let active = idx == self.active_tab;
+                    self.apply_replaced_page(idx, &new_contents);
+                    changed_tabs += 1;
+                    total += count;
+                    touched_active |= active;
+                }
+                self.finish_cross_tab_replace(
+                    changed_tabs,
+                    total,
+                    read_only,
+                    unprocessed,
+                    touched_active,
+                )
             }
             Message::ReplaceAllRegexDone(result) => {
                 // P148：后台正则替换落账。busy 包裹期间文档不可变——回报
@@ -462,11 +737,7 @@ impl Editpad {
                         if count > 0 {
                             let eol = self.cur_handle.borrow().doc.line_ending();
                             let new_contents = eol.normalize(&new_contents);
-                            self.cur().borrow_mut().replace_whole_document(
-                                editpad_core::Document::from_str(&new_contents),
-                            );
-                            self.tab_mut().dirty = true;
-                            self.tab_mut().note_mutation();
+                            self.apply_replaced_page(self.active_tab, &new_contents);
                             tasks.push(self.schedule_find_scan());
                             tasks.push(self.maybe_schedule_autosave());
                         }

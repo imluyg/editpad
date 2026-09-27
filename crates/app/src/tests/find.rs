@@ -1836,3 +1836,336 @@ fn hit_cap_truncates_the_table_and_says_so() {
     assert_eq!(app.hits_capped_suffix(), "", "未触顶不该明示");
     assert_eq!(app.matches.hits().len(), 1, "夹具自证：未触顶的表原样");
 }
+
+// ---------- A7（功能队列②）跨标签全部替换 ----------
+
+/// 造 N 页应用并逐页喂内容：返回的应用活动页恒为第 0 页。
+/// 走真实 `NewTab` 投递点，所以每页都有独立的 id / 撤销栈 / 脏位。
+fn tabs_with_contents(contents: &[&str]) -> Editpad {
+    let mut app = Editpad::default();
+    for (i, text) in contents.iter().enumerate() {
+        if i > 0 {
+            dispatch(&mut app, Message::NewTab);
+        }
+        let idx = app.tabs.len() - 1;
+        app.tabs[idx]
+            .editor
+            .borrow_mut()
+            .reset_document(editpad_core::Document::from_str(text));
+    }
+    assert_eq!(app.tabs.len(), contents.len(), "夹具自证：页数＝内容数");
+    dispatch(&mut app, Message::SwitchTab(0));
+    assert_eq!(app.active_tab, 0, "夹具自证：活动页回到第 0 页");
+    app
+}
+
+#[test]
+fn cross_tab_replace_hits_every_page_and_counts_only_the_changed_ones() {
+    let mut app = tabs_with_contents(&["foo a foo", "b foo", "nothing here"]);
+    app.find_visible = true;
+    app.find_query = "foo".into();
+    app.replace_query = "x".into();
+
+    let _ = app.update(Message::ReplaceAllInTabs);
+
+    let text_of = |app: &Editpad, i: usize| app.tabs[i].editor.borrow().doc.to_text();
+    assert_eq!(text_of(&app, 0), "x a x");
+    assert_eq!(text_of(&app, 1), "b x", "非活动页也要改写");
+    assert_eq!(text_of(&app, 2), "nothing here", "没命中的页一个字节都不动");
+    assert!(app.tabs[0].dirty && app.tabs[1].dirty);
+    assert!(
+        !app.tabs[2].dirty,
+        "零命中的页不得被置脏（更不该白占一步撤销栈）"
+    );
+    // 标签数与处数都要报：只报处数，用户分不清这次动的是当前页还是全部页
+    assert_eq!(app.status, "共 2 个标签替换 3 处", "实得 {:?}", app.status);
+
+    // 后台页的撤销链也要能反悔——落地走的是 replace_whole_document（先 snapshot）
+    dispatch(&mut app, Message::SwitchTab(1));
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "b foo",
+        "非活动页的替换必须可撤销"
+    );
+}
+
+#[test]
+fn cross_tab_replace_skips_read_only_pages_and_says_so_by_name() {
+    let mut app = tabs_with_contents(&["foo", "foo"]);
+    app.tabs[1].editor.borrow_mut().read_only = true;
+    app.find_query = "foo".into();
+    app.replace_query = "x".into();
+
+    let _ = app.update(Message::ReplaceAllInTabs);
+
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "x");
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        "foo",
+        "只读页不得被改写"
+    );
+    assert!(!app.tabs[1].dirty, "只读页也不得被置脏");
+    assert!(
+        app.status.contains("1 个只读标签未改"),
+        "跳过要点名，实得 {:?}",
+        app.status
+    );
+    assert!(app.status.starts_with("共 1 个标签替换 1 处"));
+}
+
+#[test]
+fn replace_entry_points_refuse_read_only_active_page() {
+    // 只读锁原本只挡 `Edit(EditOp)` 那道闸，而替换直接换文档是旁路：A7 给跨标签
+    // 定了「只读页跳过」的口径，单页入口就不能继续改。三条入口各钉一格。
+    let locked = Editpad::default()
+        .t(editpad_core::Key::StDocReadOnlyLocked)
+        .to_owned();
+
+    for (what, msg) in [
+        ("ReplaceAll", Message::ReplaceAll),
+        ("ReplaceCurrent", Message::ReplaceCurrent),
+        ("ReplaceCurrentRegex", Message::ReplaceCurrentRegex),
+    ] {
+        let mut app = tabs_with_contents(&["foo bar foo"]);
+        app.cur_handle.borrow_mut().read_only = true;
+        app.find_query = "foo".into();
+        app.replace_query = "x".into();
+        app.matches = Rc::new(scanned(vec![editpad_core::MatchPos {
+            line: 0,
+            col: 0,
+            len_chars: 3,
+        }]));
+        app.match_idx = Some(0);
+        app.status = "哨兵".into();
+
+        let _ = app.update(msg);
+
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "foo bar foo",
+            "{what} 不得改动只读页正文"
+        );
+        assert!(!app.tab().dirty, "{what} 不得置脏");
+        assert_eq!(
+            app.status, locked,
+            "{what} 应给出与 `Edit` 拒收分支同一句话"
+        );
+    }
+}
+
+#[test]
+fn cross_tab_replace_clears_the_stale_hit_layer_of_background_pages() {
+    // replace_whole_document 不动 find_hl：活动页随后有 schedule_find_scan 替它
+    // 刷新，后台页不会有人替它重扫——留着就是拿旧内容的坐标画新内容。
+    let mut app = tabs_with_contents(&["foo", "foo"]);
+    let stale = scanned(vec![editpad_core::MatchPos {
+        line: 0,
+        col: 0,
+        len_chars: 3,
+    }]);
+    app.tabs[1]
+        .editor
+        .borrow_mut()
+        .install_find_hits(Rc::new(stale));
+    assert!(
+        !app.tabs[1].editor.borrow().find_hl.is_empty(),
+        "夹具自证：后台页带着一张旧命中表"
+    );
+    app.find_visible = true;
+    app.find_query = "foo".into();
+    app.replace_query = "x".into();
+
+    let _ = app.update(Message::ReplaceAllInTabs);
+
+    assert!(
+        app.tabs[1].editor.borrow().find_hl.is_empty(),
+        "被改写的后台页必须作废旧命中表"
+    );
+    assert!(
+        app.find_scan.is_some(),
+        "活动页被改写过 ⇒ 排队重扫（旧表同样不可信）"
+    );
+}
+
+#[test]
+fn cross_tab_whole_word_mode_reports_oversized_pages_instead_of_freezing() {
+    // 整词支要物化正文，沿用单页那份上限；超了的那一页跳过并在摘要里报数，
+    // 而不是把整次操作拒收（前面的页已经改了，拒收也退不回去）。
+    let big = "f".repeat(crate::update::find::REPLACE_TEXT_MAX_CHARS + 1);
+    let mut app = tabs_with_contents(&["foo", "afooa", &big]);
+    app.find_query = "foo".into();
+    app.replace_query = "x".into();
+    app.whole_word = true;
+
+    let _ = app.update(Message::ReplaceAllInTabs);
+
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "x");
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        "afooa",
+        "整词模式不得命中词内子串"
+    );
+    assert_eq!(
+        app.tabs[2].editor.borrow().doc.to_text(),
+        big,
+        "超上限的页不得被改写"
+    );
+    assert!(!app.tabs[2].dirty);
+    assert!(
+        app.status.contains("1 个标签未处理"),
+        "跳过要报数，实得 {:?}",
+        app.status
+    );
+}
+
+#[test]
+fn cross_tab_regex_computes_off_the_ui_thread_and_applies_by_tab_id() {
+    // P148 的纪律在跨标签这里更强（一次跑 N 份文档）：投递时正文一定没变，
+    // 结果按页 id 落地（下标会随关页漂移），未知 id 与零处数都不落地。
+    let mut app = tabs_with_contents(&["foo a foo", "b foo"]);
+    app.find_query = "f(o)o".into();
+    app.replace_query = "x$1".into();
+    app.regex_enabled = true;
+    let ids: Vec<u64> = app.tabs.iter().map(|t| t.id).collect();
+
+    let _ = app.update(Message::ReplaceAllInTabs);
+
+    assert!(app.busy, "正则替换要进 busy 才能挡住并发改写");
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "foo a foo");
+    assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "b foo");
+    assert!(!app.tabs[0].dirty, "后台算完之前不该有落账");
+
+    // 夹具代做后台线程那一步（headless dispatch 会丢 Task，与 p70 同款手法）
+    let calc = |app: &Editpad, i: usize| {
+        let (text, count) = editpad_core::replace_all_regex(
+            &app.tabs[i].editor.borrow().doc.to_text(),
+            "f(o)o",
+            "x$1",
+            true,
+        )
+        .expect("参照替换应成功");
+        Ok((text, count))
+    };
+    let r0 = calc(&app, 0);
+    let r1 = calc(&app, 1);
+    let gone = ids[1] + 10_000;
+    dispatch(
+        &mut app,
+        Message::ReplaceAllTabsRegexDone(
+            vec![
+                (ids[0], r0),
+                (ids[1], r1),
+                (gone, Ok(("不该落地".to_owned(), 7))),
+                (ids[0], Ok(("零处数也不落地".to_owned(), 0))),
+            ],
+            0,
+            0,
+        ),
+    );
+
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "xo a xo");
+    assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "b xo");
+    assert!(!app.busy, "回报落地后必须退出 busy");
+    assert_eq!(app.status, "共 2 个标签替换 3 处", "实得 {:?}", app.status);
+}
+
+#[test]
+fn cross_tab_regex_pack_honours_read_only_and_the_cumulative_budget() {
+    // 累计预算这条线端到端看不见（headless dispatch 丢 Task，未处理数只在回报里
+    // 出现，而回报的载荷是夹具写的）⇒ 直接钉装料纯函数。
+    let app = tabs_with_contents(&["12345", "1234567", "12"]);
+    app.tabs[2].editor.borrow_mut().read_only = true;
+
+    let (jobs, read_only, unprocessed) = Editpad::pack_regex_jobs(&app.tabs, 10);
+
+    let got: Vec<u64> = jobs.iter().map(|(id, _)| *id).collect();
+    assert_eq!(got, vec![app.tabs[0].id], "只有装得下的那一页进任务");
+    assert_eq!(jobs.len(), 1, "夹具自证：预算 10 只够一页");
+    assert_eq!(jobs[0].1, "12345", "进任务的是该页正文快照");
+    assert_eq!(
+        (read_only, unprocessed),
+        (1, 1),
+        "只读与未处理各算各的：实得 {read_only} 只读 / {unprocessed} 未处理"
+    );
+    // 第二页超预算不得吃掉第三页的只读计数（两类计数不能互相顶班）
+    assert_eq!(
+        Editpad::pack_regex_jobs(&app.tabs, 10_000).2,
+        0,
+        "预算够时一页都不该被跳过"
+    );
+}
+
+#[test]
+fn cross_tab_regex_with_nothing_to_pack_reports_instead_of_leaving_busy() {
+    let mut app = tabs_with_contents(&["foo", "foo"]);
+    for tab in app.tabs.iter_mut() {
+        tab.editor.borrow_mut().read_only = true;
+    }
+    app.find_query = "f(o)o".into();
+    app.replace_query = "x$1".into();
+    app.regex_enabled = true;
+
+    let _ = app.update(Message::ReplaceAllInTabs);
+
+    assert!(
+        !app.busy,
+        "一页都没进任务却进 busy ⇒ 界面会永远停在「正则替换中…」"
+    );
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "foo");
+    assert!(
+        app.status.starts_with("共 0 个标签替换 0 处"),
+        "实得 {:?}",
+        app.status
+    );
+    assert!(
+        app.status.contains("2 个只读标签未改"),
+        "没干活也要说清为什么，实得 {:?}",
+        app.status
+    );
+}
+
+#[test]
+fn cross_tab_replace_shares_the_single_page_semantics() {
+    // 同一个面板状态在两个按钮下不得给出不同结果：正则模式不参与整词判定、
+    // 字面/整词都要解析转义。这里钉「整词＋字面查询」这一格——跨标签入口
+    // 若忘了整词，会把 afooa 改成 ax。
+    let mut app = tabs_with_contents(&["afooa", "foo"]);
+    app.find_query = "foo".into();
+    app.replace_query = "x".into();
+    app.whole_word = true;
+
+    let _ = app.update(Message::ReplaceAllInTabs);
+
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "afooa");
+    assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "x");
+    assert_eq!(app.status, "共 1 个标签替换 1 处", "实得 {:?}", app.status);
+
+    // 与单页「全部替换」对同一内容给出同一结果
+    let mut solo = tabs_with_contents(&["afooa"]);
+    solo.find_query = "foo".into();
+    solo.replace_query = "x".into();
+    solo.whole_word = true;
+    let _ = solo.update(Message::ReplaceAll);
+    assert_eq!(solo.tabs[0].editor.borrow().doc.to_text(), "afooa");
+    assert_eq!(solo.status, "已替换 0 处");
+}
+
+#[test]
+fn cross_tab_replace_refuses_empty_query_and_in_flight_scan() {
+    for (query, scan) in [("", None), ("foo", Some(11))] {
+        let mut app = tabs_with_contents(&["foo", "foo"]);
+        app.find_query = query.into();
+        app.replace_query = "x".into();
+        app.find_scan = scan;
+        app.status = "哨兵".into();
+
+        let _ = app.update(Message::ReplaceAllInTabs);
+
+        assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "foo");
+        assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "foo");
+        assert!(!app.tabs[0].dirty && !app.tabs[1].dirty);
+        assert_eq!(app.status, "哨兵", "拒收时不留任何反馈痕迹");
+        assert!(!app.busy, "拒收不得留下 busy");
+    }
+}

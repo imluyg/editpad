@@ -220,6 +220,10 @@ fn restore_window_geometry(s: &editpad_core::Settings) -> (iced::Size, window::P
     (size, position)
 }
 
+/// A7：跨标签正则替换的后台回报载荷——逐项 `(页 id, 该页的替换结果)`。
+/// 起名字是因为裸写这层嵌套会被 clippy `type_complexity` 拒收。
+pub(crate) type CrossTabRegexResults = Vec<(u64, Result<(String, usize), String>)>;
+
 #[derive(Debug, Clone)]
 enum Message {
     /// 编辑器按键编辑（字符、删除、移动……）
@@ -334,10 +338,17 @@ enum Message {
     /// P70：正则模式的「替换当前」（对当前命中做 $1 展开替换）
     ReplaceCurrentRegex,
     ReplaceAll,
+    /// A7（功能队列②）：对**全部打开的标签页**执行同一条件的全部替换。
+    /// 只读页跳过并在摘要里点名，未命中页一个字节都不动。
+    ReplaceAllInTabs,
     /// P148：正则「全部替换」后台计算完成——替换本体曾同步跑在 UI 线程，
     /// 回溯引擎对病态模式 + 大文档会冻结整个应用（回溯限制的是单次尝试
     /// 步数，全文逐位置尝试的总量无界）
     ReplaceAllRegexDone(Result<(String, usize), String>),
+    /// A7：跨标签正则替换的后台回报，按**页 id**（不是下标，关页会漂移）逐项
+    /// 投递；每项独立成败，报错的那一项不落地。后两个数是发起时跳过的
+    /// 只读页数与"未处理"页数——回报时才有依据拼出完整摘要。
+    ReplaceAllTabsRegexDone(CrossTabRegexResults, usize, usize),
     /// 后台查找扫描完成：(任务序号, 命中表)。序号过期的结果直接丢弃（P10）。
     /// P301：载荷是**造好的** [`FindHitTable`]（连同「能否按行二分」的判定），
     /// 那趟 O(表长) 判序发生在后台扫描线程，不在 UI 线程。

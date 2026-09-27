@@ -32,8 +32,9 @@ pub use json::{format_json, validate_json, JsonError};
 pub use lang::{
     fmt_bookmark_total, fmt_core_error, fmt_fif_failed, fmt_fif_panel_title, fmt_fif_summary,
     fmt_file_hits, fmt_find_counter, fmt_font_picker_more, fmt_hits_capped, fmt_match_counter,
-    fmt_match_total, fmt_page_count, fmt_replaced, fmt_restore_note, fmt_selection, fmt_suffix,
-    fmt_wrapped, untitled_prefix, Key, Lang, LangOption, LANG_NAME_EN, LANG_NAME_ZH_CN,
+    fmt_match_total, fmt_page_count, fmt_replaced, fmt_replaced_in_tabs, fmt_restore_note,
+    fmt_selection, fmt_suffix, fmt_wrapped, untitled_prefix, Key, Lang, LangOption, LANG_NAME_EN,
+    LANG_NAME_ZH_CN,
 };
 pub use loader::{
     decode, load_document_streaming, load_file, load_file_streaming, LoadProgress, LoadedDocument,
