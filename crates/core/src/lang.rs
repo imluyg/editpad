@@ -297,6 +297,11 @@ key_table! {
     { ButtonResetDefault => "回退默认", "Use Default" },
     { ButtonRestoreAll => "全部恢复默认", "Restore All Defaults" },
     { HotkeyCaptureHint => "按下新组合键…（Esc 取消）", "Press a new shortcut… (Esc to cancel)" },
+    // P320：无默认键且尚未赋值的动作，设置热键页那一行不能再是空白——
+    // 空白既看不出"这条没键"还是"这里渲染坏了"，也不告诉人怎么给它一个键。
+    { HotkeyUnassigned => "未赋值（点「修改」再按一个新组合键）", "Not assigned (press Change, then a new shortcut)" },
+    // P321：命令面板底部的三个手势。F4 是新来的——不给它一句话就没人知道能就地赋键。
+    { PaletteHintKeys => "Enter 执行 · F4 给选中的命令赋键 · Esc 关闭", "Enter run · F4 bind a key to the selected command · Esc close" },
     { ThemeLight => "浅色", "Light" },
     { ThemeDark => "深色", "Dark" },
     { BackupSimple => "覆盖式 name.bak", "Overwrite name.bak" },

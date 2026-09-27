@@ -942,23 +942,44 @@ pub(crate) fn handle_key(
 
 // ---------- P129：命令面板数据源与模糊匹配 ----------
 
-/// 面板条目：动作 id + 展示标题 + 次行细节（默认键位）。
+/// P320：某动作**当前生效**的键位集合——唯一口径。
+///
+/// 用户重映射（`settings.hotkeys`）覆盖注册表默认；没重映射（或重映射串为空）
+/// 就回落全部同义默认键；**空 Vec = 这个动作一个键都没有**，调用侧必须显式
+/// 说一句话，不许留空白／空串。
+/// 两个界面都从这里取，差别只在展示密度：设置页那一行放得下全部同义键
+/// （`Ctrl+Y / Ctrl+Shift+Z`），面板键位列窄、只取首个。
+/// ⚠️ 改前面板走的是 `default_combo_of`（只读注册表默认值），于是用户把
+/// `Ctrl+S` 改成 `F10` 之后面板仍写 `Ctrl+S`——而面板正是「忘了这招按什么」
+/// 时去看的地方，它报错比空着更糟。
+pub(crate) fn effective_combos<'a>(
+    hotkeys: &'a HashMap<String, String>,
+    action: &'a HotkeyAction,
+) -> Vec<&'a str> {
+    if let Some(mapped) = hotkeys.get(action.id) {
+        if !mapped.trim().is_empty() {
+            return vec![mapped.as_str()];
+        }
+    }
+    action.default_combos.to_vec()
+}
+
+/// 面板条目：动作 id + 展示标题。键位列不在这里算——它取决于用户的重映射表，
+/// 而这张表只有 `Editpad` 持有（P320，见 [`effective_combos`]）。
 pub(crate) struct PaletteCommand {
     pub(crate) id: &'static str,
     /// P155：标题按当前界面语言现取（原为直接指向中文说明的 `&'static str`）。
     pub(crate) title: String,
-    pub(crate) detail: String,
 }
 
-/// 命令面板数据源 = 热键注册表全量（id/desc/默认键位），执行经
-/// dispatch_action 复用既有映射——注册表加动作即自动入面板，零双维护。
+/// 命令面板数据源 = 热键注册表全量（id/desc），执行经 dispatch_action
+/// 复用既有映射——注册表加动作即自动入面板，零双维护。
 pub(crate) fn palette_commands(lang: editpad_core::Lang) -> Vec<PaletteCommand> {
     HOTKEY_ACTIONS
         .iter()
         .map(|a| PaletteCommand {
             id: a.id,
             title: a.desc.text(lang).to_owned(),
-            detail: default_combo_of(a.id).unwrap_or("—").to_owned(),
         })
         .collect()
 }

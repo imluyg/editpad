@@ -403,11 +403,19 @@ fn settings_row_catalog_covers_pages_and_controls() {
     for (action, r) in HOTKEY_ACTIONS.iter().zip(&hotkey_rows) {
         assert_eq!(r.key, action.id, "热键行键必须与动作 id 一致");
         assert_eq!(r.title, action.desc.text(zh));
-        assert_eq!(
-            r.desc,
-            action.default_combos.join(" / "),
-            "未重映射时描述 = 全部默认组合"
-        );
+        // P320 改判：这里原先无条件断 `desc == default_combos.join(" / ")`，
+        // 而 `default_combos: &[]` 的 15 条动作 join 出来就是**空串**——
+        // 那条断言等于把"设置页一片空白"钉成了契约。现在两格分开钉。
+        let defaults = action.default_combos.join(" / ");
+        if defaults.trim().is_empty() {
+            assert_eq!(
+                r.desc,
+                app.t(editpad_core::Key::HotkeyUnassigned),
+                "没有默认键的动作也要说一句，不能留空行"
+            );
+        } else {
+            assert_eq!(r.desc, defaults, "未重映射时描述 = 全部默认组合");
+        }
     }
 
     // 控件覆盖：功能行必有控件；热键行有「修改」控件、关于为纯展示行
@@ -550,6 +558,87 @@ fn hotkey_capture_rejects_non_hotkey_keys_and_esc_cancels() {
         "非法组合不得写入映射"
     );
     dispatch(&mut app, Message::HotkeyCaptureCancel);
+}
+
+/// P320：设置页热键行不许出现空白描述。
+///
+/// 注册表里有 15 条 `default_combos: &[]` 的动作（P316 那批＋P318/P319 两条面板入口），
+/// 改前它们的「当前组合」是 `default_combos.join(" / ")` ＝ **空串**——界面上
+/// 既看不出"这条没键"还是"这里渲染坏了"，也不告诉人怎么给它一个键。
+#[test]
+fn no_hotkey_row_is_blank_and_the_unassigned_are_exactly_the_keyless_ones() {
+    let app = Editpad::default();
+    let rows = app.rows_for(SettingsPage::Hotkeys);
+    let blanks: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.desc.trim().is_empty())
+        .map(|r| r.key.as_str())
+        .collect();
+    assert!(
+        blanks.is_empty(),
+        "设置热键页不许有空白行，实得 {} 条：{:?}",
+        blanks.len(),
+        blanks
+    );
+    // 非空自证：这 15 条确实存在，否则上面那条断言会因"没有空白行可言"而恒真
+    let keyless: Vec<&str> = HOTKEY_ACTIONS
+        .iter()
+        .filter(|a| a.default_combos.is_empty())
+        .map(|a| a.id)
+        .collect();
+    assert!(
+        keyless.len() >= 15,
+        "用例前提：注册表里要有无默认键的动作可数，实得 {} 条",
+        keyless.len()
+    );
+    let hint = app.t(editpad_core::Key::HotkeyUnassigned);
+    let shown_hint: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.desc == hint)
+        .map(|r| r.key.as_str())
+        .collect();
+    assert_eq!(
+        shown_hint, keyless,
+        "显式说「未赋值」的那些必须恰好是注册表里没默认键的——多一条＝有键的被说成没键，\
+         少一条＝有动作在冒充未赋值"
+    );
+}
+
+#[test]
+fn assigning_a_key_to_a_keyless_action_flips_that_row_off_the_hint() {
+    let mut app = Editpad::default();
+    let desc = |app: &Editpad| {
+        app.rows_for(SettingsPage::Hotkeys)
+            .into_iter()
+            .find(|r| r.key == "clip_history")
+            .expect("clip_history 在热键页有一行")
+            .desc
+    };
+    let hint = app.t(editpad_core::Key::HotkeyUnassigned).to_owned();
+    assert_eq!(
+        desc(&app),
+        hint,
+        "用例前提：P319 那条动作没有默认键 ⇒ 行上显示「未赋值」"
+    );
+    dispatch(&mut app, Message::HotkeyCaptureStarted("clip_history"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("F10".into()));
+    assert_eq!(
+        app.settings.hotkeys.get("clip_history").map(String::as_str),
+        Some("F10")
+    );
+    assert_eq!(
+        desc(&app),
+        "F10",
+        "赋完键行上要立刻显出这个键，不能再停在提示语——否则用户看不出刚按的键生效了"
+    );
+    // 反向一格：非法组合提交失败时，行上留住的仍是上一条生效值
+    dispatch(&mut app, Message::HotkeyCaptureStarted("clip_history"));
+    dispatch(&mut app, Message::HotkeyCaptureKey("alt+f4".into()));
+    assert_eq!(
+        desc(&app),
+        "F10",
+        "非法组合不该把行改回「未赋值」，也不该留个空串"
+    );
 }
 
 #[test]

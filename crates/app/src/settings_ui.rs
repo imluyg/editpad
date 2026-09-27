@@ -929,6 +929,17 @@ impl Editpad {
         .into()
     }
 
+    /// P320：热键页某一行的「当前组合」＝生效键位的全部同义串（用户重映射覆盖
+    /// 注册表默认，口径见 [`crate::hotkeys::effective_combos`]）；一个键都没有
+    /// 就显式说「未赋值」——空白行分不清"这条没键"与"这里渲染坏了"。
+    pub(crate) fn hotkey_row_desc(&self, action: &crate::hotkeys::HotkeyAction) -> String {
+        let combos = effective_combos(&self.settings.hotkeys, action);
+        if combos.is_empty() {
+            return self.t(editpad_core::Key::HotkeyUnassigned).to_owned();
+        }
+        combos.join(" / ")
+    }
+
     /// 某分类页的全部设置行（P62）：热键页为**动态行**——标题 = 动作
     /// 说明、描述 = 当前生效组合（随重映射变化），其余页走静态目录。
     ///
@@ -943,14 +954,11 @@ impl Editpad {
                     page,
                     key: a.id.to_owned(),
                     title: row_title(a.id, lang),
-                    // 未重映射时展示全部默认组合（多默认同义键位，如重做
-                    // 的 Ctrl+Y / Ctrl+Shift+Z）；重映射后只展示当前生效值
-                    desc: self
-                        .settings
-                        .hotkeys
-                        .get(a.id)
-                        .cloned()
-                        .unwrap_or_else(|| a.default_combos.join(" / ")),
+                    // P320：描述 = 当前**生效**键位的全部同义串（重映射覆盖默认）；
+                    // 一个键都没有的那 15 条动作显式说「未赋值」，不再留空白行
+                    //（改前是 `default_combos.join(" / ")`，`&[]` join 出空串，
+                    // 界面上分不清"这条没键"还是"这里渲染坏了"）。
+                    desc: self.hotkey_row_desc(a),
                 })
                 .collect();
         }

@@ -59,6 +59,27 @@ impl Editpad {
         self.note_clip(&text);
         iced::clipboard::write(text)
     }
+
+    /// P321：命令面板里给**当前选中的那条命令**直接开录键态——收起面板，随后一次
+    /// 按键走既有的 `HotkeyCaptureKey` 通道（冲突校验、写映射、持久化、状态栏反馈
+    /// 全是设置页那一条实现，这里零新逻辑）。
+    ///
+    /// 为什么值得占一个键：一条命令"没键"往往就等于"不存在"。此前要给它一个键，
+    /// 得先 `Ctrl+E` 认出它、关掉面板、打开设置 → 快捷键页、在近一百行里找到它、
+    /// 点「修改」——而面板正是用户刚发现这个功能的那一屏。
+    ///
+    /// 选中的不是命令（标签行／剪贴板行／列表为空）⇒ **无操作且面板不关**：
+    /// 那几类条目没有"要赋的键"，吞掉 F4 或收起面板都只会让人觉得键坏了。
+    pub(crate) fn palette_assign_key(&mut self) -> Task<Message> {
+        let Some(id) = self.palette_selected_command_id() else {
+            return Task::none();
+        };
+        self.palette_visible = false;
+        self.focus_editor();
+        // 同步递归 update（`EditorCtxCommand`／列块剪切同例）：入口逻辑仍只有
+        // `HotkeyCaptureStarted` 那一处，这里不复制一份"开始捕获"。
+        self.update(Message::HotkeyCaptureStarted(id))
+    }
     // ---------- 域方法（第 81 轮 Phase 1：update() 拆分） ----------
     /// 域：编辑器/剪贴板/光标/预览/高亮铺路。臂体自原 update() 逐字搬移，零行为变更。
     pub(super) fn update_editor(&mut self, msg: Message) -> Task<Message> {
@@ -289,6 +310,8 @@ impl Editpad {
                         (keyboard::Key::Named(Named::Enter), _) => {
                             return Task::done(Message::PaletteExecute)
                         }
+                        // P321：面板里选中一条命令按 F4 = 直接给它赋键
+                        (keyboard::Key::Named(Named::F4), _) => return self.palette_assign_key(),
                         (keyboard::Key::Named(Named::Escape), _) => {
                             self.palette_visible = false;
                             // P151：焦点还给正文

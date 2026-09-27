@@ -558,7 +558,7 @@ impl Editpad {
                     tab_index: None,
                     clip_index: None,
                     title: c.title.to_owned(),
-                    detail: c.detail,
+                    detail: self.palette_combo_detail(c.id),
                 })
                 .collect(),
             crate::state::PaletteMode::Tabs => self
@@ -616,6 +616,28 @@ impl Editpad {
         }
         out
     }
+    /// P320：面板的键位列 = **生效**键位的首个（窄列放不下同义键串），一个都没有
+    /// 显 `—`。口径与设置页同源（[`crate::hotkeys::effective_combos`]）：改前这里
+    /// 读 `default_combo_of`（只看注册表默认值），于是用户把 `Ctrl+S` 重映射成
+    /// `F10` 之后面板仍写 `Ctrl+S`——而面板正是「忘了这招按什么」时去看的地方，
+    /// 报一个错键比留空更糟。
+    fn palette_combo_detail(&self, id: &str) -> String {
+        HOTKEY_ACTIONS
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| effective_combos(&self.settings.hotkeys, a))
+            .and_then(|combos| combos.first().map(|combo| combo.to_string()))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+    /// P321：面板底部那行手势提示。只在命令模式给——标签模式没有"给命令赋键"
+    /// 这件事，写上去就是假提示。抽成方法（与 [`Self::palette_empty_label`] 同理）：
+    /// 视图树夹具读得到几何、读不到文本，这句"哪个模式说哪句话"得有地方能被钉。
+    pub(crate) fn palette_hint_line(&self) -> Option<&'static str> {
+        match self.palette_mode {
+            crate::state::PaletteMode::Commands => Some(self.t(editpad_core::Key::PaletteHintKeys)),
+            _ => None,
+        }
+    }
     /// P319：面板空态那句话。剪贴板模式说"还没复制过"而不是"搜不到"——
     /// 第一次开这个面板必然两手空空，报"无匹配"会让人以为面板坏了。
     /// 抽成方法而非写在绘制里，是因为视图树夹具读不到文本、只读得到几何，
@@ -654,6 +676,16 @@ impl Editpad {
             .into_iter()
             .map(|(e, _)| e)
             .collect()
+    }
+    /// P321：当前选中条目的**命令 id**（标签行／剪贴板行／空列表 ⇒ None）。
+    /// 下标算式与 [`Self::palette_execute`] 同一条，不在这里另起一份口径。
+    pub(crate) fn palette_selected_command_id(&self) -> Option<&'static str> {
+        let entries = self.palette_filtered();
+        if entries.is_empty() {
+            return None;
+        }
+        let idx = self.palette_idx.min(entries.len() - 1);
+        entries[idx].command_id
     }
     /// 执行当前选中条目并关闭面板。命令经 dispatch_action 复用既有
     /// 映射（空修饰键——Shift 选区透传不适用面板执行）；标签模式直接
@@ -716,29 +748,29 @@ impl Editpad {
                 .on_press(Message::PalettePick(i)),
             );
         }
-        let card = opaque(
-            container(
-                column![
-                    text_input(
-                        self.t(editpad_core::Key::PalettePlaceholder),
-                        &self.palette_input
-                    )
-                    .id(palette_input_id())
-                    .size(uipx)
-                    .font(uifont)
-                    .on_input(Message::PaletteInputChanged)
-                    .on_submit(Message::PaletteExecute)
-                    .padding([4, 8]),
-                    rule::horizontal(1),
-                    scrollable(rows).height(360.0),
-                ]
-                .spacing(4)
-                .padding(6)
-                .width(Fill),
+        let mut col = column![
+            text_input(
+                self.t(editpad_core::Key::PalettePlaceholder),
+                &self.palette_input
             )
-            .width(560)
-            .style(popup_card_style),
-        );
+            .id(palette_input_id())
+            .size(uipx)
+            .font(uifont)
+            .on_input(Message::PaletteInputChanged)
+            .on_submit(Message::PaletteExecute)
+            .padding([4, 8]),
+            rule::horizontal(1),
+            scrollable(rows).height(360.0),
+        ]
+        .spacing(4)
+        .padding(6)
+        .width(Fill);
+        // P321：底部一行手势提示。F4 是这轮新加的动作，不写出来就等于没加——
+        // 面板里"这条命令没有键"恰恰是它 most 需要被发现的那一刻。
+        if let Some(hint) = self.palette_hint_line() {
+            col = col.push(text(hint).size(uipx * 0.85).font(uifont));
+        }
+        let card = opaque(container(col).width(560).style(popup_card_style));
         mouse_area(
             container(card)
                 .width(Fill)
