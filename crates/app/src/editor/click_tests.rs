@@ -244,6 +244,20 @@ fn shift_click_without_selection_uses_cursor_as_anchor() {
 }
 
 #[test]
+fn multi_click_after_a_single_click_adds_only_one_nav_origin() {
+    // P312 复核纠正：一次"跳过去"= 一个出发点。第一拍单击已记过，
+    // 连击那一拍若再记一次，Alt+← 会先小跳到点击处、按第二下才回到真正的出发点
+    let mut c = core_with("alpha beta");
+    c.cursor = pos(0, 0);
+    c.note_nav_origin(); // 控件层第一拍（单击）做的事
+    c.cursor = pos(0, 6);
+    assert!(c.select_word_at(pos(0, 6)), "第二拍 = 双击选中整词");
+    assert_eq!(c.nav_back.len(), 1, "连击那一拍不该再记第二个出发点");
+    assert!(c.nav_back());
+    assert_eq!(c.cursor, pos(0, 0), "一次 Alt+← 就该回到双击之前那一处");
+}
+
+#[test]
 fn shift_click_does_not_start_a_word_or_line_drag() {
     let mut c = core_with("one two three");
     c.cursor = pos(0, 0);

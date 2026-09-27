@@ -236,7 +236,9 @@ impl EditorCore {
         gran: DragGran,
     ) {
         self.break_typing();
-        self.note_nav_origin(); // P312：连击选择也是"跳过去"，记出发点
+        // ⚠️ 这里**不记**跳转历史（P312 复核纠正）：能走到连击这一拍，
+        // 说明同一处刚发生过一次单击，而那一拍已把"点击前的位置"记进栈。
+        // 再记一次会让 Alt+← 先小跳到点击处、按第二下才回到真正的出发点。
         self.clear_block(); // 块态与单选区互斥（第 67 轮口径）
         self.collapse_multi(); // 连击 = 重置为单光标（B10 主流口径）
         self.clear_vertical_goal(); // 点击类操作非竖向移动
