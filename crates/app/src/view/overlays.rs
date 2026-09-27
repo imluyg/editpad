@@ -458,9 +458,7 @@ impl Editpad {
                             self.settings.show_whitespace,
                             None,
                         ),
-                        interactive.then_some(Message::SettingsShowWhitespaceToggled(
-                            !self.settings.show_whitespace,
-                        )),
+                        interactive.then_some(Message::ToggleWhitespace),
                     ))
                     .push(item(
                         item_label(
@@ -469,11 +467,11 @@ impl Editpad {
                             self.settings.show_line_endings,
                             None,
                         ),
-                        interactive.then_some(Message::SettingsShowLineEndingsToggled(
-                            !self.settings.show_line_endings,
-                        )),
+                        interactive.then_some(Message::ToggleLineEndings),
                     ))
                     // 第 73 轮 ⑯：自动换行开关（查看菜单入口，与设置页同消息）
+                    // P316：三条"翻转当前态"都改走包装消息——菜单与命令面板
+                    // 共用一份取反逻辑（`dispatch_action` 是纯函数拿不到现值）
                     .push(item(
                         item_label(
                             lang,
@@ -481,8 +479,7 @@ impl Editpad {
                             self.settings.word_wrap,
                             None,
                         ),
-                        interactive
-                            .then_some(Message::SettingsWordWrapToggled(!self.settings.word_wrap)),
+                        interactive.then_some(Message::ToggleWordWrap),
                     ))
                     // P134（C7）：本页自动换行三态循环——跟随全局/本页开/
                     // 本页关；有覆盖时全局项旁标注（标签条目自身即状态显示）

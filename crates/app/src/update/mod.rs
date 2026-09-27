@@ -541,6 +541,10 @@ impl Editpad {
             | Message::LanguageOptionSelected(..)
             | Message::FontSizeDelta(..)
             | Message::ZoomResetDefault
+            // P316：三条无默认键的翻转命令（菜单与命令面板共用）
+            | Message::ToggleWordWrap
+            | Message::ToggleWhitespace
+            | Message::ToggleLineEndings
             | Message::TabFontSizeDelta(..)
             | Message::TabFontSizeReset
             | Message::TabWrapOverrideToggled

@@ -68,6 +68,7 @@ Then open the generated log sample — the UI stays draggable during loading and
 ## Keyboard Shortcuts
 
 The following are the default combos, all remappable on the **Settings → Keyboard Shortcuts ("设置 → 快捷键")** page (click "Modify" ("修改") and press the new combo; Esc cancels; conflicts are rejected; "Restore All Defaults" ("全部恢复默认") resets everything in one click). `Enter` / `Tab` / `Insert` / `Esc` have fixed semantics and are not in the registry. If you forget a key, press `Ctrl+E` to open the command palette and fuzzy-search any command to run directly.
+Commands that used to be mouse-only on the menus are registered too — they simply carry no default combo (they steal no key), and the palette lists them like any other action: Save As, recent files, open settings, word wrap, whitespace / line-ending marks, theme, Markdown preview, backup-on-save, the per-tab wrap three-state and per-tab font-size reset, and the two find-hit commands (mark hits as bookmarks / copy hit lines). Assign them a key on the same page if you use one often.
 
 <details>
 <summary><strong>Files &amp; Tabs</strong></summary>

@@ -288,6 +288,76 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+Shift+0"],
         desc: HkZoomReset,
     },
+    // P316（路线图 §10）：**无默认键**的命令也进注册表。命令面板的数据源就是
+    // 本表，所以此前 13 条只能靠鼠标点菜单的命令在面板里根本不存在（含 P310
+    // 刚加的两条）。空 `default_combos` 是刻意的：不抢任何键、不产生冲突，
+    // 用户在设置 → 热键页可以自行赋值（捕获流程对任意 id 通用）。
+    // 标题全部复用既有 `Menu*` 键 ⇒ 零新增文案。
+    HotkeyAction {
+        id: "save_as",
+        default_combos: &[],
+        desc: MenuSaveAs,
+    },
+    HotkeyAction {
+        id: "recents",
+        default_combos: &[],
+        desc: MenuRecents,
+    },
+    HotkeyAction {
+        id: "toggle_word_wrap",
+        default_combos: &[],
+        desc: MenuWordWrap,
+    },
+    HotkeyAction {
+        id: "toggle_whitespace",
+        default_combos: &[],
+        desc: MenuShowWhitespace,
+    },
+    HotkeyAction {
+        id: "toggle_line_endings",
+        default_combos: &[],
+        desc: MenuShowLineEndings,
+    },
+    HotkeyAction {
+        id: "toggle_theme",
+        default_combos: &[],
+        desc: MenuThemeToggle,
+    },
+    HotkeyAction {
+        id: "markdown_preview",
+        default_combos: &[],
+        desc: MenuPreview,
+    },
+    HotkeyAction {
+        id: "open_settings",
+        default_combos: &[],
+        desc: MenuOpenSettings,
+    },
+    HotkeyAction {
+        id: "toggle_backup_mode",
+        default_combos: &[],
+        desc: MenuBackupMode,
+    },
+    HotkeyAction {
+        id: "tab_wrap_override",
+        default_combos: &[],
+        desc: MenuTabWrapOverride,
+    },
+    HotkeyAction {
+        id: "tab_font_reset",
+        default_combos: &[],
+        desc: MenuTabFontReset,
+    },
+    HotkeyAction {
+        id: "mark_hit_lines",
+        default_combos: &[],
+        desc: MenuMarkHitLines,
+    },
+    HotkeyAction {
+        id: "copy_hit_lines",
+        default_combos: &[],
+        desc: MenuCopyHitLines,
+    },
     HotkeyAction {
         id: "doc_start",
         default_combos: &["Ctrl+Home"],
@@ -682,6 +752,21 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "format_json" => Some(Message::FormatJson),
         // P313：键盘字号缩放——与「查看」菜单项走同一条链路（同一动作、
         // 同样的 clamp 与落盘），只是入口不同
+        // P316：13 条无默认键命令——命令面板选中后执行的就是这里返回的消息，
+        // 与菜单项**同一条消息**（三条翻转走包装消息，见 update/settings.rs）
+        "save_as" => Some(Message::SaveAsRequested),
+        "recents" => Some(Message::RecentsToggled),
+        "toggle_word_wrap" => Some(Message::ToggleWordWrap),
+        "toggle_whitespace" => Some(Message::ToggleWhitespace),
+        "toggle_line_endings" => Some(Message::ToggleLineEndings),
+        "toggle_theme" => Some(Message::ThemeToggled),
+        "markdown_preview" => Some(Message::PreviewToggled),
+        "open_settings" => Some(Message::SettingsToggled),
+        "toggle_backup_mode" => Some(Message::SettingsBackupModeToggled),
+        "tab_wrap_override" => Some(Message::TabWrapOverrideToggled),
+        "tab_font_reset" => Some(Message::TabFontSizeReset),
+        "mark_hit_lines" => edit(EditOp::MarkHitLinesAsBookmarks),
+        "copy_hit_lines" => edit(EditOp::CopyHitLines),
         "zoom_in" => Some(Message::FontSizeDelta(crate::editor::FONT_ZOOM_STEP)),
         "zoom_out" => Some(Message::FontSizeDelta(-crate::editor::FONT_ZOOM_STEP)),
         "zoom_reset" => Some(Message::ZoomResetDefault),

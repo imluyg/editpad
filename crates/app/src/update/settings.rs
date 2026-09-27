@@ -145,6 +145,21 @@ impl Editpad {
                 let delta = editor::FONT_SIZE_DEFAULT - self.display_font_size();
                 self.update(Message::FontSizeDelta(delta))
             }
+            // ---------- P316：三条无默认键的翻转（菜单与命令面板共用入口） ----------
+            // 只做"读现值取反"再交回既有那条带参消息——落盘、下发、状态栏
+            // 反馈全部留在原处一份实现，不在这里重抄一遍
+            Message::ToggleWordWrap => {
+                let next = !self.settings.word_wrap;
+                self.update(Message::SettingsWordWrapToggled(next))
+            }
+            Message::ToggleWhitespace => {
+                let next = !self.settings.show_whitespace;
+                self.update(Message::SettingsShowWhitespaceToggled(next))
+            }
+            Message::ToggleLineEndings => {
+                let next = !self.settings.show_line_endings;
+                self.update(Message::SettingsShowLineEndingsToggled(next))
+            }
             // ---------- P134：每页显示覆盖（C7） ----------
             Message::TabFontSizeDelta(delta) => {
                 // Ctrl+滚轮：当前页覆盖字号——不动全局默认、不落盘

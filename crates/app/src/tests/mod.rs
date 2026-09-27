@@ -203,6 +203,8 @@ mod find;
 mod hits;
 // P312（C11）：Alt+←/→ 跳转历史的键位通道与只读守卫
 mod nav;
+// P316：无默认键的命令（面板可见 + 点了要能动）
+mod palette_cmds;
 mod robustness;
 mod session;
 mod settings;
