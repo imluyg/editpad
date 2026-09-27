@@ -1207,6 +1207,33 @@ impl EditorCore {
         true
     }
 
+    /// 摘掉**指定行**的书签（P318：书签列表面板的逐条「×」）。
+    ///
+    /// 返回是否真的摘掉一条：该行本就没书签 ⇒ 不入撤销栈、不给"已移除"的
+    /// 假反馈（面板列表可能与当前状态差一帧，例如别处刚清除过）。
+    pub fn remove_bookmark_at(&mut self, line: usize) -> bool {
+        if !self.bookmarks.contains(&line) {
+            return false;
+        }
+        self.snapshot();
+        self.bookmarks.remove(&line);
+        true
+    }
+
+    /// 升序且**剔除悬空行号**的书签行（P318：面板数据源）。
+    ///
+    /// 与 `scrollbar_bookmark_marks` 同一防御口径：正常路径书签随编辑再映射
+    /// 不会越界，但文档变短与再映射之间没有全局锁，列出来点不动的条目比少
+    /// 一条更糟。
+    pub fn bookmarked_lines_in_doc(&self) -> Vec<usize> {
+        let last = self.doc.line_count();
+        self.bookmarks
+            .iter()
+            .copied()
+            .filter(|&l| l < last)
+            .collect()
+    }
+
     /// 当前是否有查找命中（菜单项是否放行判据；命中表随扫描/切页作废）。
     pub fn has_find_hits(&self) -> bool {
         !self.find_hl.is_empty()

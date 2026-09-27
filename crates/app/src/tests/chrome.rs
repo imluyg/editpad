@@ -47,12 +47,15 @@ fn esc_dismisses_every_transient_prompt() {
         clean_exit: false,
     });
     app.column_editor_visible = true;
+    // P318 新增成员：书签列表面板（Esc 必须一并收起，见下方断言）
+    app.bookmarks_visible = true;
 
     dispatch(&mut app, Message::BarsDismissed);
 
     // ---- 断言全集清零 ----
     assert!(!app.find_visible, "查找栏");
     assert!(!app.find_all_visible, "「查找全部」结果面板（P82）");
+    assert!(!app.bookmarks_visible, "书签列表面板（P318）");
     assert!(!app.fif_visible, "FIF 结果面板（A8）");
     assert_eq!(app.fif_scan, None, "关 FIF 面板必须连带取消在途目录扫描");
     assert!(

@@ -25,6 +25,7 @@ pub(crate) use super::*;
 use iced::widget::column;
 
 // 按域拆分的 impl 块（纯移动零行为变更；私有方法经 pub(super) 跨文件可见）
+mod bookmarks_panel;
 mod find_ops;
 mod find_panel;
 mod lifecycle;
@@ -879,6 +880,10 @@ impl Editpad {
         // P150：查找/替换轻浮层（居中定宽、无背板、可继续编辑；Esc/× 关闭）
         if self.find_visible {
             layered = layered.push(self.find_overlay(uipx, uifont));
+        }
+        // P318：书签列表面板（非模态卡片；卡片外点击照旧落回正文，Esc 收起）
+        if self.bookmarks_visible {
+            layered = layered.push(self.bookmarks_panel(uipx, uifont));
         }
         if self.settings_visible {
             layered = layered.push(self.settings_overlay());

@@ -358,6 +358,13 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &[],
         desc: MenuCopyHitLines,
     },
+    // P318（功能队列③）：书签列表面板。号码位与 Ctrl+Shift 字母都已占满，
+    // 与那 13 条同等待遇——先无键入表（面板可见、设置页可赋键）
+    HotkeyAction {
+        id: "bookmark_panel",
+        default_combos: &[],
+        desc: HkBookmarkPanel,
+    },
     HotkeyAction {
         id: "doc_start",
         default_combos: &["Ctrl+Home"],
@@ -767,6 +774,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "tab_font_reset" => Some(Message::TabFontSizeReset),
         "mark_hit_lines" => edit(EditOp::MarkHitLinesAsBookmarks),
         "copy_hit_lines" => edit(EditOp::CopyHitLines),
+        // P318：书签列表面板（面板入口＝开关，与「×」同一条消息）
+        "bookmark_panel" => Some(Message::BookmarksToggled),
         "zoom_in" => Some(Message::FontSizeDelta(crate::editor::FONT_ZOOM_STEP)),
         "zoom_out" => Some(Message::FontSizeDelta(-crate::editor::FONT_ZOOM_STEP)),
         "zoom_reset" => Some(Message::ZoomResetDefault),

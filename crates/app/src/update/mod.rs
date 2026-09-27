@@ -24,6 +24,7 @@ use super::settings_ui::SettingsPage;
 pub(crate) use super::*;
 
 // 按域拆分的 impl 块（P157：纯移动零行为变更；私有方法经 pub(super) 跨文件可见）
+mod bookmarks;
 mod edit;
 mod file;
 mod find;
@@ -607,6 +608,10 @@ impl Editpad {
             | Message::ToggleFullscreen
             | Message::ToggleAlwaysOnTop
             | Message::WindowMoved(..) => self.update_session(message),
+            // ---------- P318：书签列表面板（开关／逐条跳／逐条摘） ----------
+            Message::BookmarksToggled
+            | Message::BookmarkGoto(..)
+            | Message::BookmarkRemoveAt(..) => self.update_bookmarks(message),
             // ---------- 查找/替换/跳转/查找全部 ----------
             Message::ToggleMonitorFile
             | Message::MonitorTick
@@ -747,6 +752,8 @@ impl Editpad {
         self.find_visible = false;
         self.goto_visible = false;
         self.recents_visible = false;
+        // P318：书签列表面板同样吃 Esc（穷尽回归里已加一条断言）
+        self.bookmarks_visible = false;
         // P151：Esc 同时收起命令面板与重命名态（下方既有分支同款），
         // 收尾把输入焦点还给正文——否则中文输入法在正文里失效
         self.palette_visible = false;

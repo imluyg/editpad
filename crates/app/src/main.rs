@@ -567,6 +567,13 @@ enum Message {
     /// P313：字号复位到规范默认（Ctrl+Shift+0 与「查看 → 重置缩放」共用；
     /// 增量要到运行期才知道，故单独一条消息而不是复用 FontSizeDelta 的常数）
     ZoomResetDefault,
+    // ---------- P318：书签列表面板 ----------
+    /// 面板开关（命令面板入口；面板非模态，正文照常编辑）
+    BookmarksToggled,
+    /// 点某一行：光标跳到该**逻辑行**（0 起；换算与夹紧交给 jump_to_line）
+    BookmarkGoto(usize),
+    /// 某一行的「×」：只摘这一条书签
+    BookmarkRemoveAt(usize),
     // ---------- P316：无默认键的命令（命令面板/未来赋键的入口） ----------
     // 三条"翻转当前态"的包装消息：`dispatch_action` 是纯函数（只有 id 与
     // 修饰键），拿不到 settings 现值，所以"取反"必须留在应用层做——

@@ -41,6 +41,8 @@ fn unassigned_actions_are_visible_in_the_palette() {
         "tab_font_reset",
         "mark_hit_lines",
         "copy_hit_lines",
+        // P318 新增的无默认键动作，同一条契约
+        "bookmark_panel",
     ] {
         assert!(ids.contains(&id), "{id} 应出现在命令面板里");
     }

@@ -628,6 +628,14 @@ key_table! {
     { HkBookmarkNext => "跳到下一个书签", "Jump to the next bookmark" },
     { HkBookmarkPrev => "跳到上一个书签", "Jump to the previous bookmark" },
     { HkBookmarkClearAll => "清除全部书签", "Clear all bookmarks" },
+    // P318（功能队列③）：书签列表面板——标题复用给菜单/面板/命令面板三处
+    { HkBookmarkPanel => "书签列表", "Bookmark list" },
+    { MenuBookmarkPanel => "书签列表…", "Bookmark List…" },
+    { StNoBookmarks => "还没有书签", "No bookmarks yet" },
+    { StBookmarkRemoved => "已移除该行的书签", "Removed the bookmark on that line" },
+    { StBookmarkNotThere => "那一行已经没有书签", "That line no longer has a bookmark" },
+    { StBookmarksMorePrefix => "…另有 ", "... plus " },
+    { StBookmarksMoreSuffix => " 条未列出", " more not listed" },
     { HkCopyMarkedLines => "复制全部标记行", "Copy all bookmarked lines" },
     { HkDelMarkedLines => "删除全部标记行", "Delete all bookmarked lines" },
     { HkJumpBracket => "跳到配对括号", "Jump to the matching bracket" },
@@ -720,6 +728,17 @@ pub fn fmt_match_total(lang: Lang, total: usize) -> String {
         Lang::En => match total {
             1 => "1 match".to_owned(),
             n => format!("{n} matches"),
+        },
+    }
+}
+
+/// P318：书签列表面板标题的计数（与 `fmt_match_total` 同形状，数字不进文案）。
+pub fn fmt_bookmark_total(lang: Lang, total: usize) -> String {
+    match lang {
+        Lang::ZhCn => format!("书签 {total} 处"),
+        Lang::En => match total {
+            1 => "1 bookmark".to_owned(),
+            n => format!("{n} bookmarks"),
         },
     }
 }

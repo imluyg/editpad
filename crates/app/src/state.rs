@@ -165,6 +165,9 @@ pub(crate) struct Editpad {
     /// 「查找全部」结果面板可见（第 62 轮）：数据源 = matches 全量命中表，
     /// 扫描刷新时自动跟随；仅当查找栏可见时有意义（面板停靠在查找区内）
     pub(crate) find_all_visible: bool,
+    /// P318：书签列表面板可见。非模态卡片（正文仍可编辑），数据源每次建视图
+    /// 现取当前页书签集 ⇒ 别处改了书签（清除／删标记行／编辑再映射）下一帧自动跟上
+    pub(crate) bookmarks_visible: bool,
     /// 查找浮层左上角位置（窗口坐标）。None = 用默认位置（窗口中间偏上）；
     /// 用户点单：浮层遮住正文目标行时必须能拖开，故位置由应用层持有。
     pub(crate) find_pos: Option<Point>,
@@ -416,6 +419,7 @@ impl Default for Editpad {
             find_seq: 0,
             find_cancel: Arc::default(),
             find_all_visible: false,
+            bookmarks_visible: false,
             find_pos: None,
             find_drag: None,
             find_status: false,

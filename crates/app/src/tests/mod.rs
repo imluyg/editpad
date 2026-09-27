@@ -193,6 +193,7 @@ fn parse_combo_for_test(combo: &str) -> (keyboard::Modifiers, keyboard::Key) {
 mod view_tree;
 pub(crate) use view_tree::ViewTree;
 
+mod bookmarks_panel;
 mod chrome;
 // P308：正文右键菜单 + P307 连击选择的视图树接线核对
 mod ctx_menu;
