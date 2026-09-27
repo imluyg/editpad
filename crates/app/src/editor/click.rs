@@ -154,6 +154,11 @@ impl EditorCore {
         self.cursor = hit;
         self.drag_gran = DragGran::Char;
         self.click_base = None;
+        // ⚠️ 必须进拖选态：控件层的 CursorMoved 分支在 `!is_dragging()` 时
+        // 直接 return（P307 复核纠正）。少了这一句，Shift+按下之后的
+        // "按住继续拖"整个哑掉——而 Shift+按下分支是先于旧普通点击分支
+        // return 的，等于把原本能用的 Shift+拖选回归掉了。
+        self.dragging = true;
         self.ensure_visible();
     }
 

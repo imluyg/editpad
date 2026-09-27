@@ -262,10 +262,21 @@ fn shift_click_does_not_start_a_word_or_line_drag() {
     let mut c = core_with("one two three");
     c.cursor = pos(0, 0);
     c.extend_selection_to(pos(0, 7));
-    c.dragging = true;
     // 扩展后按逐字符拖选（apply_click_drag 恒 false）
     assert!(!c.apply_click_drag(pos(0, 12)));
     assert_eq!(c.click_base, None);
+}
+
+#[test]
+fn shift_click_enters_the_dragging_state() {
+    // P307 复核纠正：控件层的 CursorMoved 在 `!is_dragging()` 时直接 return，
+    // 少了这个状态，"Shift+按下后再按住鼠标拖"就整条哑掉（Shift+拖选回归）
+    let mut c = core_with("one two three");
+    c.cursor = pos(0, 0);
+    c.extend_selection_to(pos(0, 7));
+    assert!(c.is_dragging(), "Shift+按下必须同时进入拖选态");
+    assert_eq!(c.anchor, Some(pos(0, 0)), "锚点仍是按下前的光标");
+    assert_eq!(c.cursor, pos(0, 7));
 }
 
 // ---------- 换文档作废 ----------
