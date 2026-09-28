@@ -151,6 +151,15 @@ pub struct Settings {
     /// 制表符块粘进空格行这类"平移量没有定义"的情形一律原样。
     #[serde(default)]
     pub paste_align_indent: bool,
+    /// B12（功能队列⑤）：变更历史行边条——行号栏最左缘 2px 竖条，标出
+    /// **相对上次落盘改过／新增的行**，同一变更块内本身没变的那一段走淡色
+    /// （撤销回来的位置）。
+    ///
+    /// **默认开**：它是被动显示，不改任何内容、不参与置脏与撤销，风险面与
+    /// `indent_guides` 同类（那条也默认开）。关掉后边条一格都不画，缓存一并清空。
+    /// 超大文档（超过 core 的字节预算）不算，边条自然不显示——那是刻意的成本闸。
+    #[serde(default = "default_change_strip")]
+    pub change_history_strip: bool,
     /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
     /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/
     /// [`BACKUP_MODE_TIMESTAMPED`]（`name.bak/` 目录内时间戳历史）。
@@ -217,6 +226,8 @@ impl Default for Settings {
             edge_column: 0,
             // P322：粘贴缩进对齐默认关（关着＝与引入前逐字节相同）
             paste_align_indent: false,
+            // B12：变更边条默认开（被动显示，同 `indent_guides` 的取舍）
+            change_history_strip: true,
             // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
             backup_mode: BACKUP_MODE_NONE.to_string(),
             hotkeys: HashMap::new(),
@@ -309,6 +320,12 @@ fn default_backup_mode() -> String {
 
 /// P132：缩进参考线 serde 默认（默认开，主流编辑器同款初始态）。
 fn default_indent_guides() -> bool {
+    true
+}
+
+/// B12：变更历史边条的 serde 默认（开）。旧配置文件缺这个字段即按默认开，
+/// 因此不动 `SETTINGS_VERSION`（迁移只面向"默认值语义变更"）。
+fn default_change_strip() -> bool {
     true
 }
 
@@ -779,6 +796,11 @@ mod tests {
         assert_eq!(loaded.recent_files, vec!["C:/old.txt".to_string()]);
         assert_eq!(loaded.theme, "light");
         assert_eq!(loaded.font_size, 16.0);
+        // B12：新字段走 serde default ⇒ 旧配置缺字段即"默认开"，不需要迁移
+        assert!(
+            loaded.change_history_strip,
+            "旧配置缺 change_history_strip 字段时必须落到默认值（开）"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -56,6 +56,17 @@ impl Editpad {
                 self.persist_settings();
                 Task::none()
             }
+            // B12：变更历史边条——纯绘制开关，与参考线同口径全标签页即时生效。
+            // `set_change_strip(false)` 会清缓存，所以"关→开"之间发生过保存
+            // 也不会吐旧标记。
+            Message::SettingsChangeStripToggled(value) => {
+                self.settings.change_history_strip = value;
+                for tab in &self.tabs {
+                    tab.editor.borrow_mut().set_change_strip(value);
+                }
+                self.persist_settings();
+                Task::none()
+            }
             Message::SettingsEdgeColumnDelta(delta) => {
                 let next = (self.settings.edge_column as i32 + delta)
                     .clamp(0, editpad_core::settings::MAX_EDGE_COLUMN as i32)

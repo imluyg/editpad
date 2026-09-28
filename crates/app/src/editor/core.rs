@@ -13,6 +13,7 @@ pub(crate) use editpad_core::{
     bracket_kind, scan_forward, Document, LazyHighlighter, StyledRun, MAX_BRACKET_SCAN_CHARS,
 };
 
+pub(crate) use super::change_strip::ChangeMemo;
 pub(crate) use super::metrics::{
     char_cols, display_cols_chars, measure_insertion, prefix_width, shape_row_xs,
     validate_measured_char_width, visible_window_of_xs, H_CLIP_MARGIN_CHARS,
@@ -769,6 +770,23 @@ pub struct EditorCore {
     /// 模型/命中测试/查找。经 set_invisibles 由应用层从 Settings 下发。
     pub(crate) show_whitespace: bool,
     pub(crate) show_line_endings: bool,
+    /// B12（变更历史行边条）：开关，经 [`EditorCore::set_change_strip`] 由应用层
+    /// 从 Settings 下发，**仅影响绘制**——不参与置脏、不进撤销快照。裸 core
+    /// 默认关（与 `indent_guides` 同款取舍：无头夹具造的 core 不该凭空多墨迹）。
+    pub(crate) change_strip: bool,
+    /// B12：落盘基线的**代次**。`mark_saved` / `clear_saved_baseline` /
+    /// `reset_document` 各推进一格——`content_epoch` 只跟着正文走，而"保存
+    /// 成功"那一刻动的只有基线：单键缓存会在那一刻继续把已存的行报成没存。
+    pub(crate) baseline_epoch: u64,
+    /// B12：算好的行标记缓存（读路径见 [`EditorCore::change_mark_at`]）。
+    /// `RefCell` 是因为绘制只拿到 `&self`（与 `row_layouts` 同一手法）。
+    pub(crate) change_memo: RefCell<Option<ChangeMemo>>,
+    /// 测试钩子：边条**重算次数**与**累计行内容哈希次数**。两个都是次数命题，
+    /// 与机器负载无关（台账 O-1/P283 的口径）。
+    #[cfg(test)]
+    pub(crate) change_diffs: std::cell::Cell<u64>,
+    #[cfg(test)]
+    pub(crate) change_keys: std::cell::Cell<u64>,
     /// 测试钩子（O-1 虚拟化契约）：`line_text()` 的**实际取串次数**。
     /// 帧成本断言在忙机器上既可能假绿也可能假红（台账 P69 自己就为此把
     /// 光栅一项降级为「只打印不设限」），而「绘制循环按视口规模跑、不按
@@ -962,6 +980,15 @@ impl Default for EditorCore {
             memo_window: (0, 0),
             show_whitespace: false,
             show_line_endings: false,
+            // B12：边条开关由应用层从 Settings 下发（默认开），裸 core 关；
+            // 缓存与代次都是空起始
+            change_strip: false,
+            baseline_epoch: 0,
+            change_memo: RefCell::new(None),
+            #[cfg(test)]
+            change_diffs: std::cell::Cell::new(0),
+            #[cfg(test)]
+            change_keys: std::cell::Cell::new(0),
             #[cfg(test)]
             line_text_calls: std::cell::Cell::new(0),
             #[cfg(test)]
@@ -1436,6 +1463,8 @@ impl EditorCore {
     pub fn reset_document(&mut self, doc: Document) {
         // P38：新文档即新的落盘基线（加载完成 = 磁盘内容已就位）
         self.saved_baseline = Some(doc.clone());
+        // B12：基线换过 ⇒ 边条缓存作废（不然重载后会吐上一页的旧标记）
+        self.bump_baseline_epoch();
         self.doc = doc;
         self.cursor = CursorPos::default();
         self.anchor = None;

@@ -18,6 +18,15 @@ pub(super) const BOOKMARK_COLOR: Color = Color::from_rgb8(0xE0, 0x96, 0x2E);
 /// 区分——命中随查找消失属临时态、书签常驻。深浅主题共用一值
 ///（与书签圆点同款取舍：装饰性标注，不承担正文可读性职能）。
 pub(super) const FIND_MARK_COLOR: Color = Color::from_rgb8(0xE0, 0x5A, 0x1E);
+/// B12 变更边条（未保存改动）：绿系实心。与书签琥珀（`BOOKMARK_COLOR`）、
+/// 命中橙（`FIND_MARK_COLOR`）明确错开；深浅主题共用一值（与那两者同款取舍：
+/// 装饰性标注，不承担正文可读性职能）。
+/// ⚠️ 蓝色分量刻意低于 120、红色高于 120：既有像素用例按
+/// `blue>180 && green>100 && red<120` 数琥珀墨迹，本色不得混进那一项。
+pub(super) const CHANGE_MARK_COLOR: Color = Color::from_rgb8(0x3F, 0xB0, 0x5C);
+/// B12 变更边条（块内回退段）：同族降透明度——"这一片动过，但这行本身没变"
+/// 要看得出来，不能与实色格一样亮。
+pub(super) const CHANGE_GAP_COLOR: Color = Color::from_rgba8(0x3F, 0xB0, 0x5C, 0.35);
 /// 括号匹配下划线（第 61 轮）：浅色主题用与查找/预编辑同族的蓝，
 /// 深色主题从前景派生（EditorColors::resolve）。
 pub(super) const BRACKET_LIGHT: Color = Color::from_rgba8(0x33, 0x66, 0xCC, 0.85);
@@ -49,6 +58,10 @@ pub(super) struct EditorColors {
     /// 不可见字符标记（第 64 轮）：与选区同族的淡蓝（低透明度），
     /// 深浅主题都足够「隐」又不至于在白/黑底上消失。
     pub(super) invisibles: Color,
+    /// B12：变更历史边条——实色＝相对落盘基线改过的行，淡色＝同一变更块里
+    /// 本身没变的那一段（撤销回来的位置）。
+    pub(super) change_mark: Color,
+    pub(super) change_gap: Color,
 }
 
 impl EditorColors {
@@ -89,6 +102,8 @@ impl EditorColors {
                 link_underline: BRACKET_LIGHT,
                 // 与选区同族的淡蓝（更淡），像素对拍可复用蓝色判据
                 invisibles: Color::from_rgba8(0x33, 0x66, 0xCC, 0.30),
+                change_mark: CHANGE_MARK_COLOR,
+                change_gap: CHANGE_GAP_COLOR,
             };
         }
         let text = palette.text;
@@ -114,6 +129,8 @@ impl EditorColors {
             edge_ruler: Color { a: 0.22, ..text },
             link_underline: Color { a: 0.85, ..text },
             invisibles: Color { a: 0.32, ..text },
+            change_mark: CHANGE_MARK_COLOR,
+            change_gap: CHANGE_GAP_COLOR,
         }
     }
 }

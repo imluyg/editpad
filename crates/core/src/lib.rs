@@ -10,6 +10,7 @@ pub mod find_in_files;
 pub mod highlight;
 pub mod json;
 pub mod lang;
+pub mod line_diff;
 pub mod loader;
 pub mod markdown;
 pub mod paths;
@@ -35,6 +36,11 @@ pub use lang::{
     fmt_match_total, fmt_page_count, fmt_replaced, fmt_replaced_in_tabs, fmt_restore_note,
     fmt_selection, fmt_suffix, fmt_wrapped, untitled_prefix, Key, Lang, LangOption, LANG_NAME_EN,
     LANG_NAME_ZH_CN,
+};
+pub use line_diff::{
+    changed_lines, changed_lines_in, classify_changed_lines, classify_marks, line_key, DiffBudget,
+    DiffQuality, LineDiff, MarkKind, CHANGE_GAP_MERGE, DIFF_MAX_LCS_CELLS, DIFF_MAX_MIDDLE_LINES,
+    DIFF_MAX_TOTAL_BYTES,
 };
 pub use loader::{
     decode, load_document_streaming, load_file, load_file_streaming, LoadProgress, LoadedDocument,

@@ -8,10 +8,10 @@ use iced::widget::column;
 // `lang::ROW_*` 常量（`debug_assert` 钉住 ASCII 与唯一性）。
 pub(crate) use editpad_core::lang::{
     ROW_ABOUT_LICENSE, ROW_ABOUT_NAME, ROW_ABOUT_RENDERER, ROW_ABOUT_VERSION, ROW_AUTOSAVE,
-    ROW_AUTOSAVE_DELAY, ROW_BACKUP_MODE, ROW_EDGE_COLUMN, ROW_EXIT_MODE, ROW_FONT_FAMILY,
-    ROW_FONT_SIZE, ROW_INDENT_GUIDES, ROW_LANGUAGE, ROW_PASTE_ALIGN_INDENT, ROW_REMEMBER_RECENT,
-    ROW_REMEMBER_SESSION, ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE, ROW_SNAPSHOTS,
-    ROW_SNAPSHOT_INTERVAL, ROW_THEME, ROW_WORD_WRAP,
+    ROW_AUTOSAVE_DELAY, ROW_BACKUP_MODE, ROW_CHANGE_STRIP, ROW_EDGE_COLUMN, ROW_EXIT_MODE,
+    ROW_FONT_FAMILY, ROW_FONT_SIZE, ROW_INDENT_GUIDES, ROW_LANGUAGE, ROW_PASTE_ALIGN_INDENT,
+    ROW_REMEMBER_RECENT, ROW_REMEMBER_SESSION, ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE,
+    ROW_SNAPSHOTS, ROW_SNAPSHOT_INTERVAL, ROW_THEME, ROW_WORD_WRAP,
 };
 
 /// 「正文字体」行的行键（控件匹配与字体挑选块挂载点共用同一常量）。
@@ -162,6 +162,13 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         key: ROW_PASTE_ALIGN_INDENT,
         title: editpad_core::Key::RowPasteAlignIndent,
         desc: editpad_core::Key::RowPasteAlignIndentDesc,
+    },
+    // B12（功能队列⑤）：变更历史行边条——与参考线/标尺同页（都是"排版辅助"一档）
+    StaticRow {
+        page: SettingsPage::Appearance,
+        key: ROW_CHANGE_STRIP,
+        title: editpad_core::Key::RowChangeStrip,
+        desc: editpad_core::Key::RowChangeStripDesc,
     },
     StaticRow {
         page: SettingsPage::Font,
@@ -1153,6 +1160,11 @@ impl Editpad {
             ROW_PASTE_ALIGN_INDENT => checkbox(s.paste_align_indent)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsPasteAlignIndentToggled)
+                .into(),
+            // B12：变更历史边条（纯绘制开关，全标签页即时生效）
+            ROW_CHANGE_STRIP => checkbox(s.change_history_strip)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsChangeStripToggled)
                 .into(),
             ROW_EDGE_COLUMN => self.settings_stepper(
                 if s.edge_column == 0 {

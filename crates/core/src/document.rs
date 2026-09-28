@@ -347,6 +347,41 @@ impl Document {
         self.rope.byte_to_char(tail)
     }
 
+    /// 两份文档**公共后缀的起点**在各自里的**字符**下标 `(self 侧, other 侧)`：
+    /// 从各自返回的下标起到文末，两边逐字符相同。
+    ///
+    /// 与 [`Self::first_diff_char`] 成对使用：差异扫描的两端都用块级比较收敛，
+    /// 中间那一小窗才是需要逐行对齐的部分。
+    ///
+    /// 为什么二分而不是从文末倒着走：ropey 的 `Chunks` 不是
+    /// `DoubleEndedIterator`，反向逐块迭代要自己造轮子；而"末尾 M 个字符是否
+    /// 相同"对 M 单调 ⇒ 二分 O(log) 轮，每轮的 `RopeSlice` 相等在第一处不同
+    /// 就短路 ⇒ 总功几何级数收敛到 O(公共后缀)＋O(差异那一段)。
+    ///
+    /// 按**字符**而不是字节切，还顺手消掉了一整类 panic：字节偏移可以落在
+    /// 多字节字符中间（`byte_to_char` 那种坑），字符下标则永远落在边界上，
+    /// 可以直接喂 [`Self::char_to_line`]。
+    ///
+    /// 一方是另一方的前缀（含两边完全相同）时，短的那侧返回 0：那是
+    /// **保守上界**（真正的最后一处不同不会比它更靠后），调用方按行取窗
+    /// 只会多看、不会少看。
+    pub fn suffix_align_chars(&self, other: &Document) -> (usize, usize) {
+        let (alen, blen) = (self.rope.len_chars(), other.rope.len_chars());
+        let cap = alen.min(blen);
+        let (mut lo, mut hi) = (0usize, cap);
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            let a = self.rope.slice(alen - mid..alen);
+            let b = other.rope.slice(blen - mid..blen);
+            if a == b {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        (alen - lo, blen - lo)
+    }
+
     /// 与另一文档做内容相等比较（P38 撤销回基线判定用）：长度不等直接
     /// 短路；等长时按底层存储块逐字节比对（ropey 的块级 ==，memcmp 量级），
     /// 全程无全文 String 分配。行尾元数据一并参与——编辑层虽不会原地
@@ -564,6 +599,61 @@ fn drop_leading_whitespace(body: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B12 配套：`suffix_align_chars` 与"从尾部逐字符退"的朴素口径必须逐格同值，
+    /// 覆盖两串相同／一方是另一方前缀／交界落在多字节字符里／行尾不同。
+    #[test]
+    fn suffix_align_chars_matches_a_naive_tail_scan() {
+        let cases: &[(&str, &str)] = &[
+            ("", ""),
+            ("abc", "abc"),
+            ("abc", "abd"),
+            ("abc", "abcd"),
+            ("abcd", "abc"),
+            ("keep\ngone\nkeep2\n", "keep\nkeep2\n"),
+            ("一\n二\n三\n", "一\n二\n三\n四\n"),
+            ("\u{1F680}b", "\u{1F680}c"),
+            ("a\r\nb", "a\r\nc"),
+            (
+                "same prefix, different tail!",
+                "same prefix, different tail?",
+            ),
+        ];
+        for (x, y) in cases {
+            let a = Document::from_str(x);
+            let b = Document::from_str(y);
+            let ac: Vec<char> = x.chars().collect();
+            let bc: Vec<char> = y.chars().collect();
+            let mut m = 0usize;
+            while m < ac.len() && m < bc.len() && ac[ac.len() - 1 - m] == bc[bc.len() - 1 - m] {
+                m += 1;
+            }
+            let want = (ac.len() - m, bc.len() - m);
+            assert_eq!(a.suffix_align_chars(&b), want, "{x:?} vs {y:?}");
+            assert_eq!(
+                b.suffix_align_chars(&a),
+                (want.1, want.0),
+                "反向必须对称：{x:?}/{y:?}"
+            );
+        }
+    }
+
+    /// 同一份文本、不同 rope 叶片形状（编辑拼出来的 vs 一次性 from_str），
+    /// 后缀对齐的结果必须一致——否则它就是"按第 k 块 vs 第 k 块"那种写法。
+    #[test]
+    fn suffix_align_chars_is_independent_of_chunk_layout() {
+        let base = "line one\nline two\nline three\n";
+        let a = Document::from_str(base);
+        let mut built = Document::from_str("line one\n");
+        built.insert(9, "line two\nline three\n");
+        assert_eq!(built.to_text(), base, "夹具自证：两种构造内容相同");
+        let b = Document::from_str("line one\nline TWO\nline three\n");
+        assert_eq!(
+            built.suffix_align_chars(&b),
+            a.suffix_align_chars(&b),
+            "对齐结果不能取决于叶片怎么切"
+        );
+    }
 
     /// P304：`first_diff_char` 是"撤销只作废改动点之后"那步的地基，逐格钉住：
     /// 两串相同／一方是另一方的前缀／中间不同／交界处在多字节字符里／

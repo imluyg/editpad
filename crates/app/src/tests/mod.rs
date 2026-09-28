@@ -199,6 +199,8 @@ mod chrome;
 mod clip_history;
 // P308：正文右键菜单 + P307 连击选择的视图树接线核对
 mod ctx_menu;
+// B12：变更历史行边条的应用层接线（开关下发/新页继承/设置页行与控件/两向落盘）
+mod change_strip;
 mod editor;
 mod file;
 mod find;

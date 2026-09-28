@@ -25,6 +25,8 @@ mod edit;
 mod highlight;
 mod motion;
 mod undo;
+// B12：变更历史行边条的数据侧（相对落盘基线的行标记 + 双纪元缓存）
+mod change_strip;
 // B10 多光标一期：附加光标集（增删/折叠/步进/caret_rect_at 重入）
 mod cursors;
 
@@ -102,6 +104,10 @@ pub(crate) const GUTTER_NUM_SLACK: f32 = 1.0;
 /// 行号栏左侧书签条带宽（第 60 轮）：书签圆点的专属槽位，与行号数字
 /// 互不挤占（行号仍右对齐于条带右侧，gutter 总宽 = 条带 + 间距 + 数字宽）。
 pub(crate) const BOOKMARK_STRIP: f32 = 10.0;
+/// B12：变更历史边条宽度——贴条带**最左缘**的 2px。刻意等于
+/// `(BOOKMARK_STRIP - BOOKMARK_DOT) * 0.5`（=2.0，书签圆点的左边界）：
+/// 两者同域但一格不重叠；也不动 `gutter_width()` 的公式（那条有钉子用例）。
+pub(crate) const CHANGE_STRIP_W: f32 = 2.0;
 /// 书签圆点直径（第 60 轮，条带内水平居中、行内垂直居中）。
 pub(crate) const BOOKMARK_DOT: f32 = 6.0;
 /// 文本图层四边内缩（P66）：层边界必须严格小于传给 fill_text 的 clip

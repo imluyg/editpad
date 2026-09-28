@@ -194,6 +194,11 @@ impl Editpad {
         tab.editor
             .borrow_mut()
             .set_edge_column(self.settings.edge_column);
+        // B12：变更历史边条同口径下发（fresh_tab 幂等；漏下发会让新标签页
+        // 永远没有边条，而设置页仍显示开启）
+        tab.editor
+            .borrow_mut()
+            .set_change_strip(self.settings.change_history_strip);
         // P154：行号栏字体族与字号同口径下发（fresh_tab 幂等；漏下发会让
         // 新页行号回落到正文字体，与既有页观感不一致）
         tab.editor
@@ -383,6 +388,8 @@ impl Editpad {
             // P132：同口径兜底（漏下发则重启后参考线/标尺失效但设置仍显示开启）
             ed.set_indent_guides(state.settings.indent_guides);
             ed.set_edge_column(state.settings.edge_column);
+            // B12：首页同口径兜底（它不走 fresh_tab，漏这里重启后边条不亮）
+            ed.set_change_strip(state.settings.change_history_strip);
         }
         if configured_font_missing {
             if let Some(name) = state.settings.font_family.as_deref() {
@@ -537,6 +544,7 @@ impl Editpad {
             | Message::SettingsWordWrapToggled(..)
             | Message::SettingsIndentGuidesToggled(..)
             | Message::SettingsPasteAlignIndentToggled(..)
+            | Message::SettingsChangeStripToggled(..)
             | Message::SettingsEdgeColumnDelta(..)
             | Message::HotkeyCaptureStarted(..)
             | Message::HotkeyCaptureKey(..)

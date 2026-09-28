@@ -38,7 +38,9 @@ use super::scrollbars::{
 };
 use super::wrap::pixel_breaks;
 use super::wrap::segment_index as wrap_segment_index;
-use super::{BOOKMARK_DOT, BOOKMARK_STRIP, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET};
+use super::{
+    BOOKMARK_DOT, BOOKMARK_STRIP, CHANGE_STRIP_W, GUTTER_FONT_SCALE, GUTTER_MIN, TEXT_LAYER_INSET,
+};
 
 // P160：按域拆出的自由项（纯移动零行为变更）。font 的项经 `pub use` 再导出，
 // 以维持 `editor::view::*` 对外路径不变（editor/mod.rs 有 `pub use view::*`）。
@@ -214,6 +216,59 @@ impl EditorView {
                     ..renderer::Quad::default()
                 },
                 colors.bookmark,
+            );
+        }
+    }
+
+    /// B12：变更历史行边条。条带**最左缘** [`CHANGE_STRIP_W`] 宽的竖条，
+    /// 按行画：实色＝相对落盘基线改过／新增的行，淡色＝同一变更块内本身没变
+    /// 的那一段（撤销回来的位置）。数据来自 [`EditorCore::change_mark_at`]
+    /// （带双纪元缓存，绘制这一路不做全文扫描）。
+    ///
+    /// 数据来自 [`EditorCore::change_mark_at`]（带双纪元缓存，绘制这一路不做
+    /// 全文扫描）。**开关只在那里判一次**——这里不再重复一道 `change_strip`
+    /// 早退：两处守同一件事，第二处永远没有看守者，变异探针也分不出谁在起作用
+    /// （第 234 轮就是这么把"双保险"抓出来的）。
+    ///
+    /// 为什么在书签圆点**之前**画：圆点在条带内居中（左边界 x=2.0），边条贴
+    /// 左缘（x∈[0,2)）——一格都不重叠，谁也不挡谁。行锚定与书签同款（软换行
+    /// 开态锚逻辑行**首段**的视觉行），半行越界由 A 层掩码硬裁。
+    ///
+    /// 护栏：`headless_change_strip_ink_sits_on_changed_rows_only`
+    /// （把 `change_mark_at` 短路成"永远 None"它会红，所以这块绘制是有主的）。
+    fn draw_change_strip(
+        &self,
+        renderer: &mut iced::Renderer,
+        core: &EditorCore,
+        bounds: Rectangle,
+        colors: &EditorColors,
+        lh: f32,
+    ) {
+        let (cs_first, cs_last) = core.visible_range();
+        for line in cs_first..=cs_last {
+            let Some(kind) = core.change_mark_at(line) else {
+                continue;
+            };
+            let v = core.visual_row_of(line, 0);
+            let y = bounds.y + (v as f32 - core.scroll_top) * lh;
+            if y + lh <= bounds.y || y >= bounds.y + bounds.height {
+                continue;
+            }
+            let color = match kind {
+                editpad_core::MarkKind::Changed => colors.change_mark,
+                editpad_core::MarkKind::RevertedGap => colors.change_gap,
+            };
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x,
+                        y,
+                        width: CHANGE_STRIP_W,
+                        height: lh,
+                    },
+                    ..renderer::Quad::default()
+                },
+                color,
             );
         }
     }
@@ -2049,6 +2104,8 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             gutter_w,
         );
 
+        // B12：变更历史边条（贴条带最左缘，与书签圆点同域不重叠，先画后点）
+        self.draw_change_strip(renderer, &core, bounds, &colors, lh);
         self.draw_bookmark_dots(renderer, &core, bounds, &colors, lh);
 
         // 链接悬停下划线（S-5 第八步外提为 `draw_link_hover`，逐字搬移）

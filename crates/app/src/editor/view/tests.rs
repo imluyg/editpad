@@ -6342,3 +6342,154 @@ fn s5_caret_layer_inks_on_the_caret_column() {
         "关帧整幅仅 {body_ink}px 墨迹：夹具失效，差分断言无从谈起"
     );
 }
+
+/// B12（headless 像素级）：变更历史行边条。四格各有方向——
+/// ①改过的那一行在**最左缘 2px** 出现绿墨，且只占一行高（不是整条 gutter）；
+/// ②基线＝正文的页一格都不该有；③开关关掉后同一份改动归零（证明这块绘制
+/// 有主、也真被 gated）；④绿墨不得越进右面的行号数字区。
+///
+/// ⚠️ 几何一律**向产品现取，且必须在画过一帧之后**取（057a1fc 那条教训：
+/// 实测列宽是 `ensure_measured_char_width` 在绘制时才回填的，先取就读到假设值；
+/// 写死常数的像素护栏在本仓已经是定时炸弹的第二代）。
+#[test]
+fn headless_change_strip_ink_sits_on_changed_rows_only() {
+    let (w, h) = (400u32, 300u32);
+    let (ex, ey, ew, eh) = (20.0f32, 20.0f32, 360.0f32, 260.0f32);
+    let doc_text: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+
+    let build = |edited: bool, on: bool| -> EditorHandle {
+        let core = EditorHandle::default();
+        {
+            let mut c = core.borrow_mut();
+            c.reset_document(editpad_core::Document::from_str(&doc_text));
+            c.set_viewport_width(ew);
+            c.set_viewport_height(eh);
+            c.set_change_strip(on);
+            if edited {
+                // 走真实失效汇点插一行：基线仍是刚加载的那份 ⇒ 只有这一行改过
+                let off = c.doc.line_to_char(4);
+                c.snapshot();
+                c.doc.insert(off, "CHANGED\n");
+                c.invalidate_highlight_from(off);
+            }
+        }
+        core
+    };
+
+    let draw = |core: &EditorHandle| -> tiny_skia::Pixmap {
+        let mut view = EditorView {
+            core: core.clone(),
+            font: BODY_FONT,
+            zoom_accum: 0.0,
+        };
+        let mut renderer = iced::Renderer::new(BODY_FONT, Pixels(16.0));
+        let mut tree = Tree::empty();
+        let limits = layout::Limits::new(Size::new(ew, eh), Size::new(ew, eh));
+        let node = view.layout(&mut tree, &renderer, &limits);
+        let node = node.translate(iced::Vector::new(ex, ey));
+        let lyt = Layout::new(&node);
+        let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        let viewport_rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+        let viewport = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+        let damage = vec![viewport_rect];
+        view.draw(
+            &tree,
+            &mut renderer,
+            &Theme::Light,
+            &iced::advanced::renderer::Style::default(),
+            lyt,
+            mouse::Cursor::Unavailable,
+            &viewport_rect,
+        );
+        renderer.draw(
+            &mut pixels.as_mut(),
+            &mut mask,
+            &viewport,
+            &damage,
+            Color::WHITE,
+        );
+        pixels
+    };
+
+    // 先画一帧把实测几何回填进 core，再向产品取（同 057a1fc 的手法）
+    let probe = build(false, true);
+    let _ = draw(&probe);
+    let (gutter_w, lh) = {
+        let c = probe.borrow();
+        (c.gutter_width(), c.line_height())
+    };
+    assert!(gutter_w > 20.0, "夹具自证：gutter 宽现取 = {gutter_w}");
+    let strip_end = (ex + CHANGE_STRIP_W) as u32;
+    let gutter_end = (ex + gutter_w) as u32;
+
+    // 绿色判据（单一出处，两个采样函数共用）：CHANGE_MARK_COLOR(0x3F,0xB0,0x5C)
+    // 不透明落笔。无头 Pixmap 通道序为 BGRA（第 60 轮实测），故 blue 分量读到
+    // 0x5C=92 —— 与琥珀判据（blue>180）互斥，两种标记的墨迹不会互相顶班。
+    let is_green = |px: &tiny_skia::Pixmap, x: u32, y: u32| -> bool {
+        match px.pixel(x, y) {
+            Some(p) => p.green() > 140 && p.red() < 120 && p.blue() < 140,
+            None => false,
+        }
+    };
+    let green_in = |px: &tiny_skia::Pixmap, x0: u32, x1: u32| -> u32 {
+        let mut ink = 0u32;
+        for y in 0..h {
+            for x in x0..x1 {
+                if is_green(px, x, y) {
+                    ink += 1;
+                }
+            }
+        }
+        ink
+    };
+    let green_rows = |px: &tiny_skia::Pixmap| -> Vec<u32> {
+        let mut rows: Vec<u32> = Vec::new();
+        for y in 0..h {
+            if ((ex as u32)..strip_end).any(|x| is_green(px, x, y)) {
+                rows.push(y);
+            }
+        }
+        rows
+    };
+
+    let lh_rows = lh.round() as u32;
+    let lit = draw(&build(true, true));
+    let ink = green_in(&lit, ex as u32, strip_end);
+    let rows = green_rows(&lit);
+    eprintln!(
+        "[B12] 边条绿墨 = {ink}px，跨 {}/{} 行（lh={lh}）",
+        rows.len(),
+        lh_rows
+    );
+    assert!(
+        ink >= lh_rows,
+        "改过的那一行该有整行高的边条，实测 {ink}px（阈值 {lh_rows}）"
+    );
+    assert!(
+        rows.len() <= (lh_rows as usize + 3),
+        "只有 1 行改过 ⇒ 边条不该铺满条带：实占 {} 行",
+        rows.len()
+    );
+    assert_eq!(
+        green_in(&lit, strip_end, gutter_end),
+        0,
+        "边条越进了行号数字区（几何漂移）"
+    );
+
+    // ②基线＝正文：一格都不该有
+    let clean = draw(&build(false, true));
+    assert_eq!(
+        green_in(&clean, ex as u32, strip_end),
+        0,
+        "没改过的页不该有边条"
+    );
+    // ③开关关掉：同一份改动必须归零
+    let off = draw(&build(true, false));
+    assert_eq!(
+        green_in(&off, ex as u32, strip_end),
+        0,
+        "设置关着却画出了边条"
+    );
+}

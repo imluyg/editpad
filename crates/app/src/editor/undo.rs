@@ -7,6 +7,8 @@ impl EditorCore {
     /// rope 克隆是结构共享，O(1)。
     pub fn mark_saved(&mut self) {
         self.saved_baseline = Some(self.doc.clone());
+        // B12：基线动了、正文没动 ⇒ 边条必须重算（单键缓存在这里会漏）
+        self.bump_baseline_epoch();
     }
 
     /// 当前内容是否与最近一次落盘基线一致。撤销/重做后由应用层查询，
@@ -24,6 +26,8 @@ impl EditorCore {
     /// 在真正落盘一次之前撤销永不回清，宁可不便利也不能丢内容。
     pub fn clear_saved_baseline(&mut self) {
         self.saved_baseline = None;
+        // B12：同上，基线换过（这里是撤掉）就要让边条缓存作废
+        self.bump_baseline_epoch();
     }
 
     pub(crate) fn snapshot(&mut self) {
