@@ -1009,9 +1009,14 @@ fn multi_cursor_collapse_matrix() {
     dispatch(&mut app, Message::Edit(EditOp::Motion(Motion::Left, false)));
     assert!(app.cur_handle.borrow().has_multi(), "行内 Left 存活");
 
-    // 白名单外编辑动作折叠：SelectAll / Undo / DeleteLines（三者会改
-    // 变文档/光标，故放在存活验证之后）
-    for op in [EditOp::SelectAll, EditOp::Undo, EditOp::DeleteLines] {
+    // 白名单外编辑动作折叠：SelectAll / Enter / DeleteLines（三者会改变
+    // 文档或光标，故放在存活验证之后）。
+    // ⚠️ 这一格原本写的是 `EditOp::Undo`，而"撤销先把附加光标集清掉"正是
+    // P326 修掉的缺陷本身（旧测试把缺陷钉成了契约，改判登记见日档）：
+    // Undo/Redo 从此**不能**用 has_multi() 判生死——它们恢复的是快照里的
+    // 集合，而那份集合合法地可能本来就是空的。撤销→重做的往返由
+    // `multi_undo_redo_round_trip_keeps_the_cursor_set` 逐格盯位置。
+    for op in [EditOp::SelectAll, EditOp::Enter, EditOp::DeleteLines] {
         mk(&mut app);
         dispatch(&mut app, Message::Edit(op.clone()));
         assert!(!app.cur_handle.borrow().has_multi(), "{op:?} 折叠多光标");
@@ -1057,6 +1062,105 @@ fn multi_cursor_sync_edit_via_apply_edit_pipeline() {
     );
     assert_eq!(h.cursor, CursorPos { line: 0, col: 3 }, "恢复主光标");
     assert_eq!(h.anchor, Some(CursorPos { line: 0, col: 0 }));
+}
+
+/// P326：撤销→重做的往返**逐格**保住附加光标集。
+///
+/// 缺陷形状（改前）：`apply_edit` 的多光标存活白名单不含 Undo/Redo ⇒ 闸门先把
+/// 活集合清成空，随后 `undo()` 把这份**空集合**记进 redo 栈（它要的是"改后"那一套
+/// 位置），重做时换回来的就是空 ⇒ 多光标全灭，且两侧栈同时被污染。
+/// 同一条性质在 `editor/cursors_tests.rs` 里其实早就有人断（`extra_cursors.len()`
+/// 在 redo 之后仍是 2），但那一支直调 `EditorCore::redo()`、从不经过这道闸 ⇒
+/// 属性断在了错误的层，改前改后都绿。
+#[test]
+fn multi_undo_redo_round_trip_keeps_the_cursor_set() {
+    use crate::editor::{CursorPos, ExtraCursor};
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("foo bar foo baz\n".into())),
+    );
+    {
+        let mut h = app.cur_handle.borrow_mut();
+        h.cursor = CursorPos { line: 0, col: 3 };
+        h.anchor = Some(CursorPos { line: 0, col: 0 });
+        h.extra_cursors = vec![ExtraCursor {
+            cursor: CursorPos { line: 0, col: 11 },
+            anchor: Some(CursorPos { line: 0, col: 8 }),
+        }];
+    }
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("XX".into())));
+    let after_doc = app.cur_handle.borrow().doc.to_text();
+    let after_state: Vec<(CursorPos, Option<CursorPos>)> = {
+        let h = app.cur_handle.borrow();
+        h.extra_cursors
+            .iter()
+            .map(|e| (e.cursor, e.anchor))
+            .collect()
+    };
+    let after_main = app.cur_handle.borrow().cursor;
+    // 夹具自证：同步替换真的发生了，且**改后的位置与改前不同**——两者相同的话
+    // 下面的位置断言就分辨不出"换回改后"与"换回改前"，等于没牙。
+    assert_eq!(after_doc, "XX bar XX baz\n", "夹具前提：两点选区同步替换");
+    assert_ne!(
+        after_main,
+        CursorPos { line: 0, col: 3 },
+        "夹具前提：主光标挪过"
+    );
+    assert_eq!(
+        after_state,
+        vec![(CursorPos { line: 0, col: 9 }, None)],
+        "夹具前提：附加光标落到各自插入尾部"
+    );
+
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    {
+        let h = app.cur_handle.borrow();
+        assert_eq!(h.doc.to_text(), "foo bar foo baz\n", "撤销回到改前正文");
+        assert_eq!(h.extra_cursors.len(), 1, "撤销恢复附加光标集");
+        assert_eq!(h.cursor, CursorPos { line: 0, col: 3 });
+    }
+
+    dispatch(&mut app, Message::Edit(EditOp::Redo));
+    {
+        let h = app.cur_handle.borrow();
+        assert_eq!(h.doc.to_text(), after_doc, "重做把正文换回去");
+        // 只断"集合非空"会放过"没折叠但换回改前那份"的半修 ⇒ 位置逐格比
+        assert_eq!(h.cursor, after_main, "重做落回改后的主光标");
+        assert_eq!(h.anchor, None, "重做不留下多余选区");
+        let extra: Vec<(CursorPos, Option<CursorPos>)> = h
+            .extra_cursors
+            .iter()
+            .map(|e| (e.cursor, e.anchor))
+            .collect();
+        assert_eq!(extra, after_state, "重做落回改后的附加光标位置");
+    }
+}
+
+/// P326 的另一半：闸门不得在 `undo()` **早退之前**清掉集合（栈已空时按撤销
+/// 什么都不该发生，光标集也不该被顺手清掉）。与上一条各守一轴：那条盯
+/// "往返后位置对不对"，这条盯"没做成的操作也不许留副作用"。
+#[test]
+fn undo_failure_preserves_the_cursor_set() {
+    use crate::editor::{CursorPos, ExtraCursor};
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("abc\n".into())));
+    dispatch(&mut app, Message::Edit(EditOp::Undo)); // 撤到底：栈就此为空
+    let doc_before = app.cur_handle.borrow().doc.to_text();
+    {
+        let mut h = app.cur_handle.borrow_mut();
+        h.extra_cursors = vec![ExtraCursor {
+            cursor: CursorPos { line: 0, col: 2 },
+            anchor: None,
+        }];
+    }
+    dispatch(&mut app, Message::Edit(EditOp::Undo)); // 无处可撤
+    let h = app.cur_handle.borrow();
+    assert!(
+        h.has_multi(),
+        "失败的撤销不该顺手清掉附加光标集（闸门在 pop 之前就折叠）"
+    );
+    assert_eq!(h.doc.to_text(), doc_before, "失败的撤销不动正文");
 }
 
 #[test]

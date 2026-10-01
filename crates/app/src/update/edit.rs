@@ -616,7 +616,13 @@ impl Editpad {
         }
         // B10 多光标存活白名单（设计 §3.3）：InsertText/Backspace/Delete
         // （Phase 2 同步编辑）+ 行内 Left/Right + CancelBlock + AddNextMatch；
-        // 白名单外一律先折叠为单光标再走既有路径——单点收口防漏折
+        // 白名单外一律先折叠为单光标再走既有路径——单点收口防漏折。
+        // Undo/Redo 必须在名单内（P326）：这道闸**不得改动** undo()/redo() 将要
+        // 对换的任何字段（doc/cursor/anchor/bookmarks/extra_cursors，见
+        // editor/undo.rs）。改前只有 extra_cursors 被这里清掉 ⇒ 撤销时压进 redo
+        // 栈的那一格记下的是已清空的集合，重做再把空集合换回来：撤销看着是对的
+        // （它从历史快照恢复），撤销→重做之后多光标全灭。设计 §3.5 那句
+        // 「先折叠、快照恢复随即覆写」只在 undo 半边成立。
         if self.cur_handle.borrow().has_multi()
             && !matches!(
                 op,
@@ -625,6 +631,8 @@ impl Editpad {
                     | E::Delete
                     | E::CancelBlock
                     | E::AddNextMatch
+                    | E::Undo
+                    | E::Redo
                     | E::Motion(Motion::Left | Motion::Right, false)
             )
         {
