@@ -29,13 +29,74 @@ fn assert_settings_card_centered(app: &Editpad) {
 // ---------- P33 字体一致性 ----------
 
 #[test]
-fn font_pin_smoke_call_twice_is_safe() {
-    // P33 冒烟：公开路径 iced::advanced::graphics::text::font_system()
-    // 在测试环境真实可用（不只是类型层面编译通过）；AtomicBool 幂等
-    // 保证二次调用直接短路。副作用仅为 fontdb 的 Family::Monospace
-    // 解析目标被钉到 CJK 等宽候选——测试无渲染断言，不受影响。
+fn font_pin_is_idempotent_and_headless_tests_share_the_products_face() {
+    // P33 冒烟（公开路径在测试环境真实可用、二次调用短路）＋ P329 升级。
+    //
+    // ⚠️ 本用例的原注释写的是「副作用仅为 fontdb 解析目标被改，测试无渲染断言、
+    // 不受影响」——**那句是错的**，而且是这条线索的根因：它改的是**进程级**的
+    // `Family::Monospace` 解析目标，本用例先跑与否决定同一二进制里所有按
+    // `BODY_FONT` 渲染的用例读到哪一套字（本机 24px 实测：未钉 Cascadia Mono
+    // 14.0625 vs 钉了 NSimSun 12.0）。
+    //
+    // 所以这里**故意不先调用钉字**：第一步就走生产量度入口，判"入口自己有没有把
+    // 解析目标钉到位"（P329 把钉字从"启动顺序约定"变成 `metrics`/`draw` 的结构
+    // 保证）。第二条断言才用到幂等。将来谁改候选表、或把 `set_monospace_family`
+    // 那一步弄丢，红在这里——不是红在某条看不懂的像素差上。
+    let available = crate::fonts::enumerate_available_families();
+    assert!(
+        !available.is_empty(),
+        "全局 font_system 在测试环境必须可枚举（空清单＝量度与解析全都不可信）"
+    );
+    let via_funnel = crate::editor::metrics::measure_char_width(crate::editor::BODY_FONT, 24.0);
     apply_default_cjk_mono_pin();
-    apply_default_cjk_mono_pin();
+    apply_default_cjk_mono_pin(); // 二次调用不得改变已生效的解析目标
+    let mono_w = crate::editor::metrics::measure_char_width(crate::editor::BODY_FONT, 24.0);
+    assert_eq!(
+        via_funnel, mono_w,
+        "生产量度入口解析出的 MONOSPACE 必须已经等于钉好之后的那一套（不等＝入口漏钉，\
+         用例读到的字形族取决于谁先跑）"
+    );
+    let Some(family) = crate::editor::pick_cjk_mono_family(&available) else {
+        // 无候选（非 CJK 环境）⇒ 钉字按设计什么都不做，只保证上面两条不炸
+        return;
+    };
+    let named = iced::Font {
+        family: iced::font::Family::Name(family),
+        ..iced::Font::DEFAULT
+    };
+    let named_w = crate::editor::metrics::measure_char_width(named, 24.0);
+    assert_eq!(
+        mono_w, named_w,
+        "MONOSPACE 解析出的列宽必须等于产品钉选族按名字量的宽度：不等＝用例与产品两套字形"
+    );
+    // 反空转（正对照）：若"任何族都量出同一个宽度"，上面那条相等就是瞎的
+    let others: Vec<f32> = [
+        "Arial",
+        "Times New Roman",
+        "Verdana",
+        "Courier New",
+        "Segoe UI",
+    ]
+    .iter()
+    .filter_map(|name| {
+        crate::editor::metrics::measure_char_width(
+            iced::Font {
+                family: iced::font::Family::Name(name),
+                ..iced::Font::DEFAULT
+            },
+            24.0,
+        )
+    })
+    .collect();
+    assert!(
+        others.len() >= 2,
+        "正对照前提：本机至少要能量到两个别的族的宽度，实得 {} 个",
+        others.len()
+    );
+    assert!(
+        others.iter().any(|w| Some(*w) != named_w),
+        "正对照：别的族量出与钉选族**不同**的宽度，上面那条相等断言才有分辨力"
+    );
 }
 
 // ---------- P27 设置按钮 + 设置弹窗 + P62 热键系统 ----------

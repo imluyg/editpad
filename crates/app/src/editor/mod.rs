@@ -34,7 +34,7 @@ mod dnd;
 // P307：连击选择（双击选词 / 三击选行 / 按词按行拖选 / Shift+点击扩展）
 mod click;
 mod links;
-mod metrics;
+pub(crate) mod metrics;
 mod scrollbars;
 mod view;
 // 第 72 轮：软换行（候选池⑯ Phase 1）地基组件；第 73 轮接线完成

@@ -218,6 +218,20 @@ pub(crate) fn validate_measured_char_width(w: f32, font_size: f32) -> Option<f32
     }
 }
 
+/// P329：任何"把 `Font::MONOSPACE` 解析成具体字形"的动作之前，先保证产品那次
+/// 启动期钉字（P33）已经发生——幂等、进程内一次，`Once` 让并发调用者阻塞到写完。
+///
+/// 生产里 `Editpad::new` 早在首帧之前钉过，所以这里通常是一次原子的"已完成"快检；
+/// 把它写成结构而不是顺序约定，是因为**无头渲染用例并行**：改前
+/// `tests/settings.rs::font_pin_smoke_call_twice_is_safe` 会在进程级改写
+/// `Family::Monospace` 的解析目标，它先跑与否决定后面所有按 `BODY_FONT` 渲染的
+/// 用例读到哪一套字（本机实测：未钉 Cascadia Mono 24px = 14.0625，钉了
+/// NSimSun = 12.0 ⇒ 同一份像素断言在两套字形下各算一次）。
+#[inline]
+fn ensure_mono_face() {
+    crate::fonts::apply_default_cjk_mono_pin();
+}
+
 /// P42：用排版段落实测等宽列宽（像素/字符）。
 ///
 /// 段落构造即完成 shaping（cosmic-text 走全局 font_system——P33 钉字/
@@ -240,6 +254,7 @@ pub(crate) fn measure_text_width(font: Font, size: f32, text: &str) -> Option<f3
     if text.is_empty() || !(size.is_finite() && size > 0.0) {
         return None;
     }
+    ensure_mono_face(); // P329：解析目标必须先与产品一致，见函数上方
     let paragraph =
         <iced::Renderer as core_text::Renderer>::Paragraph::with_text(core_text::Text {
             content: text,
@@ -270,6 +285,7 @@ pub(crate) fn shape_row_xs(font: Font, size: f32, text: &str) -> Option<Vec<f32>
     if !(size.is_finite() && size > 0.0) {
         return None;
     }
+    ensure_mono_face(); // P329：字形选择必须与产品同一口径（见 ensure_mono_face）
     if text.is_empty() {
         return Some(vec![0.0]);
     }
@@ -338,6 +354,7 @@ pub(crate) fn measure_ink_box(font: Font, size: f32) -> Option<(f32, f32)> {
     if !(size.is_finite() && size > 0.0) {
         return None;
     }
+    ensure_mono_face(); // P329：墨迹盒量的就是钉字之后的那一套字形（见 ensure_mono_face）
     let (w, h) = (160u32, 48u32);
     let mut renderer = iced::Renderer::new(font, Pixels(size));
     renderer.fill_text(

@@ -2031,6 +2031,12 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         _viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
+        // P329：字形落笔之前保证产品的启动期钉字已发生（幂等、进程内一次、
+        // 已完成时只是一次原子快检）。度量侧同一条口径见 `metrics::ensure_mono_face`。
+        // 这一处不是为生产加的（`Editpad::new` 早于首帧钉好），而是让**无头渲染用例**
+        // 不再取决于"这一帧之前有没有别的测试先钉过"——改前同一份 BODY_FONT 像素断言
+        // 会在 Cascadia Mono 与 NSimSun 之间随机切换（14.0625 vs 12.0 @24px）。
+        crate::fonts::apply_default_cjk_mono_pin();
         let core = self.core.borrow();
         // P34：本帧字形族来自构造入参（默认 = BODY_FONT）
         let body_font = self.font;

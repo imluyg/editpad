@@ -4809,18 +4809,25 @@ fn headless_wrap_reflows_after_viewport_shrink() {
         pixels
     };
     let _ = render(800.0);
-    {
-        let c = core.borrow();
-        eprintln!("[P116] 800 宽段数 = {}", c.line_visual_segments(0));
-    }
+    let segs_wide = core.borrow().line_visual_segments(0);
+    eprintln!("[P116] 800 宽段数 = {segs_wide}");
     let px = render(450.0);
     let segs = core.borrow().line_visual_segments(0);
     let budget = core.borrow().wrap_max_px();
     let gutter = core.borrow().gutter_width();
     eprintln!("[P116] 450 宽段数 = {segs}（预算 {budget:.1}）");
+    // P329 改判：原先硬断 `segs >= 6`——那个 6 是"按当时那套未钉字的等宽
+    // （9.375/字符）折算出来的段数"，正是要根除的定时炸弹（钉字后同一行窄了
+    // 15%，段数自然变成 5）。判据改成断**被断言的事实本身**：拉窄必须真的
+    // 重排出更多段（与宽帧同帧对比，与字体/字号无关）。右缘墨迹带那两条
+    // 像素断言原样保留，它们才是"按新预算折"的正面证据。
     assert!(
-        segs >= 6,
-        "拉窄后折行未按新预算重排（段数 {segs}，应 ≥6 段）"
+        segs > segs_wide,
+        "拉窄后未重排：450 宽 {segs} 段，不超过 800 宽的 {segs_wide} 段"
+    );
+    assert!(
+        segs >= 2,
+        "夹具前提：窄帧至少要折出两段，否则上一条比较是空的"
     );
     // 行尾余量 = 一个汉字宽：最右正文墨迹 ≤ 控件右缘 − 14px（文本区
     // 右缘 = 控件右缘，P95 贴边口径；预算已内收余量）
@@ -5338,9 +5345,22 @@ fn headless_edge_ruler_ink_at_column_and_toggle_off() {
     };
     let r_ink = ink(&on, rx);
     eprintln!("[P132] 标尺墨迹 {r_ink}px @x={rx}");
+    // P329 改判：门槛原本是 `(eh − 8) × 2`，那个 ×2 隐含"标尺线落在两个设备像素
+    // 之间、于是跨两列各出一半墨"——它是按未钉字那套度量（8 列 = 75px，分数像素）
+    // 量出来的。钉字后列 8 恰好落在整数像素上（8×8.0 = 64 ⇒ x=130 单列全高），
+    // ×2 就把一条**画对了**的标尺判成红。改断"这一列贯穿正文区高度"，
+    // 线宽仍由下面那条"旁边几列零墨迹"钉住（两条合起来＝1px 竖线在正确的位置）。
     assert!(
-        r_ink >= ((eh as u32) - 8) * 2,
-        "edge_column=8 应有贯穿正文区高度的标尺线（墨迹 {r_ink}px）"
+        r_ink >= (eh as u32 - 8),
+        "edge_column=8 应有一列贯穿正文区高度的标尺线（墨迹 {r_ink}px，门槛 {}）",
+        eh as u32 - 8
+    );
+    // 薄线检查：标尺只占 1~2 设备像素（文档只有 3 个字符，正文墨永远在 rx 左侧，
+    // 所以 rx 右侧几列出现整列墨迹就说明线画粗了/位置跑偏）
+    assert_eq!(
+        ink(&on, rx + 6),
+        0,
+        "标尺不该糊成一条带（rx+5..rx+7 应无墨）"
     );
     let off = render(0);
     assert_eq!(

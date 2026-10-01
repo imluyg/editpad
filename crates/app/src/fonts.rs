@@ -13,25 +13,29 @@ use super::*;
 /// * 入口 = `iced::advanced::graphics::text::font_system()`（iced 0.14 公开
 ///   全局，wgpu / tiny-skia 两后端共用）；`raw().db_mut()` 直达 fontdb；
 /// * 只改解析目标、不装载任何字体字节——零体积、零内存增量（预算总则入账）；
-/// * 进程内一次（AtomicBool 幂等），且发生在首帧排版之前，无缓存失效问题；
+/// * 进程内一次，且发生在首帧排版之前，无缓存失效问题；
 /// * 无候选命中（非 CJK 环境/极简系统）静默保持现状，零行为变化。
+/// * **P329：幂等由 `AtomicBool::swap` 改为 `std::sync::Once`**。改前那句 swap 在
+///   动手改 db **之前**就把"已应用"置起 ⇒ 第二个调用者立刻返回，可能读到还没
+///   写上的解析目标。启动期单线程看不出来，而无头渲染用例是**并行**的（每个
+///   渲染夹具都要先吃这一次钉字，否则用例跑在系统默认等宽、产品跑在钉好的 CJK
+///   等宽上＝第 226 轮那两条恒红的形状）⇒ 并发调用者必须阻塞到真正写完。
 pub(crate) fn apply_default_cjk_mono_pin() {
-    static APPLIED: AtomicBool = AtomicBool::new(false);
-    if APPLIED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let Ok(mut font_system) = iced::advanced::graphics::text::font_system().write() else {
-        return;
-    };
-    let families: Vec<String> = font_system
-        .raw()
-        .db_mut()
-        .faces()
-        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
-        .collect();
-    if let Some(family) = editor::pick_cjk_mono_family(&families) {
-        font_system.raw().db_mut().set_monospace_family(family);
-    }
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    APPLIED.call_once(|| {
+        let Ok(mut font_system) = iced::advanced::graphics::text::font_system().write() else {
+            return;
+        };
+        let families: Vec<String> = font_system
+            .raw()
+            .db_mut()
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+            .collect();
+        if let Some(family) = editor::pick_cjk_mono_family(&families) {
+            font_system.raw().db_mut().set_monospace_family(family);
+        }
+    });
 }
 
 // ---------- 字体选择（P34） ----------
