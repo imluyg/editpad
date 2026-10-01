@@ -32,6 +32,10 @@ impl EditorCore {
     pub(crate) fn collapse_multi(&mut self) -> bool {
         let had = self.has_multi();
         self.extra_cursors.clear();
+        // P328：集合没了，那份"逐点组尾"也就没有归属对象——不清的话，日后重新
+        // 造出的集合若恰好对上旧偏移串，会把不相干的两次输入并成一组。
+        // 单光标那份组状态**故意不动**（折叠后的回退路径要继续用它，改它就是改行为）。
+        self.typing_run_multi = None;
         had
     }
 
@@ -305,8 +309,25 @@ impl EditorCore {
         if payload.is_empty() && edits.iter().all(|(s, e, _)| s == e) {
             return Some(false); // 全体 no-op（无实编辑），不产快照
         }
-        self.snapshot(); // 单快照：一次撤销撤掉整步同步编辑
-                         // 从后往前应用（按 (start,end) 降序）；应用后回填各光标落点
+        // P328 多光标成组打字（关掉设计 §3.2 第 3 点那条「首版不做，待按手感点单」的
+        // 取舍）。合格条件与单光标 `insert_str` 逐条对齐：载荷是**单个非换行字符**、
+        // **全部**点编辑都是零宽（没有谁的选区被吃掉）、且每个点的起点恰好等于上一字符
+        // 在该点插入后的结束偏移。第三条是关键——中途改过集合（Alt+点击／Ctrl+M／拆行）、
+        // 动过光标、撤销/重做都经 `break_typing` 把这份组状态清掉了。删除类载荷为空 ⇒
+        // 恒开新组，与单光标 backspace/delete 不并入组同口径。
+        let single_char = payload.chars().count() == 1
+            && !matches!(payload.chars().next(), Some('\n') | Some('\r'));
+        let all_zero_width = edits.iter().all(|(s, e, _)| s == e);
+        let starts: Vec<usize> = edits.iter().map(|(s, _, _)| *s).collect(); // 此刻 edits 已按 (s,e) 升序
+        let merges =
+            single_char && all_zero_width && self.typing_run_multi.as_ref() == Some(&starts);
+        if !merges {
+            self.snapshot(); // 开新组：单快照＝一次撤销撤掉整步同步编辑
+        }
+        // 成组期间单光标那份组状态恒为 None（两条链不许互相顶班；不合并时 snapshot 已清，
+        // 合并路径不经快照 ⇒ 这里显式钉住）
+        self.typing_run = None;
+        // 从后往前应用（按 (start,end) 降序）；应用后回填各光标落点
         edits.sort_by_key(|(s, e, _)| std::cmp::Reverse((*s, *e)));
         let min_start = edits.last().map(|(s, _, _)| *s).unwrap_or(0);
         for (s, e, _) in &edits {
@@ -341,6 +362,7 @@ impl EditorCore {
             }
         };
         let mut landed: Vec<(PointEdit, CursorPos)> = Vec::with_capacity(edits.len());
+        let mut ends: Vec<usize> = Vec::with_capacity(edits.len());
         let mut changed = false;
         for (i, &(s, .., ref owner)) in edits.iter().enumerate() {
             changed = true;
@@ -359,6 +381,7 @@ impl EditorCore {
             };
             let line = self.doc.char_to_line(end_off);
             let col = end_off - self.doc.line_to_char(line);
+            ends.push(end_off); // P328：组尾按**最终文档坐标**记，下一字符才比得上
             landed.push((
                 match owner {
                     PointEdit::Main => PointEdit::Main,
@@ -382,7 +405,15 @@ impl EditorCore {
             }
         }
         self.sort_dedup_cursors(); // 应用后可能并位，恢复位序不变量
-        self.typing_run = None; // 一期不做多光标成组（snapshot 已清，显式钉住）
+                                   // P328：合格的一组把组尾留给下一字符比对（升序，逐点）；多字符／换行／
+                                   // 有人带选区被吃／删除类一律置 None ⇒ 下一击开新组。
+        ends.sort_unstable();
+        self.typing_run_multi = if single_char && all_zero_width {
+            Some(ends)
+        } else {
+            None
+        };
+        self.typing_run = None; // 成组期间单光标那条组恒为 None（两条链不互相顶班）
         self.invalidate_highlight_from(min_start);
         self.ensure_visible(); // 只跟随主光标（设计 §4 #1）
         Some(changed)

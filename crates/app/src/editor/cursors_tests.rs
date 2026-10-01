@@ -709,13 +709,23 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
             assert_eq!(core_pos, oracle_pos, "seed={seed} step={step} 光标发散");
         }
 
-        // 撤销到底回初始（含完整多光标态），重放回终态
+        // 撤销到底回初始（含完整多光标态），重放回终态。
+        // ⚠️ P328 起「步数 == 快照数」这条**代理**不再成立：连续单字符输入会并成一组，
+        // 栈深从"步数"变成"组数"。正解不是把 `for _ in 0..steps` 的门槛改成 0，
+        // 而是改断被代理的那件**事实**——一路撤到底恰好落在初始文档与初始光标集、
+        // 一路重放到底恰好落在终态，且两条步数相等（＝快照链闭合，一步不多一步不少）。
         let final_text = c.doc.to_text();
         let final_main = c.cursor;
         let final_extra = c.extra_cursors.clone();
-        for _ in 0..steps {
-            assert!(c.undo(), "seed={seed} 撤销栈应足够");
+        let mut undo_steps = 0usize;
+        while c.undo() {
+            undo_steps += 1;
+            assert!(
+                undo_steps <= steps,
+                "seed={seed} 撤销步数越过步数上界（成组只该让栈变浅，不该变深）"
+            );
         }
+        assert!(undo_steps >= 1, "seed={seed} 连一组都没撤动");
         assert_eq!(c.doc.to_text(), initial, "seed={seed} 撤销到底未回初始");
         assert_eq!(
             c.extra_cursors
@@ -730,12 +740,21 @@ fn random_multi_cursor_sync_edit_matches_char_model_oracle() {
             init_main,
             "seed={seed} 撤销到底主光标未回初始"
         );
-        for _ in 0..steps {
-            assert!(c.redo(), "seed={seed} 重放栈应足够");
+        let mut redo_steps = 0usize;
+        while c.redo() {
+            redo_steps += 1;
+            assert!(redo_steps <= steps, "seed={seed} 重放步数越过步数上界");
         }
+        assert_eq!(
+            redo_steps, undo_steps,
+            "seed={seed} 重放与撤销步数不等 ⇒ 快照链不闭合"
+        );
         assert_eq!(c.doc.to_text(), final_text, "seed={seed} 重放终态发散");
-        assert_eq!(c.cursor, final_main);
-        assert_eq!(c.extra_cursors, final_extra);
+        assert_eq!(c.cursor, final_main, "seed={seed} 重放主光标终态发散");
+        assert_eq!(
+            c.extra_cursors, final_extra,
+            "seed={seed} 重放附加光标终态发散"
+        );
     }
 }
 
@@ -777,6 +796,248 @@ fn add_next_match_multibyte_wrap_scan_stays_in_bounds() {
         Some(CursorPos { line: 0, col: 0 })
     );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 3 });
+}
+
+// ---------- B10 二期：多光标成组打字（P328） ----------
+
+/// 两条光标（主 + 附加）在各自行末连续打三个字符。
+#[test]
+fn multi_typing_groups_consecutive_single_chars_into_one_undo() {
+    let mut c = core_with("alpha\nbeta");
+    c.cursor = CursorPos { line: 0, col: 5 };
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 4 },
+        anchor: None,
+    }];
+    let base = c.undo_stack.len();
+    for ch in ["x", "y", "z"] {
+        assert_eq!(c.multi_edit(MultiEditKind::Insert(ch)), Some(true));
+    }
+    assert_eq!(c.doc.to_text(), "alphaxyz\nbetaxyz", "逐点同步落字");
+    assert_eq!(
+        c.undo_stack.len(),
+        base + 1,
+        "三连击只该开一个撤销组（改前是每击一组＝打一个字要按 N 次 Ctrl+Z 才回得来）"
+    );
+    assert!(c.undo());
+    assert_eq!(c.undo_stack.len(), base, "一步退回输入前");
+    assert_eq!(c.doc.to_text(), "alpha\nbeta", "整组一次撤销全收回");
+    assert!(!c.undo(), "组内只有一份快照，再撤就该越过这次输入");
+    assert!(c.redo());
+    assert_eq!(c.doc.to_text(), "alphaxyz\nbetaxyz", "重做整体恢复该组");
+    assert_eq!(
+        c.extra_cursors.iter().map(|e| e.cursor).collect::<Vec<_>>(),
+        vec![CursorPos { line: 1, col: 7 }],
+        "重做后附加光标回到组尾（P326 那条不变量的成组版）"
+    );
+}
+
+#[test]
+fn multi_typing_group_opens_new_group_when_a_point_carries_a_selection() {
+    // 与单光标同口径：消费选区的那一击永不并入上一组。
+    let mut c = core_with("ab\ncd");
+    c.cursor = CursorPos { line: 0, col: 2 };
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 2 },
+        anchor: None,
+    }];
+    let base = c.undo_stack.len();
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("x")), Some(true));
+    let after_x = c.doc.to_text();
+    // 给附加光标挂上选区（Ctrl+M 之后的形态）：下一击要吃掉它 ⇒ 开新组
+    c.extra_cursors[0].anchor = Some(CursorPos { line: 1, col: 1 });
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("y")), Some(true));
+    assert_eq!(
+        c.undo_stack.len(),
+        base + 2,
+        "有点在吃选区 ⇒ 不许并进上一组，否则撤销会把没被选区参与的落字一起吞掉"
+    );
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), after_x, "一步只撤掉带选区那一击");
+}
+
+#[test]
+fn multi_typing_group_breaks_on_multi_char_and_newline_payload() {
+    // 多字符（粘贴／IME 上屏）开新组，且**其后**的单字符也开新组
+    let mut c = core_with("a\nb");
+    c.cursor = CursorPos { line: 0, col: 1 };
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 1 },
+        anchor: None,
+    }];
+    let base = c.undo_stack.len();
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("x")), Some(true));
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("yz")), Some(true));
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("w")), Some(true));
+    assert_eq!(
+        c.undo_stack.len(),
+        base + 3,
+        "粘贴自成一组，其后单字符另开一组（与单光标 insert_str 的粘贴格同形）"
+    );
+
+    // 换行：归一后即使只有一个字符也不并入组
+    let mut nl = core_with("a\nb");
+    nl.cursor = CursorPos { line: 0, col: 1 };
+    nl.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 1 },
+        anchor: None,
+    }];
+    let nl_base = nl.undo_stack.len();
+    assert_eq!(nl.multi_edit(MultiEditKind::Insert("x")), Some(true));
+    assert_eq!(nl.multi_edit(MultiEditKind::Insert("\n")), Some(true));
+    assert_eq!(
+        nl.undo_stack.len(),
+        nl_base + 2,
+        "回车开新组（多光标下每行各断一处，与单光标一样不该并进上一组）"
+    );
+    assert_eq!(
+        nl.doc.to_text(),
+        "ax\n\nbx\n",
+        "夹具自证：两处都真落了字（各自行末断出一行）"
+    );
+}
+
+#[test]
+fn multi_typing_group_breaks_on_motion_set_change_and_undo() {
+    // ①行内 Right 存活集合但打断组（`apply_motion` 两条 Left/Right 分支都调
+    //    break_typing ⇒ 共用同一个汇点，这就是"两份组状态一处清"的收益）
+    let mut c = core_with("ab\ncd");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 0 },
+        anchor: None,
+    }];
+    let base = c.undo_stack.len();
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("x")), Some(true));
+    c.apply_motion(Motion::Right, false);
+    assert!(
+        c.has_multi(),
+        "夹具自证：行内 Right 集合存活（白名单口径），且两条光标都还在行内"
+    );
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("y")), Some(true));
+    assert_eq!(
+        c.undo_stack.len(),
+        base + 2,
+        "移动过光标 ⇒ 移动后的输入独立成组"
+    );
+
+    // ②改过集合（Alt+点击）⇒ 打断
+    let mut t = core_with("a\nb\nc");
+    t.cursor = CursorPos { line: 0, col: 1 };
+    assert_eq!(
+        t.multi_edit(MultiEditKind::Insert("x")),
+        None,
+        "单光标不合成组"
+    );
+    t.toggle_extra_cursor(CursorPos { line: 1, col: 1 });
+    let t_base = t.undo_stack.len();
+    assert_eq!(t.multi_edit(MultiEditKind::Insert("y")), Some(true));
+    t.toggle_extra_cursor(CursorPos { line: 2, col: 1 }); // 新增一条附加光标
+    assert_eq!(t.multi_edit(MultiEditKind::Insert("z")), Some(true));
+    assert_eq!(
+        t.undo_stack.len(),
+        t_base + 2,
+        "集合被 Alt+点击改过 ⇒ 下一击开新组（旧组尾已不属于当前集合）"
+    );
+
+    // ③撤销打断旧组、新组照旧成（与单光标 undo_tests 里最后一格同形）
+    let mut u = core_with("a\nb");
+    u.cursor = CursorPos { line: 0, col: 1 };
+    u.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 1 },
+        anchor: None,
+    }];
+    let u_base = u.undo_stack.len();
+    assert_eq!(u.multi_edit(MultiEditKind::Insert("x")), Some(true));
+    assert_eq!(u.multi_edit(MultiEditKind::Insert("y")), Some(true));
+    assert_eq!(u.undo_stack.len(), u_base + 1, "xy 并作一组");
+    assert!(u.undo());
+    assert_eq!(u.doc.to_text(), "a\nb", "一步收回整组");
+    assert_eq!(u.multi_edit(MultiEditKind::Insert("z")), Some(true));
+    assert_eq!(u.multi_edit(MultiEditKind::Insert("w")), Some(true));
+    assert_eq!(
+        u.undo_stack.len(),
+        u_base + 1,
+        "撤销后重新打字另成一组（旧组尾随 break_typing 作废，不会跟新击混在一起）"
+    );
+    assert_eq!(u.doc.to_text(), "azw\nbzw");
+}
+
+/// 动过光标、但两点偏移**重新对齐**回原处的那一格，专门看守 `break_typing` 这个
+/// 共用汇点本身。上一条测试里集合变大/移动都会让逐点偏移对不上，于是"逐点对齐"
+/// 与"汇点清组尾"两道机制互相顶班（探针把汇点整条摘掉时全量 775 条一条不红＝
+/// 双保险喂出的假绿，本仓 R-5 那条教训的形状）。这一格不一样：Right 再 Left 把
+/// 两点挪回插入后的原位，只靠偏移比对会误并成一组，拦住它的只有汇点。
+/// 单光标同形（`typing_run` 由 `apply_motion` 清，而不是靠 `at == run_end` 兜住）。
+#[test]
+fn multi_typing_group_broken_by_motion_even_when_offsets_realign() {
+    let mut c = core_with("ab\ncd");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 0 },
+        anchor: None,
+    }];
+    let base = c.undo_stack.len();
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("x")), Some(true));
+    c.apply_motion(Motion::Right, false);
+    c.apply_motion(Motion::Left, false);
+    // 夹具自证：两点确实回到插入后的落点（下面那格考的就只剩"汇点清没清"）
+    assert_eq!(
+        [c.cursor, c.extra_cursors[0].cursor],
+        [CursorPos { line: 0, col: 1 }, CursorPos { line: 1, col: 1 }],
+        "夹具自证：Right→Left 之后两点回到组尾原位，逐点偏移会重新对上"
+    );
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("y")), Some(true));
+    assert_eq!(
+        c.undo_stack.len(),
+        base + 2,
+        "动过光标就不许并组——即便偏移重新对齐（这一格看守的是 break_typing 汇点）"
+    );
+    assert_eq!(c.doc.to_text(), "xyab\nxycd", "夹具自证：两击都落了字");
+}
+
+#[test]
+fn multi_typing_group_survives_scrolling() {
+    // 滚动不打断组（与单光标那条 `typing_run_survives_scrolling_…` 同形）
+    let mut c = core_with("a\nb");
+    c.cursor = CursorPos { line: 0, col: 1 };
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 1 },
+        anchor: None,
+    }];
+    let base = c.undo_stack.len();
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("x")), Some(true));
+    c.scroll_by_lines(2.0);
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("y")), Some(true));
+    assert_eq!(c.undo_stack.len(), base + 1, "滚动不改集合，组必须继续");
+    assert_eq!(c.doc.to_text(), "axy\nbxy", "夹具自证：两击都逐点落了字");
+}
+
+#[test]
+fn collapse_clears_only_the_multi_group_tail() {
+    // 折叠成单光标 ⇒ 那份"逐点组尾"作废（否则日后重新造出恰好对上的集合会并错组）；
+    // 而单光标那份组状态**不该**被折叠顺手清掉——折叠后的回退路径还要靠它成组。
+    // ⚠️ 这一格只能字段注入：成组期间单光标那份恒为 None，"两份同时存在"在生产
+    // 路径上到不了。本仓偏好走生产写入点（P296 那条账），这里注一句为什么破例。
+    let mut s = core_with("ab");
+    s.cursor = CursorPos { line: 0, col: 0 };
+    s.insert_str("x"); // 单光标成组进行中
+    assert_eq!(s.typing_run, Some(1), "夹具自证：单光标组尾已立起来");
+    s.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 0, col: 1 },
+        anchor: None,
+    }];
+    s.typing_run_multi = Some(vec![1, 2]);
+    assert!(s.collapse_multi());
+    assert!(
+        s.typing_run_multi.is_none(),
+        "折叠必须清掉逐点组尾（不清＝给下一轮误并留门）"
+    );
+    assert_eq!(
+        s.typing_run,
+        Some(1),
+        "折叠不得动单光标组（改了就是改行为，不在本笔范围内）"
+    );
 }
 
 // ---------- B10 二期首批：选区按行拆分（拆行多选） ----------

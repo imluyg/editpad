@@ -613,6 +613,12 @@ pub struct EditorCore {
     /// 编辑、撤销/重做、换文档、焦点离开）都会置 None 打断；
     /// 合并条件见 [`EditorCore::insert_str`]。
     pub(crate) typing_run: Option<usize>,
+    /// P328 多光标成组打字（补设计 §3.2 第 3 点那条「首版不做」的取舍）：
+    /// `Some(各点插入的结束字符偏移，升序)` ＝ 当前处于连续单字符输入组中。
+    /// 与单光标那份是**两份独立状态**（合并条件不同：这里要求**全部**点都对齐），
+    /// 打断点共用同一个汇点 `EditorCore::break_typing`——集合被改过、光标动过、
+    /// 撤销/重做、换文档都一并作废。合并条件见 `EditorCore::multi_edit`。
+    pub(crate) typing_run_multi: Option<Vec<usize>>,
     /// 语法高亮器；None = 纯文本快速路径。RefCell 让只读的 draw 也能推进状态。
     pub(crate) highlight: Option<RefCell<LazyHighlighter>>,
     /// 输入法预编辑串（组字过程中的拼音/候选串），提交前显示在光标处。
@@ -941,6 +947,7 @@ impl Default for EditorCore {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             typing_run: None,
+            typing_run_multi: None,
             highlight: None,
             preedit: None,
             ime_anchor: std::cell::Cell::new(None),
@@ -1482,7 +1489,8 @@ impl EditorCore {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.typing_run = None; // P37：换文档即一切成组状态作废
-                                // 第 60 轮：新文档 = 新坐标系，旧书签一律作废（会话级标注不入快照）
+        self.typing_run_multi = None; // P328：多光标那份同一条口径（同一个汇点清两份）
+                                      // 第 60 轮：新文档 = 新坐标系，旧书签一律作废（会话级标注不入快照）
         self.bookmarks.clear();
         // P123：旧文档的查找命中表一并作废（查找栏仍开时由下一次
         // FindScanDone 重新下发）

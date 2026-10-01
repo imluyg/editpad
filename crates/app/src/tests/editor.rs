@@ -1269,6 +1269,61 @@ fn split_selection_by_lines_dispatch_chain_and_read_only() {
     );
 }
 
+/// P328 端到端：拆行造出集合 → 连打三个字符 → **一步**撤销整段收回、
+/// 一步重做整段放回，且集合全程不丢（P326＋P327＋P328 三条串成一个用户手势）。
+#[test]
+fn multi_caret_typing_groups_into_one_undo_step_end_to_end() {
+    use crate::editor::CursorPos;
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("alpha\nbeta\ngamma\n".into())),
+    );
+    {
+        let mut h = app.cur_handle.borrow_mut();
+        h.cursor = CursorPos { line: 0, col: 0 };
+        h.anchor = Some(CursorPos { line: 2, col: 1 });
+    }
+    dispatch(&mut app, Message::Edit(EditOp::SplitSelectionByLines));
+    let n = app.cur_handle.borrow().extra_cursors.len();
+    assert_eq!(n, 2, "夹具自证：三行拆出两条附加光标");
+    let base = app.cur_handle.borrow().undo_stack.len();
+    for ch in ["x", "y", "z"] {
+        dispatch(&mut app, Message::Edit(EditOp::InsertText(ch.into())));
+    }
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "alphaxyz\nbetaxyz\ngammaxyz\n",
+        "逐点同步落字"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().undo_stack.len(),
+        base + 1,
+        "三击只开一个撤销组（改前＝每击一组，打三个字要按三次 Ctrl+Z）"
+    );
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "alpha\nbeta\ngamma\n",
+        "一步收回整段连续输入"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().extra_cursors.len(),
+        n,
+        "撤销后集合仍在"
+    );
+    dispatch(&mut app, Message::Edit(EditOp::Redo));
+    {
+        let h = app.cur_handle.borrow();
+        assert_eq!(
+            h.doc.to_text(),
+            "alphaxyz\nbetaxyz\ngammaxyz\n",
+            "重做整段放回"
+        );
+        assert_eq!(h.extra_cursors.len(), n, "重做后集合仍在（P326 的成组版）");
+    }
+}
+
 /// P327 的白名单那一格：`apply_edit` 的存活白名单必须含 SplitSelectionByLines。
 /// 生产里这条几乎不可见（拆行要先有跨行选区，而任何造选区的动作都已先折叠），
 /// 所以只能注入式地摆出"已有集合 + 无选区"这一格：被拒的拆行不得顺手清掉集合。
