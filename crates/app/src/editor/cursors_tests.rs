@@ -1014,30 +1014,38 @@ fn multi_typing_group_survives_scrolling() {
 }
 
 #[test]
-fn collapse_clears_only_the_multi_group_tail() {
-    // 折叠成单光标 ⇒ 那份"逐点组尾"作废（否则日后重新造出恰好对上的集合会并错组）；
-    // 而单光标那份组状态**不该**被折叠顺手清掉——折叠后的回退路径还要靠它成组。
-    // ⚠️ 这一格只能字段注入：成组期间单光标那份恒为 None，"两份同时存在"在生产
-    // 路径上到不了。本仓偏好走生产写入点（P296 那条账），这里注一句为什么破例。
-    let mut s = core_with("ab");
-    s.cursor = CursorPos { line: 0, col: 0 };
-    s.insert_str("x"); // 单光标成组进行中
-    assert_eq!(s.typing_run, Some(1), "夹具自证：单光标组尾已立起来");
-    s.extra_cursors = vec![ExtraCursor {
-        cursor: CursorPos { line: 0, col: 1 },
-        anchor: None,
+fn collapse_keeps_the_single_caret_group_alive() {
+    // P328 的"改动面不扩大"验收：折叠**不许**清单光标那份组尾。可达路径就在
+    // multi_edit 的回退分支里——跨行选区 ⇒ 折叠集合 ⇒ 交回单光标 `insert_str`，
+    // 紧接着这一次打字必须还并得进它原来那一组（若折叠顺手 break_typing，
+    // 下面第三步就会多压一份快照）。
+    let mut c = core_with("ab\ncd");
+    c.cursor = CursorPos { line: 0, col: 2 };
+    c.insert_str("x"); // 单光标成组中：组尾 = 3
+    let base = c.undo_stack.len();
+    assert_eq!(c.typing_run, Some(3), "夹具自证：单光标组已立起来");
+    // 附加光标带一条**跨行**选区（多光标一期不做跨行 ⇒ 这一击必然走回退）
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 1, col: 2 },
+        anchor: Some(CursorPos { line: 0, col: 1 }),
     }];
-    s.typing_run_multi = Some(vec![1, 2]);
-    assert!(s.collapse_multi());
-    assert!(
-        s.typing_run_multi.is_none(),
-        "折叠必须清掉逐点组尾（不清＝给下一轮误并留门）"
-    );
     assert_eq!(
-        s.typing_run,
-        Some(1),
-        "折叠不得动单光标组（改了就是改行为，不在本笔范围内）"
+        c.multi_edit(MultiEditKind::Insert("y")),
+        None,
+        "跨行选区 ⇒ 回退：返回 None 交给单光标路径"
     );
+    assert!(!c.has_multi(), "回退确实折叠了集合");
+    assert_eq!(c.doc.to_text(), "abx\ncd", "回退不动文档");
+    assert_eq!(
+        c.typing_run,
+        Some(3),
+        "折叠不得清单光标那份组尾（清了就是改行为）"
+    );
+    c.insert_str("y"); // 回退后的这一次打字：仍并入同一组
+    assert_eq!(c.undo_stack.len(), base, "并入原组 ⇒ 不多压快照");
+    assert_eq!(c.doc.to_text(), "abxy\ncd");
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), "ab\ncd", "整组两步输入一步退净");
 }
 
 // ---------- B10 二期首批：选区按行拆分（拆行多选） ----------

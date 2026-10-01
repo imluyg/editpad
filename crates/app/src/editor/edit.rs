@@ -28,6 +28,11 @@ impl EditorCore {
     /// P328：这一处同时清掉**两份**组状态（单光标那个偏移、多光标那串偏移），
     /// 免得新增一条"只清一半"的漏口——集合改动的所有入口（Alt+点击／Ctrl+M／
     /// 拆行多选）本来就都走这里。
+    /// ⚠️ 逐点那份有一处**只有**这里能兜住：`Right` 之后再 `Left`，两点落点挪回原处、
+    /// 偏移重新对齐 ⇒ 只靠"逐点对齐"判据会误并成一组（用例
+    /// `multi_typing_group_broken_by_motion_even_when_offsets_realign` 专钉这一格）。
+    /// 反向的独守格是探针「丢掉逐点偏移对齐」红 8 条那批（集合变大／落点漂移时
+    /// 只有对齐判据能拒）。两处机制各守各的 case，不是双保险。
     pub(crate) fn break_typing(&mut self) {
         self.typing_run = None;
         self.typing_run_multi = None;

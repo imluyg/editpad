@@ -32,10 +32,12 @@ impl EditorCore {
     pub(crate) fn collapse_multi(&mut self) -> bool {
         let had = self.has_multi();
         self.extra_cursors.clear();
-        // P328：集合没了，那份"逐点组尾"也就没有归属对象——不清的话，日后重新
-        // 造出的集合若恰好对上旧偏移串，会把不相干的两次输入并成一组。
-        // 单光标那份组状态**故意不动**（折叠后的回退路径要继续用它，改它就是改行为）。
-        self.typing_run_multi = None;
+        // P328：这里**不**清逐点组尾，不是漏——读它的唯一路径是本文件的 `multi_edit`，
+        // 而它开头就 `if !self.has_multi() { return None }` 短路；集合空着时那份串
+        // 无从被消费。日后重新造集合的三条手势（Alt+点击／Ctrl+M／拆行）都先经
+        // `break_typing` 把它清掉 ⇒ 失效机制只留两处（汇点 ＋ 逐点偏移对齐），
+        // 不在这儿再补一道"第二重保险"（本仓 R-5：两道保险互相顶班＝探针短路后全绿）。
+        // 单光标那份组状态同样故意不动：折叠后的回退路径要继续用它成组。
         had
     }
 
