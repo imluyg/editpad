@@ -47,6 +47,8 @@ fn unassigned_actions_are_visible_in_the_palette() {
         "clip_history",
         // A7 同等待遇：跨标签全部替换（查找栏另有按钮，面板里也要看得见）
         "replace_all_in_tabs",
+        // B10 二期首批（P327）：拆行多选。26 个 Ctrl+Shift 字母已占尽 ⇒ 先无键入表
+        "split_selection_by_lines",
     ] {
         assert!(ids.contains(&id), "{id} 应出现在命令面板里");
     }

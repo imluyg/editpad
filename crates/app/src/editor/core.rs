@@ -261,6 +261,11 @@ pub enum EditOp {
     /// 不改文档、不置脏；失败原因（不在词上/无匹配/封顶）由
     /// `EditorCore::add_next_match` 以 Err 带出给状态栏。
     AddNextMatch,
+    // ---------- B10 二期首批（roadmap §9 第 7 行）：拆行多选 ----------
+    /// 选区按行拆分（多光标）：选区触及的每一逻辑行在**正文末尾**各落一条光标，
+    /// 随后打字／退格逐点同步。不改文档、不置脏、不产快照；拒绝原因（无选区／
+    /// 超封顶）由 `EditorCore::split_selection_by_lines` 以 Err 带出给状态栏。
+    SplitSelectionByLines,
 }
 
 /// P128：选区文本工具种类。

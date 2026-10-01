@@ -1,6 +1,7 @@
 //! B10 多光标一期（设计 docs/multi-cursor-design.md）：附加光标集的
 //! 增删/排序去重/折叠与行内步进。Phase 2：同步编辑（InsertText/
 //! Backspace/Delete 从后往前逐点应用、单快照）与添加下一匹配（Ctrl+M）。
+//! 二期首批（roadmap §9 第 7 行）：选区按行拆分＝每行正文末尾各一条光标。
 
 use super::*;
 
@@ -527,6 +528,70 @@ impl EditorCore {
             self.scroll_top = row - rows_visible + 1.0;
         }
         self.clamp_scroll();
+        Ok(true)
+    }
+
+    /// B10 二期（roadmap §9 第 7 行「拆行多选」）：把选区按行拆开——选区触及的
+    /// 每一条逻辑行在**正文末尾**各落一条光标，随后打字／退格即逐点同步（走既有
+    /// [`Self::multi_edit`] 管线）。不改文档、不置脏、不产快照。
+    ///
+    /// 守卫与 [`Self::add_next_match`] 同一口径：结构性互斥（折行开态／列块态／
+    /// 组字态）静默 `Ok(false)`；面向用户的理由给 `Err`（无选区／超封顶——被拒的
+    /// 尝试**全有或全无**，连用户已有的集合都不动，所以清理只能放在守卫之后）。
+    /// 只触及一行也是 `Ok(false)` 不改动：这条命令唯一的承诺是「产生多个光标」，
+    /// 单行时产生不出第二个，把用户选区吃掉是净损失。
+    pub(crate) fn split_selection_by_lines(&mut self) -> Result<bool, EditErr> {
+        if self.wrap.borrow().enabled || self.block_sel.is_some() || self.preedit.is_some() {
+            return Ok(false);
+        }
+        if self.anchor.is_none() {
+            return Err(EditErr::NoSelection);
+        }
+        // 行区间口径复用 touched_lines()：它已经把「选区末点落在行首 ⇒ 该行不算
+        // 触及」与尾随换行的幻影末行两条规则付过学费并钉了用例，这里再算一份
+        // 就是本仓第 7 次口径分叉。
+        let (first, last) = self.touched_lines();
+        if last <= first {
+            return Ok(false); // 含"锚点与光标同位"的零宽选区
+        }
+        let count = last - first + 1;
+        if count - 1 > MAX_EXTRA_CURSORS {
+            return Err(EditErr::ExtraCursorCap(MAX_EXTRA_CURSORS));
+        }
+        // 主光标留在它自己那一行（区间内原样、区间外夹紧）：`ensure_visible` 只锚
+        // 主光标（设计 §4 #1），换行做主光标会让画面跳到用户没看的地方。
+        let main_line = self.cursor.line.clamp(first, last);
+        // 落点一律只问 line_display_len（＝ Document::line_body_len_chars，O(1)
+        // 且不物化整行）。逐行取串在本仓主夹具（单行 50 MB 日志）上＝把整份文件
+        // 抄 N 遍——P298 那条账已经把这种写法否掉了。
+        let mut extras: Vec<ExtraCursor> = Vec::with_capacity(count - 1);
+        for line in first..=last {
+            if line == main_line {
+                continue;
+            }
+            let col = self.line_display_len(line);
+            extras.push(ExtraCursor {
+                cursor: CursorPos { line, col },
+                anchor: None,
+            });
+        }
+        // 守卫之后才动状态：整体换新（不是并入）——旧集合留下来会与新集合的
+        // 位置撞在一起，而 sort_dedup_cursors 只在附加集内部去重、**从不与主光标
+        // 比**，附加光标压在主光标位＝同一行插两份（multi_edit 的干扰判定对"同起点
+        // 两个零宽插入"是放行的），屏幕上还看不出来。
+        self.extra_cursors = extras;
+        let main_col = self.line_display_len(main_line);
+        self.cursor = CursorPos {
+            line: main_line,
+            col: main_col,
+        };
+        // 主选区必须落掉：留着跨行选区，下一次插入会撞 multi_edit 的
+        // range_crosses_lines ⇒ 整批折叠回退单光标 ⇒ 功能看着是坏的。
+        self.anchor = None;
+        self.goal_px = None; // 主光标被挪到行末 ⇒ 竖向 goal 作废（同行内水平步进）
+        self.sort_dedup_cursors();
+        self.break_typing();
+        self.ensure_visible();
         Ok(true)
     }
 }

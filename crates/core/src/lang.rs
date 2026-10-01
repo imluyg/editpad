@@ -709,6 +709,7 @@ key_table! {
     { HkToggleMonitorFile => "切换当前页文件监视（tail 跟随）", "Toggle file monitoring for the current tab (tail follow)" },
     { HkColumnEditor => "列编辑器（向列块插入序号/文本）", "Column editor (insert numbers or text into a column block)" },
     { HkAddNextMatch => "多光标：添加下一匹配（环形搜索）", "Multi-cursor: add the next match (wraps around)" },
+    { HkSplitSelectionByLines => "多光标：选区按行拆分（每行一个光标）", "Multi-cursor: split the selection into one cursor per line" },
     { HkFindInFiles => "在文件中查找（当前页所在目录，可换目录）", "Find in files (folder of the current tab; can be changed)" },
 }
 

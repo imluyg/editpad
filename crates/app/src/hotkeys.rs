@@ -555,6 +555,14 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["Ctrl+M"],
         desc: HkAddNextMatch,
     },
+    // B10 二期首批：选区按行拆分（每行一条光标）。主流的 Ctrl+Shift+L 已被
+    // P121「删除行首空白」占用，且 26 个 Ctrl+Shift 字母全部占尽 ⇒ 与
+    // P318/P319/A7 同等待遇：先无键入表（命令面板可见、设置页与面板内可赋键）。
+    HotkeyAction {
+        id: "split_selection_by_lines",
+        default_combos: &[],
+        desc: HkSplitSelectionByLines,
+    },
     // A8：在文件中查找。Ctrl+Shift+F 被 format_json 占用（26 个
     // Ctrl+Shift 字母占尽，P129 记录），F 家族空闲 F1/F4/F10/F12 取 F12。
     HotkeyAction {
@@ -833,6 +841,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "column_editor" => Some(Message::ColumnEditorToggled),
         // B10 Phase 2：多光标添加下一匹配
         "add_next_match" => edit(EditOp::AddNextMatch),
+        // B10 二期首批：选区按行拆分（无默认键，只能从命令面板/菜单进来）
+        "split_selection_by_lines" => edit(EditOp::SplitSelectionByLines),
         // A8：在文件中查找
         "find_in_files" => Some(Message::FindInFilesToggled),
         _ => None,

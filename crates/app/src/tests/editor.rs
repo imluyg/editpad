@@ -1207,6 +1207,100 @@ fn add_next_match_hotkey_dispatch_full_chain() {
     );
 }
 
+/// B10 二期首批（拆行多选）的全链路：注册表 id → 消息 → 集合真的建起来，
+/// 且只读页放行（它改的是光标，不是正文）。
+#[test]
+fn split_selection_by_lines_dispatch_chain_and_read_only() {
+    use crate::editor::CursorPos;
+    // 无默认键 ⇒ 命令面板/设置页赋键是唯一入口，dispatch_action 那条臂必须存在
+    let msg =
+        crate::hotkeys::dispatch_action("split_selection_by_lines", keyboard::Modifiers::empty())
+            .expect("注册了 id 就要有分发分支");
+    assert!(
+        matches!(msg, Message::Edit(EditOp::SplitSelectionByLines)),
+        "分发的必须是拆行这一条"
+    );
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("alpha\nbeta\ngamma\n".into())),
+    );
+    let dirty_before = app.tab().dirty;
+    let undo_before = app.cur_handle.borrow().undo_stack.len();
+    {
+        let mut h = app.cur_handle.borrow_mut();
+        h.cursor = CursorPos { line: 0, col: 0 };
+        h.anchor = Some(CursorPos { line: 2, col: 1 });
+    }
+    dispatch(&mut app, msg);
+    {
+        let h = app.cur_handle.borrow();
+        assert_eq!(h.extra_cursors.len(), 2, "三行选区拆出两条附加光标");
+        assert_eq!(h.doc.to_text(), "alpha\nbeta\ngamma\n", "拆行不动正文");
+        assert_eq!(
+            h.undo_stack.len(),
+            undo_before,
+            "不产快照 ⇒ 撤销不会退到「拆行之前」那种无意义格"
+        );
+    }
+    assert_eq!(app.tab().dirty, dirty_before, "拆行既不置脏也不清脏");
+    // 只读页：分类里它属"不改文档"一族 ⇒ 放行（fail-safe 白名单漏登记会被这条逮到）
+    dispatch(&mut app, Message::ToggleReadOnly);
+    {
+        let mut h = app.cur_handle.borrow_mut();
+        h.collapse_multi();
+        h.cursor = CursorPos { line: 0, col: 0 };
+        h.anchor = Some(CursorPos { line: 2, col: 1 });
+    }
+    let locked = app.t(editpad_core::Key::StDocReadOnlyLocked).to_owned();
+    dispatch(&mut app, Message::Edit(EditOp::SplitSelectionByLines));
+    assert!(
+        app.cur_handle.borrow().has_multi(),
+        "只读页要能用拆行做阅读/选行"
+    );
+    assert_ne!(app.status, locked, "放行却写了拒收提示 ⇒ 其实被总闸挡了");
+    // 正对照：同一页上真正的编辑动作会被总闸拒收，且那条提示可观察
+    //（否则上面一句断言分不清"放行"与"这条消息压根没接上"）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("Z".into())));
+    assert_eq!(app.status, locked, "夹具自检：只读拒收提示应当可见");
+    assert!(
+        !app.cur_handle.borrow().doc.to_text().contains('Z'),
+        "只读页拒收编辑"
+    );
+}
+
+/// P327 的白名单那一格：`apply_edit` 的存活白名单必须含 SplitSelectionByLines。
+/// 生产里这条几乎不可见（拆行要先有跨行选区，而任何造选区的动作都已先折叠），
+/// 所以只能注入式地摆出"已有集合 + 无选区"这一格：被拒的拆行不得顺手清掉集合。
+#[test]
+fn split_refusal_keeps_the_existing_cursor_set() {
+    use crate::editor::{CursorPos, ExtraCursor};
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("aaa\nbbb\n".into())),
+    );
+    {
+        let mut h = app.cur_handle.borrow_mut();
+        h.extra_cursors = vec![ExtraCursor {
+            cursor: CursorPos { line: 0, col: 1 },
+            anchor: None,
+        }];
+        h.anchor = None; // 无选区 ⇒ 这一枪必然被拒，正是要看的形状
+    }
+    dispatch(&mut app, Message::Edit(EditOp::SplitSelectionByLines));
+    let h = app.cur_handle.borrow();
+    assert!(
+        h.has_multi(),
+        "被拒的拆行不得折叠已有集合（闸门须让它存活）"
+    );
+    assert!(
+        app.status.contains("选中"),
+        "拒绝理由要上状态栏，不能静默，实得：{}",
+        app.status
+    );
+}
+
 /// 裸功能键便捷构造（第 60 轮热键契约放宽后 F 键可作默认键）。
 fn key_f5() -> Option<Message> {
     use iced::keyboard::{self, key::Named};
@@ -1845,6 +1939,10 @@ fn edit_op_mutates_classification_is_failsafe() {
     assert!(!crate::update::edit_op_mutates(&EditOp::CancelBlock));
     // B10：添加下一匹配只动光标集，不改文档（只读页放行）
     assert!(!crate::update::edit_op_mutates(&EditOp::AddNextMatch));
+    // B10 二期首批：拆行多选同族——只把选区换成「每行一条光标」，正文一字不动
+    assert!(!crate::update::edit_op_mutates(
+        &EditOp::SplitSelectionByLines
+    ));
     // P310（A6）：命中→书签是标注、复制命中行是纯读取 ⇒ 同族放行
     assert!(!crate::update::edit_op_mutates(
         &EditOp::MarkHitLinesAsBookmarks

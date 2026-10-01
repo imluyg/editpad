@@ -778,3 +778,194 @@ fn add_next_match_multibyte_wrap_scan_stays_in_bounds() {
     );
     assert_eq!(c.extra_cursors[0].cursor, CursorPos { line: 0, col: 3 });
 }
+
+// ---------- B10 二期首批：选区按行拆分（拆行多选） ----------
+
+#[test]
+fn split_selection_by_lines_lands_one_cursor_per_touched_line() {
+    // 四行三种长度（含一行空行）；主光标在区间内 ⇒ 它自己那行不进附加集
+    let mut c = core_with("alpha\nbeta\n\ngamma");
+    c.cursor = CursorPos { line: 0, col: 1 };
+    c.anchor = Some(CursorPos { line: 3, col: 2 });
+    let undo_before = c.undo_stack.len();
+    assert_eq!(c.split_selection_by_lines(), Ok(true));
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 0, col: 5 },
+        "主光标留在自己那行、落到正文末尾（ensure_visible 只锚主光标）"
+    );
+    assert_eq!(
+        c.anchor, None,
+        "跨行主选区必须落掉：留着它，下一次插入会撞 multi_edit 的跨行回退"
+    );
+    assert_eq!(
+        c.extra_cursors
+            .iter()
+            .map(|e| (e.cursor, e.anchor))
+            .collect::<Vec<_>>(),
+        vec![
+            (CursorPos { line: 1, col: 4 }, None),
+            (CursorPos { line: 2, col: 0 }, None),
+            (CursorPos { line: 3, col: 5 }, None),
+        ],
+        "每行一条光标：空行落 col 0，行长取正文长度不含行尾"
+    );
+    assert_eq!(c.doc.to_text(), "alpha\nbeta\n\ngamma", "拆行不改正文");
+    assert_eq!(c.undo_stack.len(), undo_before, "纯光标态操作不产快照");
+    assert!(
+        !c.extra_cursors.iter().any(|e| e.cursor == c.cursor),
+        "附加集不得含主光标位（去重只在附加集内部做，压位会双插）"
+    );
+}
+
+#[test]
+fn split_then_type_once_per_line_appends_exactly_once() {
+    // 主光标落在区间中间 ⇒ 每行恰好一个 "X"。这条断的是**结果文本**：
+    // sort_dedup_cursors 从不把附加光标与主光标对比，multi_edit 的干扰判定
+    // 又放行"同起点两个零宽插入"，一旦把主行也塞进附加集就是同一行插两份，
+    // 而 all_cursors() 的 dedup 让屏幕上完全看不出来。
+    let mut c = core_with("alpha\nbeta\n\ngamma");
+    c.cursor = CursorPos { line: 1, col: 2 };
+    c.anchor = Some(CursorPos { line: 3, col: 2 });
+    assert_eq!(c.split_selection_by_lines(), Ok(true));
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 1, col: 4 },
+        "主行仍是主光标那一行"
+    );
+    assert_eq!(
+        c.multi_edit(MultiEditKind::Insert("X")),
+        Some(true),
+        "拆出来的集合要走同步编辑管线"
+    );
+    assert_eq!(
+        c.doc.to_text(),
+        "alpha\nbetaX\nX\ngammaX",
+        "选区内三行各加一个 X（主行不得出现两个；第 0 行在选区外，一字不动）"
+    );
+}
+
+#[test]
+fn split_without_a_range_is_an_error_or_no_change() {
+    let mut c = core_with("aaa\nbbb\nccc");
+    // 无选区 ⇒ Err（静默不应会被当成"这条命令坏了"）
+    assert!(matches!(
+        c.split_selection_by_lines(),
+        Err(EditErr::NoSelection)
+    ));
+    assert!(!c.has_multi());
+
+    c.cursor = CursorPos { line: 1, col: 1 };
+    // 零宽"选区"（锚点与光标同位）⇒ Ok(false) 且选区原样留着
+    c.anchor = Some(CursorPos { line: 1, col: 1 });
+    assert_eq!(c.split_selection_by_lines(), Ok(false));
+    assert_eq!(
+        c.anchor,
+        Some(CursorPos { line: 1, col: 1 }),
+        "被拒的尝试不许吃掉选区"
+    );
+
+    // 只触及一行 ⇒ 什么都不改（这条命令唯一的承诺是"产生多个光标"，
+    // 单行产生不出第二个，把用户选区吃掉是净损失）
+    c.anchor = Some(CursorPos { line: 1, col: 0 });
+    assert_eq!(c.split_selection_by_lines(), Ok(false));
+    assert!(!c.has_multi(), "单行拆不出第二个光标");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 1 }, "主光标没被挪走");
+    assert_eq!(c.anchor, Some(CursorPos { line: 1, col: 0 }));
+}
+
+#[test]
+fn split_refused_in_structural_states() {
+    // 三种互斥态各配一支干净夹具（复用一支会让"前一格的副作用"混进后一格）
+    let mut wrap = core_with("aaa\nbbb\nccc");
+    wrap.cursor = CursorPos { line: 0, col: 0 };
+    wrap.anchor = Some(CursorPos { line: 2, col: 1 });
+    wrap.set_word_wrap(true);
+    assert_eq!(wrap.split_selection_by_lines(), Ok(false));
+    assert!(!wrap.has_multi(), "折行开态不产生多光标（设计 §4 #7）");
+
+    let mut block = core_with("aaa\nbbb\nccc");
+    block.cursor = CursorPos { line: 0, col: 0 };
+    block.anchor = Some(CursorPos { line: 2, col: 1 });
+    block.begin_block_select(CursorPos { line: 0, col: 0 });
+    block.update_block_select(CursorPos { line: 2, col: 1 });
+    assert_eq!(block.split_selection_by_lines(), Ok(false));
+    assert!(!block.has_multi(), "列块态拒绝（块插入有自己的几何）");
+
+    let mut pre = core_with("aaa\nbbb\nccc");
+    pre.cursor = CursorPos { line: 0, col: 0 };
+    pre.anchor = Some(CursorPos { line: 2, col: 1 });
+    assert!(pre.ime_preedit("拼音".to_owned()));
+    assert!(pre.preedit.is_some(), "夹具前提：组字态真的成立");
+    assert_eq!(pre.split_selection_by_lines(), Ok(false));
+    assert!(!pre.has_multi(), "组字期拒绝多光标（设计 §3.7）");
+}
+
+#[test]
+fn split_respects_the_cursor_cap_atomically() {
+    // 超封顶 ⇒ Err 且**全有或全无**：连用户已有的集合都不清（清理只准发生在守卫之后）
+    let big = "a\n".repeat(MAX_EXTRA_CURSORS + 2);
+    let mut c = core_with(&big);
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.anchor = Some(CursorPos {
+        line: MAX_EXTRA_CURSORS + 1,
+        col: 1,
+    });
+    c.extra_cursors = vec![ExtraCursor {
+        cursor: CursorPos { line: 0, col: 1 },
+        anchor: None,
+    }];
+    assert!(matches!(
+        c.split_selection_by_lines(),
+        Err(EditErr::ExtraCursorCap(MAX_EXTRA_CURSORS))
+    ));
+    assert_eq!(c.extra_cursors.len(), 1, "被拒的拆行不得动已有附加光标集");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 0 });
+
+    // 边界：附加恰好等于封顶 ⇒ 放行（拒得太早等于把额度砍掉）
+    let exact = "a\n".repeat(MAX_EXTRA_CURSORS + 1);
+    let mut ok = core_with(&exact);
+    ok.cursor = CursorPos { line: 0, col: 0 };
+    ok.anchor = Some(CursorPos {
+        line: MAX_EXTRA_CURSORS,
+        col: 1,
+    });
+    assert_eq!(ok.split_selection_by_lines(), Ok(true));
+    assert_eq!(ok.extra_cursors.len(), MAX_EXTRA_CURSORS);
+}
+
+#[test]
+fn split_selection_by_lines_never_materialises_a_line() {
+    // 落点只要正文长度（line_body_len_chars 不物化整行），所以**取串次数不得随行数增长**。
+    // 本仓主夹具就是单行 50 MB 日志，逐行取串＝每行一份整行副本（P298 那条账否掉的写法）。
+    // 读数允许 1 次：`ensure_visible` 只为**主光标那一行**量一次水平可见性，
+    // 那是任何挪主光标的操作都要付的既有成本（智能 Home 同例），与附加行数无关。
+    fn split_fetches(lines: usize) -> usize {
+        let long: String = (0..lines)
+            .map(|_| format!("{}\n", "x".repeat(20_000)))
+            .collect();
+        let mut c = core_with(&long);
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.anchor = Some(CursorPos {
+            line: lines - 1,
+            col: 5,
+        });
+        c.take_line_text_calls(); // 清零
+        assert_eq!(c.split_selection_by_lines(), Ok(true));
+        assert_eq!(
+            c.extra_cursors.len(),
+            lines - 1,
+            "夹具自检：附加光标真的按行数拆出来了"
+        );
+        c.take_line_text_calls()
+    }
+    let few = split_fetches(4);
+    let many = split_fetches(20);
+    assert_eq!(few, many, "拆行的取串次数随行数长了：又在逐行物化整行");
+    assert!(many <= 1, "取串 {many} 次，超出主光标那一行的既有口径");
+    // 反空转（正对照）：同一支仪表在真的取串时必须非零，否则上面两条恒绿
+    let c = core_with("abc\ndef");
+    c.take_line_text_calls();
+    c.line_text(0);
+    assert_eq!(c.take_line_text_calls(), 1, "仪表自检：取串确实计数");
+}

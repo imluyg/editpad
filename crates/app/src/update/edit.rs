@@ -615,7 +615,8 @@ impl Editpad {
             self.cur_handle.borrow_mut().clear_block();
         }
         // B10 多光标存活白名单（设计 §3.3）：InsertText/Backspace/Delete
-        // （Phase 2 同步编辑）+ 行内 Left/Right + CancelBlock + AddNextMatch；
+        // （Phase 2 同步编辑）+ 行内 Left/Right + CancelBlock + AddNextMatch
+        // + SplitSelectionByLines（拆行多选＝造集合的动作本身）；
         // 白名单外一律先折叠为单光标再走既有路径——单点收口防漏折。
         // Undo/Redo 必须在名单内（P326）：这道闸**不得改动** undo()/redo() 将要
         // 对换的任何字段（doc/cursor/anchor/bookmarks/extra_cursors，见
@@ -631,6 +632,7 @@ impl Editpad {
                     | E::Delete
                     | E::CancelBlock
                     | E::AddNextMatch
+                    | E::SplitSelectionByLines
                     | E::Undo
                     | E::Redo
                     | E::Motion(Motion::Left | Motion::Right, false)
@@ -711,6 +713,15 @@ impl Editpad {
                 // Err = 具体原因上状态栏（不在词上/无匹配/封顶）——P155 起
                 // 错误是类型化的，按当前界面语言取文
                 if let Err(err) = editor.add_next_match() {
+                    hint = Some(err.text(self.lang()));
+                }
+                false
+            }
+            E::SplitSelectionByLines => {
+                // B10 二期首批：拆行多选（纯光标集操作，不改文档 ⇒ 恒 false
+                // 不置脏）。Err = 无选区／超封顶，同 AddNextMatch 走状态栏；
+                // 结构性互斥（折行开／列块／组字）静默不应，与既有口径一致
+                if let Err(err) = editor.split_selection_by_lines() {
                     hint = Some(err.text(self.lang()));
                 }
                 false

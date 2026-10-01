@@ -1145,6 +1145,9 @@ pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
             | EditOp::CancelBlock
             // B10：添加下一匹配只动光标集，不改文档（只读页可用）
             | EditOp::AddNextMatch
+            // B10 二期首批：拆行多选同族——只把选区换成「每行一条光标」，
+            // 正文一字不动 ⇒ 只读页同样放行
+            | EditOp::SplitSelectionByLines
             // P135：DropSelection 的 copy 变体不改内容，但 move 变体改——
             // fail-safe 口径一律按可变处理（只读态拖拽本就禁启动）
             | EditOp::DropSelection { .. }
