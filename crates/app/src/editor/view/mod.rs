@@ -1579,9 +1579,10 @@ impl EditorView {
     ///
     /// 护栏（第 163 轮第①步现证：摘掉本块 ⇒ 两条红）：
     /// `o1_every_visible_line_keeps_its_selection_band` 与
-    /// `headless_single_char_selection_band_centered_on_glyph_ink`。
-    /// 已知残留缺口：`extra_cursors` 的词选区上屏没有专门的像素用例（它与主选区共用
-    /// 本块，摘块时被上面两条一起覆盖，但「span 列表是否含附加光标」这一步没测）。
+    /// `headless_single_char_selection_band_centered_on_glyph_ink`；
+    /// 「span 列表是否含附加光标」这一步由第 174 轮 `388d960` 的
+    /// `s5_extra_cursor_word_selection_inks_on_its_own_row` 守（夹具明写主光标
+    /// 不带选区，蓝带只能来自附加光标）。
     #[allow(clippy::too_many_arguments)]
     fn draw_selections(
         &self,
@@ -2526,14 +2527,27 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                         }
                     }
                     drop(core);
-                    // B10 多光标：Alt+Click（无 Shift）= 加/移除附加光标
-                    // （Alt+Shift 仍走建块；先于 dnd 候选——Alt 语义优先，
-                    // 选区内按下也不启动拖拽）。只读页放行（纯导航态）。
+                    // B10 多光标：Alt+Click（无 Shift）= 加/移除附加光标；
+                    // B10 二期「选区镜像同步」：Alt+双击/三击 = 那个词/那行
+                    // 正文连选区一起进集合（Alt+Shift 仍走建块；先于 dnd
+                    // 候选——Alt 语义优先，选区内按下也不启动拖拽）。
+                    // 只读页放行（纯导航态）。
                     {
                         let mut core = self.core.borrow_mut();
                         if core.mods.alt() && !core.mods.shift() {
                             let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
-                            let changed = core.toggle_extra_cursor(hit);
+                            // 连击计数与普通点击**共用**（点单的取舍）：代价是
+                            // 「Alt+点后紧跟一次普通点」会被判成双击＝选词并折叠
+                            // 多光标，收益是零新状态、且与不按 Alt 的双击同一词口径。
+                            let count = core.register_click(hit, std::time::Instant::now());
+                            let tap = if count >= 3 {
+                                super::ExtraTap::Line
+                            } else if count == 2 {
+                                super::ExtraTap::Word
+                            } else {
+                                super::ExtraTap::Point
+                            };
+                            let changed = core.tap_extra_cursor(hit, tap);
                             drop(core);
                             if changed {
                                 shell.publish(crate::Message::EditorNavChanged);

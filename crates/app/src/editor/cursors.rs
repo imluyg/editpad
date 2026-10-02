@@ -15,6 +15,15 @@ pub(crate) enum MultiEditKind<'a> {
     Delete,
 }
 
+/// 鼠标在附加光标集上落下的粒度（B10 二期「选区镜像同步」）：
+/// `Point` ＝ Alt+单击（只落光标，一期既有语义），`Word` ＝ Alt+双击
+/// （连词带选区进集合），`Line` ＝ Alt+三击（整行正文，**不含行尾换行**）。
+pub(crate) enum ExtraTap {
+    Point,
+    Word,
+    Line,
+}
+
 /// 同步编辑的点级计划：一段字符偏移区间（删除 [s,e) 后在 s 处插入
 /// payload）与其来源光标。
 enum PointEdit {
@@ -50,12 +59,20 @@ impl EditorCore {
             .dedup_by_key(|e| (e.cursor.line, e.cursor.col));
     }
 
+    /// 多光标手势的结构性互斥（设计 §3.3/§4）：软换行开态（视觉行几何
+    /// × N 光标）、列块态（自带一套锚点语义）、组字态（IME 只锚主光标）
+    /// 一律拒绝。四条生产者（Alt+点／Ctrl+M／拆行／Alt+双击三击）共用
+    /// 这一份判据——曾经各抄一遍，而本仓的口径分叉历来长在这种副本上。
+    fn multi_gesture_blocked(&self) -> bool {
+        self.wrap.borrow().enabled || self.block_sel.is_some() || self.preedit.is_some()
+    }
+
     /// Alt+Click：点击处加/移除附加光标。守卫（设计 §3.3/§4）：折行
     /// 开态 / 列块态 / 组字态拒绝；点击主光标位 = 无意义 no-op；命中
     /// 既有附加光标（同行列）= 移除；封顶拒新增。成功后打断组字组。
     /// 返回集合是否发生变化（调用方据此刷新）。
     pub(crate) fn toggle_extra_cursor(&mut self, at: CursorPos) -> bool {
-        if self.wrap.borrow().enabled || self.block_sel.is_some() || self.preedit.is_some() {
+        if self.multi_gesture_blocked() {
             return false;
         }
         if at == self.cursor {
@@ -72,6 +89,106 @@ impl EditorCore {
         self.extra_cursors.push(ExtraCursor {
             cursor: at,
             anchor: None,
+        });
+        self.sort_dedup_cursors();
+        self.break_typing();
+        true
+    }
+
+    /// B10 二期「选区镜像同步」：鼠标手势的统一入口。`Point` 走一期既有
+    /// [`Self::toggle_extra_cursor`]（逐字不变）；`Word`/`Line` 把点击处
+    /// 的范围连选区一起加进集合，于是附加光标第一次能持有选区带。
+    /// 词口径复用 [`Self::word_range_at`]＝与不按 Alt 的双击同一个词，
+    /// 两套口径会当场喂出两种手感。
+    pub(crate) fn tap_extra_cursor(&mut self, at: CursorPos, tap: ExtraTap) -> bool {
+        match tap {
+            ExtraTap::Point => self.toggle_extra_cursor(at),
+            ExtraTap::Word => match self.word_range_at(at) {
+                Some((start, end)) => self.attach_extra_selection(start, end),
+                None => false, // 空行/点处无字符：无从选词，静默 no-op
+            },
+            ExtraTap::Line => {
+                let body = self.line_display_len(at.line);
+                if body == 0 {
+                    return false; // 空行没有正文可选
+                }
+                // 只取正文、故意不含行尾换行（既不像三击主选区那样
+                // `line_end_plus_break`）：跨行选区会让 `multi_edit` 的
+                // `range_crosses_lines` 把整批光标折叠掉，下一次打字
+                // 看起来就是"多光标自己消失了"。
+                let start = CursorPos {
+                    line: at.line,
+                    col: 0,
+                };
+                let end = CursorPos {
+                    line: at.line,
+                    col: body,
+                };
+                self.attach_extra_selection(start, end)
+            }
+        }
+    }
+
+    /// 把 `start..end`（同一逻辑行内、非零宽）作为一条带选区的附加光标
+    /// 放进集合。返回集合是否变化；拒绝时一字未动（被拒的尝试全有或
+    /// 全无，与 [`Self::split_selection_by_lines`] 同口径）。
+    ///
+    /// 次序就是设计本身，两步"清理"都不是可选的卫生活：
+    /// [`Self::multi_edit`] 的干扰判据对「零宽点落在区间内部」与「同起点
+    /// 一宽一零」都是**整批折叠**（`edits.windows(2)`），所以新选区落进来
+    /// 时，被它吞掉的标点必须一起走——留着它们，用户下一次打字不是在这
+    /// 几点插入，而是整个集合被清空。
+    fn attach_extra_selection(&mut self, start: CursorPos, end: CursorPos) -> bool {
+        if self.multi_gesture_blocked() {
+            return false;
+        }
+        let Some((s, e)) = self.cursor_selection_offsets(Some(start), end) else {
+            return false; // 零宽（空区间）不参与
+        };
+        let main_off = self.cursor_offset();
+        if s < main_off && main_off < e {
+            // 主光标落在新区间内部：它那个零宽插入点会被判成干扰
+            return false;
+        }
+        if let Some(i) = self
+            .extra_cursors
+            .iter()
+            .position(|ec| self.cursor_selection_offsets(ec.anchor, ec.cursor) == Some((s, e)))
+        {
+            // 同一段再点一次 = 取消（与点位移除那条同一手感）
+            self.extra_cursors.remove(i);
+            self.break_typing();
+            return true;
+        }
+        // 与新区间相交的既有点一律让位。两类都要走：①带选区者真交叠
+        // （贴边相邻不算）；②零宽点落在 `[s, e)` 内——压在被吞区间里＝
+        // 「点在区间内部」，正好压在起点＝「同起点一宽一零」，`multi_edit`
+        // 对这两类的处置都是**整批折叠**。留着它们的后果不是插错位置，
+        // 是用户下一次打字整个集合被清空。贴右缘 `e` 的零宽点合法相邻，保留。
+        let swallowed: Vec<usize> = self
+            .extra_cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ec)| {
+                let hits = match self.cursor_selection_offsets(ec.anchor, ec.cursor) {
+                    Some((os, oe)) => os < e && s < oe,
+                    None => {
+                        let point = self.doc.line_to_char(ec.cursor.line) + ec.cursor.col;
+                        s <= point && point < e
+                    }
+                };
+                hits.then_some(i)
+            })
+            .collect();
+        for i in swallowed.iter().rev() {
+            self.extra_cursors.remove(*i);
+        }
+        if self.extra_cursors.len() >= MAX_EXTRA_CURSORS {
+            return false;
+        }
+        self.extra_cursors.push(ExtraCursor {
+            cursor: end,
+            anchor: Some(start),
         });
         self.sort_dedup_cursors();
         self.break_typing();
@@ -460,7 +577,7 @@ impl EditorCore {
     /// 不置脏；`Err` = 拒绝原因（由调用方按界面语言取文案，见
     /// [`crate::editor::EditErr::text`]）。
     pub(crate) fn add_next_match(&mut self) -> Result<bool, EditErr> {
-        if self.wrap.borrow().enabled || self.block_sel.is_some() || self.preedit.is_some() {
+        if self.multi_gesture_blocked() {
             return Ok(false);
         }
         let (needle, scan_from) = if let Some(text) = self.selected_text() {
@@ -574,7 +691,7 @@ impl EditorCore {
     /// 只触及一行也是 `Ok(false)` 不改动：这条命令唯一的承诺是「产生多个光标」，
     /// 单行时产生不出第二个，把用户选区吃掉是净损失。
     pub(crate) fn split_selection_by_lines(&mut self) -> Result<bool, EditErr> {
-        if self.wrap.borrow().enabled || self.block_sel.is_some() || self.preedit.is_some() {
+        if self.multi_gesture_blocked() {
             return Ok(false);
         }
         if self.anchor.is_none() {

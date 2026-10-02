@@ -1238,3 +1238,159 @@ fn split_selection_by_lines_never_materialises_a_line() {
     c.line_text(0);
     assert_eq!(c.take_line_text_calls(), 1, "仪表自检：取串确实计数");
 }
+
+// ---------- B10 二期收尾：鼠标落点连选区进集合（「选区镜像同步」） ----------
+
+/// Alt+双击：那个词连选区一起进集合 ⇒ 同步编辑替掉的是**词本体**，
+/// 不是"在词尾插一份"。判据落在结果文本上（附加光标集从不与主光标去重，
+/// 只看集合会放过"同一处插两份"这一族错）。
+#[test]
+fn tap_word_extra_owns_selection_and_replaces_it_once() {
+    let mut c = core_with("abc def\nabc ghi");
+    c.cursor = CursorPos { line: 0, col: 7 }; // 主光标停在行一正文末尾（区间之外）
+    assert!(c.tap_extra_cursor(CursorPos { line: 1, col: 1 }, ExtraTap::Word));
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 1, col: 0 }),
+        "Alt+双击造的附加光标必须带锚点"
+    );
+    assert_eq!(
+        c.extra_cursors[0].cursor,
+        CursorPos { line: 1, col: 3 },
+        "落点在词尾（与不按 Alt 的双击同一个词口径）"
+    );
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("X")), Some(true));
+    assert_eq!(c.doc.to_text(), "abc defX\nX ghi", "每点各替一次");
+}
+
+/// 先 Alt+点在词中间、再 Alt+双击同一个词：被新区间吞掉的那个点必须让位。
+/// 留着它不是"插错位置"，而是下一次打字整个集合被 `multi_edit` 的干扰判据
+/// 折叠清空——所以这条断言盯的是"没被折叠"。
+#[test]
+fn tap_word_subsumes_point_inside_it() {
+    let mut c = core_with("abc def\nabc ghi");
+    c.cursor = CursorPos { line: 0, col: 7 };
+    assert!(c.tap_extra_cursor(CursorPos { line: 1, col: 1 }, ExtraTap::Point));
+    assert!(c.tap_extra_cursor(CursorPos { line: 1, col: 1 }, ExtraTap::Word));
+    assert_eq!(
+        c.extra_cursors.len(),
+        1,
+        "落在新选区内部的点已被吞并，不该并存"
+    );
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("X")), Some(true));
+    assert!(c.has_multi(), "同步编辑不得把集合折叠掉");
+    assert_eq!(c.doc.to_text(), "abc defX\nX ghi");
+}
+
+/// 同一段再点一次 = 取消（与点位移除那条同一手感）。摘掉这一步不会把结果文本
+/// 改错——它只是"把同一段重新交一遍"，所以这一格是那条机制唯一的看守。
+#[test]
+fn tap_word_twice_toggles_the_selection_off() {
+    let mut c = core_with("abc def\nabc ghi");
+    c.cursor = CursorPos { line: 0, col: 7 };
+    assert!(c.tap_extra_cursor(CursorPos { line: 1, col: 1 }, ExtraTap::Word));
+    assert_eq!(c.extra_cursors.len(), 1);
+    assert!(
+        c.tap_extra_cursor(CursorPos { line: 1, col: 2 }, ExtraTap::Word),
+        "同一个词（换个字符位置点）再双击一次应识别成同一段"
+    );
+    assert!(c.extra_cursors.is_empty(), "同一段再点一次＝把它移出集合");
+}
+
+/// Alt+三击：整行**正文**进选区，故意不含行尾换行——跨行选区会让
+/// `multi_edit` 的 `range_crosses_lines` 整批折叠，功能当场看起来是坏的。
+#[test]
+fn tap_line_extra_covers_body_not_the_line_break() {
+    let mut c = core_with("hello world\nsecond line\nthird");
+    c.cursor = CursorPos { line: 0, col: 11 };
+    assert!(c.tap_extra_cursor(CursorPos { line: 1, col: 3 }, ExtraTap::Line));
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 1, col: 0 })
+    );
+    assert_eq!(
+        c.extra_cursors[0].cursor,
+        CursorPos { line: 1, col: 11 },
+        "止于正文末尾"
+    );
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("Q")), Some(true));
+    assert_eq!(c.doc.to_text(), "hello worldQ\nQ\nthird");
+    assert_eq!(
+        c.doc.line_count(),
+        3,
+        "换行单元还在：含行尾的选区跨行 ⇒ 整批折叠并把换行吞掉"
+    );
+}
+
+/// 主光标落在要被选中的词内部 ⇒ 拒绝（它的零宽插入点会撞上"点在区间内部"
+/// 那条干扰判据）。带正对照：主光标挪出去后同一手势必须成立，否则上一条恒真。
+#[test]
+fn tap_word_rejected_when_main_cursor_sits_inside_the_word() {
+    let mut c = core_with("abcdef\nxyz");
+    c.cursor = CursorPos { line: 0, col: 2 };
+    assert!(
+        !c.tap_extra_cursor(CursorPos { line: 0, col: 4 }, ExtraTap::Word),
+        "主光标在区间内部时不得落进集合"
+    );
+    assert!(c.extra_cursors.is_empty(), "被拒的尝试一字未动");
+    c.cursor = CursorPos { line: 1, col: 3 };
+    assert!(
+        c.tap_extra_cursor(CursorPos { line: 0, col: 4 }, ExtraTap::Word),
+        "正对照：主光标移出区间后同一手势成立"
+    );
+    assert_eq!(
+        c.extra_cursors[0].anchor,
+        Some(CursorPos { line: 0, col: 0 })
+    );
+}
+
+/// 四条鼠标生产者共用同一组结构性互斥与封顶（守卫合并的靶子）：
+/// 折行开态／列块态／组字态一律拒，且拒绝时一字未动；正对照＝清掉后成立。
+#[test]
+fn tap_extra_selection_shares_the_gesture_guards_and_cap() {
+    let mut c = core_with("abc def\nghi jkl");
+    c.cursor = CursorPos { line: 1, col: 7 };
+    c.set_word_wrap(true);
+    assert!(!c.tap_extra_cursor(CursorPos { line: 0, col: 1 }, ExtraTap::Word));
+    assert!(!c.tap_extra_cursor(CursorPos { line: 0, col: 1 }, ExtraTap::Line));
+    c.set_word_wrap(false);
+    c.begin_block_select(CursorPos { line: 0, col: 0 });
+    assert!(!c.tap_extra_cursor(CursorPos { line: 0, col: 1 }, ExtraTap::Word));
+    c.clear_block();
+    c.ime_preedit("pin".to_owned());
+    assert!(!c.tap_extra_cursor(CursorPos { line: 0, col: 1 }, ExtraTap::Word));
+    c.ime_preedit(String::new());
+    assert!(c.extra_cursors.is_empty(), "三态各自拒绝：集合必须还是空的");
+    assert!(
+        c.tap_extra_cursor(CursorPos { line: 0, col: 1 }, ExtraTap::Word),
+        "正对照：守卫清掉后同一手势成立"
+    );
+
+    // 封顶：填满集合后新增被拒（被拒的行上没有点可吞并，所以走的是纯封顶）
+    let lines = "x\n".repeat(MAX_EXTRA_CURSORS / 2 + 2);
+    let mut big = core_with(&lines);
+    for i in 0..=MAX_EXTRA_CURSORS / 2 + 1 {
+        for j in 0..2 {
+            if big.extra_cursors.len() >= MAX_EXTRA_CURSORS {
+                break;
+            }
+            let pos = CursorPos { line: i, col: j };
+            if pos == big.cursor {
+                continue;
+            }
+            assert!(big.tap_extra_cursor(pos, ExtraTap::Point));
+        }
+    }
+    assert_eq!(big.extra_cursors.len(), MAX_EXTRA_CURSORS);
+    assert!(
+        !big.tap_extra_cursor(
+            CursorPos {
+                line: MAX_EXTRA_CURSORS / 2 + 2,
+                col: 0
+            },
+            ExtraTap::Line
+        ),
+        "封顶后 Alt+三击也拒新增"
+    );
+    assert_eq!(big.extra_cursors.len(), MAX_EXTRA_CURSORS);
+}

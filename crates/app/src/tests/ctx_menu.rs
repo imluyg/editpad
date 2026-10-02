@@ -5,6 +5,8 @@
 //! 不到的东西：控件层按下分支的顺序（连击裁决先于拖拽候选）与右键入口。
 //! 判据刻意取「选中了整词」而非「发过某条消息」——分支顺序错一次，
 //! 双击就会被拖拽候选吃掉，本文件即红。
+//! B10 二期（Alt+双击带选区）同样只在这里核对接线：core 层盯算式，这里盯
+//! 修饰键状态真能穿过按下分支。
 
 use super::*;
 
@@ -201,4 +203,39 @@ fn stray_command_after_close_does_not_reopen_menu() {
         "转交照常执行"
     );
     assert!(!app.editor_context_menu, "执行菜单项不该把菜单再打开");
+}
+
+/// B10 二期「选区镜像同步」的**接线**核对：core 层那五格盯的是算式，这一格盯
+/// 鼠标事件真能走到 Alt+双击那条分支。变异＝视图恒传 `ExtraTap::Point`
+/// ⇒ core 层全绿、只有这里红（第 226 轮那条"注册了但点不动"的护栏同形）。
+#[test]
+fn headless_alt_double_click_adds_extra_cursor_owning_a_selection() {
+    let mut app = Editpad::default();
+    type_into(&mut app, "alpha beta");
+    let at = {
+        let body = ViewTree::layout_default(&app).editor_body();
+        Point::new(body.x + body.width * 0.3, body.y + 10.0)
+    };
+    {
+        let mut ui = ViewTree::layout_default(&app);
+        let _ = ui.send(
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(
+                iced::keyboard::Modifiers::ALT,
+            )),
+            at,
+        );
+        // 第一次按下＝点（加一条无选区光标），第二次＝双击（该词连选区进来）
+        let msgs = ui.double_click(at);
+        assert!(
+            msgs.iter().any(|m| matches!(m, Message::EditorNavChanged)),
+            "Alt+双击应发导航变更消息（状态栏与查找联动）；实收 {msgs:?}"
+        );
+    }
+    let core = app.cur_handle.borrow();
+    assert_eq!(core.extra_cursors.len(), 1, "Alt+双击后应恰有一条附加光标");
+    assert!(
+        core.extra_cursors[0].anchor.is_some(),
+        "附加光标必须持有选区——这正是本轮补的那一格"
+    );
+    assert_eq!(core.doc.to_text(), "alpha beta", "手势本身一字不改文档");
 }

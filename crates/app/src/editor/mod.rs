@@ -44,8 +44,9 @@ mod wrap;
 
 pub use core::*;
 pub use view::*;
-// B10 Phase 2：同步编辑操作种类（update.rs apply_edit 分流消费）
-pub(crate) use cursors::MultiEditKind;
+// B10 Phase 2：同步编辑操作种类（update.rs apply_edit 分流消费）；
+// B10 二期：鼠标落点粒度（view 的 Alt 分支消费）
+pub(crate) use cursors::{ExtraTap, MultiEditKind};
 // P133：链接识别（E2）——update.rs 消费 LinkTarget，view.rs 消费 link_at
 pub(crate) use links::{link_at, LinkTarget};
 
