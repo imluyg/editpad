@@ -1394,3 +1394,37 @@ fn tap_extra_selection_shares_the_gesture_guards_and_cap() {
     );
     assert_eq!(big.extra_cursors.len(), MAX_EXTRA_CURSORS);
 }
+
+/// 行内左/右箭头在多光标态先把**各点**选区塌掉。主光标与附加光标是两侧
+/// 各一份副本，只修一边就是本仓"分叉只守一边"的第 7 次 ⇒ 两条断言分开放，
+/// 两发变异各咬一条。判据落结果文本：没塌掉的那一侧，打字替掉的是
+/// "选区 + 一格"。
+#[test]
+fn horizontal_step_collapses_every_selection_in_multi() {
+    let mut c = core_with("abc def\nghi jkl");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    c.anchor = Some(CursorPos { line: 0, col: 0 });
+    assert!(c.tap_extra_cursor(CursorPos { line: 1, col: 1 }, ExtraTap::Word));
+    assert_eq!(
+        c.selected_text().as_deref(),
+        Some("abc"),
+        "夹具自检：主光标带着选区进来"
+    );
+    assert!(
+        c.extra_cursors[0].anchor.is_some(),
+        "夹具自检：附加光标也带着选区进来"
+    );
+
+    c.apply_motion(Motion::Right, false);
+    assert_eq!(c.anchor, None, "非扩展步进先塌掉主光标选区");
+    assert!(
+        c.extra_cursors.iter().all(|e| e.anchor.is_none()),
+        "附加光标同样塌掉"
+    );
+    assert_eq!(c.multi_edit(MultiEditKind::Insert("Z")), Some(true));
+    assert_eq!(
+        c.doc.to_text(),
+        "abc Zdef\nghi Zjkl",
+        "塌掉后是纯插入：谁也不该多吞一个字符"
+    );
+}

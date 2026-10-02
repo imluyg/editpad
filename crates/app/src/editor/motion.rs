@@ -157,6 +157,11 @@ impl EditorCore {
                     Motion::Left => {
                         self.break_typing();
                         self.clear_vertical_goal();
+                        // B10 二期补的口径：非扩展移动先塌掉主光标选区，
+                        // 与本方法末尾那条单光标分支一致。漏掉这一步，提前
+                        // return 就绕过了它 ⇒ 按一次左箭头再打字替掉的是
+                        // "选区 + 一个字符"。
+                        self.anchor = None;
                         if let Some(left) = self.step_main_horizontal(false) {
                             self.cursor = left;
                         }
@@ -167,6 +172,7 @@ impl EditorCore {
                     Motion::Right => {
                         self.break_typing();
                         self.clear_vertical_goal();
+                        self.anchor = None; // 同上（Left 那条注释讲的同一件事）
                         if let Some(right) = self.step_main_horizontal(true) {
                             self.cursor = right;
                         }

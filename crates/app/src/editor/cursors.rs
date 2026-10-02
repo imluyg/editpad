@@ -199,9 +199,14 @@ impl EditorCore {
     /// 进入）：附加光标逐个走一步，触行界者折叠该光标（设计 §3.3）；
     /// 主光标走既有 move_local 语义（含跨行）。全部走完后若附加集空
     /// 则自然回归单光标路径。
+    ///
+    /// B10 二期补的口径：步进先把各点选区塌掉再走——非扩展的左/右箭头
+    /// 在单光标路径就是"落掉锚点走一格"，附加光标不塌就变成"选区跟着
+    /// 加宽一格"，下一次打字替掉的是选区再加一个字符。
     pub(crate) fn multi_step_horizontal(&mut self, right: bool) {
         let mut i = 0;
         while i < self.extra_cursors.len() {
+            self.extra_cursors[i].anchor = None;
             let len = self.line_display_len(self.extra_cursors[i].cursor.line);
             let col = self.extra_cursors[i].cursor.col;
             let step_ok = if right { col < len } else { col > 0 };
