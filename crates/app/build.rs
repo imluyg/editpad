@@ -16,6 +16,16 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    // 构建出处（先于 Windows 早退：CI 在 ubuntu 上跑，也要能编过）。
+    // 值由 package.ps1 与打包清单首行**同一个变量**喂进来 ⇒ exe 自陈的出处
+    // 与 zip 里那份 sha256.txt 首行不可能对不上（本仓真发生过"同号两个构建"，
+    // 当时只能靠手抄 sha 分辨）。`cargo run`／CI 没有这个环境变量 ⇒ 落到
+    // `dev · <profile>`，一眼看得出是开发档而不是发布物。
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
+    let stamp = env::var("EDITPAD_BUILD").unwrap_or_else(|_| format!("dev · {}", profile));
+    println!("cargo:rustc-env=EDITPAD_BUILD={}", stamp);
+    println!("cargo:rerun-if-env-changed=EDITPAD_BUILD");
+
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

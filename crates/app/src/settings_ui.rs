@@ -7,11 +7,12 @@ use iced::widget::column;
 // 语言；②搜索/控件匹配都会随文案漂移。P155 起行键一律走 core 的
 // `lang::ROW_*` 常量（`debug_assert` 钉住 ASCII 与唯一性）。
 pub(crate) use editpad_core::lang::{
-    ROW_ABOUT_LICENSE, ROW_ABOUT_NAME, ROW_ABOUT_RENDERER, ROW_ABOUT_VERSION, ROW_AUTOSAVE,
-    ROW_AUTOSAVE_DELAY, ROW_BACKUP_MODE, ROW_CHANGE_STRIP, ROW_EDGE_COLUMN, ROW_EXIT_MODE,
-    ROW_FONT_FAMILY, ROW_FONT_SIZE, ROW_INDENT_GUIDES, ROW_LANGUAGE, ROW_PASTE_ALIGN_INDENT,
-    ROW_REMEMBER_RECENT, ROW_REMEMBER_SESSION, ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE,
-    ROW_SNAPSHOTS, ROW_SNAPSHOT_INTERVAL, ROW_THEME, ROW_WORD_WRAP,
+    ROW_ABOUT_BUILD, ROW_ABOUT_HOMEPAGE, ROW_ABOUT_LICENSE, ROW_ABOUT_NAME, ROW_ABOUT_RENDERER,
+    ROW_ABOUT_VERSION, ROW_AUTOSAVE, ROW_AUTOSAVE_DELAY, ROW_BACKUP_MODE, ROW_CHANGE_STRIP,
+    ROW_EDGE_COLUMN, ROW_EXIT_MODE, ROW_FONT_FAMILY, ROW_FONT_SIZE, ROW_INDENT_GUIDES,
+    ROW_LANGUAGE, ROW_PASTE_ALIGN_INDENT, ROW_REMEMBER_RECENT, ROW_REMEMBER_SESSION,
+    ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE, ROW_SNAPSHOTS, ROW_SNAPSHOT_INTERVAL, ROW_THEME,
+    ROW_WORD_WRAP,
 };
 
 /// 「正文字体」行的行键（控件匹配与字体挑选块挂载点共用同一常量）。
@@ -245,6 +246,12 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
     },
     StaticRow {
         page: SettingsPage::About,
+        key: ROW_ABOUT_BUILD,
+        title: editpad_core::Key::RowAboutBuild,
+        desc: editpad_core::Key::RowAboutBuild,
+    },
+    StaticRow {
+        page: SettingsPage::About,
         key: ROW_ABOUT_RENDERER,
         title: editpad_core::Key::RowAboutRenderer,
         desc: editpad_core::Key::RowAboutRendererDesc,
@@ -255,6 +262,12 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         title: editpad_core::Key::RowAboutLicense,
         desc: editpad_core::Key::RowAboutLicense,
     },
+    StaticRow {
+        page: SettingsPage::About,
+        key: ROW_ABOUT_HOMEPAGE,
+        title: editpad_core::Key::RowAboutHomepage,
+        desc: editpad_core::Key::RowAboutHomepage,
+    },
 ];
 
 /// 非文案表的静态描述（版本号 / 许可证名）：与 [`SETTINGS_ROWS`] 的行键
@@ -262,6 +275,11 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
 const ROW_LITERAL_DESC: &[(&str, &str)] = &[
     (ROW_ABOUT_VERSION, env!("CARGO_PKG_VERSION")),
     (ROW_ABOUT_LICENSE, "Apache-2.0"),
+    // 打包时由 package.ps1 喂进来（与 zip 清单首行同一个变量）；本地/CI 构建
+    // 没有该 env ⇒ build.rs 回退成 `dev · <profile>`，一眼分清发布物与开发档。
+    (ROW_ABOUT_BUILD, env!("EDITPAD_BUILD")),
+    // About 页是纯文本行、不可点也不能选中 ⇒ 只给可搜可抄的短地址。
+    (ROW_ABOUT_HOMEPAGE, "github.com/imluyg/editpad"),
 ];
 
 /// 取某行在给定语言下的描述（文案表 / 事实数据两条来源统一在此）。

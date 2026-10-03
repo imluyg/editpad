@@ -98,8 +98,14 @@ for ($i = $table.LineNumber; $i -lt $cargoToml.Count; $i++) {
 if (-not $version) { throw "no version in [workspace.package] ($cargoTomlPath)" }
 
 # 1. Build release.
+#    出处标签在这里一次算好，同时喂给编译期常量与下面的清单首行——两件事
+#    必须来自同一个变量，否则"exe 说的"与"zip 清单说的"可以各说各话。
+#    走 -SkipCheck（本地试打包）时 $tag 为空 ⇒ 显式落 [UNTAGGED]，不留隐式痕迹。
+$revLabel = if ($rev) { $rev } else { 'unknown' }
+$tagLabel = if ($tag) { " (tag $tag)" } else { ' [UNTAGGED]' }
+$env:EDITPAD_BUILD = "{0}{1} · release" -f $revLabel, $tagLabel
 if (-not $SkipBuild) {
-    Write-Host '== cargo build --release =='
+    Write-Host ('== cargo build --release (build stamp: {0}) ==' -f $env:EDITPAD_BUILD)
     & $cargo build --release --manifest-path (Join-Path $root 'Cargo.toml')
     if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 }
@@ -162,10 +168,10 @@ Get-ChildItem -LiteralPath $stage | ForEach-Object { Write-Host ("  {0,-20} {1,1
 # 5. Checksum manifest: full hashes on disk, ready to paste into release
 #    notes. Copying them by hand off the console is how typos get shipped.
 $shaFile = Join-Path $root "dist\$stageName-sha256.txt"
-$revLabel = if ($rev) { $rev } else { 'unknown' }
-# 走 -SkipCheck 时清单行过去只是「少了 (tag …) 后缀」——隐式痕迹，事后无法与
-# 「忘了打 tag」区分（已发生过：产物名/版本串/tag 三者互不对应）。显式落字。
-$tagLabel = if ($tag) { " (tag $tag)" } else { ' [UNTAGGED]' }
+# $revLabel / $tagLabel 在第 1 步之前算好（同一对值也喂给了 exe 里的
+# EDITPAD_BUILD）；这里只是复用，不再各算一遍——走 -SkipCheck 时清单行过去
+# 只是「少了 (tag …) 后缀」＝隐式痕迹，事后无法与「忘了打 tag」区分
+# （已发生过：产物名/版本串/tag 三者互不对应），所以显式落 [UNTAGGED]。
 $shaLines = @(
     ("Editpad {0} @ {1}{2}" -f $version, $revLabel, $tagLabel),
     ("zip  {0}  sha256={1}" -f (Split-Path $zip -Leaf), $zipSha),

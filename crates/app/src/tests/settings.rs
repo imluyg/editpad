@@ -1424,3 +1424,42 @@ fn space_key_inserts_space_regardless_of_ime_state() {
         if text == " "
     ));
 }
+
+// ---------- 「关于」页的事实行 ----------
+
+/// 关于页里两行**不翻译的事实数据**必须真落在行上：构建出处与项目主页。
+/// 摘掉 `SETTINGS_ROWS` 里的任一行 ⇒ 本条红（读不到行）；摘掉
+/// `ROW_LITERAL_DESC` 里对应那一条 ⇒ 描述退化成文案表的 Key 文案
+/// （"构建出处"／"项目主页与反馈"），本条同样红。
+#[test]
+fn about_page_reports_build_provenance_and_homepage() {
+    let rows: Vec<SettingsRow> = settings_rows(editpad_core::Lang::ZhCn).collect();
+    let row_of = |key: &str| rows.iter().find(|r| r.key == key);
+
+    let build = row_of(editpad_core::lang::ROW_ABOUT_BUILD).expect("关于页应有「构建出处」行");
+    assert_eq!(build.title, "构建出处", "标题走文案表，不是行键回显");
+    assert!(
+        build.desc.contains(" · "),
+        "构建串是 `<出处> · <profile>` 两段，实得 {:?}",
+        build.desc
+    );
+    assert_ne!(build.desc, build.title, "描述必须是事实数据，不是标题复读");
+
+    let home = row_of(editpad_core::lang::ROW_ABOUT_HOMEPAGE).expect("关于页应有「项目主页」行");
+    assert_eq!(
+        home.title, "项目主页与反馈",
+        "英文界面下同一行走 key_table 的另一列"
+    );
+    assert_eq!(
+        home.desc, "github.com/imluyg/editpad",
+        "About 页不可点选，只给可搜可抄的短地址"
+    );
+    // 语言切换不换地址：同一行在英文界面下描述同值
+    let en_rows: Vec<SettingsRow> = settings_rows(editpad_core::Lang::En).collect();
+    let en_home = en_rows
+        .iter()
+        .find(|r| r.key == editpad_core::lang::ROW_ABOUT_HOMEPAGE)
+        .expect("英文界面同样要有这一行");
+    assert_eq!(en_home.desc, home.desc, "URL 属事实数据，不随语言变");
+    assert_eq!(en_home.title, "Homepage & feedback");
+}

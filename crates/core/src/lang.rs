@@ -149,6 +149,11 @@ pub const ROW_ABOUT_NAME: &str = "about_name";
 pub const ROW_ABOUT_VERSION: &str = "about_version";
 pub const ROW_ABOUT_RENDERER: &str = "about_renderer";
 pub const ROW_ABOUT_LICENSE: &str = "about_license";
+/// 「构建出处」行：值来自编译期常量 `EDITPAD_BUILD`（打包脚本与 zip 清单首行
+/// 同一个变量），本地构建显示 `dev · debug`。
+pub const ROW_ABOUT_BUILD: &str = "about_build";
+/// 「项目主页与反馈」行：URL 属事实数据，不翻译。
+pub const ROW_ABOUT_HOMEPAGE: &str = "about_homepage";
 
 /// 声明 [`Key`]（全部用户可见文案的语言无关键）与它在**每种语言**下的文案。
 ///
@@ -302,6 +307,8 @@ key_table! {
     { RowAboutRenderer => "渲染后端", "Renderer" },
     { RowAboutRendererDesc => "tiny-skia 软渲染（内存取舍：进程内存约为 GPU 路径的 1/12）。", "tiny-skia software rendering (roughly 1/12 the process memory of the GPU path)." },
     { RowAboutLicense => "开源协议", "License" },
+    { RowAboutBuild => "构建出处", "Build" },
+    { RowAboutHomepage => "项目主页与反馈", "Homepage & feedback" },
     { ButtonModify => "修改", "Change" },
     { ButtonResetDefault => "回退默认", "Use Default" },
     { ButtonRestoreAll => "全部恢复默认", "Restore All Defaults" },
@@ -1126,6 +1133,8 @@ mod tests {
             ROW_ABOUT_VERSION,
             ROW_ABOUT_RENDERER,
             ROW_ABOUT_LICENSE,
+            ROW_ABOUT_BUILD,
+            ROW_ABOUT_HOMEPAGE,
         ];
         for (i, a) in rows.iter().enumerate() {
             assert!(a.is_ascii(), "行键必须语言无关（ASCII）：{a}");
