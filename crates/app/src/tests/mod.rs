@@ -212,6 +212,9 @@ mod nav;
 mod palette_cmds;
 // P322：多行粘贴按光标行缩进对齐（默认关／目标取自哪一行／列块与多光标不动）
 mod paste_indent;
+// 第 239 轮：文档以中文为准 ⇒ 两份 README 的结构必须齐步
+//（英文多出一节／一条功能而中文没跟，就红在这里）
+mod readmes;
 mod robustness;
 mod session;
 mod settings;

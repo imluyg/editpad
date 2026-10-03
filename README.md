@@ -16,6 +16,10 @@ A windowed notepad built from scratch in Rust: multi-tab, session snapshot resto
 
 </div>
 
+> **Documentation policy**: [README.zh.md](README.zh.md) is the authoritative
+> document and is updated with every commit. This English file is a condensed
+> mirror, refreshed at release time — where the two disagree, the Chinese one wins.
+
 ## Highlights
 
 - **Large files** — rope storage + background streaming load + viewport-virtualized rendering, so multi-megabyte logs cost about the same per frame as a few-KB file, and the UI stays draggable while a load is in progress;
@@ -313,17 +317,11 @@ editpad/
 
 ## Development History
 
-| Milestone | Content | Status |
-|--------|------|------|
-| M0 | Skeleton + open / edit / save / dirty marker / atomic save | ✅ Done |
-| M1 | Everyday usability: background streaming load + progress, find & replace, go to line, settings & recent files, hotkeys | ✅ Done |
-| M2a | Large-file push: iced 0.14 (IME works) + custom virtualized editor + rope data source + undo/redo | ✅ Done |
-| M2b | syntect per-line lazy highlighting, IME pre-edit inline, CJK column mapping | ✅ Done |
-| M3 | Close confirmation, drag-open, dark theme + font-size settings, dirty replace protection, open/save-as deadlock fixes | ✅ Done |
-| M4 | Multi-tab, instant save, JSON validate & format, Log/TOML coloring + extensionless sniffing + Markdown preview | ✅ Done |
-| M5 | Session snapshots: close a dirty window with no prompt + restore the last interface on startup, recoverable after an abnormal exit | ✅ Done |
-
-After M5, iteration continues from a candidate pool and user requests: soft wrap v2 (word-boundary wrapping), regex & whole-word search, bookmarks, column-block editing v2, menu-bar/status-bar refactor, multi-instance isolation and single-instance mutex, command-line open, word navigation and smart indent, extended line operations, overwrite mode, read-only lock, text tools, encoding expansion, command palette, file-watch tail follow — plus a round of structural refactoring (update/view/core domain splits, clippy zeroed) and repeated root-cause fixes for IME / wrapping / rendering.
+Milestones M0–M5 (skeleton → everyday usability → large files → highlighting →
+multi-tab + encoding → session snapshots) are all done; everything after them
+came out of a candidate pool and from user requests. This file deliberately does
+not keep a running list: `git log` and the [releases](https://github.com/imluyg/editpad/releases)
+are the record, and the Chinese README's 开发历程 section carries the milestone table.
 
 ## License
 
