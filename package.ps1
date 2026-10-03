@@ -137,7 +137,7 @@ if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -F
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -LiteralPath $exe -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage
-Copy-Item -LiteralPath (Join-Path $root 'README.zh.md') -Destination $stage
+Copy-Item -LiteralPath (Join-Path $root 'README.en.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE-APACHE') -Destination $stage
 # 两份 README 首屏都是相对路径引用的截图（README.md:13 的
 # docs/assets/screenshot-dark.png——那张真实截图本身就是卖点）。只拷 README
