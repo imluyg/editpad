@@ -47,11 +47,13 @@ fn first_blockquote(text: &str) -> String {
 fn both_readmes_declare_which_one_is_authoritative() {
     let zh = readme("README.md");
     let en = readme("README.en.md");
-    let zh_note = first_blockquote(&zh);
     let en_note = first_blockquote(&en);
+    // 中文那份是首页，口径**不摆在首屏**（对外不必宣传自己压着另一份），只要求文末有
+    // 一句自足的话：同一行里既说"以本文为准"又点名另一份——散在别处的用词凑不出这一行。
     assert!(
-        zh_note.contains("权威文档") && zh_note.contains("以本文为准"),
-        "中文 README 的首屏公告要声明自己是权威版本、随每次提交更新"
+        zh.lines()
+            .any(|l| l.contains("以本文为准") && l.contains("README.en.md")),
+        "中文 README 要有一句声明口径（谁为准＋另一份是谁）"
     );
     assert!(
         en_note.to_lowercase().contains("authoritative") && en_note.contains("](README.md)"),
