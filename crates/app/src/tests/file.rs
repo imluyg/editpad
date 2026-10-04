@@ -263,6 +263,88 @@ fn ctrl_shift_f_maps_to_format_json_but_ctrl_f_stays_find() {
     ));
 }
 
+#[test]
+fn whole_document_write_entries_refuse_read_only_pages() {
+    // 只读锁原本只挡 `apply_edit` 里的 `edit_op_mutates` 那道闸，而 `FormatJson`
+    // 与 `ConvertEol` 是直接调 `replace_whole_document` 换整份文档的旁路（定案
+    // R-4 说的是同一件事，当时补的是替换四条入口，这两条是同族余下的）。
+    // 这里断的不止「正文没被改」：这两条原本还会置脏，而 `tab_autosave_ready`
+    // 只看 `dirty`——开着自动保存时，两秒后磁盘上那份被用户明确锁定不许动的
+    // 文件就被覆写了，而只读页上撤销本身又被 `edit_op_mutates` 拒收，
+    // 不先解锁就反悔不了。故 `autosave_inflight` 必须是 false。
+    let locked = Editpad::default()
+        .t(editpad_core::Key::StDocReadOnlyLocked)
+        .to_owned();
+
+    let eol_app = || {
+        let app = loaded_txt_app();
+        app.cur_handle
+            .borrow_mut()
+            .reset_document(editpad_core::Document::from_str("a\nb\nc\n"));
+        app
+    };
+    // (入口名, 夹具, 要派发的消息)
+    type Entry = (&'static str, fn() -> Editpad, fn() -> Message);
+    let cases: [Entry; 2] = [
+        (
+            "FormatJson",
+            || json_app("{\"b\":1}"),
+            || Message::FormatJson,
+        ),
+        ("ConvertEol", eol_app, || {
+            Message::ConvertEol(editpad_core::LineEnding::CrLf)
+        }),
+    ];
+
+    for (what, build, msg) in cases {
+        // 两趟：加锁必须被拒，未加锁必须照改——后者是防空转的正对照（否则
+        // 「正文不变／不置脏／不排任务」四格在「夹具压根没走到写入」时也会全绿）
+        for lock in [true, false] {
+            let mut app = build();
+            app.settings.autosave_enabled = true;
+            if lock {
+                app.cur_handle.borrow_mut().read_only = true;
+            }
+            let before = app.cur_handle.borrow().doc.to_text();
+            let v0 = app.tab().version;
+            app.status = "哨兵".into();
+
+            let _ = app.update(msg());
+
+            if lock {
+                assert_eq!(
+                    app.cur_handle.borrow().doc.to_text(),
+                    before,
+                    "{what} 不得改动只读页正文"
+                );
+                assert!(!app.tab().dirty, "{what} 不得在只读页置脏");
+                assert_eq!(app.tab().version, v0, "{what} 不得推进版本");
+                assert_eq!(
+                    app.status, locked,
+                    "{what} 应给出与 `Edit` 拒收分支同一句话，实得 {:?}",
+                    app.status
+                );
+                assert!(
+                    !app.tabs[0].autosave_inflight,
+                    "{what} 不得给只读页排自动保存任务（那就是覆写磁盘）"
+                );
+            } else {
+                assert_ne!(
+                    app.cur_handle.borrow().doc.to_text(),
+                    before,
+                    "未加锁的 {what} 必须改写正文（否则加锁那趟是空断言）"
+                );
+                assert!(app.tab().dirty, "未加锁的 {what} 必须置脏");
+                assert_eq!(app.tab().version, v0 + 1, "未加锁的 {what} 必须推进版本");
+                assert!(
+                    app.tabs[0].autosave_inflight,
+                    "未加锁的 {what} 必须排上自动保存"
+                );
+            }
+        }
+    }
+}
+
 // ---------- P18 即时保存 ----------
 
 #[test]
@@ -773,6 +855,46 @@ fn p67_status_menus_toggle_mutually_and_esc_closes() {
     assert!(app.encoding_menu);
     dispatch(&mut app, Message::BarsDismissed);
     assert!(!app.encoding_menu && !app.eol_menu);
+}
+
+#[test]
+fn eol_convert_items_are_disabled_for_locked_pages_and_matching_eol() {
+    // 只读页上「转换行尾」由 `update/file.rs` 的闸拒收（见
+    // `whole_document_write_entries_refuse_read_only_pages`）；这一格盯的是**面上的
+    // 诚实**：拒收的动作不该看着能点。判据取 [`Editpad::eol_item_disabled`]
+    // 的三态表格——`ViewTree::click` 打不到叠层里的按钮（同
+    // `tests/bookmarks_panel.rs` 申报的那条设施边界），所以逐条点击的接线留手测。
+    use editpad_core::LineEnding as LE;
+    let mut app = loaded_txt_app();
+    assert_eq!(
+        app.cur_handle.borrow().doc.line_ending(),
+        LE::Lf,
+        "夹具前提：`base` 这种无换行文档落到 LF 档"
+    );
+
+    // (页锁了吗, busy 吗, 目标行尾, 该不该灰)
+    let cells = [
+        // 正对照：可写页上「转换为 CRLF」必须**能点**——否则下面三格会在
+        // 「恒灰」的实现下也全绿（灰掉一切同样"没有能点的项"）
+        (false, false, LE::CrLf, false),
+        // 已是目标：转换无处可转，灰（既有口径，本轮不许改）
+        (false, false, LE::Lf, true),
+        // 只读页：动作会被闸拒收 ⇒ 面上也不许看着能点（本轮补的那一半）
+        (true, false, LE::CrLf, true),
+        // busy：这一族动作在忙碌期间一律灰（与正文右键菜单同一把尺子）
+        (false, true, LE::CrLf, true),
+        // 只读 + busy 同时成立
+        (true, true, LE::CrLf, true),
+    ];
+    for (locked, busy, target, disabled) in cells {
+        app.cur_handle.borrow_mut().read_only = locked;
+        app.busy = busy;
+        assert_eq!(
+            app.eol_item_disabled(target),
+            disabled,
+            "read_only={locked} busy={busy} target={target:?} 的置灰判据错位"
+        );
+    }
 }
 
 #[test]

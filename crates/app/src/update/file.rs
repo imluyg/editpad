@@ -666,6 +666,11 @@ impl Editpad {
                 if self.busy || self.active_load.is_some() {
                     return Task::none();
                 }
+                // 只读闸排在物化全文之前：行尾转换走 `replace_whole_document`，
+                // 不经 `apply_edit` 那道总闸（定案 R-4 的同一条外延）。
+                if self.read_only_blocks_write() {
+                    return Task::none();
+                }
                 // 单遍重排是同步操作：超大文档先挡下并提示（FormatJson 同款
                 // 防冻结思路；上限放宽到 800 万字符 ≈ 24MB 文本）
                 const EOL_CONVERT_MAX_CHARS: usize = 8_000_000;

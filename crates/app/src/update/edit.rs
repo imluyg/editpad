@@ -394,6 +394,11 @@ impl Editpad {
                     self.set_status(self.t(editpad_core::Key::StJsonOnly).to_owned());
                     return Task::none();
                 }
+                // 只读闸排在物化全文之前：格式化走 `replace_whole_document`，
+                // 不经 `apply_edit` 那道总闸（定案 R-4 的同一条外延）。
+                if self.read_only_blocks_write() {
+                    return Task::none();
+                }
                 let (text, chars) = {
                     let ed = self.cur_handle.borrow();
                     (ed.doc.to_text(), ed.doc.text_len())

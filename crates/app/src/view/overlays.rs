@@ -107,10 +107,33 @@ impl Editpad {
         .into()
     }
 
+    /// 菜单里「这一页允许改写吗」的唯一判据：busy 或未解锁只读都算不许。
+    /// 收成一份是因为本仓反复出事的形状就是「两把尺子各守一头」——正文右键菜单
+    /// 与状态栏行尾弹菜单问的是同一件事，必须同一个答案。
+    pub(crate) fn menu_writable(&self) -> bool {
+        !self.busy && !self.cur_handle.borrow().read_only
+    }
+
+    /// 行尾弹菜单里「转换为 `target`」这一项该不该灰掉：已是目标，或这一页不许
+    /// 改写。抽成方法是为了让 headless 用例能把三态列表格。
+    ///
+    /// ⚠️ 它盯不到「有人在 [`Self::eol_menu_overlay`] 里绕过它另写一个判据」——
+    /// 叠层里的按钮 `ViewTree::click` 打不到（设施边界见 `tests/bookmarks_panel.rs`
+    /// 的 `open_panel_renders_one_row_area_per_listed_bookmark` 注释，同 P259 在
+    /// `tests/chrome.rs` 里申报的那半），逐条点击的接线留手测。
+    pub(crate) fn eol_item_disabled(&self, target: editpad_core::LineEnding) -> bool {
+        self.cur_handle.borrow().doc.line_ending() == target || !self.menu_writable()
+    }
+
     /// P308：正文右键菜单面板。菜单项一律经 [`Message::EditorCtxCommand`]
-    /// 转交**既有**消息（零新编辑逻辑），守卫口径与菜单栏一致：
-    /// busy 时全灰，只读页只留纯读取与导航项。文案全部复用既有语言键
+    /// 转交**既有**消息（零新编辑逻辑）：busy 时全灰，只读页只留纯读取与导航项
+    /// （判据 [`Self::menu_writable`]）。文案全部复用既有语言键
     /// （`Menu*` 与 `Hk*` 两族），不新增 i18n 条目。
+    ///
+    /// ⚠️ 旧注释写的「守卫口径与菜单栏一致」**不成立**：[`Self::menubar_panel`]
+    /// 只判 `busy`，同一句动作在菜单栏里是亮着的（按下去由 `apply_edit` 总闸拒收
+    /// ⇒ 不改数据，只是两处观感不一致）。菜单栏那一片置灰按「改内容／纯导航」
+    /// 分族还没做，登记在台账。
     pub(super) fn editor_context_panel(&self) -> Element<'_, Message> {
         use editpad_core::Key as K;
         let uipx = editor::ui_font_px();
@@ -118,7 +141,7 @@ impl Editpad {
         let lang = self.lang();
         let interactive = !self.busy;
         // 只读页：改内容与撤销/重做一律拒收（与 Ctrl+R 的拒绝口径一致）
-        let writable = interactive && !self.cur_handle.borrow().read_only;
+        let writable = self.menu_writable();
         let named = self.tab().path.is_some();
         let hits = self.cur_handle.borrow().has_find_hits();
         let item = |label: K, combo: Option<&str>, msg: Option<Message>| {
@@ -1033,8 +1056,9 @@ impl Editpad {
             panel.into(),
         )
     }
-    /// P67：行尾弹出菜单——当前主导行尾标头 + 两个转换项（已是目标
-    /// 则禁用）。转换为可撤销的文档编辑。
+    /// P67：行尾弹出菜单——当前主导行尾标头 + 两个转换项（已是目标、或这一页
+    /// 锁定只读则禁用）。转换为可撤销的文档编辑，拒收闸在 `update/file.rs`，
+    /// 这里只是让它看着就点不动。
     pub(super) fn eol_menu_overlay(&self) -> Element<'_, Message> {
         const W: f32 = 220.0;
         const ITEM_H: f32 = 32.0;
@@ -1042,7 +1066,7 @@ impl Editpad {
         let uifont = self.ui_font();
         let current = self.cur_handle.borrow().doc.line_ending();
         let item = |label: &str, target: editpad_core::LineEnding| {
-            let disabled = current == target;
+            let disabled = self.eol_item_disabled(target);
             button(text(label.to_owned()).size(uipx).font(uifont).width(Fill))
                 .width(Fill)
                 .padding([6, 10])

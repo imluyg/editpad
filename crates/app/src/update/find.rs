@@ -84,11 +84,19 @@ impl ReplaceRequest {
 
 impl Editpad {
     /// 只读锁原本只挡 `Edit(EditOp)` 那道闸（`update/edit.rs` 的
-    /// `edit_op_mutates` 分支），而替换是**直接换整份文档**的旁路：单页
-    /// 「全部替换」「替换当前」都不经那道闸。A7 要给跨标签路径定「只读页跳过」
-    /// 的口径，就不能留下「当前页改得动、别的页改不得」的矛盾 ⇒ 在此补闸，
+    /// `edit_op_mutates` 分支），而「直接换整份文档」的写入口不经那道闸 ⇒
+    /// 每个这样的入口都得在这儿显式表态。第 233 轮（定案 R-4）补的是替换四条
+    /// 入口，本轮补的是余下两条：`FormatJson` 与 `ConvertEol`——它们同样调
+    /// `replace_whole_document`、同样置脏，却一处只读判定都没有。开着自动保存
+    /// 时后果不止「内存里改了字」：`tab_autosave_ready` 只看 `dirty`，两秒后
+    /// 磁盘上那份被用户明确锁定的文件就被覆写，而只读页上撤销本身也被
+    /// `edit_op_mutates` 拒收 ⇒ 不先解锁就反悔不了。
+    ///
+    /// 排序纪律：这道闸排在**任何需要物化全文才能算出的守卫之前**（`to_text()`
+    /// /尺寸上限那类）。一条注定被拒收的请求不该先花掉一次整份拷贝。
+    ///
     /// 文案与 `Edit` 那条拒收分支同一句。
-    fn read_only_blocks_replace(&mut self) -> bool {
+    pub(super) fn read_only_blocks_write(&mut self) -> bool {
         if !self.cur_handle.borrow().read_only {
             return false;
         }
@@ -469,13 +477,13 @@ impl Editpad {
             }
             Message::ReplaceCurrent => {
                 // 「替换当前」直接改选区，不经 `Edit(EditOp)` 那道只读闸——在此补
-                if self.read_only_blocks_replace() {
+                if self.read_only_blocks_write() {
                     return Task::none();
                 }
                 self.replace_current()
             }
             Message::ReplaceCurrentRegex => {
-                if self.read_only_blocks_replace() {
+                if self.read_only_blocks_write() {
                     return Task::none();
                 }
                 // P70：正则模式的「替换当前」——重选当前命中跨度（命中表
@@ -564,7 +572,7 @@ impl Editpad {
                     // 扫描在途时禁止全部替换：此刻的全文快照可能是过期的
                     return Task::none();
                 }
-                if self.read_only_blocks_replace() {
+                if self.read_only_blocks_write() {
                     return Task::none();
                 }
                 let Some(req) = ReplaceRequest::from_panel(self) else {
