@@ -172,8 +172,6 @@ impl Editpad {
                 let last = self.tabs.len() - 1;
                 self.assign_untitled_num(last);
                 self.set_active_tab(last);
-                // P28：页集合已变，右键菜单随之下收
-                self.tab_context_menu = None;
                 Task::none()
             }
             // 第 76 轮：标签条空白区双击 → 新建标签页。双击判定由控件层完成
@@ -189,13 +187,11 @@ impl Editpad {
             Message::SwitchTabNext => {
                 let next = (self.active_tab + 1) % self.tabs.len();
                 self.set_active_tab(next);
-                self.tab_context_menu = None;
                 Task::none()
             }
             Message::SwitchTabPrev => {
                 let prev = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
                 self.set_active_tab(prev);
-                self.tab_context_menu = None;
                 Task::none()
             }
             Message::SwitchTab(i) => {
@@ -207,7 +203,6 @@ impl Editpad {
                 let dbl = is_double_click(self.last_tab_click, i, now);
                 if i < self.tabs.len() && i != self.active_tab {
                     self.set_active_tab(i);
-                    self.tab_context_menu = None;
                 }
                 if dbl {
                     self.last_tab_click = None;

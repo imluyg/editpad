@@ -280,9 +280,22 @@ impl Editpad {
     /// 量到的正是这一格）。改前这句话由四条用户切页路径各手写一遍
     /// `cancel_find_scan()`，而 `FifGoto` 跳页那条漏了 ⇒ 收进唯一入口，
     /// 从此不可能各守一边。
+    ///
+    /// 换页同样作废**绑在活动页上的浮层**（P336，同一形状的第二格）：它们的
+    /// 待执行意图都属于「打开它那一刻的那一页」——列编辑器对话框要写的列块属于
+    /// 旧页（留着对话框再按 Enter 会把旧页草稿生成的内容插进新页，还把它置脏，
+    /// 开着自动保存时两秒后连新页磁盘上那份一起被覆写）；正文右键菜单锚在旧页的
+    /// 坐标上、菜单项动的却是新页；标签右键菜单带的是旧页下标。改前只有
+    /// NewTab／SwitchTabNext／SwitchTabPrev／SwitchTab 四条路径各手写一句收标签菜单，
+    /// 另两个浮层无人理会，而 `FifGoto`／`start_loading` 两条路径连这一句都没有
+    /// ⇒ 一并收进本函数。
+    /// **只收浮层，不代做编辑**：旧页的列块与对话框草稿都保留。
     pub(crate) fn set_active_tab(&mut self, idx: usize) {
         self.active_tab = idx.min(self.tabs.len() - 1);
         self.cur_handle = self.tabs[self.active_tab].editor.clone();
+        self.column_editor_visible = false;
+        self.editor_context_menu = false;
+        self.tab_context_menu = None;
         self.cancel_find_scan();
     }
 

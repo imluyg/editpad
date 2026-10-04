@@ -239,3 +239,77 @@ fn headless_alt_double_click_adds_extra_cursor_owning_a_selection() {
     );
     assert_eq!(core.doc.to_text(), "alpha beta", "手势本身一字不改文档");
 }
+
+/// P336：两类右键菜单都绑在「打开它那一刻的那一页」上——正文菜单锚在旧页坐标、
+/// 菜单项动的却是新页；标签菜单带的是旧页下标。作废原本由三条切页路径各手写一句
+/// （只收标签菜单），`FifGoto` 跳页与装载那条路连这一句都没有，正文菜单则全程没人
+/// 收 ⇒ 现收进 `set_active_tab` 一处，两条入口都钉住。
+#[test]
+fn switching_pages_closes_both_context_menus() {
+    use crate::find_scan::{FileHit, FileHits};
+
+    let load = |app: &mut Editpad, name: &'static str, body: &'static str| {
+        dispatch(app, Message::FileDropped(PathBuf::from(name)));
+        let seq = app.job_seq;
+        dispatch(
+            app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(body),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+    };
+
+    let mut app = Editpad::default();
+    load(&mut app, "C:/doc/a.txt", "a1\na2\n");
+    load(&mut app, "C:/doc/b.txt", "b1\n");
+    assert_eq!(app.tabs.len(), 2, "夹具自证：两页都带上了路径");
+    assert_eq!(app.active_tab, 1, "夹具自证：装载完停在 B 页");
+
+    // 回 A 页，两类菜单都在场
+    app.set_active_tab(0);
+    dispatch(&mut app, Message::EditorContextMenu(300.0, 240.0));
+    app.tab_context_menu = Some(0);
+    assert!(app.editor_context_menu, "夹具自证：正文菜单已开");
+
+    // 入口一：键盘切页（Ctrl+Tab → SwitchTabNext）
+    dispatch(&mut app, Message::SwitchTabNext);
+    assert_eq!(app.active_tab, 1, "夹具自证：切到了 B 页");
+    assert!(
+        !app.editor_context_menu,
+        "正文菜单锚在 A 页坐标上，切页必须收起"
+    );
+    assert_eq!(
+        app.tab_context_menu, None,
+        "标签菜单带的是 A 页下标，切页必须收起"
+    );
+
+    // 入口二：从「在文件中查找」结果面板跳进另一个已开页（原先不收菜单）
+    dispatch(&mut app, Message::EditorContextMenu(10.0, 20.0));
+    app.tab_context_menu = Some(1);
+    app.fif_results = vec![FileHits {
+        path: PathBuf::from("C:/doc/a.txt"),
+        hits: vec![FileHit {
+            pos: editpad_core::MatchPos {
+                line: 0,
+                col: 0,
+                len_chars: 2,
+            },
+            excerpt: "a1".into(),
+        }],
+    }];
+    dispatch(&mut app, Message::FifGoto(0, 0));
+    assert_eq!(app.active_tab, 0, "夹具自证：跳页生效，回到 A 页");
+    assert!(
+        !app.editor_context_menu,
+        "跳页同样要收起在 B 页开着的正文菜单"
+    );
+    assert_eq!(
+        app.tab_context_menu, None,
+        "跳页这条路径原先连标签菜单都不收"
+    );
+}

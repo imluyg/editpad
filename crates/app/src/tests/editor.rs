@@ -936,6 +936,71 @@ fn column_editor_dialog_open_guard_and_confirm() {
     assert_eq!(app.column_editor.base, NumBase::Dec);
 }
 
+// ---------- P336：切页作废绑定在活动页上的浮层 ----------
+
+/// 列编辑器对话框的插入目标是「确认那一刻的活动页」的列块，而那块选区属于
+/// **打开对话框那一页**。键盘切页（`Ctrl+Tab` → `SwitchTabNext`）原先只作废
+/// 标签右键菜单 ⇒ 对话框在 B 页仍然开着，此时 Enter／「确定」把 A 页草稿生成
+/// 的内容插进 B 页正文（B 页没有列块时退化成在光标处插入），并把 B 页置脏。
+#[test]
+fn switching_tabs_voids_the_column_editor_before_it_can_write_another_page() {
+    use crate::editor::{BlockSel, CursorPos};
+    use iced::keyboard::{self, key::Named};
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::NewTab);
+    app.set_active_tab(0);
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("abcdef\nghijkl\n".into())),
+    );
+
+    // A 页：建列块 [1,2) × 两行 → 开对话框 → 填文本模式内容
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 1 },
+        head: CursorPos { line: 1, col: 2 },
+    });
+    dispatch(&mut app, Message::ColumnEditorTextChanged("XY".into()));
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(
+        app.column_editor_visible,
+        "夹具自证：A 页对话框已开（无块/软换行会被守卫拒掉）"
+    );
+
+    // 真实手势：Ctrl+Tab 切到 B 页（对话框拦截层只管 Esc/Enter，Ctrl 组合照常放行）。
+    // 无头 dispatch 不执行 Task::done ⇒ 与 `column_editor_f6_dispatches` 同一手法：
+    // 先证键位映射，再直投那条消息。
+    let switched = handle_key_defaults(keyboard::Key::Named(Named::Tab), keyboard::Modifiers::CTRL);
+    assert!(
+        matches!(switched, Some(Message::SwitchTabNext)),
+        "夹具自证：Ctrl+Tab 就是「切到下一页」，对话框开着也放行"
+    );
+    dispatch(&mut app, Message::SwitchTabNext);
+    assert_eq!(app.active_tab, 1, "夹具自证：切页后活动页是 B");
+    assert!(
+        !app.column_editor_visible,
+        "切页必须作废列编辑器——它绑的是 A 页的列块"
+    );
+
+    // 「确定」＝ Enter 经 Task 送出的那条消息（无头 dispatch 不执行 Task，故直投）
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        "",
+        "B 页正文一个字都不许被写进去"
+    );
+    assert!(!app.tabs[1].dirty, "B 页不得被置脏（否则自动保存会覆写它）");
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "abcdef\nghijkl\n",
+        "A 页原样：作废只是收浮层，不代做编辑"
+    );
+    assert!(
+        app.tabs[0].editor.borrow().has_block(),
+        "A 页的列块留着，切回去还能接着用"
+    );
+}
+
 // ---------- B9 Phase 3：列编辑器封顶实测 ----------
 
 #[test]
