@@ -977,12 +977,8 @@ fn switching_tabs_voids_the_column_editor_before_it_can_write_another_page() {
     );
     dispatch(&mut app, Message::SwitchTabNext);
     assert_eq!(app.active_tab, 1, "夹具自证：切页后活动页是 B");
-    assert!(
-        !app.column_editor_visible,
-        "切页必须作废列编辑器——它绑的是 A 页的列块"
-    );
-
-    // 「确定」＝ Enter 经 Task 送出的那条消息（无头 dispatch 不执行 Task，故直投）
+    // 「确定」＝真机上 Enter 经 Task 送出的那条消息（无头 dispatch 不执行 Task，故直投）。
+    // ⚠️ 判据顺序刻意：先让**用户可感的后果**（内容写进错页）红，机制那一句放最后。
     dispatch(&mut app, Message::ColumnEditorConfirmed);
     assert_eq!(
         app.tabs[1].editor.borrow().doc.to_text(),
@@ -998,6 +994,10 @@ fn switching_tabs_voids_the_column_editor_before_it_can_write_another_page() {
     assert!(
         app.tabs[0].editor.borrow().has_block(),
         "A 页的列块留着，切回去还能接着用"
+    );
+    assert!(
+        !app.column_editor_visible,
+        "机制那一半：切页当场作废对话框，而不是靠确认路径里「不可见就返回」那句兜住"
     );
 }
 
