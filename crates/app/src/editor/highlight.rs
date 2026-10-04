@@ -112,14 +112,17 @@ impl EditorCore {
             target_text,
             total,
             LazyHighlighter::MAX_INLINE_STRIDES,
-            &mut |i| doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned(),
+            // 剥行尾走 core 唯一实现（认全异体行界）：喂给 syntect 的行正文
+            // 必须与 `EditorCore::line_text` 画的、以及 `line_body_len_chars`
+            // 数的是同一个区间，否则底色 run 的列会整体偏移一格
+            &mut |i| editpad_core::trim_line_breaks(&doc.line_str(i)).to_owned(),
         ) {
             return runs;
         }
         let anchor = self.visible_range().0;
         hl.borrow_mut()
             .styled_line_approx(line_idx, anchor, target_text, total, &mut |i| {
-                doc.line_str(i).trim_end_matches(['\n', '\r']).to_owned()
+                editpad_core::trim_line_breaks(&doc.line_str(i)).to_owned()
             })
     }
 

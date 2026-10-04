@@ -426,27 +426,35 @@ impl Document {
 
     /// 第 `line_idx` 行**不含行尾换行符**的字符数（P284）。
     ///
-    /// 与 [`Self::line_str`] 再 `trim_end_matches(['\n','\r'])` 后数字符完全
-    /// 等价，但**不扫全行**：ropey 把 `\r` 也算行 break ⇒ 一行的正文不可能以
-    /// `\r`/`\n` 结尾，行尾只可能是 `\n` / `\r\n` / `\r` / 空（末行无换行），
+    /// 与 [`Self::line_str`] 再走一遍 [`trim_line_breaks`] 后数字符完全等价，
+    /// 但**不扫全行**：ropey 一行的行尾只可能是**一个**行界单元（`\r\n` 配对，
+    /// 或 [`crate::search::LINE_BREAK_CHARS`] 里的单个字符，末行可以没有），
     /// 所以从行末往回数最多看两个字符就够。长行文档（单行日志/压缩文件）里
     /// 这是每帧"这行有多少字符"从 O(行长) 变成常数的关键。
+    /// ⚠️ 全集里那五个异体字符（VT/FF/NEL/LS/PS）**同样是行尾**——旧注释写的
+    /// 「行尾只可能是 `\n` / `\r\n` / `\r` / 空」是假的，它让以 FF 结尾的行
+    /// 多算 1 列，而本函数是 app 侧约 70 处列夹紧（End 键、点击、选区）唯一的
+    /// 长度来源（`EditorCore::line_display_len`）。
     /// 行号越界返回 0（与 `line_str` 的空串口径一致）。
     pub fn line_body_len_chars(&self, line_idx: usize) -> usize {
         if line_idx >= self.rope.len_lines() {
             return 0;
         }
         let line = self.rope.line(line_idx);
-        let n = line.len_chars();
-        let mut end = n;
-        // 最多剥两个字符：`\r\n`。再多一个都不可能是行尾（见上）。
-        for _ in 0..2 {
-            if end == 0 {
-                break;
-            }
+        let mut end = line.len_chars();
+        if end > 0 {
             match line.char(end - 1) {
-                '\n' | '\r' => end -= 1,
-                _ => break,
+                // CRLF 是唯一"两个字符一个行界单元"的形态：剥掉 `\n` 之后
+                // 还要回头看一眼，才可能再剥掉那个 `\r`。
+                '\n' => {
+                    end -= 1;
+                    if end > 0 && line.char(end - 1) == '\r' {
+                        end -= 1;
+                    }
+                }
+                // 其余行界（孤立 `\r` 与 VT/FF/NEL/LS/PS）都是单字符，剥一次。
+                c if crate::search::is_line_break(c) => end -= 1,
+                _ => {}
             }
         }
         end
@@ -575,6 +583,32 @@ fn split_line_ending(line: &str) -> (&str, &str) {
         return (body, "\r");
     }
     (line, "")
+}
+
+/// 剥掉一行末尾的**一个**行界单元（全集见 [`crate::search::LINE_BREAK_CHARS`]）。
+///
+/// 「读的方向」唯一的剥行尾实现：ropey 的一行只可能以一个行界单元结尾，所以这里
+/// 不写成 `trim_end_matches(['\n','\r'])` 那种反复剥的形式——那种写法既漏掉
+/// VT/FF/NEL/LS/PS 五个异体行界，又把「最多剥两个字符」这条依据藏在了调用点
+/// （本仓第 6 次口径分叉：`Document::line_body_len_chars`、`EditorCore::line_text`、
+/// 高亮取线、结果面板摘录原先各写一遍）。
+///
+/// ⚠️ 写侧（[`LineEnding::normalize`]、`split_line_ending`）刻意只认 `\r\n` /
+/// `\n` / 孤立 `\r` 三种：异体行界字符是用户文件里的**数据**，改写它＝静默变更
+/// 内容（定案 R-11「读按全集、写按三种」）。
+pub fn trim_line_breaks(line: &str) -> &str {
+    let Some(last) = line.chars().next_back() else {
+        return line;
+    };
+    if !crate::search::is_line_break(last) {
+        return line;
+    }
+    let body = &line[..line.len() - last.len_utf8()];
+    // CRLF 是唯一「两个字符一个行界单元」的形态：剥掉 `\n` 后再看一眼那个 `\r`
+    if last == '\n' && body.ends_with('\r') {
+        return &body[..body.len() - 1];
+    }
+    body
 }
 
 /// 行首空白段（调用方保证 `body` 非空白行；全空白时返回整段，无害）。
@@ -840,11 +874,13 @@ mod tests {
     }
 
     #[test]
-    fn line_body_len_chars_matches_the_trimmed_string_on_every_ending() {
-        // P284 的对拍：`line_body_len_chars` 只看行末两个字符，而参照口径是
-        // "物化整行再 trim_end 掉所有 \n/\r 然后数"。行尾形态只有四种
-        // （`\n` / `\r\n` / `\r` / 末行无换行），但"只看两个字符够不够"要由
-        // 对拍说，不由推理说。
+    fn line_body_len_chars_matches_the_stream_scanned_body_on_every_ending() {
+        // P284 的对拍：`line_body_len_chars` 只看行末两个字符，参照口径必须是
+        // **另一套真不同的实现**——这里用 `for_each_line`（逐字符流扫描）取该行
+        // 第一个分段再数字符。旧参照写的是 `trim_end_matches(['\n','\r'])`，
+        // 与本函数**同一个盲区**（都只认 \n/\r），所以异体行界那几格永远照不出
+        // （第 242 轮量出来的：以 FF 结尾的行多算 1 列，而它是 app 侧约 70 处
+        // 列夹紧唯一的长度来源）。
         let cases = [
             ("a\r\nbb\ncc", "CRLF 开头 + LF + 末行无换行"),
             ("plain\n", "全 LF"),
@@ -857,21 +893,31 @@ mod tests {
             ("\n\n", "只有两个空行"),
             ("中文字\ttab\nemoji 🚀 end\r\n", "宽字符 / Tab / emoji"),
             ("x\n\ny", "中间夹空行"),
+            ("a\u{000B}b\u{000C}c\n", "VT 与 FF 分行（经典分页文本）"),
+            (
+                "中\u{2028}文\u{2029}x\u{0085}",
+                "LS / PS 混排，末行以 NEL 收尾",
+            ),
+            ("x\r\ru", "两个孤立 CR 中间夹一个空行"),
+            ("\u{0085}alone", "NEL 开头：第一行正文为空"),
+            ("a\u{000C}", "FF 结尾且是整个文档的末行"),
         ];
         for (text, label) in cases {
             let doc = Document::from_str(text);
             for i in 0..doc.line_count() {
                 let fast = doc.line_body_len_chars(i);
-                let slow = doc
-                    .line_str(i)
-                    .trim_end_matches(['\n', '\r'])
-                    .chars()
-                    .count();
+                let raw = doc.line_str(i);
+                let mut first: Option<String> = None;
+                crate::search::for_each_line(&raw, |_, seg| {
+                    // 只取**第一个**分段：Some("") 也算取到了（整行只有一个行界时）
+                    if first.is_none() {
+                        first = Some(seg.to_owned());
+                    }
+                });
+                let slow = first.unwrap_or_default().chars().count();
                 assert_eq!(
-                    fast,
-                    slow,
-                    "{label}：第 {i} 行（原始行 {:?}）快速口径 {fast} != 参照 {slow}",
-                    doc.line_str(i)
+                    fast, slow,
+                    "{label}：第 {i} 行（原始行 {raw:?}）快速口径 {fast} != 参照 {slow}"
                 );
             }
             // 越界恒 0，与 `line_str` 返回空串的口径一致
@@ -881,6 +927,66 @@ mod tests {
                 "{label}：越界行号须给 0"
             );
         }
+    }
+
+    #[test]
+    fn trim_line_breaks_strips_one_break_unit_of_the_full_set() {
+        // 「剥掉行尾单元」全仓只剩这一份实现（第 242 轮把四份抄写收到这里）。
+        // 判据是「剥**一个**单元」而不是「反复剥掉所有 \n/\r」：异体行界必须认，
+        // 而多字节行界（NEL 2 字节／LS·PS 3 字节）不能按字节宽度剥。
+        let cases = [
+            ("a\r\n", "a", "CRLF 是一个单元"),
+            ("a\n", "a", "LF"),
+            ("a\r", "a", "孤立 CR"),
+            ("a\u{000B}", "a", "VT"),
+            ("a\u{000C}", "a", "FF"),
+            ("a\u{0085}", "a", "NEL：2 字节 1 字符"),
+            ("a\u{2028}", "a", "LS：3 字节 1 字符"),
+            ("a\u{2029}", "a", "PS：3 字节 1 字符"),
+            ("a", "a", "末行无换行"),
+            ("", "", "空串"),
+            ("\n", "", "整行只有一个 LF"),
+            ("\r\n", "", "整行只有一个 CRLF"),
+            ("a\u{000C}\u{0085}", "a\u{000C}", "只剥末尾那一个单元"),
+            ("中\u{2028}", "中", "宽字符 + LS"),
+        ];
+        for (input, want, label) in cases {
+            assert_eq!(
+                trim_line_breaks(input),
+                want,
+                "{label}：实得 {:?}",
+                trim_line_breaks(input)
+            );
+        }
+
+        // 两份实现同结论：`line_body_len_chars`（只看行末）与本函数（扫末尾字符），
+        // 每格都用 rope 的一行原始串（含行尾）过一遍
+        for (input, _, label) in cases {
+            let doc = Document::from_str(input);
+            let raw = doc.line_str(0);
+            assert_eq!(
+                doc.line_body_len_chars(0),
+                trim_line_breaks(&raw).chars().count(),
+                "{label}：第 0 行（{raw:?}）两份口径分叉"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_never_rewrites_exotic_breaks() {
+        // 定案 R-11「读按全集、写按三种」的**石头**：归一化只管 `\r\n`/`\n`/孤立 `\r`。
+        // 异体行界字符是用户文件里的数据，哪天有人"顺手统一"把它们也改写，
+        // 打开一份含 FF 的分页文本再保存就会静默变更正文——那格必须红在这里。
+        let exotic = "a\u{000B}b\u{000C}c\u{0085}d\u{2028}e\u{2029}f";
+        for target in [LineEnding::Lf, LineEnding::CrLf, LineEnding::Cr] {
+            assert_eq!(
+                target.normalize(exotic),
+                exotic,
+                "{target:?} 归一化不该碰异体行界字符"
+            );
+        }
+        // 同一条里带上 `\r\n`：证明归一化本身还活着（防整条短路成恒等蒙过上面四格）
+        assert_eq!(LineEnding::Lf.normalize("x\r\ny\u{000C}"), "x\ny\u{000C}");
     }
 
     #[test]

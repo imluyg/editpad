@@ -960,7 +960,8 @@ pub(crate) fn find_input_widget_id() -> iced::advanced::widget::Id {
 /// 结果面板行摘录：剥行尾 → 以命中列为窗心取最多 `max_cols` 个字符，
 /// 两端截断处补省略号 `…`。纯函数便于单测。
 pub(crate) fn match_excerpt(line_text: &str, col: usize, max_cols: usize) -> String {
-    let body = line_text.trim_end_matches(['\n', '\r']);
+    // 剥行尾走 core 唯一实现（认全异体行界），与 `EditorCore::line_text` 同口径
+    let body = editpad_core::trim_line_breaks(line_text);
     let chars: Vec<char> = body.chars().collect();
     let col = col.min(chars.len());
     if chars.len() <= max_cols {

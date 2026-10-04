@@ -1489,10 +1489,11 @@ impl EditorCore {
         }
         #[cfg(test)]
         self.line_text_calls.set(self.line_text_calls.get() + 1);
-        self.doc
-            .line_str(line)
-            .trim_end_matches(['\n', '\r'])
-            .to_owned()
+        // 剥行尾走 core 那份唯一实现（`trim_line_breaks`）：原先本地写的是
+        // `trim_end_matches(['\n','\r'])`，它与 `line_body_len_chars` 曾有同一个
+        // 盲区（漏掉 VT/FF/NEL/LS/PS），于是"正文长度"与"正文文本"两套口径
+        // 各走一半（第 242 轮定案 R-11）。
+        editpad_core::trim_line_breaks(&self.doc.line_str(line)).to_owned()
     }
 
     /// 测试钩子（O-1）：读取并清零 `line_text` 取串计数。用法 = 绘制前清零、

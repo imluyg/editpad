@@ -22,7 +22,7 @@ pub(crate) mod syntaxes;
 pub mod toolkit;
 
 pub use brackets::{bracket_kind, scan_forward, BRACKET_PAIRS, MAX_BRACKET_SCAN_CHARS};
-pub use document::{Document, LineEnding};
+pub use document::{trim_line_breaks, Document, LineEnding};
 pub use error::CoreError;
 pub use find_in_files::{
     filter_whole_word_text, find_in_file, find_in_file_with, walk_files, FifMatcher, WalkOutput,
@@ -55,8 +55,9 @@ pub use saver::{
 pub use search::{
     ascii_case_eq, compile_regex, expand_regex_at, filter_whole_word, find_all, find_all_document,
     find_all_document_limited, find_all_regex, find_all_regex_compiled, find_all_regex_document,
-    find_all_regex_document_limited, for_each_line, is_word_char, next_from, prev_from,
-    replace_all, replace_all_document, replace_all_regex, replace_all_word, MatchPos,
+    find_all_regex_document_limited, for_each_line, is_line_break, is_word_char, next_from,
+    prev_from, replace_all, replace_all_document, replace_all_regex, replace_all_word, MatchPos,
+    LINE_BREAK_CHARS,
 };
 pub use settings::{
     normalize_combo, normalize_settings_page, RecentView, Settings, EXIT_MODE_ASK,

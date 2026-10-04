@@ -2813,3 +2813,46 @@ fn row_layout_memo_misses_when_font_changes() {
     assert_eq!(c.row_layout_memo[&0].0, other, "memo 键应记录新字体");
     assert_eq!(c.row_layouts[&0].len(), first.len(), "布局长度口径不变");
 }
+
+/// 第 242 轮（定案 R-11「读按全集」）：ropey 把 VT/FF/NEL/LS/PS 也算行界，
+/// 而 core 里剥行尾的实现原先只认 `\n`/`\r` ⇒ 以异体结尾的行**多算一列**。
+/// 用户可见的形状＝`abc<FF>xyz` 上按 End，光标站到 `xyz` 前面（看起来是下一行
+/// 行首），随后打的字插进下一条正文。这里钉的是这条链上三个真实消费者，
+/// 不是判据函数本身（那份对拍在 core `document::tests`）。
+#[test]
+fn exotic_line_break_ends_the_row_so_end_key_and_typing_stay_inside_the_body() {
+    for (brk, label) in [
+        ('\u{000B}', "VT"),
+        ('\u{000C}', "FF"),
+        ('\u{0085}', "NEL"),
+        ('\u{2028}', "LS"),
+        ('\u{2029}', "PS"),
+    ] {
+        let text = format!("abc{brk}xyz");
+        let mut c = core_with(&text);
+        // 前提自证：ropey 真把它切成两行——否则下面三格全是空转
+        assert_eq!(
+            c.doc.line_count(),
+            2,
+            "{label}：前提——ropey 应把 {label} 当行界"
+        );
+        // ① 长度：约 70 处列夹紧唯一的来源（`line_display_len` 就是它）
+        assert_eq!(c.line_display_len(0), 3, "{label}：行正文只该 3 列");
+        // ② 文本：绘制与取行正文的来源，不许带着行界字符
+        assert_eq!(c.line_text(0), "abc", "{label}：正文里不该留下行界字符");
+        // ③ 落点与插入：End 停在正文末尾，打字插进**这一行**
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.apply_motion(Motion::End, false);
+        assert_eq!(
+            c.cursor,
+            CursorPos { line: 0, col: 3 },
+            "{label}：End 越过正文末尾"
+        );
+        c.insert_str("X");
+        assert_eq!(
+            c.doc.line_str(0),
+            format!("abcX{brk}"),
+            "{label}：在行尾打字应留在本行，不该写进下一行"
+        );
+    }
+}

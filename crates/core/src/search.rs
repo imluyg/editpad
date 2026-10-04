@@ -48,19 +48,35 @@ fn char_eq(a: char, b: char, case_sensitive: bool) -> bool {
 
 // ---------- 行界口径（查找 ↔ ropey 对齐） ----------
 
+/// ropey `unicode_lines`（默认特性）的**行界全集**：`\n`、孤立 `\r`、VT、FF、NEL、LS、PS
+/// （`\r\n` 是这两位的配对，算一个行界单元）。
+///
+/// 全仓**读**的方向——行号、列夹紧、点击落点、切行、跨行查找——都以此为准；
+/// **写**的方向（[`crate::document::LineEnding::normalize`] 与主导行尾检测）刻意只处理
+/// `\r\n` / `\n` / 孤立 `\r` 三种：异体行界字符是用户文件里的**数据**，改写它等于
+/// 静默变更内容（定案见 `docs/决策记录.md` R-11）。
+///
+/// 这份表必须由用例钉住"与 ropey 完备且最小一致"（见 `line_break_chars_match_ropey_exactly`）：
+/// 它是**上游实现**，ropey 哪天加/减一个行界字符，整套坐标系会无声漂移。
+pub const LINE_BREAK_CHARS: [char; 7] = [
+    '\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}',
+];
+
+/// `c` 本身是否构成一个行界。CRLF 的配对宽度只有 `line_break_byte_len` 关心，
+/// 因为它要看后一个字符。
+pub fn is_line_break(c: char) -> bool {
+    LINE_BREAK_CHARS.contains(&c)
+}
+
 /// ropey `unicode_lines` 行界全集的判定：`c` 构成的行界共几字节
 /// （CRLF 配对算一个单元计 2 字节），非行界返回 0。
 ///
 /// 这是查找模块与编辑器（ropey 默认 `unicode_lines` 特性）行号坐标的
-/// 唯一对齐点：`\n`、`\r\n`、孤立 `\r`、VT、FF、NEL、LS、PS 一律算
-/// 行界。旧实现只认 `\n`，在含孤立 `\r` 的文档上（加载器明确支持的
-/// 经典 Mac CR 文件）所有命中的行号都会漂移、选区定位错位。
+/// 唯一对齐点：全集见 [`LINE_BREAK_CHARS`]。旧实现只认 `\n`，在含孤立 `\r`
+/// 的文档上（加载器明确支持的经典 Mac CR 文件）所有命中的行号都会漂移、
+/// 选区定位错位。
 fn line_break_byte_len(c: char, next: Option<char>) -> usize {
-    let is_break = matches!(
-        c,
-        '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
-    );
-    if !is_break {
+    if !is_line_break(c) {
         return 0;
     }
     let mut len = c.len_utf8();
@@ -589,10 +605,9 @@ impl MultiLineScanner {
                     Some(_) => self.push_token(ScanToken::Newline, out), // 孤立 `\r`
                     None => self.pending_cr = true, // 片段末尾：悬置待下片段裁决
                 },
-                // 行界全集（除 \r\n 外的单字符行界）：与编辑器行号同源
-                '\n' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
-                    self.push_token(ScanToken::Newline, out)
-                }
+                // 行界全集（除 `\r\n` 外的单字符行界，`\r` 已由上面那支裁决）：
+                // 与编辑器行号同源，判据只有 [`is_line_break`] 这一份
+                c if is_line_break(c) => self.push_token(ScanToken::Newline, out),
                 other => self.push_token(ScanToken::Char(other), out),
             }
         }
@@ -1688,6 +1703,46 @@ mod tests {
             out.push(ALPHABET[(state >> 33) as usize % ALPHABET.len()]);
         }
         out
+    }
+
+    /// `LINE_BREAK_CHARS` 是**上游 ropey 实现**在本仓的抄本，所以它必须自己
+    /// 证明"完备且最小"（第 242 轮：`line_body_len_chars` 曾只认 `\n`/`\r`，
+    /// 于是以 FF 结尾的行多算 1 列，而那是 app 侧约 70 处列夹紧唯一的长度来源）：
+    /// - **完备**：表里每个字符 ropey 真当行界（少一格 ⇒ 本仓行号与编辑器分叉）；
+    /// - **最小**：紧邻的几个"常被误当换行"的控制/格式字符，ropey 都不当行界
+    ///   （多一格 ⇒ 把用户正文里的字符当行尾剥掉）。
+    ///
+    /// ropey 哪天改动这个集合，本条会红——那是**唯一**能提前发现坐标系无声漂移的闸。
+    #[test]
+    fn line_break_chars_match_ropey_exactly() {
+        use crate::document::Document;
+        for &c in &LINE_BREAK_CHARS {
+            let doc = Document::from_str(&format!("a{c}b"));
+            assert_eq!(
+                doc.line_count(),
+                2,
+                "{c:?} 是行界，ropey 却把它留在同一行？"
+            );
+            assert!(is_line_break(c), "{c:?} 在表里但判据说不是行界");
+        }
+        for &c in &[
+            '\u{001C}', // FILE SEPARATOR
+            '\u{001D}', '\u{001E}', '\u{0084}', '\u{200E}', '\u{202A}',
+        ] {
+            let doc = Document::from_str(&format!("a{c}b"));
+            assert_eq!(
+                doc.line_count(),
+                1,
+                "{c:?} 不是行界，ropey 把它切成两行了？"
+            );
+            assert!(!is_line_break(c), "{c:?} 不该进表");
+        }
+        // 表规模自证：删掉一格 ⇒ 上面第一圈少跑一格而全绿
+        assert_eq!(
+            LINE_BREAK_CHARS.len(),
+            7,
+            "行数与判据的格数不匹配（改表要连这条一起改）"
+        );
     }
 
     /// P217 回归：行界字符**后面紧跟另一个行界字符**时必须切成两行。
