@@ -51,18 +51,25 @@ impl EditorCore {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.break_typing(); // P37：撤销本身打断组，防后续输入混入历史组
-        self.goal_px = None; // 第 73 轮 ⑯：撤销 = 非竖向操作，清 goal
-        self.clear_block(); // 第 67 轮：列块不参与快照回滚，一并清除
-                            // B10 Phase 2：附加光标随快照整体对换——undo 前的多光标态存入
-                            // redo 快照，undo 落点的多光标态从历史快照恢复（设计 §3.5）
+        // 池 ⑧：先取货、后吃状态。栈空时这一按必须是**零变更**——改前三行
+        // 排在 `pop()` 之前，于是产品回报「没有更多可撤销」的同时，用户刚框好
+        // 的列块与竖向目标列已被顺手清掉，紧接着打字只写进首行。附加光标那一半
+        // 由 P326 在应用层闸门修掉，这三行是同一格漏掉的兄弟字段。
         let Some(snap) = self.undo_stack.pop() else {
             return false;
         };
+        // P37：撤销本身打断组，防后续输入混入历史组
+        self.break_typing();
+        // 第 73 轮 ⑯：撤销 = 非竖向操作，清 goal
+        self.goal_px = None;
+        // 第 67 轮：列块不参与快照回滚，一并清除
+        self.clear_block();
         // P304：新旧正文共同的开头（字节相同 ⇒ 行界与语法状态链逐格相同）。
         // 改前一律从第 0 行失效：撤销一个字符＝丢光全部检查点、后台补建从
         // 文档开头重来。失效点挪到这里之后，只有改动点之后的档需要重建。
         let same_upto = self.doc.first_diff_char(&snap.doc);
+        // B10 Phase 2：附加光标随快照整体对换——undo 前的多光标态存入
+        // redo 快照，undo 落点的多光标态从历史快照恢复（设计 §3.5）
         self.redo_stack.push(Snapshot {
             doc: std::mem::replace(&mut self.doc, snap.doc),
             cursor: self.cursor,
@@ -84,13 +91,13 @@ impl EditorCore {
     }
 
     pub fn redo(&mut self) -> bool {
-        self.break_typing(); // P37 同上
-        self.goal_px = None; // 第 73 轮 ⑯：重做 = 非竖向操作，清 goal
-        self.clear_block(); // 第 67 轮：同 undo
-                            // B10 Phase 2：附加光标随快照整体对换（同 undo，对称）
         let Some(snap) = self.redo_stack.pop() else {
             return false;
         };
+        self.break_typing(); // P37 同上
+        self.goal_px = None; // 第 73 轮 ⑯：重做 = 非竖向操作，清 goal
+        self.clear_block(); // 第 67 轮：同 undo（池 ⑧：同一条「先取货后吃状态」）
+                            // B10 Phase 2：附加光标随快照整体对换（同 undo，对称）
         let same_upto = self.doc.first_diff_char(&snap.doc); // 同 undo（P304）
         self.undo_stack.push(Snapshot {
             doc: std::mem::replace(&mut self.doc, snap.doc),

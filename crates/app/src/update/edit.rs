@@ -612,10 +612,22 @@ impl Editpad {
         // 需要 'static（曾用 leak() 属内存泄漏，已纠正）
         let mut hint: Option<String> = None;
         // 第 67 轮 ⑮：列块态只在白名单内存活（输入/退格/删除/块内 Tab 走
-        // 块分支），其余任何编辑动作先清块——单点收口防漏清
+        // 块分支），其余任何编辑动作先清块——单点收口防漏清。
+        // 池 ⑧：Undo/Redo 同样必须在名单内（与下面 P326 那条多光标闸门同一条
+        // 口径）：这道闸在 `editor.undo()` **之前**执行，改前失败的撤销（栈空）
+        // 也照样吃掉用户刚框好的矩形，而回报是「没有更多可撤销」——按错一下
+        // 不该有后果。清块本身没丢：`undo()`/`redo()` 只在真的取到快照时才清
+        // （editor/undo.rs），成功那半边由用例
+        // `undo_failure_preserves_the_column_block` 的后两格钉住。
         if !matches!(
             op,
-            E::InsertText(_) | E::Backspace | E::Delete | E::CancelBlock | E::TabKey(false)
+            E::InsertText(_)
+                | E::Backspace
+                | E::Delete
+                | E::CancelBlock
+                | E::TabKey(false)
+                | E::Undo
+                | E::Redo
         ) {
             self.cur_handle.borrow_mut().clear_block();
         }

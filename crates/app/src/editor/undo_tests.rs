@@ -936,3 +936,65 @@ fn undo_voids_the_checkpoints_rebuilt_after_the_change_point() {
         assert_eq!(mine, theirs, "第 {line} 行与全新解析不同色（撤销后）");
     }
 }
+
+// ---------- 池 ⑧：撤销/重做的「无事可做」必须是零变更 ----------
+
+/// 撤销栈空时按 Ctrl+Z，产品已经报告「没有更多可撤销」，但改前的 `undo()`
+/// 在 `pop()` **之前**就清了列块与竖向目标列：一次没做成的操作照样吃掉用户
+/// 刚框好的矩形，紧接着打字只写进首行而不是逐行。
+#[test]
+fn undo_on_empty_history_changes_nothing_at_all() {
+    let mut c = core_with("aaa\nbbb\nccc\n");
+    c.begin_block_select(CursorPos { line: 0, col: 1 });
+    c.update_block_select(CursorPos { line: 2, col: 2 });
+    assert!(c.finish_block_select(), "夹具自证：块确实在场");
+    assert!(c.undo_stack.is_empty(), "夹具自证：撤销栈为空");
+    c.goal_px = Some(24.0);
+
+    let doc = c.doc.to_text();
+    let cursor = c.cursor;
+    assert!(!c.undo(), "栈空 ⇒ 无事可做");
+    assert!(c.has_block(), "失败的撤销不得吃掉列块");
+    assert_eq!(c.goal_px, Some(24.0), "失败的撤销不得清掉竖向目标列");
+    assert_eq!(c.doc.to_text(), doc, "失败的撤销不动正文");
+    assert_eq!(c.cursor, cursor, "失败的撤销不动光标");
+    // 块不是「看着还在、其实已失效」的标记：下一次打字必须仍然逐行写入
+    assert!(c.insert_into_block("Z"), "块必须仍可用于打字");
+    assert_eq!(
+        c.doc.to_text(),
+        "aZa\nbZb\ncZc\n",
+        "逐行替换是列块存在的意义（块被吃掉时这里只会改首行）"
+    );
+}
+
+/// 重做半边同一条口径：重做栈空时按 Ctrl+Y 同样不该吃状态；而**成功**的
+/// 撤销／重做仍然必须作废旧坐标系下的块（闸门挪位不等于块能跨过正文换血）。
+#[test]
+fn redo_on_empty_history_changes_nothing_at_all() {
+    let mk_block = |c: &mut EditorCore| {
+        c.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 1, col: 0 },
+            head: CursorPos { line: 2, col: 1 },
+        });
+    };
+    let mut c = core_with("aaa\nbbb\nccc\n");
+    mk_block(&mut c);
+    c.goal_px = Some(12.0);
+    assert!(c.redo_stack.is_empty(), "夹具自证：重做栈为空");
+
+    let doc = c.doc.to_text();
+    assert!(!c.redo(), "重做栈空 ⇒ 无事可做");
+    assert!(c.has_block(), "失败的重做不得吃掉列块");
+    assert_eq!(c.goal_px, Some(12.0), "失败的重做不得清掉竖向目标列");
+    assert_eq!(c.doc.to_text(), doc, "失败的重做不动正文");
+
+    // 对照：有货时一撤一重做，块各自照常作废
+    c.insert_str("x");
+    mk_block(&mut c);
+    assert!(c.undo(), "夹具自证：这一步可撤");
+    assert!(!c.has_block(), "成功的撤销必须清块");
+    mk_block(&mut c);
+    assert!(c.redo(), "夹具自证：这一步可重做");
+    assert!(!c.has_block(), "成功的重做必须清块");
+    assert_eq!(c.doc.to_text(), "xaaa\nbbb\nccc\n", "重做把正文换回去");
+}

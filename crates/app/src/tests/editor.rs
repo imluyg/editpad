@@ -1241,6 +1241,67 @@ fn undo_failure_preserves_the_cursor_set() {
     assert_eq!(h.doc.to_text(), doc_before, "失败的撤销不动正文");
 }
 
+/// P326 那一格的**兄弟字段**：附加光标已被挪出 pop 之前的闸门，列块没有。
+/// 两处叠着清块——`apply_edit` 的清块白名单不含 Undo/Redo，`undo()` 自己也在
+/// pop 之前清——所以按错一下 Ctrl+Z 就吃掉刚框好的矩形，紧接着打字只写进一行
+/// 而不是逐行。这里钉应用层那一半（内核那一半见
+/// `editor::undo_tests::undo_on_empty_history_changes_nothing_at_all`）。
+#[test]
+fn undo_failure_preserves_the_column_block() {
+    use crate::editor::{BlockSel, CursorPos};
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("abc\n".into())));
+    dispatch(&mut app, Message::Edit(EditOp::Undo)); // 撤到底：栈就此为空
+    let doc_before = app.cur_handle.borrow().doc.to_text();
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 0, col: 2 },
+    });
+
+    dispatch(&mut app, Message::Edit(EditOp::Undo)); // 无处可撤
+    assert!(
+        app.cur_handle.borrow().has_block(),
+        "失败的撤销不该顺手吃掉列块（闸门在 undo() 之前就清）"
+    );
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), doc_before);
+
+    // 反面对照：闸门挪位不等于块能跨过正文换血活着——成功的撤销仍须清块，
+    // 否则旧坐标系的矩形会作用在新文档上（行号越界即 ropey 越界）。
+    // ⚠️ 先手动清掉那块：块态下的 InsertText 会被路由成「逐行替换块内容」，
+    // 留着它这一步就不是一次普通编辑了。
+    app.cur_handle.borrow_mut().clear_block();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("abc\n".into())));
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 0, col: 2 },
+    });
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert!(
+        !app.cur_handle.borrow().has_block(),
+        "成功的撤销必须作废旧坐标系的列块"
+    );
+
+    // 重做半边同样两处都要放行：成功清块、失败不清块
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 0, col: 2 },
+    });
+    dispatch(&mut app, Message::Edit(EditOp::Redo)); // 上一步撤下来的货还在栈里
+    assert!(
+        !app.cur_handle.borrow().has_block(),
+        "成功的重做必须清块（同 undo 口径）"
+    );
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 0, col: 2 },
+    });
+    dispatch(&mut app, Message::Edit(EditOp::Redo)); // 这一按起重做栈已空
+    assert!(
+        app.cur_handle.borrow().has_block(),
+        "失败的重做不得吃掉列块"
+    );
+}
+
 #[test]
 fn add_next_match_hotkey_dispatch_full_chain() {
     use crate::editor::CursorPos;
