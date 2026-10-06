@@ -6,6 +6,23 @@
 use super::*;
 
 impl Editpad {
+    /// `update` 的**尾部钩子**（P354）：不忙且暂存里还攥着单实例转发来的路径，
+    /// 就在这里接上打开链。
+    ///
+    /// 为什么挂在 `update` 末尾而不是各个 `busy = false` 旁边：那样的收口点全库有
+    /// 13 处，每一条都可能需要驱动这一批，**漏掉任何一个的症状都是"用户双击的文件
+    /// 没打开"**；而这一批的来源只有到货通知一条（`PendingOpenPaths`，P210 起空拍
+    /// 不发消息），所以"等下一拍"根本等不来。
+    /// 递归安全：暂存在递归之前已 `take` 清空 ⇒ 内层这道钩子必定原样返回。
+    pub(crate) fn drive_stashed_pending_open(&mut self, task: Task<Message>) -> Task<Message> {
+        if self.busy || self.pending_open_stash.is_empty() {
+            return task;
+        }
+        self.pending_cli
+            .extend(std::mem::take(&mut self.pending_open_stash));
+        Task::batch([task, self.update(Message::OpenNextCliFile)])
+    }
+
     // ---------- domain methods (round 81 Phase 1: update() split) ----------
     /// 域：文件（打开/保存/编码/行尾/拖放/外部变更）。臂体自原 update() 逐字搬移，零行为变更。
     pub(super) fn update_file(&mut self, msg: Message) -> Task<Message> {
@@ -56,23 +73,18 @@ impl Editpad {
                 self.request_open(path)
             }
             Message::PendingOpenPaths(paths) => {
-                // 单实例转发的**到货通知**（P210：轮询与 rename 抢占都在桥接
-                // 线程里做，空拍一条消息都不发，故本臂只在真有活时到达）。
-                // busy（加载/对话框在途）时不进 pending_cli——取消分支会连带
-                // 作废整条队列（N-07 的口径），而路径已经从磁盘抢走了，塞进去
-                // 等于让用户双击的文件被一次「取消」吞掉。改存
-                // Editpad::pending_open_stash，等下一拍到货且已不忙时并入，
-                // 节拍每 400ms 再来一次，自愈合。
-                if self.busy {
-                    self.pending_open_stash.extend(paths);
-                    return Task::none();
-                }
-                if !self.pending_open_stash.is_empty() {
-                    self.pending_cli
-                        .extend(std::mem::take(&mut self.pending_open_stash));
-                }
-                self.pending_cli.extend(paths);
-                self.update(Message::OpenNextCliFile)
+                // 单实例转发的**到货通知**（P210：轮询与 rename 抢占都在桥接线程里
+                // 做，空拍一条消息都不发，故本臂只在真有活时到达）。
+                // P354：一律先入 `pending_open_stash`，**在不在这里起装载**由
+                // `update` 末尾那一个驱动点决定（[`Self::drive_stashed_pending_open`]）。
+                // 改前分两半写——busy 时入暂存、不忙时手工并入队列再起装载，而
+                // "暂存什么时候能出去"没有第二处看守，注释还写着「节拍每 400ms
+                // 再来一次，自愈合」：那句**与机制不符**，空拍不发消息，于是对话框
+                // 在途时到货的那一批会永远躺在暂存里——路径早已被 rename 从磁盘抢走，
+                // 用户双击要打开的文件就此静默丢失。
+                // 也不直接进 `pending_cli`：取消分支会连带作废整条 CLI 队列（N-07 口径）。
+                self.pending_open_stash.extend(paths);
+                Task::none()
             }
             Message::LoadProgress(job_id, bytes_read, total_bytes) => {
                 if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {

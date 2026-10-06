@@ -497,7 +497,7 @@ impl Editpad {
             self.cur_handle.try_borrow_mut().is_ok(),
             "update 不得在持有 editor 借用时被调用——递归重入必须落在借用作用域之外"
         );
-        match &message {
+        let task = match &message {
             // ---------- 编辑器/剪贴板/光标/预览/高亮铺路 ----------
             Message::Edit(..)
             | Message::ToggleOverwrite
@@ -685,7 +685,12 @@ impl Editpad {
             | Message::GotoToggled
             | Message::GotoInputChanged(..)
             | Message::GotoSubmit => self.update_find(message),
-        }
+        };
+        // P354：单实例转发的批次**只有这一个驱动点**。`PendingOpenPaths` 是到货
+        // 通知（P210 起空拍一条消息都不发），所以"等下一拍自愈合"不成立——
+        // 忙时存进 `pending_open_stash` 的那一批路径早已从磁盘抢走，若本轮之后
+        // 已不忙而队列里还攥着它，就在这里接上打开链（实现见 file.rs 同名方法）。
+        self.drive_stashed_pending_open(task)
     }
 
     // ---------- domain methods (round 81 Phase 1: update() split) ----------

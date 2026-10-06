@@ -2836,6 +2836,45 @@ fn pending_open_paths_stash_while_busy_and_merge_in_order_when_idle() {
     );
 }
 
+/// P354：忙时到货的单实例批次，**没有第二批次也必须被打开**。
+///
+/// 上一轮扫描量出来的形状：`PendingOpenPaths` 是"到货通知"（P210 起空拍**一条
+/// 消息都不发**），而暂存那段注释写着"节拍每 400ms 再来一次，自愈合"——那句
+/// 与机制不符（本仓第 4 次）。磁盘上的批次早已被桥接线程 rename 抢走，
+/// 没有第二次到货就永远没人再驱动它：用户双击要打开的文件**静默丢失**。
+/// 上面那条既有用例是靠**再投一条** `PendingOpenPaths` 才让 a.txt 被并走的，
+/// 所以它恰好掩盖了这一格。
+#[test]
+fn a_stashed_pending_open_opens_without_a_second_arrival() {
+    let mut app = Editpad::default();
+    // 场景：打开/另存为对话框在途（busy），第二实例把用户双击的文件转发进来
+    app.busy = true;
+    dispatch(
+        &mut app,
+        Message::PendingOpenPaths(vec![PathBuf::from("C:/pf/a.txt")]),
+    );
+    assert_eq!(app.pending_open_stash, vec![PathBuf::from("C:/pf/a.txt")]);
+    assert!(app.active_load.is_none(), "busy 期间不许起装载");
+    assert!(
+        app.pending_cli.is_empty(),
+        "也不许混进 CLI 队列（取消分支会连带作废整条队列）"
+    );
+
+    // 对话框取消＝busy 归零；此后再没有任何到货通知。
+    // ⚠️ 别把这一步断成 `!app.busy`：批次被接上之后 busy 会因**这次真的开始装载**
+    // 而重新为真，那正是本用例要的结果。自证落在「装载作业指向的就是那一批路径」。
+    dispatch(&mut app, Message::FileChosen(None));
+    assert!(
+        app.pending_open_stash.is_empty(),
+        "批次不许继续躺在暂存里——路径已从磁盘抢走，不会有人再送来"
+    );
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.path.clone()),
+        Some(PathBuf::from("C:/pf/a.txt")),
+        "用户双击的那个文件必须真的开始打开"
+    );
+}
+
 /// P210：抢占读取内核的首批用例。P148 那段「rename 原子抢占 + 读后即删」
 /// 守着的是「用户双击的文件会不会被静默吞掉」，此前**一条用例都没有**。
 #[test]
