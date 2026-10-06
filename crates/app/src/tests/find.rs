@@ -167,6 +167,205 @@ fn p70_regex_replace_current_expands_single_match() {
     assert!(app.tab().dirty, "替换当前是真实文档编辑");
 }
 
+// ---------- P338「替换当前」× 在途自动保存 ----------
+
+/// 三档「替换当前」共用的夹具：一页真文件 + 指定正文 + 查询与替换文本。
+/// 命中表由用例自己注入（注入前若已改过正文，位置必须按改后的正文算）。
+fn p338_replacement_app(
+    tag: &str,
+    doc: &str,
+    regex: bool,
+    query: &str,
+    replacement: &str,
+) -> Editpad {
+    let (mut app, _path) = loaded_real_file_app(tag);
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str(doc));
+    }
+    app.settings.autosave_enabled = true;
+    app.regex_enabled = regex;
+    app.find_query = query.to_owned();
+    app.replace_query = replacement.to_owned();
+    app
+}
+
+/// 把命中表当"后台扫描已完成"注入（与 `p70_regex_replace_current_*` 同法）。
+fn p338_inject_hits(app: &mut Editpad, hits: Vec<editpad_core::MatchPos>) {
+    let seq = app.find_seq;
+    app.find_scan = Some(seq); // 登记「在途扫描」：FindScanDone 的守卫条件
+    dispatch(app, Message::FindScanDone(seq, scanned(hits)));
+}
+
+#[test]
+fn p338_late_autosave_must_not_clear_dirty_after_replace_current() {
+    // 后果那一半：打字排出一轮自动保存（它落的是**调度时刻**的正文快照），防抖窗
+    // 还没醒就点「替换当前」——字面档原先只置脏不推版本，于是回报的 `version`
+    // 比对成立 ⇒ 清脏 + `mark_saved`。磁盘上留的是替换前的正文，标签不脏、
+    // 关页不提示 = 那次替换静默丢失。正则两档一直带 `note_mutation`，字面档漏。
+    let mut app = p338_replacement_app("p338-late-autosave", "foo bar foo", false, "bar", "BAR");
+    let path = app.tabs[0].path.clone().expect("夹具必须是已命名页");
+    // 排出一轮真实的在途任务（它带走的快照里还没有 BAR）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+    assert!(
+        app.tabs[0].autosave_inflight,
+        "用例前提：有一轮在途自动保存可迟到"
+    );
+    let scheduled = app.tab().version;
+    let tid = app.tabs[0].id;
+    // 命中位置按**插入之后**的正文算（"!foo bar foo" 里 bar 在第 5 列）
+    let hits = {
+        let ed = app.cur_handle.borrow();
+        editpad_core::find_all_document(&ed.doc, "bar", true)
+    };
+    assert!(!hits.is_empty(), "夹具前提：换文里得找得到 bar");
+    p338_inject_hits(&mut app, hits);
+    // 字面档的「替换当前」只换"当前选中的命中"（正则档会自己先跳）
+    dispatch(&mut app, Message::FindNext);
+
+    dispatch(&mut app, Message::ReplaceCurrent);
+    assert!(
+        app.cur_handle.borrow().doc.to_text().contains("BAR"),
+        "夹具前提：替换真的发生了，否则下面的断言是空转"
+    );
+
+    // 迟到的「保存成功」拿着调度时刻的旧版本
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            scheduled,
+            path.clone(),
+            crate::autosave::AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
+        ),
+    );
+    assert!(
+        app.tab().dirty,
+        "磁盘上少这一次替换，账目不能清（改前：版本没推进 ⇒ 这里被清脏）"
+    );
+
+    // 正对照：版本对得上时该清就清——否则上面那句红是"永远不清脏"造成的假守卫
+    let current = app.tab().version;
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            current,
+            path,
+            crate::autosave::AutosaveOutcome::Written(editpad_core::SaveEncoding::Utf8),
+        ),
+    );
+    assert!(
+        !app.tab().dirty,
+        "版本一致的落盘必须清脏，否则上面那句红只是「永远不清脏」造成的假守卫"
+    );
+
+    // 机制那一半放在后果之后：它解释的是"为什么没被清"，不是本用例的验收线
+    assert_eq!(
+        app.tab().version,
+        scheduled + 1,
+        "替换当前必须推进版本（在途轮次靠它分辨新旧）"
+    );
+}
+
+#[test]
+fn p338_all_three_replace_arms_advance_version() {
+    // 三档投递点（字面／正则常规／正则零宽展开）走同一份落地一步：少一档不推
+    // 版本，那一档就能被迟到的自动保存清脏。逐档各撞一次，防"改一档漏一档"。
+    let cases = [
+        (
+            "p338-arm-literal",
+            "foo bar foo",
+            vec![editpad_core::MatchPos {
+                line: 0,
+                col: 4,
+                len_chars: 3,
+            }],
+            false,
+            "bar",
+            "BAR",
+        ),
+        (
+            "p338-arm-regex",
+            "a1 b2",
+            vec![editpad_core::MatchPos {
+                line: 0,
+                col: 3,
+                len_chars: 2,
+            }],
+            true,
+            r"b(\d)",
+            "B<$1>",
+        ),
+        (
+            // 零宽命中：`selected_text` 为空，走 expand_regex_at 那一档
+            "p338-arm-regex-zero",
+            "abc",
+            vec![editpad_core::MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 0,
+            }],
+            true,
+            "b*",
+            "X",
+        ),
+    ];
+    for (tag, doc, hits, regex, query, replacement) in cases {
+        let mut app = p338_replacement_app(tag, doc, regex, query, replacement);
+        p338_inject_hits(&mut app, hits);
+        let before = app.tab().version;
+        // 先跳到命中：字面档只换"当前选中的那一个"（正则两档会自己跳，这一步
+        // 对它们是把当前命中定下来，形状三档一致）
+        dispatch(&mut app, Message::FindNext);
+        dispatch(
+            &mut app,
+            if regex {
+                Message::ReplaceCurrentRegex
+            } else {
+                Message::ReplaceCurrent
+            },
+        );
+        assert!(app.tab().dirty, "{tag}：夹具前提，这一档确实替换了");
+        assert_ne!(
+            app.cur_handle.borrow().doc.to_text(),
+            doc,
+            "{tag}：正文一字未动＝夹具空转，下面的版本断言会变成没内容的过场"
+        );
+        assert_eq!(
+            app.tab().version,
+            before + 1,
+            "{tag}：这一档必须推进版本，否则迟到的自动保存会把替换前正文当最新写盘"
+        );
+    }
+}
+
+#[test]
+fn p338_replace_current_schedules_its_own_autosave_round() {
+    // 另一头的后果：替换发生时若没有 in-flight 轮次（刚自动保存完就点替换），
+    // 三档原先都只回 `schedule_find_scan()`，落盘的触发点只剩"下一次敲字"——
+    // 这笔改动可以无限期停在内存里。「全部替换」四条码点本来就各自补排一轮。
+    let mut app = p338_replacement_app("p338-self-schedule", "foo bar foo", false, "bar", "BAR");
+    p338_inject_hits(
+        &mut app,
+        vec![editpad_core::MatchPos {
+            line: 0,
+            col: 4,
+            len_chars: 3,
+        }],
+    );
+    assert!(
+        !app.tabs[0].autosave_inflight,
+        "用例前提：此刻没有在途轮次，这一格封的正是「没人替它排」那条路"
+    );
+    dispatch(&mut app, Message::FindNext);
+    dispatch(&mut app, Message::ReplaceCurrent);
+    assert!(
+        app.tabs[0].autosave_inflight,
+        "替换当前必须自己排一轮防抖，不能等下一次敲字"
+    );
+}
+
 #[test]
 fn step_prev_from_selected_match_jumps_back_in_one_press() {
     // 光标/选区正落在命中上时，「查找上一个」必须一步跳到上一处——

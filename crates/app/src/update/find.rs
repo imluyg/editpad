@@ -124,6 +124,27 @@ impl Editpad {
         tab.note_mutation();
     }
 
+    /// 「替换当前」三档投递点（字面／正则常规／正则零宽展开）共用的落地一步：
+    /// 换掉选区内容＋置脏＋**推进版本**＋排队重扫＋排一轮自动保存。
+    ///
+    /// 版本推进不是可选的：在途的自动保存落的是**调度时刻的快照**，醒来后拿
+    /// `tab.version` 与排期时记的版本比对——替换不推版本，那次比对就成立，于是
+    /// 磁盘上留下替换前的正文，而标签被清脏、`mark_saved` 把基线对齐到旧内容，
+    /// 关页也不再提示。字面档曾只置脏（P338 的根因），三档收成这一份。
+    ///
+    /// 自动保存要自己排：三档原先都只回 `schedule_find_scan()`，落盘的触发点
+    /// 只剩"下一次敲字"。若替换发生时没有 in-flight 轮次（刚自动保存完就点
+    /// 替换），这笔改动可以无限期停在内存里——「停止编辑→防抖窗内落盘」的承诺
+    /// 从这条入口漏出去。「全部替换」四条码点本来就各自补排（见本文件
+    /// `maybe_schedule_autosave` 三处调用），此处同口径。
+    pub(crate) fn commit_replaced_selection(&mut self, replacement: &str) -> Task<Message> {
+        self.cur_handle.borrow_mut().replace_selection(replacement);
+        let tab = self.tab_mut();
+        tab.dirty = true;
+        tab.note_mutation();
+        Task::batch([self.schedule_find_scan(), self.maybe_schedule_autosave()])
+    }
+
     /// A7 跨标签正则的装料：算出要送后台的 `(页 id, 正文)`，以及两类没送去的页
     /// （只读 / 未处理）。
     ///
@@ -534,11 +555,8 @@ impl Editpad {
                     };
                     return match expansion {
                         Ok(expanded) => {
-                            self.cur_handle.borrow_mut().replace_selection(&expanded);
-                            self.tab_mut().dirty = true;
-                            self.tab_mut().note_mutation();
                             // 命中表已过期：排队重扫（「下一个」等重扫完成）
-                            self.schedule_find_scan()
+                            self.commit_replaced_selection(&expanded)
                         }
                         Err(e) => {
                             self.set_status_error(
@@ -553,11 +571,8 @@ impl Editpad {
                         let expanded = re
                             .replace(&matched, self.replace_query.as_str())
                             .into_owned();
-                        self.cur_handle.borrow_mut().replace_selection(&expanded);
-                        self.tab_mut().dirty = true;
-                        self.tab_mut().note_mutation();
                         // 命中表已过期：排队重扫（「下一个」等重扫完成）
-                        self.schedule_find_scan()
+                        self.commit_replaced_selection(&expanded)
                     }
                     Err(e) => {
                         self.set_status_error(

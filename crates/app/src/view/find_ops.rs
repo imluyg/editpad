@@ -131,13 +131,9 @@ impl Editpad {
         };
 
         if hit_selected {
-            self.cur_handle
-                .borrow_mut()
-                .replace_selection(&effective_replacement);
-            self.tab_mut().dirty = true;
             // P10：替换后命中表已过期，排队后台重扫；「跳到下一个」等重扫完成
             // 后由用户再按（旧行为是同步重扫后立即跳，会卡大文档 UI）
-            return self.schedule_find_scan();
+            return self.commit_replaced_selection(&effective_replacement);
         }
         // 没有可替换的选区：行为不变——跳到下一个匹配
         self.step_match(true)
