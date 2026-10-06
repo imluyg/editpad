@@ -60,7 +60,7 @@ pub use search::{
     LINE_BREAK_CHARS,
 };
 pub use settings::{
-    normalize_combo, normalize_settings_page, RecentView, Settings, EXIT_MODE_ASK,
+    normalize_combo, normalize_settings_page, RecentView, Settings, SettingsRead, EXIT_MODE_ASK,
     EXIT_MODE_SNAPSHOT, SETTINGS_PAGES, SETTINGS_PAGE_ABOUT, SETTINGS_PAGE_APPEARANCE,
     SETTINGS_PAGE_FONT, SETTINGS_PAGE_HOTKEYS, SETTINGS_PAGE_SAVE, SETTINGS_PAGE_SESSION,
 };

@@ -349,7 +349,14 @@ impl Editpad {
         // 进程内一次）——必须发生在首帧排版之前，否则排版缓存里已固化的
         // 逐字回退不会重排
         apply_default_cjk_mono_pin();
-        let mut settings = editpad_core::Settings::load();
+        // P355：读配置**分档**——「文件在却读不出」不能等同于「没有配置文件」
+        // （旧形状把两者收敛成同一份默认偏好，而窗口几何本次启动就把它写回磁盘）
+        let config = editpad_core::Settings::config_path();
+        let settings_read = match &config {
+            Some(path) => editpad_core::Settings::load_from_checked(path),
+            None => editpad_core::SettingsRead::Absent,
+        };
+        let mut settings = settings_read.clone().into_settings();
         // P62：热键重映射表消毒——动作 id 不在注册表中的条目删除
         // （core 只做组合串格式归一，动作清单是 app 层知识）
         sanitize_hotkeys(&mut settings);
@@ -426,13 +433,18 @@ impl Editpad {
         // 依赖 boot 任务的消息投递（iced 0.14 实测：boot 任务「立即
         // 输出」在窗口创建初期丢失，CaretTick 类延时输出正常；详见
         // 归档第 79 轮）。
-        let (state, boot_task) = if cli_files.is_empty() {
+        let (mut state, boot_task) = if cli_files.is_empty() {
             let task = state.boot_restore();
             (state, task)
         } else {
             state.boot_cli_kickoff(cli_files);
             (state, Task::none())
         };
+        // P355：坏配置的留痕＋提示。**排在会话恢复之后**是刻意的：同一拍里若还撞上
+        // 坏会话清单，那条讲的是崩前的工作、更值钱，本条就让位（原文照样留档）。
+        if let Some(path) = config.as_ref() {
+            state.note_unreadable_config(path, &settings_read);
+        }
         // 单实例转发轮询：已运行实例经实例目录的批次文件接收第二实例
         // 递来的待开文件（双击文件而实例已在跑 = 新标签页打开而非弹窗）。
         // P149：轮询节拍已改订阅时钟驱动（见 subscription），boot 不再起链。
@@ -1105,6 +1117,44 @@ impl Editpad {
         };
         self.set_status(status);
     }
+    /// P355：把「有 `config.toml` 却读不出」这件事**留痕**。
+    ///
+    /// 改前的形状是 core 侧 `fs::read_to_string(path).unwrap_or_default()`：文件在、
+    /// 但读不出（非 UTF-8／被占用／权限）＝和"没有配置文件"收敛成同一个结果 ⇒
+    /// 全部偏好回默认，而窗口几何在本次启动就把它写回磁盘＝**丢失固化**，界面零痕迹。
+    /// 这里做两件事：**原文复制留档**（`config.corrupt.toml`，与坏会话清单同一套收口，
+    /// 见 `snapshot::preserve_broken_bytes`）＋**状态栏说一声**。
+    /// 刻意**不**拦住后续写入：拦住＝用户改的开关静默不生效，那正是 P347 刚清掉的症状；
+    /// 留档已经让原文件可以从容恢复。
+    /// 状态栏只在**还空着的时候**写：启动同时撞上坏会话清单时，那条讲的是崩前的工作，
+    /// 比偏好更值钱——两份留档文件都已在磁盘上，一条消息不该掩盖另一条的线索。
+    pub(crate) fn note_unreadable_config(
+        &mut self,
+        config: &Path,
+        read: &editpad_core::SettingsRead,
+    ) {
+        let editpad_core::SettingsRead::Broken { error, original } = read else {
+            return; // Absent = 首次启动，静默；Good = 读得出来，无事可报
+        };
+        let dir = config.parent().unwrap_or(config);
+        let hint = match original {
+            Some(bytes) => {
+                editpad_core::snapshot::preserve_broken_bytes(dir, "config.corrupt", bytes)
+                    .unwrap_or_else(|| config.to_path_buf())
+            }
+            // 连字节都没读到（占用／权限）：能给的最后一线索是那份文件本身的位置
+            None => config.to_path_buf(),
+        };
+        if !self.status.is_empty() {
+            return;
+        }
+        self.set_status_error(editpad_core::fmt_suffix(
+            self.lang(),
+            editpad_core::Key::StSettingsUnreadable,
+            &format!("{}（{error}）", hint.display()),
+        ));
+    }
+
     /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到临时目录，
     /// 绝不动真实 %APPDATA%；否则走系统配置目录。
     ///

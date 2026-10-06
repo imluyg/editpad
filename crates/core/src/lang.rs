@@ -545,6 +545,7 @@ key_table! {
     { StBackupFailed => "备份失败（继续保存）：", "Backup failed (saving continues): " },
     { StSettingsSaveFailed => "设置保存失败（本次改动不会记住）：", "Failed to save settings (this change will not be remembered): " },
     { StSessionManifestBroken => "上次会话的清单读不出来，原文已留档：", "The last session's manifest could not be read; the original was kept aside: " },
+    { StSettingsUnreadable => "配置文件读不出来，本次启动按默认值，原文见：", "The config file could not be read; this session uses defaults. Original at: " },
     { StLoadThreadCrashed => "加载线程崩溃：", "Load thread crashed: " },
     { StLoadStreamEnded => "加载流意外终止（未收到完成事件）", "The load stream ended unexpectedly (no completion event)" },
     { StUnknownReason => "未知原因", "unknown reason" },

@@ -1464,6 +1464,81 @@ fn about_page_reports_build_provenance_and_homepage() {
     assert_eq!(en_home.title, "Homepage & feedback");
 }
 
+/// P355（第 261 轮扫描池 ③）：`config.toml` **在**、却读不出 ⇒ 必须留痕＋搬走原文。
+///
+/// 改前 core 那句 `fs::read_to_string(path).unwrap_or_default()` 把"读不出"当成
+/// "没有配置"：全部偏好回默认，而窗口几何在本次启动就把它写回磁盘＝**丢失固化**，
+/// 界面上零痕迹。会话清单侧（P348）早已三分，本轮补的是同一件事剩下的那一半。
+#[test]
+fn unreadable_config_is_archived_and_said_out_loud() {
+    let dir = scratch_dir("p355-config-broken");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut raw = b"theme = \"dark\"\nfont_size = 18\n".to_vec();
+    raw.push(0xFF); // 不可能是合法 UTF-8 的一个字节
+    let config = dir.join("config.toml");
+    std::fs::write(&config, &raw).unwrap();
+
+    let read = editpad_core::Settings::load_from_checked(&config);
+    // 夹具自证：core 那边确实把它归成"读不出"，否则本用例测的是别的东西
+    assert!(
+        matches!(read, editpad_core::SettingsRead::Broken { .. }),
+        "夹具：这份夹具必须真的读不出"
+    );
+
+    let mut app = Editpad::default();
+    app.note_unreadable_config(&config, &read);
+    assert!(
+        app.status.contains("config.corrupt"),
+        "提示要指到留档文件，实际 {:?}",
+        app.status
+    );
+    assert_eq!(
+        std::fs::read(dir.join("config.corrupt.toml"))
+            .ok()
+            .as_deref(),
+        Some(raw.as_slice()),
+        "留档必须是**原始字节**——lossy 之后的文本救不回用户的偏好"
+    );
+
+    // 正对照一：没有配置文件＝首次启动，不该打扰用户，也不该造出留档文件
+    let absent = dir.join("nope.toml");
+    let mut quiet = Editpad::default();
+    quiet.note_unreadable_config(&absent, &editpad_core::Settings::load_from_checked(&absent));
+    assert!(
+        quiet.status.is_empty(),
+        "首次启动不该冒提示，实际 {:?}",
+        quiet.status
+    );
+    assert!(
+        !dir.join("config.corrupt-2.toml").exists(),
+        "没有原文可留档时不该乱造文件"
+    );
+
+    // 正对照二：读得出来的配置同样不许冒噪音
+    let good = dir.join("good.toml");
+    std::fs::write(&good, "theme = \"dark\"\n").unwrap();
+    let mut fine = Editpad::default();
+    fine.note_unreadable_config(&good, &editpad_core::Settings::load_from_checked(&good));
+    assert!(
+        fine.status.is_empty(),
+        "合法配置不该有任何提示，实际 {:?}",
+        fine.status
+    );
+
+    // 顺序那一格的裁决：同一拍里坏会话清单更值钱（它讲的是崩前的工作），本条让位。
+    // ⚠️ 让位的是**消息**，不是留档——原文在这一步之前就已经复制到磁盘上了。
+    let mut noisy = Editpad::default();
+    noisy.status = "上次会话的清单读不出来，原文已留档：x".to_string();
+    noisy.note_unreadable_config(&config, &read);
+    assert!(
+        noisy.status.starts_with("上次会话"),
+        "已有一条启动提示时不许覆盖，实际 {:?}",
+        noisy.status
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// 池 ⑩ 的探针：设置落盘失败曾**零回传**——`persist_settings` 与 core 的
 /// `Settings::save()` 两处 `let _ =` 把 `io::Result` 吞掉。用户在设置弹窗改完
 /// 一项，磁盘上一个字节都没写出去，状态栏却一片安静；下次启动全部 revert

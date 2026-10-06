@@ -447,22 +447,30 @@ pub fn read_manifest_checked(dir: &Path) -> ManifestRead {
 /// 启动仍要能看出「这里有一份坏清单」。同名内容已留过档就不重复造（每次启动
 /// 都堆一份是噪音）；内容不同则追加序号（P148 时间戳备份同款收口）。
 pub fn preserve_broken_manifest(dir: &Path, raw: &str) -> Option<PathBuf> {
-    if raw.is_empty() {
+    preserve_broken_bytes(dir, "session.corrupt", raw.as_bytes())
+}
+
+/// [`preserve_broken_manifest`] 的**字节版**：留档对象是原始字节，所以连"不是合法
+/// UTF-8 的坏配置文件"也搬得走（P355 的 `config.corrupt.toml` 用的就是这一支）。
+/// 收口与串版同一条：空输入不造文件、同内容不重复造、异内容追加序号——
+/// 两处各写一份就会漂（CONTRIBUTING §7 孪生规矩），故串版只是门面。
+pub fn preserve_broken_bytes(dir: &Path, stem: &str, bytes: &[u8]) -> Option<PathBuf> {
+    if bytes.is_empty() {
         return None;
     }
     let mut seq = 0u32;
     loop {
         let path = if seq == 0 {
-            dir.join("session.corrupt.toml")
+            dir.join(format!("{stem}.toml"))
         } else {
-            dir.join(format!("session.corrupt-{seq}.toml"))
+            dir.join(format!("{stem}-{seq}.toml"))
         };
-        match fs::read_to_string(&path) {
+        match fs::read(&path) {
             // 同一份坏内容只留一份档
-            Ok(text) if text == raw => return Some(path),
+            Ok(existing) if existing == bytes => return Some(path),
             Ok(_) => seq += 1,
             Err(_) => {
-                return fs::write(&path, raw).ok().map(|_| path);
+                return fs::write(&path, bytes).ok().map(|_| path);
             }
         }
     }

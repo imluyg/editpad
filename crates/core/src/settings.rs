@@ -4,8 +4,11 @@
 //! 系统配置目录下按 **exe 路径哈希** 分出的实例目录（Windows 上
 //! `%APPDATA%\editpad\instances\<实例键>\`），每份拷贝各搞各的数据；
 //! 首次运行把旧版遗留的 `%APPDATA%\editpad\` 整体搬入首个实例。
-//! 读写都是尽力而为：配置损坏或目录不可写时静默回退默认值，绝不
-//! 影响编辑器本体。
+//! 读写都是尽力而为：目录不可写时回退默认值，绝不影响编辑器本体。
+//! ⚠️ P355 起**「读不出」不再静默**：`config.toml` 在而读不出（非 UTF-8／语法整份坏）
+//! 归 [`SettingsRead::Broken`]，由调用方留档并提示——旧形状是
+//! `read_to_string(..).unwrap_or_default()`，把"读不出"当成"没有配置"，全部偏好回默认
+//! 而被窗口几何本次启动写回磁盘＝丢失固化。个别坏字段仍按 R-15 逐键回默认，不算故障。
 
 use std::collections::HashMap;
 use std::fs;
@@ -440,11 +443,88 @@ pub fn normalize_combo(value: &str) -> Option<String> {
     Some(out)
 }
 
+/// 读配置的结果分档（P355）。形状照 [`crate::snapshot::ManifestRead`]。
+///
+/// 为什么要分档：旧形状是 `fs::read_to_string(path).unwrap_or_default()`——
+/// 「文件不存在」与「文件在却读不出」（非 UTF-8／被占用／权限）被收敛成同一个
+/// 空串，于是主题／语言／热键／最近文件／窗口几何**一起**回默认，而窗口几何在
+/// 本次启动就会把它写回磁盘＝把这次丢失固化。第 257 轮在会话清单侧已经三分过
+/// （P348），设置侧是同一件事剩下的那一半。
+#[derive(Debug, Clone)]
+pub enum SettingsRead {
+    /// 没有 config.toml：首次启动，安静用默认值就对了（不该打扰用户）。
+    Absent,
+    /// 有文件却读不出。`error` 是给人看的原因；`original` 是磁盘上的原文——
+    /// 连字节都没读到（占用／权限）时为 `None`，调用方据此决定"留档"还是"只报位置"。
+    Broken {
+        error: String,
+        original: Option<Vec<u8>>,
+    },
+    /// 读得出的偏好。个别坏字段按 R-15 逐键回默认，那**不算** Broken（不算"没了"）。
+    /// 装箱只为让三档的尺寸差留在一次指针跳转内（`clippy::large_enum_variant`），
+    /// 代价是 boot 期一次堆分配——这份枚举整个生命周期只构造一次。
+    Good(Box<Settings>),
+}
+
+impl SettingsRead {
+    /// 取出偏好：`Good` 用读到的那一份，`Absent`／`Broken` 回规范默认值并归一——
+    /// 与 [`Settings::load_from`] 改前的契约逐字相同（分档只**加**信息，不改回落行为）。
+    pub fn into_settings(self) -> Settings {
+        match self {
+            SettingsRead::Good(settings) => *settings,
+            SettingsRead::Absent | SettingsRead::Broken { .. } => {
+                let mut settings = Settings::default();
+                settings.normalize();
+                settings
+            }
+        }
+    }
+}
+
 impl Settings {
     pub fn load_from(path: &Path) -> Self {
-        let mut settings = Self::parse_lenient(&fs::read_to_string(path).unwrap_or_default());
+        Self::load_from_checked(path).into_settings()
+    }
+
+    /// [`Self::load_from`] 的**分档版**（P355）：把「没有配置文件」与「文件在却读不出」
+    /// 分开。读侧仍不动磁盘上那份 `config.toml`。
+    pub fn load_from_checked(path: &Path) -> SettingsRead {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return SettingsRead::Absent;
+            }
+            Err(source) => {
+                return SettingsRead::Broken {
+                    error: source.to_string(),
+                    original: None,
+                };
+            }
+        };
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(source) => {
+                // 原文一个字节都没丢掉才能救得回来：整份字节交给调用方留档
+                return SettingsRead::Broken {
+                    error: format!("配置文件不是合法 UTF-8 文本（{source}）"),
+                    original: Some(bytes),
+                };
+            }
+        };
+        // 只有**整份**读不通才算 Broken：单个坏字段已由 [`Self::parse_lenient`]
+        // 逐键回默认（R-15），那不是"偏好没了"。判据＝连 `toml::Table` 都解不出
+        // ＝语法坏，一个键都没取回。空文件不在此列（所有字段都有默认值，照旧静默）。
+        if !text.trim().is_empty() {
+            if let Err(source) = toml::from_str::<toml::Table>(text) {
+                return SettingsRead::Broken {
+                    error: source.to_string(),
+                    original: Some(bytes),
+                };
+            }
+        }
+        let mut settings = Self::parse_lenient(text);
         settings.normalize();
-        settings
+        SettingsRead::Good(Box::new(settings))
     }
 
     /// 解析偏好文件：**一个坏字段不许连坐其余偏好**。
@@ -1202,6 +1282,74 @@ mod tests {
     }
 
     // ---------- P352 缺字段的取值只许有一个来源 ----------
+
+    /// P355（第 261 轮扫描池 ③）：「没有配置文件」与「文件在却读不出」必须分开。
+    ///
+    /// 旧形状是 `fs::read_to_string(path).unwrap_or_default()`，两者收敛成同一个空串
+    /// ⇒ 主题／语言／热键／最近文件／窗口几何一起回默认，而窗口几何在本次启动就把它
+    /// 写回磁盘＝**把丢失固化**，界面上零痕迹。会话清单侧第 257 轮已三分（P348），
+    /// 本轮补的是同一件事剩下的那一半。
+    #[test]
+    fn unreadable_config_is_told_apart_from_absent_one() {
+        let dir = scratch_dir("p355-read-kinds");
+        fs::create_dir_all(&dir).unwrap();
+
+        // 正对照一：文件不存在 = Absent（首次启动不该被当成故障）
+        let missing = dir.join("nope.toml");
+        assert!(matches!(
+            Settings::load_from_checked(&missing),
+            SettingsRead::Absent
+        ));
+
+        // 非 UTF-8：读不出，但**原文一个字节都不该丢**——那是唯一能救回来的东西
+        let mut raw = b"theme = \"dark\"\nfont_size = 18\n".to_vec();
+        raw.push(0xFF);
+        let unreadable = dir.join("config.toml");
+        fs::write(&unreadable, &raw).unwrap();
+        match Settings::load_from_checked(&unreadable) {
+            SettingsRead::Broken { error, original } => {
+                assert!(!error.is_empty(), "必须带上为什么读不出来");
+                assert_eq!(
+                    original.as_deref(),
+                    Some(raw.as_slice()),
+                    "原文必须逐字节交回调用方"
+                );
+            }
+            other => panic!("非 UTF-8 的配置必须归 Broken，实际 {other:?}"),
+        }
+        // 门面契约不许变：读不出仍是规范默认值——本轮只**加**信息，不改回落行为
+        assert_eq!(Settings::load_from(&unreadable), Settings::default());
+
+        // 语法整份坏（文本读到了、一个键都取不回）：同样归 Broken，也带原文
+        let bad_syntax = dir.join("bad.toml");
+        fs::write(&bad_syntax, "theme = \n").unwrap();
+        match Settings::load_from_checked(&bad_syntax) {
+            SettingsRead::Broken { original, .. } => assert_eq!(
+                original.as_deref(),
+                Some("theme = \n".as_bytes()),
+                "语法坏那份原文也要留住"
+            ),
+            other => panic!("语法坏的配置必须归 Broken，实际 {other:?}"),
+        }
+
+        // 正对照二：读得出来的归 Good 且值真进来了（不是"逢启动就报坏"的过度报警）
+        let good = dir.join("good.toml");
+        fs::write(&good, "theme = \"dark\"\n").unwrap();
+        match Settings::load_from_checked(&good) {
+            SettingsRead::Good(settings) => assert_eq!(settings.theme, THEME_DARK),
+            other => panic!("合法配置必须归 Good，实际 {other:?}"),
+        }
+
+        // 半坏那一格仍是 Good：一个坏字段只让自己回默认（R-15），那不叫"没了"
+        let half = dir.join("half.toml");
+        fs::write(&half, "theme = \"dark\"\nfont_size = \"big\"\n").unwrap();
+        assert!(
+            matches!(Settings::load_from_checked(&half), SettingsRead::Good(_)),
+            "个别坏字段不该升级成整份故障"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn every_field_missing_from_config_takes_the_documented_default() {
