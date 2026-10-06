@@ -59,33 +59,32 @@ pub const MAX_FONT_SIZE: f32 = 48.0;
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// P352：缺字段取什么值，只有这一个来源＝下面那份手写 `Default`。
+// 旧形状是每个字段各写一句 `#[serde(default = "…")]`——同一件事写两份，
+// 25 格里恰好有 1 格相反（`autosave_enabled` 的文档与 `Default` 都是**关**，
+// serde 那份还停在 P18 时代的**开**；P63 反转默认值时只翻了看得见的那两处）。
+// 容器级 default 把「两份写法会漂」这一族在结构上封掉：新增字段不写任何属性
+// 就自动继承规范默认值。唯一例外是 `settings_version`（它缺字段＝旧文件＝v0）。
+#[serde(default)]
 pub struct Settings {
-    #[serde(default)]
     pub recent_files: Vec<String>,
     /// 最近文件的光标/滚动记忆（P32）：键 = 路径字符串，与
     /// [`Self::recent_files`] 对齐。修剪规则：键不在最近列表中即删除
     /// （加载归一与 push_recent 后都会对齐），「记住最近文件」关闭时整体清空
     /// ——路径本身是隐私数据（P20 同款口径），不能换个字段继续留痕。
-    #[serde(default)]
     pub recent_views: HashMap<String, RecentView>,
     /// 界面主题：只允许 `"light"` 或 `"dark"`，非法输入在加载时归一。
-    // 注意：不能用裸 #[serde(default)]——那会落到 String::default()（空串），
-    // 必须指向规范默认值，保证旧 config.toml 缺字段时直接得到合法偏好。
-    #[serde(default = "default_theme")]
     pub theme: String,
     /// P154：界面语言。P155 起类型化为 [`crate::lang::Lang`]（默认
     /// [`crate::lang::Lang::ZhCn`]），承担两件事：**界面文案**（`lang`
     /// 模块的字符串表）与 **UI 字体族**（app 层候选链）。旧配置的
     /// `"zh-CN"` / `"en"` 短码逐字节兼容；未知值反序列化回落中文简体。
-    #[serde(default = "default_language")]
     pub language: crate::lang::Lang,
     /// 编辑器字号，加载时 clamp 到 `[MIN_FONT_SIZE, MAX_FONT_SIZE]`。
-    #[serde(default = "default_font_size")]
     pub font_size: f32,
     /// 是否记住最近打开的文件（P20 隐私选项）。默认 true 保持既有行为；
     /// 关闭后 `push_recent` 变 no-op，且加载时清空存量列表——
     /// config.toml 不再留任何文件路径痕迹。
-    #[serde(default = "default_true")]
     pub remember_recent_files: bool,
     /// 编辑后自动写盘开关（P18 引入；P63 策略反转，对标主流编辑器）。
     /// **默认关闭**：修改只留在内存（标签页 ● 标记），直到显式 Ctrl+S——
@@ -93,55 +92,43 @@ pub struct Settings {
     /// 兜底，不动原文件。显式开启的用户选择照常持久化与尊重；
     /// 历史上默认开启时期持久化下来的 `true` 由 [`Self::settings_version`]
     /// 迁移一次性重置（见 [`SETTINGS_VERSION`]）。
-    #[serde(default = "default_true")]
     pub autosave_enabled: bool,
     /// 自动保存防抖秒数：加载时收敛到 `[1, 60]`。
-    #[serde(default = "default_autosave_delay_secs")]
     pub autosave_delay_secs: u32,
     /// 会话快照总开关（P29，隐私对齐 P20 先例）：明文快照落盘必须可一键关闭。
     /// 关闭后退出回旧确认条行为；加载/启动时清空存量快照区。
-    #[serde(default = "default_true")]
     pub enable_snapshots: bool,
     /// 关窗行为（P29）：[`EXIT_MODE_SNAPSHOT`] = 置脏页写快照后直接退出、
     /// 零询问（默认）；[`EXIT_MODE_ASK`] = 每次弹「未保存确认条」旧行为。
     /// 非法值在加载时归一为快照直退。
-    #[serde(default = "default_exit_mode")]
     pub exit_mode: String,
     /// 启动会话恢复开关（P30）。默认开启：「再次打开还是上次的界面」；
     /// 关闭 = 启动恒空白页、退出不写会话清单（存量快照区在启动时清空）。
-    #[serde(default = "default_true")]
     pub remember_session: bool,
     /// 周期快照心跳间隔秒数（P31）：运行中每隔 N 秒巡检一次置脏页，
     /// 把内容有变化的页增量写进快照区（崩溃至多丢一个间隔的输入）。
     /// 加载时收敛到 `[MIN_SNAPSHOT_INTERVAL_SECS, MAX_SNAPSHOT_INTERVAL_SECS]`。
-    #[serde(default = "default_snapshot_interval_secs")]
     pub snapshot_interval_secs: u32,
     /// 正文字体族名（P34）。None = 默认等宽（现状行为，旧配置缺字段兼容）；
     /// Some(名字) = 用系统里该族渲染正文与 UI。加载时归一：空串/纯空白/
     /// 超长/含控制字符的值收敛为 None；「名字未安装」的回退在 app 层做
     /// （core 不掌握系统字体清单），且只影响本次生效，不抹掉用户配置。
-    #[serde(default)]
     pub font_family: Option<String>,
     /// 第 63 轮：显示空白字符覆盖标记（空格点/制表符箭头）。默认关；
     /// 纯渲染层偏好，不影响文档模型与命中测试。
-    #[serde(default)]
     pub show_whitespace: bool,
     /// 第 63 轮：显示行尾符标记（行尾短标）。默认关。
-    #[serde(default)]
     pub show_line_endings: bool,
     /// 第 73 轮 ⑯：自动换行（软换行）开关。默认关——关闭时视觉得到
     /// 恒等退化（与软换行引入前的渲染逐像素一致），一键可回退。
     /// 开启时：正文按视口宽折行为若干视觉行；水平滚动条隐藏、
     /// scroll_left 锁 0、列块编辑禁用（设计文档）。
-    #[serde(default)]
     pub word_wrap: bool,
     /// P132（路线图 C4）：缩进参考线——行首缩进制表位倍数处的淡竖线。
     /// 默认开（主流编辑器同款初始态）。
-    #[serde(default = "default_indent_guides")]
     pub indent_guides: bool,
     /// P132（路线图 C5）：右缘标尺列——固定显示列处的纵向辅助线。
     /// 0 = 关闭（默认）。加载归一钳到 [`MAX_EDGE_COLUMN`]。
-    #[serde(default)]
     pub edge_column: u32,
     /// P322（功能队列①）：多行粘贴按光标所在行的缩进对齐。
     ///
@@ -149,7 +136,6 @@ pub struct Settings {
     /// 改缩进是真实伤害，这类行为变更必须显式开启）。开启后走
     /// [`crate::document::align_paste_indent`]：目标与块基准互为前缀才平移，
     /// 制表符块粘进空格行这类"平移量没有定义"的情形一律原样。
-    #[serde(default)]
     pub paste_align_indent: bool,
     /// B12（功能队列⑤）：变更历史行边条——行号栏最左缘 2px 竖条，标出
     /// **相对上次落盘改过／新增的行**，同一变更块内本身没变的那一段走淡色
@@ -158,35 +144,33 @@ pub struct Settings {
     /// **默认开**：它是被动显示，不改任何内容、不参与置脏与撤销，风险面与
     /// `indent_guides` 同类（那条也默认开）。关掉后边条一格都不画，缓存一并清空。
     /// 超大文档（超过 core 的字节预算）不算，边条自然不显示——那是刻意的成本闸。
-    #[serde(default = "default_change_strip")]
     pub change_history_strip: bool,
     /// 第 64 轮 ⑭：保存时备份模式。[`BACKUP_MODE_NONE`]（默认，不备份）/
     /// [`BACKUP_MODE_SIMPLE`]（同目录 `name.bak` 覆盖式）/
     /// [`BACKUP_MODE_TIMESTAMPED`]（`name.bak/` 目录内时间戳历史）。
     /// 非法值在加载时归一为 none。
-    #[serde(default = "default_backup_mode")]
     pub backup_mode: String,
     /// P62 热键重映射：动作 id → 组合键串（如 `"Ctrl+Shift+S"`）。
     /// 空 = 全部默认。加载时逐条经 [`normalize_combo`] 归一，非法组合
     /// 条目删除；动作 id 的合法性由 app 层过滤（core 不掌握动作清单）。
-    #[serde(default)]
     pub hotkeys: HashMap<String, String>,
     /// 设置策略版本（P63）：旧配置缺字段 = 0，加载归一时逐级执行
     /// 策略迁移后推进到 [`SETTINGS_VERSION`]。只承载「默认值语义变更」
     /// 的一次性迁移；普通新增字段一律走 serde default 零迁移。
+    ///
+    /// ⚠️ 本结构里**唯一**保留字段级 `#[serde(default)]` 的一格：容器级默认
+    /// 会给出 [`SETTINGS_VERSION`]（新装用户直接落在当前版本、不经历迁移），
+    /// 而旧文件缺这个键必须读成 0，否则 P63 那条 v0→v1 梯子永不触发、
+    /// 即时保存的默认反转对存量配置失效。
     #[serde(default)]
     pub settings_version: u32,
     /// P102：窗口几何记忆——上次关闭时的窗口位置（逻辑像素，屏幕坐标）。
     /// None = 未记录过（启动回退默认/居中）。只入 config.toml，不在
     /// 设置弹窗展示（它属于窗口自身状态）。
-    #[serde(default)]
     pub window_x: Option<i32>,
-    #[serde(default)]
     pub window_y: Option<i32>,
     /// P102：窗口尺寸（逻辑像素）。None = 未记录过（启动回退默认 1024×768）。
-    #[serde(default)]
     pub window_width: Option<f32>,
-    #[serde(default)]
     pub window_height: Option<f32>,
 }
 
@@ -313,21 +297,6 @@ pub(crate) const BACKUP_MODES: [&str; 3] = [
     BACKUP_MODE_SIMPLE,
     BACKUP_MODE_TIMESTAMPED,
 ];
-
-fn default_backup_mode() -> String {
-    BACKUP_MODE_NONE.to_string()
-}
-
-/// P132：缩进参考线 serde 默认（默认开，主流编辑器同款初始态）。
-fn default_indent_guides() -> bool {
-    true
-}
-
-/// B12：变更历史边条的 serde 默认（开）。旧配置文件缺这个字段即按默认开，
-/// 因此不动 `SETTINGS_VERSION`（迁移只面向"默认值语义变更"）。
-fn default_change_strip() -> bool {
-    true
-}
 
 /// 备份模式归一（纯函数可单测）：未知/空白收敛为 none。
 pub fn normalize_backup_mode(value: &str) -> &'static str {
@@ -469,41 +438,6 @@ pub fn normalize_combo(value: &str) -> Option<String> {
     }
     out.push_str(&key);
     Some(out)
-}
-
-/// `#[serde(default)]` 用：缺字段时的主题默认值。
-fn default_theme() -> String {
-    THEME_LIGHT.to_string()
-}
-
-/// `#[serde(default)]` 用：P154 缺字段时的界面语言默认值（中文简体）。
-fn default_language() -> crate::lang::Lang {
-    crate::lang::Lang::ZhCn
-}
-
-/// `#[serde(default)]` 用：缺字段时的字号默认值。
-fn default_font_size() -> f32 {
-    DEFAULT_FONT_SIZE
-}
-
-/// `#[serde(default)]` 用：P20 开关缺字段时的默认值（true，不惊扰老用户）。
-fn default_true() -> bool {
-    true
-}
-
-/// `#[serde(default)]` 用：P18 防抖秒数缺字段时的默认值。
-fn default_autosave_delay_secs() -> u32 {
-    DEFAULT_AUTOSAVE_DELAY_SECS
-}
-
-/// `#[serde(default)]` 用：P29 关窗模式缺字段时的默认值（快照直退）。
-fn default_exit_mode() -> String {
-    EXIT_MODE_SNAPSHOT.to_string()
-}
-
-/// `#[serde(default)]` 用：P31 心跳间隔缺字段时的默认值。
-fn default_snapshot_interval_secs() -> u32 {
-    DEFAULT_SNAPSHOT_INTERVAL_SECS
 }
 
 impl Settings {
@@ -853,7 +787,11 @@ mod tests {
             loaded.font_size, DEFAULT_FONT_SIZE,
             "类型写错的那一键自己回默认"
         );
-        assert_eq!(loaded.autosave_delay_secs, default_autosave_delay_secs());
+        assert_eq!(
+            loaded.autosave_delay_secs,
+            Settings::default().autosave_delay_secs,
+            "缺这一键时回手写 Default 的值（默认值只有一个来源）"
+        );
         assert!(loaded.recent_files.is_empty(), "该是数组却写了字符串");
 
         fs::remove_dir_all(&dir).ok();
@@ -1260,6 +1198,46 @@ mod tests {
         let loaded_off = Settings::load_from(&off);
         assert!(!loaded_off.autosave_enabled && loaded_off.settings_version == SETTINGS_VERSION);
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------- P352 缺字段的取值只许有一个来源 ----------
+
+    #[test]
+    fn every_field_missing_from_config_takes_the_documented_default() {
+        // 「手写 Default」与「serde 缺字段默认」写的是同一件事，历史上漂过一次：
+        // `autosave_enabled` 的文档与 `Default` 都是**关**，serde 那一份仍是
+        // `default_true`（P63 只翻了三行代码里的两处）。这里不逐字段列清单
+        // （列了就会漏登记，与 R-15 同规），而是拿「除版本号外一个键都没有」的
+        // 文件与 `Default` 整体对拍——将来任何一格两份写法不一致都当场红。
+        let text = format!("settings_version = {SETTINGS_VERSION}\n");
+        assert_eq!(
+            Settings::parse_lenient(&text),
+            Settings::default(),
+            "缺字段必须逐字段等于手写 Default（版本号除外：它缺字段＝旧文件＝v0）"
+        );
+    }
+
+    #[test]
+    fn malformed_autosave_line_does_not_switch_autosave_on() {
+        // 后果那一半：version 已是 1 的文件里这一行被手改坏成别的意思，严格解析
+        // 失败 ⇒ R-15 的逐键累加丢掉这一键 ⇒ 缺字段默认值上位。旧形状下那等于
+        // 「替用户打开即时保存」——他没按 Ctrl+S，原文件也会被防抖写盘。
+        let dir = scratch_dir("p352-autosave");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            format!("settings_version = {SETTINGS_VERSION}\ntheme = \"dark\"\nautosave_enabled = \"on\"\n"),
+        )
+        .unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(
+            !loaded.autosave_enabled,
+            "坏掉的那一格回默认＝关，不许回成「开」"
+        );
+        // 连坐闸仍要成立：坏这一键不许把别的偏好一起带走
+        assert_eq!(loaded.theme, THEME_DARK);
         fs::remove_dir_all(&dir).ok();
     }
 
