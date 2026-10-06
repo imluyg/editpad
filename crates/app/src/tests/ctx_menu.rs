@@ -313,3 +313,85 @@ fn switching_pages_closes_both_context_menus() {
         "跳页这条路径原先连标签菜单都不收"
     );
 }
+
+/// P356（第 261 轮扫描池 ⑤）：**每一类**带整窗背板的浮层，在**每一个**"必须让路"的
+/// 入口都得收起。
+///
+/// 形状＝"清单只写了一半"：`enter_busy` 收三类、唯独漏后来才加的正文右键菜单（P308）
+/// ⇒ 菜单挂着时按 `Ctrl+O`，busy 的透明背板与菜单背板叠着挡整窗点击，busy 结束后菜单
+/// 还悬在**旧坐标**上、内容还是旧页那组命令。这条收口的存在理由（P39）是**背板挡点击**，
+/// 不是"数据属于哪一页"——所以判据是"有没有整窗背板"，四类全中。
+/// 两个入口都钉：`enter_busy` 与 Esc 的统一收起出口（`dismiss_all_prompts`）。
+/// ⚠️ **切页那一列故意不钉**：P336 已裁决状态栏编码／行尾菜单**不带页专属数据**
+/// （目标就是"当下活动页"），切页时不收＝既定语义，不是漏做；两类右键菜单在切页那
+/// 一列由既有用例 `switching_pages_closes_both_context_menus` 钉着。
+#[test]
+fn every_dismissal_entry_closes_every_full_window_backdrop_overlay() {
+    // 表驱动的三份类型别名（clippy 的 `type_complexity` 在提醒：这条矩阵的类型确实长）
+    type Opener = fn(&mut Editpad);
+    type Probe = fn(&Editpad) -> bool;
+    type Overlay = (&'static str, Opener, Probe);
+    type Entry = (&'static str, Opener);
+
+    // 四个浮层：(名字, 打开它的探针, 读它的探针)
+    let overlays: Vec<Overlay> = vec![
+        (
+            "正文右键菜单",
+            |a| {
+                dispatch(a, Message::EditorContextMenu(120.0, 90.0));
+            },
+            |a| a.editor_context_menu,
+        ),
+        (
+            "标签右键菜单",
+            |a| {
+                dispatch(a, Message::TabContextMenu(0));
+            },
+            |a| a.tab_context_menu.is_some(),
+        ),
+        (
+            "状态栏编码菜单",
+            |a| {
+                dispatch(a, Message::ToggleEncodingMenu);
+            },
+            |a| a.encoding_menu,
+        ),
+        (
+            "状态栏行尾菜单",
+            |a| {
+                dispatch(a, Message::ToggleEolMenu);
+            },
+            |a| a.eol_menu,
+        ),
+    ];
+    // 两个"必须让路"的入口：进 busy / Esc 统一收起
+    let entries: Vec<Entry> = vec![
+        ("进 busy（打开对话框）", |a| {
+            dispatch(a, Message::OpenRequested);
+        }),
+        ("Esc（统一收起出口）", |a| {
+            dispatch(a, Message::BarsDismissed);
+        }),
+    ];
+
+    for (oname, open, visible) in &overlays {
+        for (ename, entry) in &entries {
+            let mut app = Editpad::default();
+            open(&mut app);
+            assert!(
+                visible(&app),
+                "夹具自证：{oname} 本来就开得起来（入口＝{ename}）"
+            );
+            entry(&mut app);
+            assert!(
+                !visible(&app),
+                "入口「{ename}」之后 {oname}必须收起——它的透明背板会挡住整窗点击，\
+                 而菜单还悬在打开它那一刻的坐标上"
+            );
+        }
+    }
+    // 反空转自证：进 busy 那条入口确实把 busy 置起来了（否则上面 4 格红的是别的原因）
+    let mut probe = Editpad::default();
+    dispatch(&mut probe, Message::OpenRequested);
+    assert!(probe.busy, "夹具自证：OpenRequested 真的走 enter_busy");
+}

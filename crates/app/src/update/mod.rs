@@ -210,9 +210,19 @@ impl Editpad {
     /// 进入 busy（对话框/IO 互斥）。P39 浮层化后的新约束：同时收起
     /// 右键菜单浮层——它的透明背板会挡住整窗点击，busy 期间不能留它挡道
     /// （旧内嵌面板无此问题，故此前各 busy 置位点都无需理会菜单态）。
+    ///
+    /// ⚠️ P356：清单里**必须**包含每一类带整窗背板的浮层。正文右键菜单（P308）
+    /// 是在这条收口写完之后才加进来的，当时没登记 ⇒ 菜单挂着时进 busy，背板照旧
+    /// 挡整窗点击、busy 结束后菜单还悬在旧坐标上。表驱动用例
+    /// `every_dismissal_entry_closes_every_full_window_backdrop_overlay` 现在把四类
+    /// 逐个钉住，第五类浮层再加进来时它会逼着登记。
+    /// （判据是"有没有整窗背板"，不是"数据属于哪一页"——后者归 `set_active_tab` 管，
+    /// 那里 P336 已裁决状态栏两个菜单不带页专属数据、切页时不收。）
     pub(crate) fn enter_busy(&mut self) {
         self.busy = true;
         self.tab_context_menu = None;
+        // P308：正文右键菜单与标签菜单同锚点、同背板，同收
+        self.editor_context_menu = false;
         // P67：状态栏弹出菜单同样会被 busy 互斥挡住，直接收起
         self.encoding_menu = false;
         self.eol_menu = false;
