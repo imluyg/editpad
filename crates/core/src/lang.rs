@@ -474,6 +474,7 @@ key_table! {
     { StRegexReplacing => "正则替换中…（后台）", "Replacing with regex… (background)" },
     { StReplaced => "已替换 ", "Replaced " },
     { StRegexReplaceFailed => "正则替换失败：", "Regex replace failed: " },
+    { StRegexReplaceStale => "正则替换失败：这一页在后台计算期间又变了（或已被关掉），结果未应用", "Regex replace failed: this page changed (or was closed) while the background pass was running, result not applied" },
     { StMonitorOn => "已开启文件监视：磁盘变化时自动重载（干净页）并跟随文末（F8 关闭）", "File monitoring on: external changes reload clean pages and follow the end of file (F8 to turn off)" },
     { StMonitorOff => "已关闭文件监视", "File monitoring off" },
     { StColumnEditorWrapOff => "自动换行开启时不可用列编辑器（先关闭折行）", "The column editor is unavailable while word wrap is on (turn wrap off first)" },

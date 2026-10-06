@@ -616,6 +616,8 @@ impl Editpad {
                     let pattern = req.query.clone();
                     let replacement = req.replacement.clone();
                     let case_sensitive = req.case_sensitive;
+                    // P342：把"这一笔属于哪一页、那一刻它是什么版本"随任务带走
+                    let (tab_id, version) = (self.tab().id, self.tab().version);
                     self.enter_busy();
                     self.set_status(self.t(editpad_core::Key::StRegexReplacing).to_owned());
                     return Task::perform(
@@ -627,7 +629,7 @@ impl Editpad {
                                 case_sensitive,
                             )
                         },
-                        Message::ReplaceAllRegexDone,
+                        move |result| Message::ReplaceAllRegexDone(tab_id, version, result),
                     );
                 }
                 // 字面／整词两支：条件与落地都收进 ReplaceRequest／
@@ -748,20 +750,45 @@ impl Editpad {
                     touched_active,
                 )
             }
-            Message::ReplaceAllRegexDone(result) => {
-                // P148：后台正则替换落账。busy 包裹期间文档不可变——回报
-                // 内容与发起时刻一致，无需版本复核。替换结果按主导行尾归一
-                // 后整体入主：正则替换文本里的裸换行不得在 CRLF 文档里
-                // 制造混合行尾（字面路径的归一已在 core 内完成）。
+            Message::ReplaceAllRegexDone(tab_id, version, result) => {
+                // P148：替换本体移出 UI 线程；P342 补上"落到哪一页、还算不算数"。
+                // 旧注释断言「busy 包裹期间文档不可变，无需版本复核」，两条都不成立：
+                // 三条切页臂没有 busy 守卫（＝P340/P341 那扇门），而 `apply_edit` 只挡
+                // `active_load` 不挡 busy ⇒ 同页连打几字也会把这份旧结果覆到改后的文档上。
+                // 落地时按 (id, version) 双问：任一不合就丢弃并明示，绝不"写到别页"或
+                // "用旧结果盖新改动"。替换文本按**那一页**的主导行尾归一：正则替换文本里
+                // 的裸换行不得在 CRLF 文档里制造混合行尾（字面路径的归一在 core 内完成）。
                 self.busy = false;
                 match result {
+                    Err(e) => {
+                        self.set_status_error(
+                            self.t_suffix(editpad_core::Key::StRegexReplaceFailed, &e),
+                        );
+                        Task::none()
+                    }
                     Ok((new_contents, count)) => {
+                        // 双问：那一页还在 + 它这段时间没被改过
+                        let idx = self
+                            .tabs
+                            .iter()
+                            .position(|t| t.id == tab_id)
+                            .filter(|&i| self.tabs[i].version == version);
+                        let Some(idx) = idx else {
+                            self.set_status_error(
+                                self.t(editpad_core::Key::StRegexReplaceStale).to_owned(),
+                            );
+                            return Task::none();
+                        };
                         let mut tasks: Vec<Task<Message>> = Vec::new();
                         if count > 0 {
-                            let eol = self.cur_handle.borrow().doc.line_ending();
+                            let eol = self.tabs[idx].editor.borrow().doc.line_ending();
                             let new_contents = eol.normalize(&new_contents);
-                            self.apply_replaced_page(self.active_tab, &new_contents);
-                            tasks.push(self.schedule_find_scan());
+                            self.apply_replaced_page(idx, &new_contents);
+                            // 只有活动页被改过才重扫它的命中表（后台页由
+                            // `apply_replaced_page` 自己清层，与跨标签那一路同口径）
+                            if idx == self.active_tab {
+                                tasks.push(self.schedule_find_scan());
+                            }
                             tasks.push(self.maybe_schedule_autosave());
                         }
                         self.set_status(editpad_core::fmt_replaced(self.lang(), count));
@@ -770,12 +797,6 @@ impl Editpad {
                         } else {
                             Task::batch(tasks)
                         }
-                    }
-                    Err(e) => {
-                        self.set_status_error(
-                            self.t_suffix(editpad_core::Key::StRegexReplaceFailed, &e.to_string()),
-                        );
-                        Task::none()
                     }
                 }
             }

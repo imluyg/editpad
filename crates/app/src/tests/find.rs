@@ -93,12 +93,13 @@ fn p70_regex_replace_all_end_to_end_with_captures() {
     // P148：替换本体移后台——dispatch 丢弃 Task，手动回报计算结果
     dispatch(&mut app, Message::ReplaceAll);
     assert!(app.busy, "正则替换应进入 busy 包裹");
+    let (tid, v) = (app.tab().id, app.tab().version);
     let (new_contents, count) =
         editpad_core::replace_all_regex("a1 b2\na3 c\nend a4", r"a(\d)", "x$1", true)
             .expect("参照替换应成功");
     dispatch(
         &mut app,
-        Message::ReplaceAllRegexDone(Ok((new_contents, count))),
+        Message::ReplaceAllRegexDone(tid, v, Ok((new_contents, count))),
     );
     assert!(!app.busy);
     assert_eq!(
@@ -115,9 +116,10 @@ fn p70_regex_replace_all_end_to_end_with_captures() {
 
     // 后台计算失败（如回溯超限）：文档原封不动、busy 收口、错误留痕
     let before = app.cur_handle.borrow().doc.clone();
+    let (tid2, v2) = (app.tab().id, app.tab().version);
     dispatch(
         &mut app,
-        Message::ReplaceAllRegexDone(Err("回溯超限".into())),
+        Message::ReplaceAllRegexDone(tid2, v2, Err("回溯超限".into())),
     );
     assert!(!app.busy);
     assert_eq!(app.cur_handle.borrow().doc.to_text(), before.to_text());
@@ -366,6 +368,123 @@ fn p338_replace_current_schedules_its_own_autosave_round() {
     );
 }
 
+#[test]
+fn p342_regex_replace_all_report_lands_on_the_originating_tab() {
+    // 缺陷形状：页 0 点「全部替换」（正则＝移后台，busy 包裹）→ 后台算着，用户
+    // `Ctrl+Tab` 切到页 1（切页臂不看 busy）→ 回报落地 ⇒ 旧写法把**页 0 算出的
+    // 整份替换文**写进当时活动页 = 页 1 被覆掉。
+    let mut app = Editpad::default();
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("a1 keep0"));
+    dispatch(&mut app, Message::NewTab);
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("a1 keep1"));
+    app.set_active_tab(0);
+    app.regex_enabled = true;
+    app.find_query = r"a(\d)".to_owned();
+    app.replace_query = "x$1".to_owned();
+
+    let (tid, v) = (app.tab().id, app.tab().version); // 生产者带走的两个数
+    let (new_contents, count) =
+        editpad_core::replace_all_regex("a1 keep0", r"a(\d)", "x$1", true).unwrap();
+    dispatch(&mut app, Message::ReplaceAll);
+    assert!(app.busy, "夹具前提：后台在途");
+    let other_id = app.tabs[1].id;
+    assert_ne!(other_id, tid);
+
+    // 后台期间切页（生产里就是 Ctrl+Tab，切页臂没有 busy 守卫）
+    app.set_active_tab(1);
+    dispatch(
+        &mut app,
+        Message::ReplaceAllRegexDone(tid, v, Ok((new_contents, count))),
+    );
+
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "x1 keep0");
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        "a1 keep1",
+        "回报不许写进活动页——那是另一页"
+    );
+    assert!(!app.busy, "回报必须收口 busy");
+    assert!(
+        app.status.contains("1"),
+        "应报告替换 1 处：{:?}",
+        app.status
+    );
+}
+
+#[test]
+fn p342_regex_replace_all_report_is_dropped_when_the_page_changed() {
+    // 同一格的另一半：`apply_edit` 只挡 `active_load` 不挡 busy ⇒ 后台算着的时候
+    // 用户还能在当前页继续打字。旧写法拿那份旧结果整文覆盖，打进去的字就没了。
+    let mut app = Editpad::default();
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("a1 keep"));
+    app.regex_enabled = true;
+    app.find_query = r"a(\d)".to_owned();
+    app.replace_query = "x$1".to_owned();
+    let (tid, v) = (app.tab().id, app.tab().version);
+    let (new_contents, count) =
+        editpad_core::replace_all_regex("a1 keep", r"a(\d)", "x$1", true).unwrap();
+    dispatch(&mut app, Message::ReplaceAll);
+    assert!(app.busy);
+
+    // 后台期间同一页又打了一字（busy 不挡编辑）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("!!".into())));
+    let typed = app.cur_handle.borrow().doc.to_text();
+    dispatch(
+        &mut app,
+        Message::ReplaceAllRegexDone(tid, v, Ok((new_contents, count))),
+    );
+
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        typed,
+        "版本对不上＝这份旧结果必须整份丢弃，不许盖掉刚打进去的字"
+    );
+    assert!(!app.busy, "被丢弃的回报也要收口 busy");
+    assert!(
+        app.status.contains("结果未应用") || app.status.contains("result not applied"),
+        "丢弃要出声，不能静默：{:?}",
+        app.status
+    );
+}
+
+#[test]
+fn p342_regex_replace_all_report_for_a_closed_tab_is_dropped() {
+    // 第三种：发起页在后台期间被关掉 ⇒ 无账可记，丢弃并出声，别把结果倒进幸存页。
+    let mut app = app_with_tabs(2); // 页 0 脏，页 1 新建
+    app.set_active_tab(0);
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("a1 keep0"));
+    app.regex_enabled = true;
+    app.find_query = r"a(\d)".to_owned();
+    app.replace_query = "x$1".to_owned();
+    let (tid, v) = (app.tab().id, app.tab().version);
+    let (new_contents, count) =
+        editpad_core::replace_all_regex("a1 keep0", r"a(\d)", "x$1", true).unwrap();
+    dispatch(&mut app, Message::ReplaceAll);
+    let survivor = app.tabs[1].id;
+    assert_ne!(survivor, tid);
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+    let before = app.cur_handle.borrow().doc.to_text();
+
+    dispatch(
+        &mut app,
+        Message::ReplaceAllRegexDone(tid, v, Ok((new_contents, count))),
+    );
+    assert_eq!(app.tabs[0].id, survivor, "夹具前提：只剩幸存页");
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        before,
+        "发起页已关，旧结果不许落到幸存页上"
+    );
+    assert!(!app.busy, "丢弃也要收口 busy");
+}
 #[test]
 fn step_prev_from_selected_match_jumps_back_in_one_press() {
     // 光标/选区正落在命中上时，「查找上一个」必须一步跳到上一处——
