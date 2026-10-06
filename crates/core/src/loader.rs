@@ -97,12 +97,17 @@ where
 // 解码全量 String + 复制进 rope）；本节把 rope 构建搬进读取循环，
 // 全程只有 rope 一份正文（+64KB 块缓冲），峰值降到 ~×1.05。
 //
-// 编码判定语义与 [`decode`] 完全一致（BOM 分流 → NUL → 严格 UTF-8 →
-// GBK 兜底 + U+FFFD 占比），差异只在实现方式：
-// * NUL/UTF-8 校验改为「第一遍流式扫描」——不保留任何字节，
-//   NUL 一旦出现立即短路拒绝，全文检测语义不缩水；
-// * UTF-8 合法时第二遍边读边推进 `RopeBuilder`；
-// * 非 UTF-8 时第二遍用 encoding_rs 增量解码器（跨块序列自动缝合）。
+// 编码判定语义与 [`decode`] 完全一致（剥 BOM → NUL → 严格 UTF-8 →
+// GBK 兜底 + GBK 结果的 U+FFFD 占比），差异只在实现方式：
+// * NUL/UTF-8 校验与装载**融成一趟**（O-9）——不保留任何字节，
+//   校验一破格就丢弃乐观 rope、在同一 fd 上回卷走 GBK；
+// * 非 UTF-8 时用 encoding_rs 增量解码器（跨块序列自动缝合）。
+// ⚠️ P353 之前这条"完全一致"是**不实**的：UTF-8 BOM 文件走一支独立的
+// `Plan::Direct`，退回 GBK 的触发条件是「解码产出的 U+FFFD 占比 > 1%」，
+// 而 `decode_body` 的条件是「严格 UTF-8 没过」。低占比破损（大文件里只夹
+// 少量 GBK 汉字）因此在两条链上给出两个结论——流式收下带 □ 的 lossy 正文、
+// 标签还写 UTF-8(BOM)，用户改一笔再保存＝把原字节按这份损毁文本覆写回去。
+// 现在 BOM 只决定「剥掉几个字节」与「合法时叫什么标签」，判据链只剩一条。
 
 /// 流式加载直入 rope 的结果（P19）。
 ///
@@ -118,8 +123,10 @@ pub struct LoadedDocument {
 
 /// 流式加载为文档：内存峰值与文件大小近似线性（≈rope 本身）。
 ///
-/// 进度回调语义：无 BOM 文件经历「校验遍」与「装载遍」两趟读取，
-/// 进度被映射到前半程/后半程保持单调递增至 total；BOM 文件单趟直达。
+/// 进度回调语义：走 UTF-8 判据链的文件（无 BOM 与带 UTF-8 BOM 同一支，P353）
+/// 在校验＋装载这一趟里映射到 `[0, 3/4]`，真不是 UTF-8 时回卷重读走 GBK 补满
+/// 到 `total`——两趟读法共用「单调不减、末值到 total」这条契约。
+/// 宽编码（UTF-16LE/BE）单趟直达，进度线性。
 pub fn load_document_streaming<F>(
     path: &Path,
     mut on_progress: F,
@@ -157,35 +164,47 @@ where
     // 构成**进度倒退**（65536 → 49152），破坏 `load_document_streaming` 的
     // 单调契约——既有 streaming_reports_monotonic_progress_and_decodes 挡着。
     enum Plan {
-        /// 单趟：增量解码即装载（进度线性）
+        /// 单趟：增量解码即装载（进度线性）。P353 起**只剩宽编码两支**
         Direct(&'static Encoding, &'static str, usize),
         /// 先全量扫描（NUL + 严格 UTF-8），再按结论二选一装载
-        ScanThenBuild,
+        ScanThenBuild {
+            /// 首块要剥掉的 BOM 字节数（扫描与解码都不吃它，回卷重读也从它之后起）
+            bom_len: usize,
+            /// 严格校验通过时的编码标签
+            label: &'static str,
+        },
     }
 
     let plan = if chunk.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        Plan::Direct(UTF_8, "UTF-8(BOM)", 3)
+        // P353：UTF-8 BOM 那一支**不再自成一条链**。改前它走 `Plan::Direct`，
+        // 判「要不要退 GBK」用的是 U+FFFD **占比**，而 [`decode_body`]（小文件
+        // 那一支）用的是「严格 UTF-8 是否通过」——同一份字节两个结论：破损占比
+        // 低于阈值的误加 BOM 的 GBK 文件，流式收下 lossy 结果（正文挂着 □、
+        // 标签写着 UTF-8(BOM)），用户在编辑器里改一笔再保存＝把原始 GBK 字节按
+        // 这份带 □ 的文本覆写回去，不可逆。并入同一条链之后，BOM 只决定两件事：
+        // 剥掉几个字节、合法时叫什么标签。
+        Plan::ScanThenBuild {
+            bom_len: 3,
+            label: "UTF-8(BOM)",
+        }
     } else if chunk.starts_with(&[0xFF, 0xFE]) {
         Plan::Direct(UTF_16LE, "UTF-16LE", 2)
     } else if chunk.starts_with(&[0xFE, 0xFF]) {
         Plan::Direct(UTF_16BE, "UTF-16BE", 2)
     } else {
-        Plan::ScanThenBuild
+        Plan::ScanThenBuild {
+            bom_len: 0,
+            label: "UTF-8",
+        }
     };
 
     match plan {
         Plan::Direct(encoding, label, bom_len) => {
-            // BOM / UTF-16 单趟直达：进度线性，首报仍是原始字节数（与改前一致）
+            // 宽编码单趟直达：进度线性，首报仍是原始字节数（与改前一致）。
+            // 这两支**不判** NUL、也不判 U+FFFD 占比：那里的 0x00 是合法字符
+            // 字节，「含 NUL 即二进制」这条判据对宽编码根本不成立（P265 已写明）。
             report(&mut on_progress, first_len as u64, total_bytes);
             let mut head = HeadSample::default();
-            // P265：`UTF-8(BOM)` 这一支必须**统计**替换字符并按同一阈值判二进制。
-            // 改前一律传 `None`：贴了 BOM 的文件里凡是非法 UTF-8 序列都被 lossy
-            // 换成 U+FFFD 无声收下，用户一按保存就把这堆损毁文本当原文写回磁盘
-            // （与 `decode` 那侧同源，见 [`decode_body`] 的说明）。
-            // UTF-16LE/BE 两支**继续不判**：那里的 0x00 是合法字符字节，
-            // 「含 NUL 即二进制」这条判据对宽编码根本不成立。
-            let guard_replacements = label == "UTF-8(BOM)";
-            let mut stats = BuildStats::default();
             let doc = build_pass(
                 &mut reader,
                 path,
@@ -196,81 +215,16 @@ where
                 0,
                 total_bytes,
                 &mut on_progress,
-                if guard_replacements {
-                    Some(&mut stats)
-                } else {
-                    None
-                },
+                None,
                 &mut head,
             )?;
-            if guard_replacements {
-                // P274（原 P266，外加一条实测出来的更重漏口）：BOM 只说明"作者意图
-                // 是 UTF-8"，不保证正文真是 UTF-8。小文件那条链（`decode_body`）在这
-                // 里做三件事：① 全文出现 0x00 ⇒ 二进制；② 严格 UTF-8 不合法 ⇒ 退回
-                // GBK 重解；③ GBK 解出来仍满屏 U+FFFD ⇒ 二进制。流式这一支改前只有
-                // ②' 的占比一道，于是实测出两格不一致：
-                //   · 误加 BOM 的 GBK 大文件被**拒绝打开**（同一份字节在小文件上按
-                //     GBK 正确恢复）；
-                //   · 误加 BOM 且正文含 NUL 的二进制被**当作文本收下**（小文件判二进制）
-                //     ⇒ 用户一按保存就把原始字节按 UTF-8 覆写回去，那是不可逆的损毁。
-                if stats.nul {
-                    return Err(CoreError::BinaryDetected {
-                        path: path.to_path_buf(),
-                    });
-                }
-                if stats.replacements as f32 / stats.chars.max(1) as f32 > BINARY_REPLACEMENT_RATIO
-                {
-                    // GBK 兜底：在**同一个已打开的 fd**上 seek 回 BOM 之后重读
-                    // （重开文件曾是 TOCTOU 的成因，见 `Plan::ScanThenBuild` 那段）
-                    let mut file = reader.into_inner();
-                    file.seek(std::io::SeekFrom::Start(bom_len as u64))
-                        .map_err(|source| CoreError::Read {
-                            path: path.to_path_buf(),
-                            source,
-                        })?;
-                    let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
-                    let n = fill_chunk(&mut reader, &mut chunk).map_err(io_err(path))?;
-                    // 进度不得倒退：第一趟已经按原始字节数报到 first_len
-                    let start = (total_bytes - total_bytes / 4)
-                        .max(first_len as u64)
-                        .min(total_bytes);
-                    let mut gstats = BuildStats::default();
-                    let mut ghead = HeadSample::default();
-                    let gbk = build_pass(
-                        &mut reader,
-                        path,
-                        &chunk[..n],
-                        0,
-                        GBK,
-                        total_bytes,
-                        start,
-                        total_bytes - start,
-                        &mut on_progress,
-                        Some(&mut gstats),
-                        &mut ghead,
-                    )?;
-                    if gstats.nul
-                        || gstats.replacements as f32 / gstats.chars.max(1) as f32
-                            > BINARY_REPLACEMENT_RATIO
-                    {
-                        return Err(CoreError::BinaryDetected {
-                            path: path.to_path_buf(),
-                        });
-                    }
-                    return Ok(LoadedDocument {
-                        doc: gbk,
-                        encoding: "GBK",
-                        sample: ghead.buf,
-                    });
-                }
-            }
             Ok(LoadedDocument {
                 doc,
                 encoding: label,
                 sample: head.buf,
             })
         }
-        Plan::ScanThenBuild => {
+        Plan::ScanThenBuild { bom_len, label } => {
             // O-9：校验遍与装载遍**融成一趟**——同一遍读取里既喂 Utf8Scan
             // （NUL 短路 + 严格 UTF-8 增量校验），又把字节喂进 UTF-8 解码器
             // 推进 rope。校验通过即装载完成：读字节数 = 文件大小（旧写法是
@@ -284,6 +238,8 @@ where
                 &mut reader,
                 path,
                 &chunk[..first_len],
+                bom_len,
+                label,
                 total_bytes,
                 utf8_span,
                 &mut on_progress,
@@ -291,9 +247,9 @@ where
             match scanned {
                 Some(loaded) => Ok(loaded),
                 None => {
-                    // 回卷重读：用同一个已打开的 fd，不重新 open
+                    // 回卷重读：用同一个已打开的 fd，不重新 open；起点＝BOM 之后
                     let mut file = reader.into_inner();
-                    file.seek(std::io::SeekFrom::Start(0))
+                    file.seek(std::io::SeekFrom::Start(bom_len as u64))
                         .map_err(|source| CoreError::Read {
                             path: path.to_path_buf(),
                             source,
@@ -348,6 +304,8 @@ fn scan_and_build_utf8<F>(
     reader: &mut BufReader<fs::File>,
     path: &Path,
     first_chunk: &[u8],
+    skip: usize,
+    label: &'static str,
     total_bytes: u64,
     progress_span: u64,
     on_progress: &mut F,
@@ -363,11 +321,15 @@ where
     let mut head = HeadSample::default();
     let mut stats: Option<&mut BuildStats> = None; // UTF-8 路径不统计占比
 
-    scan.feed(first_chunk);
+    // P353：`skip` 个 BOM 字节既不进校验也不进正文——`decode_body` 那侧是
+    // 「先剥 BOM 再判」，两边必须同一口径，否则 BOM 本身参与严格校验的结论
+    // 就成了流式那一支独有的东西。
+    let body = &first_chunk[skip.min(first_chunk.len())..];
+    scan.feed(body);
     // 首块的读入量已由调用点记账，这里不重复计
     absorb(
         &mut decoder,
-        first_chunk,
+        body,
         false,
         &mut out,
         &mut builder,
@@ -375,8 +337,7 @@ where
         stats.as_deref_mut(),
         &mut head,
     );
-    let mut done = first_chunk.len() as u64;
-    // 乐观装载被放弃的标志：置位后**只读不装**（不解码、不再分配）
+    let mut done = first_chunk.len() as u64; // 乐观装载被放弃的标志：置位后**只读不装**（不解码、不再分配）
     let mut dropped = false;
     report(
         on_progress,
@@ -447,7 +408,7 @@ where
     report(on_progress, total_bytes, total_bytes);
     Ok(Some(LoadedDocument {
         doc: Document::from_parts(builder.finish(), eol.finish()),
-        encoding: "UTF-8",
+        encoding: label,
         sample: head.buf,
     }))
 }
@@ -1105,13 +1066,15 @@ mod tests {
         );
     }
 
-    /// P265 的流式孪生：**大文件也不能绕过占比判据**。
+    /// P265 的流式孪生：**大文件也不能绕过编码判据**。
     ///
-    /// 与 `decode` 那侧同源的老问题。这里 `Plan::Direct(UTF_8, "UTF-8(BOM)", 3)`
-    /// 改前给 `build_pass` 传 `None`（根本不统计）。
-    /// 第 183 轮 P274 把这条支剩下的两格不对称也补上了（NUL 判据 + GBK 兜底重读），
-    /// 与小文件链 `decode_body` 完全同款——见下面的
-    /// `p274_streaming_bom_shares_both_guards_with_small_file_path`。
+    /// 与 `decode` 那侧同源的老问题。改前这一支给 `build_pass` 传 `None`
+    /// （根本不统计），第 183 轮 P274 补上 NUL 判据 + GBK 兜底重读；第 262 轮
+    /// P353 干脆把它并进「剥 BOM → NUL → 严格 UTF-8 → GBK 兜底」这条与
+    /// [`decode_body`] 同一条链——占比从此只用来判 **GBK 的结果**是不是二进制，
+    /// 不再充当「要不要退 GBK」的触发条件（那一步只看严格校验）。下面两条用例
+    /// 分别守着补进来的两半：本条（占比闸）与
+    /// `streaming_utf8_bom_decodes_gbk_by_strict_validation_not_by_ratio`（触发条件）。
     #[test]
     fn streaming_utf8_bom_applies_the_replacement_guard() {
         let dir = scratch_dir("p265-bom-stream");
@@ -1154,6 +1117,101 @@ mod tests {
             ),
             Err(e) => panic!("期望 BinaryDetected，实际 {e:?}"),
         }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 第 262 轮 P353：流式 BOM 支的**退回触发条件**必须与 `decode_body` 是同一条——
+    /// 「严格 UTF-8 不过」，而不是「U+FFFD 占比 > 1%」。两格方向相反，缺一格都会漏：
+    ///
+    /// ① 误加 BOM 的 GBK 文件，但**破损占比低于阈值**（正文以 ASCII 日志为主、只夹
+    ///    少量 GBK 汉字）：`decode_body` 走「严格校验失败 ⇒ GBK 兜底」，解出正确汉字；
+    ///    流式那一支按占比判 ⇒ 低于阈值就原样收下 lossy 结果，正文里挂着 U+FFFD、
+    ///    标签还写着 UTF-8(BOM)。用户在编辑器里看到 □，改一笔再保存＝把原始 GBK 字节
+    ///    按这份带 □ 的文本覆写回去＝**不可逆损毁**（P265/P274 那两格剩下的最后一角）。
+    /// ② 正文**本来就带** U+FFFD 的合法 UTF-8+BOM 文件（占比可以高过阈值）：
+    ///    `decode_body` 严格校验通过 ⇒ 判 UTF-8(BOM)；按占比判的那一支会误退 GBK，
+    ///    把一份好文件解成乱码甚至判二进制拒开。⇒ 顺手把触发条件改成
+    ///    「出现过 □ 就退」也会砸在这一格上——`stats.replacements` 数的是解码产出里的
+    ///    字符，分不清「解码造的」与「正文自带的」（`absorb` 里那句 `out.matches()`）。
+    #[test]
+    fn streaming_utf8_bom_decodes_gbk_by_strict_validation_not_by_ratio() {
+        let dir = scratch_dir("p353-bom-strict");
+        fs::create_dir_all(&dir).unwrap();
+
+        // ① 夹具自证两半：严格 UTF-8 确实不过（参照链的触发条件），
+        //    而 lossy 结果的 U+FFFD 占比确实低于阈值（旧流式判据的放行条件）。
+        //    两半都成立，这一格测的才是「判据选错了」，不是「字节太罕见」。
+        let mut gbk_body: Vec<u8> = Vec::new();
+        for _ in 0..1_500 {
+            gbk_body.extend_from_slice(b"log line: the quick brown fox jumps\r\n");
+        }
+        let (han, _, _) = encoding_rs::GBK.encode("编辑器中文测试");
+        for _ in 0..8 {
+            gbk_body.extend_from_slice(&han);
+        }
+        assert!(
+            std::str::from_utf8(&gbk_body).is_err(),
+            "夹具前提：这份正文不是合法 UTF-8，参照链必须走 GBK 兜底"
+        );
+        let lossy = String::from_utf8_lossy(&gbk_body);
+        let bad = lossy.matches('\u{FFFD}').count();
+        let total = lossy.chars().count();
+        assert!(
+            (bad as f32 / total.max(1) as f32) <= BINARY_REPLACEMENT_RATIO,
+            "夹具前提：破损占比 {bad}/{total} 必须低到旧判据放行，这一格才测得到那一判据"
+        );
+
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(&gbk_body);
+        let target = dir.join("bom-gbk-low-ratio.txt");
+        fs::write(&target, &bytes).unwrap();
+
+        let reference = decode(&bytes);
+        assert!(!reference.is_binary, "参照链（小文件那一支）判它是文本");
+        assert_eq!(reference.encoding, "GBK", "参照链走的是 GBK 兜底");
+        assert!(
+            reference.text.contains("编辑器中文测试"),
+            "参照链解得出汉字，夹具才不是自欺"
+        );
+
+        let loaded =
+            load_document_streaming(&target, |_| {}).expect("同一份字节在流式链上不许拒开");
+        assert_eq!(
+            loaded.encoding, "GBK",
+            "标签必须说实话：低占比破损不许挂着 UTF-8(BOM) 收下 lossy 结果"
+        );
+        assert_eq!(
+            loaded.doc.to_text(),
+            reference.text,
+            "两条链对同一份字节必须给出同一份正文（占比判据与严格校验判据的分叉就红在这里）"
+        );
+        assert!(
+            !loaded.doc.to_text().contains('\u{FFFD}'),
+            "编辑器里不许出现 U+FFFD——用户改一笔再保存就是把 □ 当原文写回磁盘"
+        );
+
+        // ② 反向那一格：正文自带 U+FFFD 的**合法** UTF-8+BOM 文件，占比高过阈值也必须
+        //    按 UTF-8(BOM) 收下（严格校验通过＝它就是 UTF-8）。
+        let legit = "错误提示：\u{FFFD}无法解析\u{FFFD}\n".repeat(30);
+        assert!(
+            (legit.matches('\u{FFFD}').count() as f32 / legit.chars().count() as f32)
+                > BINARY_REPLACEMENT_RATIO,
+            "夹具前提：□ 占比必须高过阈值，才测得到按占比判那一支会不会误退"
+        );
+        let mut good_bytes = vec![0xEF, 0xBB, 0xBF];
+        good_bytes.extend_from_slice(legit.as_bytes());
+        let good = dir.join("bom-utf8-with-fffd.txt");
+        fs::write(&good, &good_bytes).unwrap();
+
+        let loaded = load_document_streaming(&good, |_| {}).expect("合法 UTF-8 不许被占比判据误退");
+        assert_eq!(loaded.encoding, "UTF-8(BOM)");
+        assert_eq!(loaded.doc.to_text(), legit);
+        assert_eq!(
+            loaded.doc.to_text(),
+            decode(&good_bytes).text,
+            "参照链与流式链对同一份合法 UTF-8 必须同判"
+        );
+
         fs::remove_dir_all(&dir).ok();
     }
 
