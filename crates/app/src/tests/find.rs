@@ -2554,3 +2554,43 @@ fn cross_tab_replace_refuses_empty_query_and_in_flight_scan() {
         assert!(!app.busy, "拒收不得留下 busy");
     }
 }
+
+#[test]
+fn p344_goto_stale_hit_after_the_document_shrank_does_not_panic() {
+    // 面板点击用的坐标是**上一轮扫描**算出来的：撤销或删行之后正文可能已经变短
+    // （`undo()` 不清命中表＝既有口径）。旧写法把越界行号挂进光标，用户接着敲
+    // 第一个字就 panic（实测：panic 落在 ropey 的 line_to_char）。
+    let mut app = Editpad::default();
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("a\nb\nc"));
+    app.find_visible = true;
+    app.find_query = "a".to_owned();
+    let seq = app.find_seq;
+    app.find_scan = Some(seq);
+    dispatch(
+        &mut app,
+        Message::FindScanDone(
+            seq,
+            scanned(vec![editpad_core::MatchPos {
+                line: 50,
+                col: 0,
+                len_chars: 1,
+            }]),
+        ),
+    );
+    let lines = app.cur_handle.borrow().doc.line_count();
+    assert_eq!(lines, 3, "夹具前提：文档只有三行");
+
+    dispatch(&mut app, Message::FindAllGoto(0));
+    assert!(
+        app.cur_handle.borrow().cursor.line < lines,
+        "点击过期命中不许把光标挂到文档外，实际行 {}",
+        app.cur_handle.borrow().cursor.line
+    );
+
+    // 这一步在改前必 panic（光标越界后的第一个编辑动作才炸）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("z".into())));
+    assert_eq!(app.cur_handle.borrow().doc.line_count(), lines);
+    assert!(app.cur_handle.borrow().doc.to_text().contains('z'));
+}

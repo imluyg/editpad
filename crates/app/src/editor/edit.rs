@@ -305,11 +305,20 @@ impl EditorCore {
     }
 
     /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
+    ///
+    /// ⚠️ 坐标先夹紧：`line`/`col` 来自**外部表**（「查找全部」面板、FIF 结果、
+    /// 书签跳转），而那些表与正文不同源——`undo()` 就不清命中表（台账记过的既有
+    /// 口径）。旧写法把越界行号原样挂进 `anchor`/`cursor`，界面看着正常、下一次
+    /// 编辑动作才在 ropey 的 `line_to_char` 上炸（实测：`select_span(9999, 0, 3)`
+    /// 本身不 panic，紧跟一个 `insert_str` 必 panic）。收敛点放在这里＝所有入口
+    /// 共用（`goto_match_index`／`step_match`／`FifGoto`），不各写一份守卫。
     pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
         self.break_typing(); // P37：选区变更打断组（查找跳转/替换当前都经此）
         self.note_nav_origin(); // P312：查找命中跳转 = 一次远距离跳转
         self.clear_block(); // 第 67 轮：块态与单选区互斥
         self.collapse_multi(); // B10：选区跳转重置为单光标（白名单外动作）
+        let line = line.min(self.doc.line_count().saturating_sub(1));
+        let col = col.min(self.line_display_len(line));
         let start = CursorPos { line, col };
         let mut cur = start;
         let mut remain = len_chars;
