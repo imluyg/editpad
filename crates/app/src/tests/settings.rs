@@ -1463,3 +1463,53 @@ fn about_page_reports_build_provenance_and_homepage() {
     assert_eq!(en_home.desc, home.desc, "URL 属事实数据，不随语言变");
     assert_eq!(en_home.title, "Homepage & feedback");
 }
+
+/// 池 ⑩ 的探针：设置落盘失败曾**零回传**——`persist_settings` 与 core 的
+/// `Settings::save()` 两处 `let _ =` 把 `io::Result` 吞掉。用户在设置弹窗改完
+/// 一项，磁盘上一个字节都没写出去，状态栏却一片安静；下次启动全部 revert
+/// ＝看起来「这个编辑器的设置不生效」。
+#[test]
+fn settings_persist_failure_is_reported_while_success_stays_quiet() {
+    let dir = scratch_dir("p347-persist");
+    std::fs::create_dir_all(&dir).unwrap();
+    // 让写盘必然失败：配置路径的「父目录」位置上躺着一个普通文件
+    std::fs::write(dir.join("blocker"), "x").unwrap();
+
+    let mut broken = Editpad::default();
+    broken.settings_path_override = Some(dir.join("blocker").join("config.toml"));
+    // 夹具自证：这条路径**确实**写不进去——否则下面那条「必须留痕」的断言
+    // 测的就不是失败回报，而是别的什么东西
+    assert!(
+        editpad_core::Settings::default()
+            .save_to(&dir.join("blocker").join("config.toml"))
+            .is_err(),
+        "夹具：注入路径必须让落盘真的失败"
+    );
+    dispatch(&mut broken, Message::SettingsPasteAlignIndentToggled(true));
+    assert!(
+        broken.settings.paste_align_indent,
+        "夹具：内存里确实改了这项偏好"
+    );
+    assert!(
+        broken.status.contains("保存"),
+        "落盘失败必须在状态栏留痕，实际 {:?}",
+        broken.status
+    );
+
+    // 成功侧不许冒提示：否则「改设置」每次都有噪音，用户分不清哪次真失败
+    let ok = dir.join("good.toml");
+    let mut fine = Editpad::default();
+    fine.settings_path_override = Some(ok.clone());
+    dispatch(&mut fine, Message::SettingsPasteAlignIndentToggled(true));
+    assert!(
+        editpad_core::Settings::load_from(&ok).paste_align_indent,
+        "夹具：这条路径确实写得进去"
+    );
+    assert!(
+        fine.status.is_empty(),
+        "成功不该动状态栏，实际 {:?}",
+        fine.status
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

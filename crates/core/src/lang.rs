@@ -543,6 +543,7 @@ key_table! {
     { StBackupSkipLarge => "文件超过 64MB，按策略跳过备份", "File exceeds 64MB; backup skipped by policy" },
     { StBackupDone => "已备份旧版 → ", "Previous version backed up to " },
     { StBackupFailed => "备份失败（继续保存）：", "Backup failed (saving continues): " },
+    { StSettingsSaveFailed => "设置保存失败（本次改动不会记住）：", "Failed to save settings (this change will not be remembered): " },
     { StLoadThreadCrashed => "加载线程崩溃：", "Load thread crashed: " },
     { StLoadStreamEnded => "加载流意外终止（未收到完成事件）", "The load stream ended unexpectedly (no completion event)" },
     { StUnknownReason => "未知原因", "unknown reason" },

@@ -1100,13 +1100,26 @@ impl Editpad {
         };
         self.set_status(status);
     }
-    /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到
-    /// 临时目录，绝不动真实 %APPDATA%；否则走系统配置目录（尽力而为）。
-    pub(crate) fn persist_settings(&self) {
-        if let Some(path) = &self.settings_path_override {
-            let _ = self.settings.save_to(path);
-        } else {
-            self.settings.save();
+    /// 统一设置落盘入口：测试注入 `settings_path_override` 时写到临时目录，
+    /// 绝不动真实 %APPDATA%；否则走系统配置目录。
+    ///
+    /// P347（池 ⑩）：写盘失败必须在状态栏留痕。旧形状是两处 `let _ =`
+    /// （本函数一条＋core 的 `Settings::save()` 一条）把 `io::Result` 吞掉
+    /// ⇒ 用户改完设置、磁盘一个字节都没写出去，界面却一片安静，下次启动
+    /// 全部 revert＝看起来「这个编辑器的设置不生效」。
+    /// 成功侧**不动**状态栏：改一项就冒一句「已保存」会把状态栏变成噪音，
+    /// 用户也就分不清哪一次是真失败。
+    pub(crate) fn persist_settings(&mut self) {
+        let result = match &self.settings_path_override {
+            Some(path) => self.settings.save_to(path),
+            None => self.settings.save(),
+        };
+        if let Err(error) = result {
+            self.set_status_error(editpad_core::fmt_suffix(
+                self.lang(),
+                editpad_core::Key::StSettingsSaveFailed,
+                &error.to_string(),
+            ));
         }
     }
 

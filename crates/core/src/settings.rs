@@ -692,10 +692,15 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    /// 尽力保存，错误忽略（设置丢失可接受，不该打断用户）。
-    pub fn save(&self) {
-        if let Some(p) = Self::config_path() {
-            let _ = self.save_to(&p);
+    /// 尽力保存：拿不到数据目录时什么都不做并返回 `Ok`（功能自动降级）。
+    ///
+    /// P347（池 ⑩）：写盘失败**必须回传**给调用方。旧形状是 `let _ = ...`，
+    /// 于是"设置没记住"这件事在 UI 上零痕迹——core 不该替界面决定"要不要
+    /// 打断用户"，它只负责别把错误吞掉。
+    pub fn save(&self) -> std::io::Result<()> {
+        match Self::config_path() {
+            Some(p) => self.save_to(&p),
+            None => Ok(()),
         }
     }
 
