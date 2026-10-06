@@ -334,17 +334,28 @@ impl Editpad {
                 None => self.save_as_dialog(),
             },
             Message::SaveAsRequested => self.save_as_dialog(),
-            Message::SaveTargetChosen(None) => {
+            Message::SaveTargetChosen(_, None) => {
                 self.busy = false;
                 // 另存为被取消：若它属于「保存并关闭」，一并放弃关闭
                 self.pending_close = false;
                 Task::none()
             }
-            Message::SaveTargetChosen(Some(path)) => {
+            Message::SaveTargetChosen(tab_id, Some(path)) => {
+                // P340：按**发起页 id** 落地。对话框在途期间 `Ctrl+Tab`/`Ctrl+N`
+                // 不被 busy 挡（`update/tabs.rs` 那几条切换臂没有 busy 守卫），
+                // 而本臂原先用的是 `self.tab_mut()`＝回报时刻的活动页 ⇒ 另一页被
+                // 改名、并重写它的编码偏好与比对戳，落盘的还是它的内容。
+                // 与 `Saved`／`TabAutosaved` 的按 id 归账同一条纪律（P146）。
+                let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+                    // 发起页已被关闭：目标文件一个字节都没写过，什么都不做
+                    self.busy = false;
+                    self.pending_close = false;
+                    return Task::none();
+                };
                 // P146：改路径前作废在途自动保存——曾以调度时刻的旧路径
                 // 落盘，新内容被写进旧文件
-                self.tab_mut().invalidate_autosave();
-                let tab = self.tab_mut();
+                self.tabs[idx].invalidate_autosave();
+                let tab = &mut self.tabs[idx];
                 tab.path = Some(path.clone());
                 // P133：相对路径链接的解析基准 = 本页文件所在目录
                 tab.editor
@@ -357,9 +368,13 @@ impl Editpad {
                 // P63：按目标磁盘现状重记戳（新文件 = None）——用户在
                 // 对话框里显式选中的覆盖目标，不该被自家外部修改守卫拦下
                 tab.file_stamp = file_stamp(&path);
-                // 对话框阶段结束再交给 save() 的 busy 守卫（原实现在此卡死 busy）
+                // 对话框阶段结束再交给落盘的 busy 守卫（原实现在此卡死 busy）
                 self.busy = false;
-                self.save()
+                let (task, started) = self.save_page(idx, false);
+                if !started {
+                    self.pending_close = false;
+                }
+                task
             }
             Message::Saved(tab_id, version, Ok(notice)) => {
                 // P146 路由：按发起页 id 归账——保存异步期间切页/关页，
@@ -983,6 +998,8 @@ impl Editpad {
         }
         self.enter_busy();
         let suggested = self.suggested_name();
+        // 发起页 id 随任务带走：对话框开着期间用户完全可以切页
+        let tab_id = self.tab().id;
         Task::perform(
             async move {
                 rfd::AsyncFileDialog::new()
@@ -990,7 +1007,7 @@ impl Editpad {
                     .save_file()
                     .await
             },
-            |handle| Message::SaveTargetChosen(handle.map(|f| f.path().to_path_buf())),
+            move |handle| Message::SaveTargetChosen(tab_id, handle.map(|f| f.path().to_path_buf())),
         )
     }
 

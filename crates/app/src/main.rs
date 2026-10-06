@@ -291,7 +291,11 @@ enum Message {
     ),
     SaveRequested,
     SaveAsRequested,
-    SaveTargetChosen(Option<PathBuf>),
+    /// 另存为对话框回报：(发起页 id, 选中的目标路径)。
+    /// ⚠️ 必须带页 id：对话框在途期间切页不被 busy 挡（`Ctrl+Tab` 那几条路径
+    /// 没有 busy 守卫），按「回报时刻的活动页」写就会把另一页改名并按它的内容
+    /// 覆写目标文件（与 `Saved`／`TabAutosaved` 按 id 归账同一条纪律）。
+    SaveTargetChosen(u64, Option<PathBuf>),
     /// 保存完成：(发起页 id, 落盘内容的内容版本号, 结果)（P18 版本守卫；
     /// P67 起成功分支携带编码落盘的附带信息，如 GBK 不可映射字符告警）。
     /// P146：按页 id 归账——保存异步期间切页/关页曾把账目记到「完成时刻

@@ -806,6 +806,83 @@ fn p63_manual_save_blocked_on_external_change_until_acknowledged() {
 }
 
 #[test]
+fn p340_save_as_report_lands_on_the_originating_tab() {
+    // 缺陷形状：A 页起「另存为」对话框（busy=true）→ 期间 Ctrl+Tab 切到 B
+    // （切页臂不看 busy）→ 选名字 ⇒ 旧实现用 `self.tab_mut()`＝**回报时刻的
+    // 活动页**：B 被改名、被重写编码偏好与比对戳，落盘落的还是 B 的内容。
+    let target = scratch_dir("p340-saveas-origin").join("a-was-here.txt");
+    let mut app = app_with_tabs(2); // 页 0 置脏（"d0"），页 1 干净
+    let origin = app.tabs[0].id;
+    assert_ne!(origin, app.tabs[1].id, "夹具前提：两页 id 不同");
+    let other_path_before = app.tabs[1].path.clone();
+    let other_dirty_before = app.tabs[1].dirty;
+    let other_text_before = app.tabs[1].editor.borrow().doc.to_text();
+
+    app.set_active_tab(1);
+    assert_eq!(app.active_tab, 1, "夹具前提：回报时活动页已不是发起页");
+    dispatch(
+        &mut app,
+        Message::SaveTargetChosen(origin, Some(target.clone())),
+    );
+
+    assert_eq!(
+        app.tabs[0].path.as_deref(),
+        Some(target.as_path()),
+        "另存为必须落在发起页上"
+    );
+    assert_eq!(
+        app.tabs[1].path, other_path_before,
+        "别页路径不许被这次回报改写"
+    );
+    assert_eq!(
+        app.tabs[1].dirty, other_dirty_before,
+        "别页的脏账目不许被动"
+    );
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        other_text_before,
+        "别页正文不许被动"
+    );
+    assert!(app.busy, "夹具前提：另存为之后确实起了一次写盘");
+    // 落盘回报按发起页 id 归账：清的是 A 的脏，B 的账目一个字都不许动
+    let (tid, v) = (app.tabs[0].id, app.tabs[0].version);
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert!(!app.tabs[0].dirty, "发起页保存成功应清脏");
+    assert_eq!(
+        app.tabs[1].dirty, other_dirty_before,
+        "别页账目不许被这次回报改写"
+    );
+    std::fs::remove_dir_all(target.parent().unwrap()).ok();
+}
+
+#[test]
+fn p340_save_as_report_for_a_closed_tab_touches_nothing() {
+    // 同一条回报的另一头：发起页在对话框开着时被关掉了。旧实现没有"页还在不在"
+    // 这一问，会把幸存页当成发起页改名。
+    let target = scratch_dir("p340-saveas-gone").join("ghost.txt");
+    let mut app = app_with_tabs(2);
+    let origin = app.tabs[0].id;
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+    assert_eq!(app.tabs.len(), 1, "夹具前提：发起页已关");
+    assert_ne!(app.tabs[0].id, origin, "夹具前提：幸存页不是发起页");
+    let survivor_path = app.tabs[0].path.clone();
+
+    app.busy = true; // 生产里对话框在途必然占着 busy
+    dispatch(
+        &mut app,
+        Message::SaveTargetChosen(origin, Some(target.clone())),
+    );
+
+    assert!(!app.busy, "无人认领的回报也必须收口 busy");
+    assert_eq!(app.tabs[0].path, survivor_path, "不许把幸存页当发起页改名");
+    assert!(!target.exists(), "更不该往那个路径写东西");
+    std::fs::remove_dir_all(target.parent().unwrap()).ok();
+}
+
+#[test]
 fn p63_save_as_target_is_restamped_not_blocked() {
     // 另存为：对话框里显式选中的目标（可能已存在且内容不同）不该被
     // 自家外部修改守卫拦下——选定目标即按其磁盘现状记戳
@@ -814,7 +891,11 @@ fn p63_save_as_target_is_restamped_not_blocked() {
 
     let mut app = Editpad::default(); // 未命名页，file_stamp = None
     dispatch(&mut app, Message::Edit(EditOp::InsertText("draft".into())));
-    dispatch(&mut app, Message::SaveTargetChosen(Some(target.clone())));
+    let origin = app.tab().id;
+    dispatch(
+        &mut app,
+        Message::SaveTargetChosen(origin, Some(target.clone())),
+    );
 
     assert_eq!(app.tabs[0].path, Some(target.clone()));
     assert_eq!(
@@ -1149,7 +1230,8 @@ fn p67_loaded_and_save_as_reset_encoding_preference() {
     // 另存为新路径：同样重置（旧偏好属于旧路径）——先给活动页设偏好
     app.tab_mut().save_encoding = Some(editpad_core::SaveEncoding::Utf8Bom);
     let target = scratch_dir("p67-pref-reset2").join("new.txt");
-    dispatch(&mut app, Message::SaveTargetChosen(Some(target)));
+    let origin = app.tab().id;
+    dispatch(&mut app, Message::SaveTargetChosen(origin, Some(target)));
     assert!(app.tab().save_encoding.is_none(), "另存为必须重置编码偏好");
 }
 

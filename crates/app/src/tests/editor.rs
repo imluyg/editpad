@@ -167,9 +167,10 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
 
     // 另存为转正后序号清除，标签显示真实文件名
     app.set_active_tab(1);
+    let origin = app.tabs[1].id;
     dispatch(
         &mut app,
-        Message::SaveTargetChosen(Some(PathBuf::from("C:/x/real.txt"))),
+        Message::SaveTargetChosen(origin, Some(PathBuf::from("C:/x/real.txt"))),
     );
     assert_eq!(
         app.tabs[1].path.as_deref(),
