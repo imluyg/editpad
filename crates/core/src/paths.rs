@@ -11,7 +11,9 @@
 //! 每份拷贝/每个目录自动各搞各的数据，零配置零标记；exe 更新/重装到
 //! 同一位置时数据延续（同一路径 → 同一哈希）。首次运行迁移：P101 前
 //! 布局的遗留 `%APPDATA%\editpad\` 目录整体搬入首个实例目录（原拷贝
-//! 数据无缝续用），之后所有拷贝各自建实例目录、互不互通。
+//! 数据无缝续用），之后所有拷贝各自建实例目录、互不互通。迁移判据是
+//! 「遗留 config 还在不在」，所以半途而废的那次会在下次启动自动续上
+//! （P350）。
 
 use std::path::{Path, PathBuf};
 
@@ -40,13 +42,12 @@ pub fn data_root_for_base(exe: Option<&Path>, appdata: Option<&Path>) -> Option<
         .join("editpad")
         .join(INSTANCES_DIR)
         .join(instance_key(exe));
-    if dir.exists() {
-        return Some(dir);
-    }
-    // 首次运行迁移：把遗留目录（P101 前布局）整体搬入本实例。
-    // 多拷贝并发首启时只有先搬走 config.toml 的进程胜出，其余拷贝看到
-    // 源缺失即自建实例目录；迁移失败无害（数据仍留在遗留目录，下次
-    // 启动重试），绝不丢数据。
+    // P350（池 ⑫）：闸门不能是「实例目录已存在」。`create_dir_all(dir)` 跑在
+    // 搬运**之前**，进程在这两步之间被杀、或整批 rename/copy 失败，都会留下一
+    // 个空目录 ⇒ 从此每次启动都在这里早退，遗留 config 与崩前快照被永久埋掉，
+    // 用户看到的是「设置没了」且没有任何一处会再试。真正的判据是「遗留
+    // config 还在不在」（`migrate_legacy` 自己问这一问，并逐条跳过已存在的
+    // 目标 ⇒ 天然幂等），代价只是每次多一个 stat。
     migrate_legacy(appdata, &dir);
     Some(dir)
 }
@@ -85,11 +86,12 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// 把遗留 `%APPDATA%\editpad` 目录内容整体搬入 `dir`（尽力而为）。
+/// 把遗留 `%APPDATA%\editpad` 目录内容搬入 `dir`（尽力而为，可反复调用）。
 ///
-/// 顺序固定 **config.toml 在先**：并发下最多一个进程搬走它，其余进程
-/// 在「源缺失」判定处立即作罢，不会与胜者交错搬同一批文件。`instances`
-/// 子目录本身（本目录的家）与已存在的条目跳过。
+/// 判据是「`legacy/config.toml` 还在」而不是「`dir` 不存在」⇒ 半途而废的迁移
+/// 会在下次启动自动续上（P350）。顺序固定 **config.toml 在先**：并发下最多一个
+/// 进程搬走它，其余进程在「源缺失」判定处立即作罢，不会与胜者交错搬同一批文件。
+/// `instances` 子目录本身（本目录的家）与已存在的条目跳过。
 fn migrate_legacy(appdata: &Path, dir: &Path) {
     let legacy = appdata.join("editpad");
     if !legacy.join("config.toml").is_file() {
@@ -111,9 +113,34 @@ fn migrate_legacy(appdata: &Path, dir: &Path) {
         // 移动失败（占用/权限等）退化为复制：数据要到实例目录，目录
         // 里残留副本无碍（下次启动不再读遗留目录）
         if std::fs::rename(entry.path(), &target).is_err() {
-            let _ = std::fs::copy(entry.path(), &target);
+            let _ = copy_entry(&entry.path(), &target);
         }
     }
+}
+
+/// 条目复制：`std::fs::copy` 只认文件（对目录返回 InvalidInput），所以
+/// 「rename 失败就 copy」那条退路对 `snapshot/` 目录一直是空转的——本函数对
+/// 目录自己走下去。尽力而为：单个条目失败不影响其余，剩下的靠下次启动重试
+/// （P350 已把闸门从「实例目录是否存在」改成「遗留数据是否还在」）。
+fn copy_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+    if !from.is_dir() {
+        return std::fs::copy(from, to).map(|_| ());
+    }
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let inner = to.join(name);
+        if copy_entry(&path, &inner).is_err() {
+            return Err(std::io::Error::other(format!(
+                "目录条目复制失败：{}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -215,6 +242,79 @@ mod tests {
         let root = data_root_for_base(Some(&exe), Some(&appdata)).unwrap();
         assert!(root.starts_with(appdata.join("editpad").join("instances")));
         assert!(!root.join("config.toml").exists());
+        fs::remove_dir_all(&appdata).ok();
+    }
+
+    /// 池 ⑫ 的探针：**实例目录存在过 ≠ 数据搬进来了**。旧闸门是
+    /// `if dir.exists() { return }`，而 `create_dir_all(dir)` 跑在搬运**之前**
+    /// ⇒ 进程在两步之间被杀（或 rename/copy 整批失败）之后，遗留 config 与
+    /// 快照被永久埋掉：下次启动直接返回那个空实例目录，设置与崩前会话一起
+    /// 无声消失，而且没有任何一处会再试。
+    #[test]
+    fn an_adopted_but_empty_instance_retries_the_migration() {
+        let appdata =
+            std::env::temp_dir().join(format!("editpad-paths-retry-{}", std::process::id()));
+        let legacy = appdata.join("editpad");
+        fs::create_dir_all(legacy.join("snapshot")).unwrap();
+        fs::write(legacy.join("config.toml"), b"theme = \"dark\"").unwrap();
+        fs::write(legacy.join("snapshot").join("s1.snap"), b"draft").unwrap();
+
+        let exe = appdata.join("prod").join("editpad.exe");
+        let dir = legacy.join(INSTANCES_DIR).join(instance_key(&exe));
+        // 夹具自证：造出「目录已存在、里面什么都没有」这一半程状态
+        fs::create_dir_all(&dir).unwrap();
+        assert!(dir.exists() && !dir.join("config.toml").is_file());
+        assert!(
+            legacy.join("config.toml").is_file(),
+            "夹具：遗留数据还原封不动"
+        );
+
+        let root = data_root_for_base(Some(&exe), Some(&appdata)).unwrap();
+        assert_eq!(root, dir);
+        assert!(
+            dir.join("config.toml").is_file(),
+            "半途而废的迁移必须重试，否则设置永久失踪：{:?}",
+            dir
+        );
+        assert!(dir.join("snapshot").join("s1.snap").is_file());
+        assert!(
+            !legacy.join("config.toml").exists(),
+            "搬完的遗留 config 不该再留着（否则另一拷贝会抢）"
+        );
+
+        fs::remove_dir_all(&appdata).ok();
+    }
+
+    /// 兜底复制的机制自证：`fs::copy` 只认文件，对**目录**直接返回 Err，
+    /// 所以「rename 失败就 copy」这条退路对 `snapshot/` 一直是空转的。
+    #[test]
+    fn copy_entry_falls_back_to_a_recursive_copy_for_directories() {
+        let appdata =
+            std::env::temp_dir().join(format!("editpad-paths-copy-{}", std::process::id()));
+        let from = appdata.join("legacy").join("snapshot");
+        fs::create_dir_all(from.join("nested")).unwrap();
+        fs::write(from.join("s1.snap"), b"one").unwrap();
+        fs::write(from.join("nested").join("s2.snap"), b"two").unwrap();
+        let to = appdata.join("instance").join("snapshot");
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+
+        // 旧退路的形状：对目录 `fs::copy` 就是失败
+        assert!(
+            fs::copy(&from, &to).is_err(),
+            "夹具自证：fs::copy 不处理目录，所以这条退路上轮一直空转"
+        );
+
+        copy_entry(&from, &to).expect("目录必须能整棵复制过去");
+        assert_eq!(fs::read(to.join("s1.snap")).unwrap(), b"one");
+        assert_eq!(fs::read(to.join("nested").join("s2.snap")).unwrap(), b"two");
+
+        // 文件那条支路照常
+        let lone = appdata.join("legacy").join("config.toml");
+        let lone_to = appdata.join("instance").join("config.toml");
+        fs::write(&lone, b"theme = \"dark\"").unwrap();
+        copy_entry(&lone, &lone_to).unwrap();
+        assert!(lone_to.is_file());
+
         fs::remove_dir_all(&appdata).ok();
     }
 }
