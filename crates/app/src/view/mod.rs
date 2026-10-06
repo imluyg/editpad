@@ -575,7 +575,7 @@ impl Editpad {
         }
 
         // 未保存时打开新文件的确认条（样式沿用关闭确认条）
-        if let Some(path) = &self.open_confirm {
+        if let Some((_, path)) = &self.open_confirm {
             body = body.push(rule::horizontal(1)).push(
                 row![
                     text(editpad_core::fmt_wrapped(

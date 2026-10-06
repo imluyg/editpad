@@ -622,11 +622,15 @@ impl Editpad {
             }
             // ---------- 打开确认 ----------
             Message::ConfirmOpenDiscard => {
-                let Some(path) = self.open_confirm.take() else {
+                let Some((tab_id, path)) = self.open_confirm.take() else {
                     return Task::none();
                 };
+                // P341：清脏落在**发起页**上（确认条不占 busy，用户可能已经切走）；
+                // 发起页已被关闭时无账可记（内容随页一起没了），照常把文件开出来。
+                if let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) {
+                    self.tabs[idx].dirty = false;
+                }
                 // 明确放弃：不再触发下一次确认；若关闭确认条还开着，其前提已消失
-                self.tab_mut().dirty = false;
                 self.confirm_visible = false;
                 self.pending_close = false;
                 let tab = self.target_tab_for_open();
@@ -860,7 +864,7 @@ impl Editpad {
             return Task::none();
         }
         if self.tab().dirty {
-            self.open_confirm = Some(path);
+            self.open_confirm = Some((self.tab().id, path));
             return Task::none();
         }
         let tab = self.target_tab_for_open();

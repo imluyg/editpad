@@ -18,7 +18,7 @@ fn esc_dismisses_every_transient_prompt() {
     app.settings_visible = true;
     app.confirm_visible = true;
     app.pending_close = true;
-    app.open_confirm = Some(PathBuf::from("C:/w/x.txt"));
+    app.open_confirm = Some((app.tab().id, PathBuf::from("C:/w/x.txt")));
     app.pending_cli.push_back(PathBuf::from("C:/w/y.txt"));
     app.pending_link_goto = Some(7);
     app.pending_fif_goto = Some((0, 0, 0));

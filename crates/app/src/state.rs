@@ -260,8 +260,11 @@ pub(crate) struct Editpad {
     pub(crate) pending_link_goto: Option<u32>,
 
     // ---------- 打开确认 ----------
-    /// dirty 时暂存待打开的路径；Some 即打开确认条可见
-    pub(crate) open_confirm: Option<PathBuf>,
+    /// dirty 时暂存 (发起页 id, 待打开的路径)；Some 即打开确认条可见。
+    /// ⚠️ 必须带发起页 id：确认条挂着时**不占 busy**，切页臂也不看 busy ⇒ 旧写法
+    /// 只存路径，〔放弃并打开〕按 `tab_mut()` 清脏会把**别页**标成「已保存」，
+    /// 那页的未存改动此后既不弹关页确认也进不了自动保存（P341）。
+    pub(crate) open_confirm: Option<(u64, PathBuf)>,
 
     // ---------- 标签页关闭确认（P21） ----------
     /// Some(id) = 该页置脏、正在确认「放弃更改并关闭」。存**页 id** 不存下标

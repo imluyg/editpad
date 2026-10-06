@@ -2281,6 +2281,70 @@ fn save_and_close_chain_voids_pending_flag_when_guard_blocks() {
 /// `pending_cli`。用户点「取消」只收走了确认条，队列悬挂 → 之后任意一次
 /// 无关的 Loaded 收尾续排会把被放弃的文件接二连三开出来。
 #[test]
+fn p341_open_confirm_discard_clears_the_originating_page() {
+    // 缺陷形状：A 页置脏 → 一次打开弹出「放弃更改并打开」确认条（它**不占 busy**，
+    // 切页臂也不看 busy）→ 用户切到 B 页并敲了字 → 点〔放弃并打开〕 ⇒ 旧写法用
+    // `self.tab_mut()` 清脏，被标成"已保存"的是 **B**：那页的未存改动此后既不弹
+    // 关页确认、也进不了自动保存 = 静默丢失；而真正被放弃的 A 反倒还挂着脏账。
+    let mut app = app_with_tabs(2); // 页 0 脏（"d0"），页 1 是新建页
+    app.set_active_tab(0); // 确认条问的就是**活动页**的未存改动
+    let pending = PathBuf::from("C:/w/next.txt");
+    dispatch(&mut app, Message::FileDropped(pending.clone()));
+    assert_eq!(
+        app.open_confirm.as_ref().map(|(_, p)| p),
+        Some(&pending),
+        "夹具前提：确认条已弹出且带着待开路径"
+    );
+
+    app.set_active_tab(1);
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("B 的未存改动".into())),
+    );
+    assert!(
+        app.tabs[0].dirty && app.tabs[1].dirty,
+        "夹具前提：两页都有未存改动（否则分辨不出清错了页）"
+    );
+    let (a_id, b_id) = (app.tabs[0].id, app.tabs[1].id);
+    let b_version = app.tabs[1].version;
+
+    dispatch(&mut app, Message::ConfirmOpenDiscard);
+
+    assert_eq!(app.tabs[0].id, a_id);
+    assert!(!app.tabs[0].dirty, "被放弃的应当是发起页 A 的更改");
+    assert!(app.tabs[1].dirty, "B 的未存改动不许被这次裁决清掉");
+    assert_eq!(app.tabs[1].version, b_version, "B 的账目一字不动");
+    assert_ne!(b_id, a_id);
+    // 打开本身照常起——这才是用户点〔放弃并打开〕要的结果
+    let job = app.active_load.as_ref().expect("确认之后应真的开始装载");
+    assert_eq!(job.path, pending, "开的就是那条路径");
+}
+
+#[test]
+fn p341_open_confirm_discard_after_originating_tab_closed_still_opens() {
+    // 同一条裁决的另一头：确认条挂着时发起页被关掉了（关页时它自己那笔改动已经
+    // 没了）。旧写法没有"页还在不在"这一问，会把幸存页当成发起页清脏。
+    let mut app = app_with_tabs(1); // 只有一页，且已置脏
+    let pending = PathBuf::from("C:/w/after.txt");
+    dispatch(&mut app, Message::FileDropped(pending.clone()));
+    let origin = app.open_confirm.as_ref().expect("确认条应弹出").0;
+
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+    assert_eq!(app.tabs.len(), 1, "夹具前提：发起页已关");
+    assert_ne!(app.tabs[0].id, origin, "夹具前提：幸存页不是发起页");
+    assert!(!app.tabs[0].dirty, "夹具前提：幸存页本来就干净");
+
+    dispatch(&mut app, Message::ConfirmOpenDiscard);
+
+    assert!(
+        app.active_load.as_ref().is_some_and(|j| j.path == pending),
+        "发起页没了也要把用户要开的文件开出来"
+    );
+    assert!(!app.tabs[0].dirty, "无人认领的裁决不许改别页账目");
+}
+
+#[test]
 fn cancelling_open_confirm_voids_remaining_cli_queue() {
     let mut app = Editpad::default();
     dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
@@ -2288,7 +2352,7 @@ fn cancelling_open_confirm_voids_remaining_cli_queue() {
         PathBuf::from("C:/cli/b.txt"),
         PathBuf::from("C:/cli/c.txt"),
     ]);
-    app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
+    app.open_confirm = Some((app.tab().id, PathBuf::from("C:/cli/a.txt")));
 
     dispatch(&mut app, Message::ConfirmOpenCancel);
 
@@ -2305,7 +2369,7 @@ fn esc_on_open_confirm_also_voids_cli_queue() {
     let mut app = Editpad::default();
     dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
     app.pending_cli = VecDeque::from(vec![PathBuf::from("C:/cli/b.txt")]);
-    app.open_confirm = Some(PathBuf::from("C:/cli/a.txt"));
+    app.open_confirm = Some((app.tab().id, PathBuf::from("C:/cli/a.txt")));
 
     // Esc 在 BarsDismissed 里本就等价于「放弃打开确认」
     dispatch(&mut app, Message::BarsDismissed);
