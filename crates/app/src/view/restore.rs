@@ -32,8 +32,30 @@ impl Editpad {
     /// 从注入的快照目录执行恢复决策。生产路径经 [`Self::boot_restore`]；
     /// 测试注入项目内目录，避免触碰真实 %APPDATA%（同 P29 先例）。
     pub(crate) fn restore_from_dir(&mut self, dir: &Path) -> Task<Message> {
-        let Some(manifest) = editpad_core::snapshot::read_manifest(dir) else {
-            return Task::none(); // 无会话/损坏清单一律按空白启动，绝不 panic
+        // P348（池 ⑪）：**坏清单不再等于「没有会话」**。旧形状是一条早退把两种
+        // 情形并成静默空白启动，而坏清单那种情况下崩前未保存的页文件还躺在
+        // 目录里，唯一能对上「哪一页是哪个文件」的线索就是这份读不出的清单
+        // 本身——下一次会话提交会覆写它。⇒ 先留档，再把留档路径告诉用户。
+        // 留档用复制而非改名：`session.toml` 归写侧管，读侧不动它的存在性。
+        let manifest = match editpad_core::snapshot::read_manifest_checked(dir) {
+            editpad_core::snapshot::ManifestRead::Good(manifest) => manifest,
+            editpad_core::snapshot::ManifestRead::Absent => {
+                return Task::none(); // 没有会话 = 正常空白启动，不打扰用户
+            }
+            editpad_core::snapshot::ManifestRead::Broken { raw, .. } => {
+                let kept = editpad_core::snapshot::preserve_broken_manifest(dir, &raw);
+                // 连原文都没读到（读文件本身就失败）时，能给的最后一线索是目录
+                let hint = match kept {
+                    Some(path) => path.display().to_string(),
+                    None => dir.display().to_string(),
+                };
+                self.set_status_error(editpad_core::fmt_suffix(
+                    self.lang(),
+                    editpad_core::Key::StSessionManifestBroken,
+                    &hint,
+                ));
+                return Task::none();
+            }
         };
         if manifest.tabs.is_empty() {
             return Task::none();

@@ -393,9 +393,79 @@ fn gc_stale_pages(
 }
 
 /// 读会话清单；缺失或损坏一律返回 None（按无会话处理，绝不 panic）。
+/// 会话清单的读取结果（P348，池 ⑪）：**读不出 ≠ 不存在**。
+///
+/// 旧形状是 `read_to_string().ok()?` + `from_str().ok()` 两条失败都收敛成
+/// `None`，调用侧于是把「坏清单」按「没有会话」处理＝静默空白启动。坏清单
+/// 那种情况下，崩前未保存的页文件还躺在目录里，而唯一能对上「哪一页是哪个
+/// 文件」的线索就是这份读不出的清单本身——下一次会话提交会覆写它。
+#[derive(Debug, Clone)]
+pub enum ManifestRead {
+    /// 清单不存在（正常空白启动，不该打扰用户）。
+    Absent,
+    /// 清单存在但读不出：带回原始文本供调用方留档（读文件本身失败时为空串）。
+    Broken { error: String, raw: String },
+    /// 读得出的清单。
+    Good(SessionManifest),
+}
+
+/// [`read_manifest_checked`] 的门面：只要「有没有可恢复的会话」这一维的调用方
+/// 用它，坏清单同样得 `None`（既有契约，`missing_or_corrupt_manifest…` 用例钉着）。
 pub fn read_manifest(dir: &Path) -> Option<SessionManifest> {
-    let text = fs::read_to_string(dir.join(MANIFEST_NAME)).ok()?;
-    toml::from_str(&text).ok()
+    match read_manifest_checked(dir) {
+        ManifestRead::Good(manifest) => Some(manifest),
+        _ => None,
+    }
+}
+
+pub fn read_manifest_checked(dir: &Path) -> ManifestRead {
+    let raw = match fs::read_to_string(dir.join(MANIFEST_NAME)) {
+        Ok(text) => text,
+        // 文件不存在才是「没有会话」；存在却读不动（占用/权限）跟损坏同档，
+        // 都该让用户知道——静默当成没发生过，等于替用户决定了「不要了」
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return ManifestRead::Absent,
+        Err(error) => {
+            return ManifestRead::Broken {
+                error: error.to_string(),
+                raw: String::new(),
+            }
+        }
+    };
+    match toml::from_str::<SessionManifest>(&raw) {
+        Ok(manifest) => ManifestRead::Good(manifest),
+        Err(error) => ManifestRead::Broken {
+            error: error.to_string(),
+            raw,
+        },
+    }
+}
+
+/// 把读不出的清单**复制**一份留档，返回留档路径；`raw` 为空（清单内容都没
+/// 读到）时不造文件、返回 None。
+///
+/// 用复制而不是改名：`session.toml` 归写侧管，读侧不该动它的存在性——下次
+/// 启动仍要能看出「这里有一份坏清单」。同名内容已留过档就不重复造（每次启动
+/// 都堆一份是噪音）；内容不同则追加序号（P148 时间戳备份同款收口）。
+pub fn preserve_broken_manifest(dir: &Path, raw: &str) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let mut seq = 0u32;
+    loop {
+        let path = if seq == 0 {
+            dir.join("session.corrupt.toml")
+        } else {
+            dir.join(format!("session.corrupt-{seq}.toml"))
+        };
+        match fs::read_to_string(&path) {
+            // 同一份坏内容只留一份档
+            Ok(text) if text == raw => return Some(path),
+            Ok(_) => seq += 1,
+            Err(_) => {
+                return fs::write(&path, raw).ok().map(|_| path);
+            }
+        }
+    }
 }
 
 /// 读一页的内容快照；缺失/损坏/非 UTF-8 返回 None——
@@ -725,6 +795,48 @@ mod tests {
         assert!(read_page(&dir, &t).is_none());
 
         clear_session(&dir);
+    }
+
+    /// P348（池 ⑪）：「读不出」与「不存在」必须是两个可分的结果，且坏清单的
+    /// 原文要能留档——下一次提交覆写 `session.toml` 之后，用户手里就不该
+    /// 连一份线索都没有。
+    #[test]
+    fn broken_manifest_is_told_apart_from_absent_one_and_can_be_kept_aside() {
+        let dir = scratch_dir("broken-vs-absent");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(
+            matches!(read_manifest_checked(&dir), ManifestRead::Absent),
+            "空目录才是「没有会话」"
+        );
+
+        // 必填字段少一个（tabs）⇒ 整份解析失败 ⇒ Broken，并把原文带回
+        let raw = "generation = 7\nactive = 0\nclean_exit = false\n";
+        fs::write(dir.join(MANIFEST_NAME), raw).unwrap();
+        let checked = read_manifest_checked(&dir);
+        let ManifestRead::Broken { error, raw: got } = checked else {
+            panic!("缺必填字段必须判成 Broken");
+        };
+        assert_eq!(got, raw, "原文要带回给调用方留档");
+        assert!(!error.is_empty(), "错误说明不得空着");
+        assert!(
+            read_manifest(&dir).is_none(),
+            "门面契约不变：坏清单仍按「无可恢复会话」"
+        );
+
+        // 留档：同一份坏内容只留一份；换了内容才另开，不许覆掉上一份线索
+        let first = preserve_broken_manifest(&dir, raw).unwrap();
+        assert_eq!(fs::read_to_string(&first).unwrap(), raw);
+        assert_eq!(
+            preserve_broken_manifest(&dir, raw).unwrap(),
+            first,
+            "同内容不重复造文件"
+        );
+        let second = preserve_broken_manifest(&dir, "generation = x\n").unwrap();
+        assert_ne!(second, first, "不同内容必须另开一份");
+        // 没读到原文（读文件就失败）时不造空文件
+        assert_eq!(preserve_broken_manifest(&dir, ""), None);
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     // ---------- 代次回收（write-ahead 孤儿清理） ----------

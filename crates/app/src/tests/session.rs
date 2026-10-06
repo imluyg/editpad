@@ -2247,3 +2247,55 @@ fn restore_with_all_pages_over_mem_cap_keeps_app_alive() {
     assert!(app.tabs[0].editor.borrow().doc.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 池 ⑪ 的探针：清单**读不出**与清单**不存在**曾走同一条早退＝静默空白启动。
+/// 前者的磁盘上还躺着崩前未保存的页文件，而唯一能对上「哪一页是哪个文件」的
+/// 线索就是那份读不出的清单本身——下一次会话提交会覆写 `session.toml`，
+/// 覆掉之后连手动救的路都没有了。
+#[test]
+fn broken_session_manifest_is_reported_and_kept_aside_instead_of_a_blank_start() {
+    let dir = snapshot_scratch_dir("p348-broken-manifest");
+    std::fs::create_dir_all(&dir).unwrap();
+    let raw = "generation = 7\nactive = 0\nclean_exit = false\n";
+    std::fs::write(dir.join(editpad_core::snapshot::MANIFEST_NAME), raw).unwrap();
+    // 崩前那一页的内容文件还在（清单里没 tabs ⇒ 整份解析失败）
+    std::fs::write(dir.join("s7-t0.snap"), "崩溃前的未保存草稿").unwrap();
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_dir(&dir);
+
+    assert!(
+        app.status.contains("读不出来"),
+        "坏清单必须在状态栏留痕，实际 {:?}",
+        app.status
+    );
+    assert_eq!(app.tabs.len(), 1, "不弹提示也不动当前标签");
+    assert!(
+        app.recover_prompt.is_none(),
+        "读不出的清单给不了可恢复的会话"
+    );
+    let kept = dir.join("session.corrupt.toml");
+    assert_eq!(
+        std::fs::read_to_string(&kept).ok(),
+        Some(raw.to_owned()),
+        "读不出的清单原文必须改名留住——下一次提交覆写 session.toml 后就没线索了"
+    );
+
+    // 正对照：清单**不存在**才是正常的静默空白启动，不许冒提示
+    let clean = snapshot_scratch_dir("p348-no-manifest");
+    std::fs::create_dir_all(&clean).unwrap();
+    let mut app2 = Editpad::default();
+    let _ = app2.restore_from_dir(&clean);
+    assert!(
+        app2.status.is_empty(),
+        "没有会话不该留痕，实际 {:?}",
+        app2.status
+    );
+    assert!(
+        !clean.join("session.corrupt.toml").exists(),
+        "没坏清单就不该造文件"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&clean);
+}
