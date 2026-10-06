@@ -401,14 +401,9 @@ impl Editpad {
                 if let Some(path) = self.tabs[idx].path.clone() {
                     self.record_recent(&path);
                 }
-                // P67：状态栏标签反映实际落盘编码（用户选择的偏好或默认
-                // UTF-8），转码提示按「原标签 vs 实际目标」判定
-                let target_label = self.tabs[idx]
-                    .save_encoding
-                    .unwrap_or(editpad_core::SaveEncoding::Utf8)
-                    .label();
-                let prev_label = self.tabs[idx].encoding_label.clone();
-                self.tabs[idx].encoding_label = target_label.to_owned();
+                // P67：状态栏标签反映实际落盘编码；P50：落盘成功即按磁盘
+                // 现状重记比对戳（见 `settle_saved_page`）
+                let (prev_label, target_label) = self.settle_saved_page(idx);
                 // P6 编码知情权：发生转码/BOM 丢失/不可映射字符时明确告知；
                 // 无转码时补显暂存的备份提示（备份消息写在异步落盘完成
                 // 之前，直接进状态栏会被本分支立即覆盖/抹掉）
@@ -421,10 +416,6 @@ impl Editpad {
                     self.set_status(text);
                 } else {
                     self.status.clear();
-                }
-                // P50：落盘成功即刷新外部修改比对戳（磁盘内容 = 刚写的内容）
-                if let Some(path) = self.tabs[idx].path.clone() {
-                    self.tabs[idx].file_stamp = file_stamp(&path);
                 }
                 if self.pending_close {
                     // P147：「保存并关闭」= 存完**全部**置脏页再关窗——曾只存
@@ -754,6 +745,11 @@ impl Editpad {
                     Ok(()) => {
                         // 版本守卫同款：期间又有编辑则保持置脏、不关闭
                         let clean = self.tabs[idx].version == version;
+                        // P345：自家这次写盘已把磁盘推进了一格——两步收口与
+                        // `Saved` 共用 `settle_saved_page`。缺了它，留在原位
+                        // 没关掉的页（版本不符／关页失败）下一次 Ctrl+S 会
+                        // 被 P63 守卫拦下，把自家写盘报成「文件被外部修改」
+                        self.settle_saved_page(idx);
                         if clean {
                             self.tabs[idx].dirty = false;
                             // P38：落盘成功且版本守卫通过——内容即磁盘内容。
@@ -1013,6 +1009,28 @@ impl Editpad {
             },
             move |handle| Message::SaveTargetChosen(tab_id, handle.map(|f| f.path().to_path_buf())),
         )
+    }
+
+    /// 自家落盘成功之后的页内两步收口（`Saved`／`TabSaved` 共用这一份）：
+    /// 状态栏编码标签对齐**磁盘上真实的编码**（P67/P271）、外部修改比对戳按
+    /// 磁盘现状重记（P50）。两步都只描述「磁盘上现在是什么」，与本页此刻
+    /// 是否仍置脏无关 ⇒ 版本守卫把页留下的那条路同样要走完。
+    ///
+    /// P345（孪生合并·回报侧）：此前只有 `Saved` 臂做这两步，关闭链那臂漏了
+    /// ⇒ 〔保存并关闭〕落盘成功但期间又编辑过的页，下一次 Ctrl+S 被 P63
+    /// 守卫拦下，把自家那次写盘报成「文件被外部修改」，还要用户去裁决一个
+    /// 自己造成的冲突。返回改标前的旧标签，供调用方判转码知情权。
+    pub(crate) fn settle_saved_page(&mut self, idx: usize) -> (String, &'static str) {
+        let target_label = self.tabs[idx]
+            .save_encoding
+            .unwrap_or(editpad_core::SaveEncoding::Utf8)
+            .label();
+        let prev_label =
+            std::mem::replace(&mut self.tabs[idx].encoding_label, target_label.to_owned());
+        if let Some(path) = self.tabs[idx].path.clone() {
+            self.tabs[idx].file_stamp = file_stamp(&path);
+        }
+        (prev_label, target_label)
     }
 
     /// 把第 `idx` 页落盘的唯一次序：busy/未命名 → P63 外部改动守卫 →

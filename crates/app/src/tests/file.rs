@@ -2791,3 +2791,70 @@ fn pending_open_claim_recovers_leftover_taking_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P345 夹具：走到「〔保存并关闭〕已落盘成功，但期间用户又编辑了一笔 ⇒
+/// 页没关掉、仍置脏」这一步，返回 `(app, 文件路径, 落盘时刻的版本)`。
+///
+/// 无头 `dispatch` 不执行 Task，所以磁盘由本夹具代写＝模型化那次成功落盘
+/// （写的是**调度时刻**的内容，与真实线程一致）。这一步之后 `file_stamp`
+/// 与 `encoding_label` 该不该跟着磁盘走，就是下面两条用例的判据。
+///
+/// 编码偏好在落盘前置成 GBK：这样标签那一半也有真实形状可断（否则标签
+/// 本来就等于目标编码，改了也不动）。
+fn close_chain_survivor(tag: &str) -> (Editpad, PathBuf, u64) {
+    let (mut app, path) = loaded_real_file_app(tag);
+    app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tid = app.tabs[0].id;
+    let scheduled_version = app.tab().version;
+    let scheduled_text = app.cur_handle.borrow().doc.to_text();
+
+    dispatch(&mut app, Message::CloseTabSave(0));
+    assert!(app.busy, "夹具：写盘应在途");
+    assert_eq!(app.pending_close_tab, Some(tid), "夹具：应已登记待关页");
+
+    // 页仍是活动页，用户照常打字 ⇒ 版本推进
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+    assert_ne!(
+        app.tab().version,
+        scheduled_version,
+        "夹具：回报必须赶不上这次编辑"
+    );
+
+    std::fs::write(&path, &scheduled_text).unwrap();
+    dispatch(&mut app, Message::TabSaved(tid, scheduled_version, Ok(())));
+    assert_eq!(app.tabs.len(), 1, "版本不符 → 取消自动关闭，页留着");
+    assert!(app.tab().dirty, "留着必须保持置脏");
+    assert!(!app.busy, "回报已收口");
+    (app, path, scheduled_version)
+}
+
+#[test]
+fn own_close_chain_write_is_not_an_external_change_for_the_next_save() {
+    // P50/P63 那条口径（自家落盘之后按磁盘现状重记戳）在 `Saved` 臂上有
+    // session.rs 的用例守着；兄弟臂 `TabSaved` 漏了这一步 ⇒ 页留着时，
+    // 下一次 Ctrl+S 把自己那次写盘当成「文件被外部修改」拦下来，让用户
+    // 去裁决一个自己造成的冲突
+    let (mut app, _path, _) = close_chain_survivor("p345-stamp");
+
+    dispatch(&mut app, Message::SaveRequested);
+
+    assert_eq!(
+        app.external_change, None,
+        "自家那次落盘不得触发外部修改提示条"
+    );
+    assert!(app.busy, "应真的起了一次写盘，实际状态 {:?}", app.status);
+}
+
+#[test]
+fn own_close_chain_write_moves_the_encoding_label_to_the_disk_truth() {
+    // 同一处漏口的另一半：状态栏标签的口径是「磁盘上真实的编码」（P271），
+    // 与本页是否仍置脏无关。漏了这一步，标签停在载入时刻的 UTF-8 而文件
+    // 已是 GBK ⇒ 下一次改编码时 `transcode_notice` 拿错的 prev_label 比
+    let (app, _path, _) = close_chain_survivor("p345-label");
+
+    assert_eq!(
+        app.tabs[0].encoding_label, "GBK",
+        "标签应跟上磁盘上真实的编码"
+    );
+}
