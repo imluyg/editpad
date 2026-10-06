@@ -7,7 +7,8 @@
 //! \r / \n 皆行界）、行首尾边界、跨行命中保留。
 
 use editpad_core::{
-    filter_whole_word_text, find_all, find_in_file, walk_files, WalkOutput, IGNORED_DIRS,
+    filter_whole_word_text, find_all, find_all_regex, find_in_file, walk_files, WalkOutput,
+    IGNORED_DIRS,
 };
 use std::path::PathBuf;
 
@@ -218,6 +219,83 @@ fn find_in_file_cap_returns_and_allocates_only_the_limit() {
         find_in_file(&text, "the", true, false, false, 3),
         "find_in_file 与 find_in_file_with 的封顶结果必须一致"
     );
+}
+
+#[test]
+fn find_in_file_regex_cap_returns_and_allocates_only_the_limit() {
+    // L-20：正则档的封顶同样下推进扫描内核——上面那条 O-13 用例只管了字面档，
+    // 而 FIF 的 64MB 豁免让正则档能在「合法用户动作」上跑到千万级命中：
+    // 「先全收再 truncate」要物化整份跨度表＋整份 MatchPos 表（24B/条），
+    // 面板却只留 1000 条。
+    let text = "the ".repeat(100_000);
+    let all = find_all_regex(&text, "t.e", true).unwrap();
+    assert_eq!(all.len(), 100_000, "用例前提：命中数 ≫ 上限");
+
+    let hits = find_in_file(&text, "t.e", true, true, false, 3);
+    assert_eq!(
+        hits,
+        all.into_iter().take(3).collect::<Vec<_>>(),
+        "封顶结果 == 全量扫描的前 3 个（序列与坐标一字不差）"
+    );
+    // 分配形状：`Vec::truncate` 不缩容，改前 capacity 跟着 10 万个命中走。
+    assert!(
+        hits.capacity() <= 3 * 2 + 8,
+        "只允许上限量级的分配，实际 capacity={}",
+        hits.capacity()
+    );
+
+    // 「恰好等于命中数」与「上限大于命中数」都不该丢命中
+    assert_eq!(
+        find_in_file(&text, "t.e", true, true, false, 100_000).len(),
+        100_000
+    );
+    assert_eq!(
+        find_in_file(&text, "t.e", true, true, false, 100_001).len(),
+        100_000
+    );
+    assert!(find_in_file(&text, "t.e", true, true, false, 0).is_empty());
+
+    // 预编译入口与 find_in_file 同一条内核（S-4：孪生不各写一份）
+    let matcher = editpad_core::FifMatcher::build("t.e", true, true).unwrap();
+    assert_eq!(
+        editpad_core::find_in_file_with(&text, &matcher, false, 3).unwrap(),
+        find_in_file(&text, "t.e", true, true, false, 3),
+        "find_in_file 与 find_in_file_with 的正则封顶结果必须一致"
+    );
+}
+
+#[test]
+fn find_in_file_regex_limit_is_exactly_the_full_scan_prefix() {
+    // 封顶不得改变命中序列：与全量正则扫描的前缀逐点相等（含 0、超量、
+    // CRLF/孤立 CR、跨行模式、零宽模式、多字节列号）。
+    // 这条是上面那条 capacity 判据的另一半：capacity 只证明"少装了"，
+    // 本条证明"没装错、没漏装"。
+    let long_line = "a1 ".repeat(500);
+    let texts = [
+        "",
+        "x x x x x",
+        "the cat\nthe bat the\n",
+        "a\r\nb\r\na\r\na",
+        "中文中文\n🚀中🚀\n",
+        &long_line,
+    ];
+    for text in texts {
+        for pattern in [r"\d", "word", r"中|🚀", r"\s", "a\na", r"1|the", ""] {
+            for cs in [true, false] {
+                let all = find_all_regex(text, pattern, cs)
+                    .unwrap_or_else(|e| panic!("模式 {pattern:?} 应能编译：{e}"));
+                for limit in [0usize, 1, 2, 7, 999, usize::MAX] {
+                    let mut want = all.clone();
+                    want.truncate(limit);
+                    assert_eq!(
+                        find_in_file(text, pattern, cs, true, false, limit),
+                        want,
+                        "text={text:?} pattern={pattern:?} cs={cs} limit={limit}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

@@ -105,7 +105,8 @@ fn walk_dir(dir: &Path, max_files: usize, depth: usize, out: &mut WalkOutput) {
 }
 
 /// 单文件命中组装（设计 §3.2）。字面走 `crate::search::find_all_limited`
-/// （封顶即早退）、正则走 [`crate::search::find_all_regex`]；整词只作用于字面模式（正则的
+/// （封顶即早退）、正则走 [`crate::search::find_all_regex_compiled_limited`]
+/// （取满封顶即收工，剩余正文不匹配）；整词只作用于字面模式（正则的
 /// 边界语义由模式自身表达，与编辑器查找栏同口径）。`max_hits` = 单文件命中
 /// 封顶，超出截断（截断事实由调用方按总量口径统一明示）。
 ///
@@ -187,6 +188,13 @@ impl FifMatcher {
 /// 回溯超限——引擎默认上限 100 万步，见 `search::regex_replace_propagates_
 /// runtime_errors_instead_of_panic`）。调用方必须把它与「扫完但零命中」
 /// 分开报：两者都当成零命中，就等于替用户把一个坏查询伪装成一个好答案。
+///
+/// ⚠️ `Err` 的可见范围是**前 `max_hits` 条之内**：正则档取满封顶即收工
+/// （[`crate::search::find_all_regex_compiled_limited`]），封顶之后才发生的
+/// 回溯超限不再上抛——那批命中本来就不报，而"跑完整个文件"换来一个用户
+/// 已经看不到的错误，代价是整份命中表先物化（64MB 文件查 `.` ≈ GB 级）。
+/// 封顶之前的失败一条不漏（见测试 `find_in_file_with_reports_regex_
+/// runtime_error_not_empty_hits`）。
 pub fn find_in_file_with(
     text: &str,
     matcher: &FifMatcher,
@@ -194,12 +202,16 @@ pub fn find_in_file_with(
     max_hits: usize,
 ) -> Result<Vec<MatchPos>, String> {
     let mut hits = match matcher {
-        FifMatcher::Regex(re) => crate::search::find_all_regex_compiled(text, re)?,
+        FifMatcher::Regex(re) => {
+            crate::search::find_all_regex_compiled_limited(text, re, max_hits)?
+        }
         FifMatcher::Literal {
             query,
             case_sensitive,
         } => literal_hits(text, query, *case_sensitive, whole_word, max_hits),
     };
+    // 只有整词档还靠这一刀：原始命中必须全量扫（过滤只减不增，先截后滤会
+    // 少报），截断只能发生在过滤之后。字面非整词与正则两档已在内核里取满即停。
     hits.truncate(max_hits);
     Ok(hits)
 }
@@ -330,5 +342,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn regex_cap_stops_the_engine_once_the_limit_is_full() {
+        // L-20：封顶下推进正则跨度内核。返回条数与 capacity 都分不清「取满即停」
+        // 与「扫完全程再截断」——两者结果一字不差，只有"内核被喂了几条跨度"能分开，
+        // 而那正是 GB 级临时内存与 24KB 的差别。
+        let text = "a1 ".repeat(2_000);
+        let matcher = FifMatcher::build(r"\d", true, true).unwrap();
+
+        // 对照项：不封顶时内核逐条物化（否则本用例是空转，红不出任何东西）
+        crate::search::take_regex_spans_pushed();
+        let all = find_in_file_with(&text, &matcher, false, usize::MAX).unwrap();
+        assert_eq!(all.len(), 2_000, "用例前提：命中数 ≫ 上限");
+        assert_eq!(
+            crate::search::take_regex_spans_pushed(),
+            2_000,
+            "对照项：全量档逐条物化"
+        );
+
+        crate::search::take_regex_spans_pushed();
+        let hits = find_in_file_with(&text, &matcher, false, 3).unwrap();
+        assert_eq!(
+            crate::search::take_regex_spans_pushed(),
+            3,
+            "改前为 2 000：整表物化再 truncate"
+        );
+        assert_eq!(
+            hits,
+            all.iter().take(3).copied().collect::<Vec<_>>(),
+            "前 3 条与全量扫描逐点相等（早退不许漏掉任何一条该报的命中）"
+        );
+        // 手算坐标：前缀对拍两边共用同一份换算，钉不住"跨度被挪位/终点写成起点"
+        // 这一类形状（那种错两边一起错）。夹具 "a1 "×2000 无换行，`\d` 命中在第
+        // 1/4/7 列、各 1 字符。
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.line, h.col, h.len_chars))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, 1), (0, 4, 1), (0, 7, 1)],
+            "封顶档的换算结果与改前逐格相同（早退没把游标推进的起点状态带错）"
+        );
+
+        // 封顶 0：连一次引擎都不必驱动
+        crate::search::take_regex_spans_pushed();
+        assert!(find_in_file_with(&text, &matcher, false, 0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            crate::search::take_regex_spans_pushed(),
+            0,
+            "封顶 0 = 整档不跑，不是跑完再丢弃"
+        );
     }
 }

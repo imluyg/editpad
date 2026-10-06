@@ -977,12 +977,59 @@ pub fn find_all_regex_compiled(
     text: &str,
     re: &fancy_regex::Regex,
 ) -> Result<Vec<MatchPos>, String> {
+    Ok(spans_to_matchpos(text, &regex_spans(text, re, usize::MAX)?))
+}
+
+/// [`find_all_regex_compiled`] 的**封顶档**：引擎取满 `limit` 条跨度即收工，
+/// 剩余正文不再匹配，结果恒等于全量扫描的前 `limit` 条。
+///
+/// FIF 的单文件命中走这一档（[`crate::find_in_files::find_in_file_with`]）：
+/// 旧写法「整表物化再 `truncate`」在 64 MB 文件上跑正则查 `.`，要先把
+/// 6 300 万条跨度与同量 [`MatchPos`]（24 B/条）全收进内存，再丢掉尾部——
+/// 面板只留 1 000 条，内存却按命中总数走。字面档的同一件事早在 O-13 就用
+/// [`find_all`] 的封顶版封住了，这条链是那个口径漏掉的另一半。
+pub fn find_all_regex_compiled_limited(
+    text: &str,
+    re: &fancy_regex::Regex,
+    limit: usize,
+) -> Result<Vec<MatchPos>, String> {
+    Ok(spans_to_matchpos(text, &regex_spans(text, re, limit)?))
+}
+
+/// 正则跨度的**封顶内核**，三个入口共用这一份循环（S-4：孪生不各写一份）：
+/// [`find_all_regex_compiled`]（&str 全量档）、[`find_all_regex_compiled_limited`]
+/// （&str 封顶档）与 [`find_all_regex_document_limited`]（Document 封顶档）。
+///
+/// 用 `take(limit)` 而不是「循环体里判满再 break」：`break` 之前 for 已经把
+/// 下一次 `next()` 调出去了，limit 之后那一条仍会驱动引擎走完回溯，还可能把
+/// 它跑出的运行期错误递到 `map_err` 面前。取满即**不再向引擎要下一条**才叫早退。
+fn regex_spans(
+    text: &str,
+    re: &fancy_regex::Regex,
+    limit: usize,
+) -> Result<Vec<(usize, usize)>, String> {
     let mut spans = Vec::new();
-    for m in re.find_iter(text) {
+    for m in re.find_iter(text).take(limit) {
         let m = m.map_err(|e| e.to_string())?;
         spans.push((m.start(), m.end()));
+        #[cfg(test)]
+        REGEX_SPANS_PUSHED.with(|c| c.set(c.get() + 1));
     }
-    Ok(spans_to_matchpos(text, &spans))
+    Ok(spans)
+}
+
+// 测试仪表（L-20）：正则跨度内核一共物化了几条跨度。
+// 返回条数与 capacity 都分不清「取满即停」与「扫完全程再截断」——后者结果
+// 一字不差，只是内存按命中总数走；判据要的是那条被丢掉的本体。
+#[cfg(test)]
+thread_local! {
+    static REGEX_SPANS_PUSHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 取走并清零 [`REGEX_SPANS_PUSHED`]（测试仪表）。
+#[cfg(test)]
+pub(crate) fn take_regex_spans_pushed() -> usize {
+    REGEX_SPANS_PUSHED.with(|c| c.replace(0))
 }
 
 /// 跨度序列 → [`MatchPos`] 的**稀疏档**：逐命中问 rope 的索引树，
@@ -1083,14 +1130,7 @@ pub fn find_all_regex_document_limited(
 ) -> Result<Vec<MatchPos>, String> {
     let re = compile_regex(pattern, case_sensitive)?;
     let text = doc.to_text();
-    let mut spans: Vec<(usize, usize)> = Vec::new();
-    for m in re.find_iter(&text) {
-        if spans.len() >= limit {
-            break; // 取满即停：剩下的命中不收集，剩余正文不匹配
-        }
-        let m = m.map_err(|e| e.to_string())?;
-        spans.push((m.start(), m.end()));
-    }
+    let spans = regex_spans(&text, &re, limit)?;
     Ok(matchpos_for_document(doc, &text, &spans))
 }
 
