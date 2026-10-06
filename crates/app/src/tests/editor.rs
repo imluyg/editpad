@@ -166,11 +166,23 @@ fn closed_untitled_numbers_are_reused_and_saving_clears_them() {
     );
 
     // 另存为转正后序号清除，标签显示真实文件名
+    // （P349：归属改到**落盘成功**那一步提交，所以这里补一条成功回报）
     app.set_active_tab(1);
     let origin = app.tabs[1].id;
     dispatch(
         &mut app,
         Message::SaveTargetChosen(origin, Some(PathBuf::from("C:/x/real.txt"))),
+    );
+    assert!(app.busy, "夹具前提：另存为起了一次写盘");
+    assert_eq!(
+        app.tabs[1].untitled_num,
+        Some(2),
+        "在途期间序号与标签仍是未命名"
+    );
+    let v = app.tabs[1].version;
+    dispatch(
+        &mut app,
+        Message::Saved(origin, v, Ok(editpad_core::EncodeNotice::default())),
     );
     assert_eq!(
         app.tabs[1].path.as_deref(),

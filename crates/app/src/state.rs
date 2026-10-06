@@ -67,6 +67,15 @@ pub(crate) struct Editpad {
     /// Saved/TabSaved 完成后据此关页
     pub(crate) pending_close_tab: Option<u64>,
 
+    /// 「另存为」的目标：`(发起页 id, 选定的路径)`（P349）。
+    ///
+    /// 归属（路径／链接基准目录／未命名序号／编码偏好）**等到落盘成功那一步
+    /// 才提交**——旧实现在对话框回报时就当场改写这几个字段，写盘失败（目标被
+    /// 占用、目录只读、磁盘满）后这一页就认领了一个磁盘上不存在的文件，还被
+    /// 抹掉了该页显式选过的编码偏好；那份"已改名"的错觉会一路带到关窗确认条。
+    /// 记 id 而不是下标：见定案 R-14。
+    pub(crate) pending_save_as: Option<(u64, PathBuf)>,
+
     // ---------- 设置 ----------
     pub(crate) settings: editpad_core::Settings,
     /// 配置文件注入点（测试用）；None = 系统配置目录。
@@ -472,6 +481,7 @@ impl Default for Editpad {
             viewport_size: (0.0, 0.0),
             batch_close_confirm: None,
             pending_close_tab: None,
+            pending_save_as: None,
             // 第 64 轮：会话内「上次关闭」栈，启动为空（不跨重启）
             closed_stack: Vec::new(),
             menu_bar_open: None,

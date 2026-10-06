@@ -355,28 +355,26 @@ impl Editpad {
                 // P146：改路径前作废在途自动保存——曾以调度时刻的旧路径
                 // 落盘，新内容被写进旧文件
                 self.tabs[idx].invalidate_autosave();
-                let tab = &mut self.tabs[idx];
-                tab.path = Some(path.clone());
-                // P133：相对路径链接的解析基准 = 本页文件所在目录
-                tab.editor
-                    .borrow_mut()
-                    .set_base_dir(path.parent().map(|p| p.to_path_buf()));
-                // P25：另存为转正后未命名序号使命完成
-                tab.untitled_num = None;
-                // P67：新路径回到默认 UTF-8 偏好（旧偏好属于旧路径）
-                tab.save_encoding = None;
-                // P63：按目标磁盘现状重记戳（新文件 = None）——用户在
-                // 对话框里显式选中的覆盖目标，不该被自家外部修改守卫拦下
-                tab.file_stamp = file_stamp(&path);
+                // P349（池 ⑤）：**归属不在这里改**。把选定的目标挂到
+                // `pending_save_as` 上，等 `Saved` 的成功分支再提交——旧实现
+                // 在这里就写 `path`/`base_dir`/`untitled_num`/`save_encoding`，
+                // 写盘失败后这一页认领着一个从没写出去的文件，该页显式选过
+                // 的编码偏好也一起没了。
+                self.pending_save_as = Some((tab_id, path.clone()));
                 // 对话框阶段结束再交给落盘的 busy 守卫（原实现在此卡死 busy）
                 self.busy = false;
-                let (task, started) = self.save_page(idx, false);
+                let (task, started) = self.save_page_as(idx, &path);
                 if !started {
                     self.pending_close = false;
+                    self.pending_save_as = None;
                 }
                 task
             }
             Message::Saved(tab_id, version, Ok(notice)) => {
+                // P349：先取走「另存为」那份待提交的归属——不管这条回报最后
+                // 落到哪个分支都不许留残值（留着就会被之后一次无关的落盘成功
+                // 认领，把页改名成一个从没写出去的路径）。
+                let save_as = self.pending_save_as.take().filter(|(id, _)| *id == tab_id);
                 // P146 路由：按发起页 id 归账——保存异步期间切页/关页，
                 // 曾按「完成时刻的活动页」记账（错清别页置脏标记 → 关页
                 // 不再弹确认 → 未保存内容无声丢失）。
@@ -386,6 +384,22 @@ impl Editpad {
                     self.pending_close = false;
                     return Task::none();
                 };
+                // P349（池 ⑤）：归属到这一步才落地——磁盘上确实有这个文件了。
+                // 比 `record_recent` 与 `settle_saved_page` 都早，所以最近文件
+                // 记的是新路径、编码标签按「新路径＝默认 UTF-8」对齐、比对戳
+                // 也重记成新文件的戳（P63 那条按目标重记戳的语义由此承接）。
+                if let Some((_, path)) = save_as {
+                    let tab = &mut self.tabs[idx];
+                    tab.path = Some(path.clone());
+                    // P133：相对路径链接的解析基准 = 本页文件所在目录
+                    tab.editor
+                        .borrow_mut()
+                        .set_base_dir(path.parent().map(|p| p.to_path_buf()));
+                    // P25：另存为转正后未命名序号使命完成
+                    tab.untitled_num = None;
+                    // P67：新路径回到默认 UTF-8 偏好（旧偏好属于旧路径）
+                    tab.save_encoding = None;
+                }
                 // P18 版本守卫：保存期间又有编辑则保持置脏，防止丢改动标记
                 self.tabs[idx].dirty = self.tabs[idx].version != version;
                 self.busy = false;
@@ -460,6 +474,10 @@ impl Editpad {
             }
             Message::Saved(_, _, Err(error)) => {
                 self.busy = false;
+                // P349（池 ⑤）：失败 ⇒ 那份待提交的另存为归属当场作废——
+                // 归属字段一个都不动（页仍叫原名／仍留着该页的编码偏好），
+                // 也不留残值给下一次落盘成功去认领。
+                self.pending_save_as = None;
                 // 保存失败不关窗：留在应用里让用户处理
                 self.pending_close = false;
                 self.set_status_error(
@@ -1033,9 +1051,9 @@ impl Editpad {
         (prev_label, target_label)
     }
 
-    /// 把第 `idx` 页落盘的唯一次序：busy/未命名 → P63 外部改动守卫 →
-    /// `enter_busy` → 写前备份 → 按页编码偏好 + 作废在途自动保存 →
-    /// `Task::perform`。返回 `(任务, 是否真的启动了写盘)`。
+    /// 把第 `idx` 页按**已归属的路径**落盘：目标与编码取本页现状，走
+    /// [`Self::start_save`] 那唯一的次序（含 P63 外部改动守卫）。未命名页
+    /// 没有归属路径 ⇒ 不启动（调用方改走另存为对话框）。
     ///
     /// S-4（孪生合并）：这条次序此前在 `save()` 与页签「保存并关闭」
     /// （`CloseTabSave`）各写一遍，第 146 轮（P172）实测到的后果是残缺那遍
@@ -1052,7 +1070,43 @@ impl Editpad {
         let Some(tab) = self.tabs.get(idx) else {
             return (Task::none(), false);
         };
-        if self.busy || tab.path.is_none() {
+        let Some(path) = tab.path.clone() else {
+            return (Task::none(), false);
+        };
+        // 本页常规落盘：目标 = 已归属的路径，编码 = 该页显式选过的偏好（P67）
+        let encoding = tab.save_encoding;
+        self.start_save(idx, &path, encoding, true, as_close_chain)
+    }
+
+    /// 「另存为」那一条落盘次序（P349）：目标是对话框里**显式选定**的路径，
+    /// 编码按默认 UTF-8（P67：旧偏好属于旧路径），且不查 P63 外部改动守卫
+    /// ——用户刚在对话框里点过这个目标，覆盖它是被授权的动作。
+    ///
+    /// 归属字段（`path`／`base_dir`／`untitled_num`／`save_encoding`）这里
+    /// **一个字都不改**：它们在 `Saved` 的成功分支才提交（见
+    /// [`crate::Editpad::pending_save_as`]）。旧实现在此当场改写 ⇒ 写盘失败
+    /// 后这一页认领着一个磁盘上不存在的文件，还顺手抹掉了该页的编码偏好。
+    pub(crate) fn save_page_as(&mut self, idx: usize, target: &Path) -> (Task<Message>, bool) {
+        self.start_save(idx, target, None, false, false)
+    }
+
+    /// 落盘次序的唯一实现：busy → [P63 外部改动守卫] → `enter_busy` →
+    /// 写前备份 → 按编码偏好 + 作废在途自动保存 → `Task::perform`。
+    /// 返回 `(任务, 是否真的启动了写盘)`。`check_external` = false 时跳过
+    /// P63 守卫（供「另存为」用）；`as_close_chain` = true 时在**真的启动写盘
+    /// 的那一刻**登记 `pending_close_tab`。
+    fn start_save(
+        &mut self,
+        idx: usize,
+        path: &Path,
+        encoding_pref: Option<editpad_core::SaveEncoding>,
+        check_external: bool,
+        as_close_chain: bool,
+    ) -> (Task<Message>, bool) {
+        let Some(tab) = self.tabs.get(idx) else {
+            return (Task::none(), false);
+        };
+        if self.busy {
             return (Task::none(), false);
         }
         // P63 外部修改守卫：磁盘现状 ≠ 记录戳 → 不落盘。场景是页置脏且
@@ -1060,34 +1114,32 @@ impl Editpad {
         // 发），此时 Ctrl+S 会无声覆盖。拦截后把裁决交给 P52 提示条：
         // 〔忽略〕按磁盘现状重记戳，再按一次 Ctrl+S = 两步的有意覆盖；
         // 〔重新加载〕放弃本地改动。干净页同样适用（写 = 无差别覆盖）。
-        let path = tab.path.clone().expect("上方已确认非空");
         let tab_id = tab.id;
-        if let Some(recorded) = tab.file_stamp {
-            if file_changed_externally(Some(recorded), file_stamp(&path)) {
-                let queue = self.external_change.get_or_insert_with(Vec::new);
-                // P220：入队用页 id（下标会在条子停留期间左移）
-                if !queue.contains(&tab_id) {
-                    queue.push(tab_id);
+        if check_external {
+            if let Some(recorded) = tab.file_stamp {
+                if file_changed_externally(Some(recorded), file_stamp(path)) {
+                    let queue = self.external_change.get_or_insert_with(Vec::new);
+                    // P220：入队用页 id（下标会在条子停留期间左移）
+                    if !queue.contains(&tab_id) {
+                        queue.push(tab_id);
+                    }
+                    self.status = self.t(editpad_core::Key::StExternalPaused).to_owned();
+                    return (Task::none(), false);
                 }
-                self.status = self.t(editpad_core::Key::StExternalPaused).to_owned();
-                return (Task::none(), false);
             }
         }
         self.enter_busy();
         // 第 64 轮 ⑭：写前备份磁盘旧版（同步执行——显式保存本就用户等待
         // 语义，≤64MB 复制为一次性毫秒级开销）。提示暂存到落盘完成后
         // 补显：异步 Saved 分支会重写状态栏，先写必被覆盖/抹掉
-        if let Some(note) =
-            crate::perform_backup_before_overwrite(&path, &self.settings.backup_mode)
+        if let Some(note) = crate::perform_backup_before_overwrite(path, &self.settings.backup_mode)
         {
             // P155：备份说明是语言无关的结果类型，展示时按当前语言取文
             let lang = self.lang();
             self.pending_backup_notice = Some(note.text(lang));
         }
         // P67：按页编码偏好落盘（None = 默认 UTF-8，历史行为）
-        let encoding = self.tabs[idx]
-            .save_encoding
-            .unwrap_or(editpad_core::SaveEncoding::Utf8);
+        let encoding = encoding_pref.unwrap_or(editpad_core::SaveEncoding::Utf8);
         // P146：手动保存接管本页写盘——先作废在途自动保存（双写者并发
         // 曾可交错写同一目标；且自动保存回报晚于手动保存落地会搅乱账目）
         self.tabs[idx].invalidate_autosave();
@@ -1100,6 +1152,7 @@ impl Editpad {
         if as_close_chain {
             self.pending_close_tab = Some(tab_id);
         }
+        let path = path.to_path_buf();
         let task = Task::perform(
             async move {
                 let saved = editpad_core::save_document_encoded(&path, &doc, encoding)

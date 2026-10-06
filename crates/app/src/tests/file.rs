@@ -825,11 +825,9 @@ fn p340_save_as_report_lands_on_the_originating_tab() {
         Message::SaveTargetChosen(origin, Some(target.clone())),
     );
 
-    assert_eq!(
-        app.tabs[0].path.as_deref(),
-        Some(target.as_path()),
-        "另存为必须落在发起页上"
-    );
+    // P349：归属改到落盘成功那一步才提交 ⇒ 在途期间这一页还不该认领目标
+    // （旧实现在这里就已经把 path 写上了，失败后留下一个不存在的文件名）
+    assert!(app.tabs[0].path.is_none(), "在途期间不得预先认领目标");
     assert_eq!(
         app.tabs[1].path, other_path_before,
         "别页路径不许被这次回报改写"
@@ -851,6 +849,11 @@ fn p340_save_as_report_lands_on_the_originating_tab() {
         Message::Saved(tid, v, Ok(editpad_core::EncodeNotice::default())),
     );
     assert!(!app.tabs[0].dirty, "发起页保存成功应清脏");
+    assert_eq!(
+        app.tabs[0].path.as_deref(),
+        Some(target.as_path()),
+        "落盘成功才把归属落在**发起页**上（本轮判据的落点）"
+    );
     assert_eq!(
         app.tabs[1].dirty, other_dirty_before,
         "别页账目不许被这次回报改写"
@@ -897,13 +900,96 @@ fn p63_save_as_target_is_restamped_not_blocked() {
         Message::SaveTargetChosen(origin, Some(target.clone())),
     );
 
+    assert!(app.busy, "另存为应直接进入保存管线而不被拦");
+    // P349：归属改到**落盘成功**那一步才提交（失败就不该认领），所以这两条
+    // 断言挪到回报之后——判据本身不变：目标不被 P63 拦下、记的是目标的戳
+    let v = app.tab().version;
+    dispatch(
+        &mut app,
+        Message::Saved(origin, v, Ok(editpad_core::EncodeNotice::default())),
+    );
     assert_eq!(app.tabs[0].path, Some(target.clone()));
     assert_eq!(
         app.tabs[0].file_stamp,
         file_stamp(&target),
         "选定目标即按其磁盘现状重记戳"
     );
-    assert!(app.busy, "另存为应直接进入保存管线而不被拦");
+}
+
+/// 池 ⑤：另存为的归属（路径／链接基准目录／未命名序号／该页的编码偏好）曾
+/// 全部在**落盘之前**生效 ⇒ 写盘失败后这一页认领着一个磁盘上不存在的文件，
+/// 用户为该页显式选过的编码偏好也一起没了（而状态栏那句「保存失败」看着像
+/// 「什么都没发生」）。
+#[test]
+fn failed_save_as_leaves_the_page_ownership_untouched() {
+    let dir = scratch_dir("p349-saveas-fail");
+    // 父目录不存在 ⇒ 这次写盘必然失败（无需模拟权限或磁盘满）
+    let bad = dir.join("没这个目录").join("draft.txt");
+    let mut app = Editpad::default();
+    app.tabs[0].untitled_num = Some(7);
+    app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("稿".into())));
+    let tid = app.tabs[0].id;
+    let v = app.tab().version;
+
+    dispatch(&mut app, Message::SaveTargetChosen(tid, Some(bad.clone())));
+    assert!(app.busy, "夹具前提：确实起了一次写盘");
+    assert!(app.tabs[0].path.is_none(), "在途期间不许先认领目标");
+    assert_eq!(app.tabs[0].untitled_num, Some(7), "在途期间序号仍在");
+
+    dispatch(&mut app, Message::Saved(tid, v, Err("拒绝访问".to_owned())));
+
+    assert!(!app.busy, "失败照常收口 busy");
+    assert!(app.status.contains("保存失败"), "实际 {:?}", app.status);
+    assert!(
+        app.tabs[0].path.is_none(),
+        "失败之后仍不许认领那个不存在的文件"
+    );
+    assert_eq!(app.tabs[0].untitled_num, Some(7), "未命名序号不得被抹");
+    assert_eq!(
+        app.tabs[0].save_encoding,
+        Some(editpad_core::SaveEncoding::Gbk),
+        "该页显式选过的编码偏好不得被抹"
+    );
+    assert!(!bad.exists(), "夹具自证：目标位置什么都没写出来");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 上一轮 ④/⑩ 记过的那类「残值」形状：登记了却没消费干净的意图，会被之后
+/// 一次**无关**的落盘回报认领。失败的那次另存为必须当场作废，否则下一次
+/// Ctrl+S 成功时会把这一页改名成一个从没写过的路径。
+#[test]
+fn a_failed_save_as_cannot_hijack_the_next_plain_save() {
+    let (mut app, path) = loaded_real_file_app("p349-stale-saveas");
+    let dir = scratch_dir("p349-stale-target");
+    let bad = dir.join("没这个目录").join("hijack.txt");
+    let tid = app.tabs[0].id;
+
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let v1 = app.tab().version;
+    dispatch(&mut app, Message::SaveTargetChosen(tid, Some(bad.clone())));
+    assert!(app.busy, "夹具前提：另存为已起一次写盘");
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v1, Err("拒绝访问".to_owned())),
+    );
+
+    // 之后一次普通 Ctrl+S（走原路径）成功：归属必须是**原路径**
+    dispatch(&mut app, Message::SaveRequested);
+    assert!(app.busy, "夹具前提：Ctrl+S 应起一次写盘");
+    let v2 = app.tab().version;
+    dispatch(
+        &mut app,
+        Message::Saved(tid, v2, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert_eq!(
+        app.tabs[0].path.as_deref(),
+        Some(path.as_path()),
+        "失败的那次另存为不得留下残值"
+    );
+    assert_eq!(app.tabs[0].untitled_num, None, "命名页本就没有序号");
+    assert!(!bad.exists(), "更不该往那个路径写东西");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------- P67 编码与行尾控制 ----------
@@ -1232,6 +1318,18 @@ fn p67_loaded_and_save_as_reset_encoding_preference() {
     let target = scratch_dir("p67-pref-reset2").join("new.txt");
     let origin = app.tab().id;
     dispatch(&mut app, Message::SaveTargetChosen(origin, Some(target)));
+    // P349：偏好归到「落盘成功」那一步才重置（失败时一个字段都不许动，
+    // 那条判据见 `failed_save_as_leaves_the_page_ownership_untouched`）
+    assert_eq!(
+        app.tab().save_encoding,
+        Some(editpad_core::SaveEncoding::Utf8Bom),
+        "在途期间不得抢先重置该页的编码偏好"
+    );
+    let v = app.tab().version;
+    dispatch(
+        &mut app,
+        Message::Saved(origin, v, Ok(editpad_core::EncodeNotice::default())),
+    );
     assert!(app.tab().save_encoding.is_none(), "另存为必须重置编码偏好");
 }
 
