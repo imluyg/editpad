@@ -2339,17 +2339,20 @@ fn cross_tab_whole_word_mode_reports_oversized_pages_instead_of_freezing() {
 
 #[test]
 fn cross_tab_regex_computes_off_the_ui_thread_and_applies_by_tab_id() {
-    // P148 的纪律在跨标签这里更强（一次跑 N 份文档）：投递时正文一定没变，
-    // 结果按页 id 落地（下标会随关页漂移），未知 id 与零处数都不落地。
-    let mut app = tabs_with_contents(&["foo a foo", "b foo"]);
+    // P148 的纪律在跨标签这里更强（一次跑 N 份文档）：结果按页 id 落地（下标会随
+    // 关页漂移），未知 id 与零处数都不落地。P343 再补一问：版本变了的那一页不落地。
+    let mut app = tabs_with_contents(&["foo a foo", "b foo", "quiet"]);
     app.find_query = "f(o)o".into();
     app.replace_query = "x$1".into();
     app.regex_enabled = true;
     let ids: Vec<u64> = app.tabs.iter().map(|t| t.id).collect();
+    let vers: Vec<u64> = app.tabs.iter().map(|t| t.version).collect();
 
     let _ = app.update(Message::ReplaceAllInTabs);
 
-    assert!(app.busy, "正则替换要进 busy 才能挡住并发改写");
+    // busy 只挡界面重入，**不挡编辑**（`apply_edit` 的条件是 `active_load`）——
+    // 所以"回报内容与发起时刻一致"要靠版本比对来保证，见下一条用例
+    assert!(app.busy, "正则替换要进 busy");
     assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "foo a foo");
     assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "b foo");
     assert!(!app.tabs[0].dirty, "后台算完之前不该有落账");
@@ -2372,10 +2375,12 @@ fn cross_tab_regex_computes_off_the_ui_thread_and_applies_by_tab_id() {
         &mut app,
         Message::ReplaceAllTabsRegexDone(
             vec![
-                (ids[0], r0),
-                (ids[1], r1),
-                (gone, Ok(("不该落地".to_owned(), 7))),
-                (ids[0], Ok(("零处数也不落地".to_owned(), 0))),
+                (ids[0], vers[0], r0),
+                (ids[1], vers[1], r1),
+                (gone, vers[0], Ok(("不该落地".to_owned(), 7))),
+                // 零处数走第三页（不是同一页的二次回报：P343 之后那种回报会被
+                // 版本守卫挡下，混在这里就分不清是哪道闸门拦的了）
+                (ids[2], vers[2], Ok(("零处数也不落地".to_owned(), 0))),
             ],
             0,
             0,
@@ -2384,8 +2389,66 @@ fn cross_tab_regex_computes_off_the_ui_thread_and_applies_by_tab_id() {
 
     assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "xo a xo");
     assert_eq!(app.tabs[1].editor.borrow().doc.to_text(), "b xo");
+    assert_eq!(
+        app.tabs[2].editor.borrow().doc.to_text(),
+        "quiet",
+        "零处数的那一页一个字节都不该动"
+    );
     assert!(!app.busy, "回报落地后必须退出 busy");
     assert_eq!(app.status, "共 2 个标签替换 3 处", "实得 {:?}", app.status);
+}
+
+#[test]
+fn cross_tab_regex_report_skips_the_tab_edited_while_running() {
+    // P343：`apply_edit` 只挡 `active_load` 不挡 busy ⇒ 后台一次跑 N 份文档期间，
+    // 用户还能在某一页继续打字。旧写法把那份旧正文整文覆盖回该页＝新打的字一步没了。
+    let mut app = tabs_with_contents(&["foo a", "foo b"]);
+    app.find_query = "f(o)o".into();
+    app.replace_query = "x$1".into();
+    app.regex_enabled = true;
+    let ids: Vec<u64> = app.tabs.iter().map(|t| t.id).collect();
+    let vers: Vec<u64> = app.tabs.iter().map(|t| t.version).collect();
+    let _ = app.update(Message::ReplaceAllInTabs);
+    assert!(app.busy, "夹具前提：后台在途");
+
+    // 后台期间只有页 1 又被编辑过
+    dispatch(&mut app, Message::SwitchTab(1));
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+    let typed = app.tabs[1].editor.borrow().doc.to_text();
+    assert_eq!(
+        app.tabs[1].version,
+        vers[1] + 1,
+        "夹具前提：busy 不挡编辑，这一页的版本确实推进了"
+    );
+    assert_eq!(app.tabs[0].version, vers[0], "夹具前提：另一页没动");
+
+    let r0 = editpad_core::replace_all_regex("foo a", "f(o)o", "x$1", true).unwrap();
+    let r1 = editpad_core::replace_all_regex("foo b", "f(o)o", "x$1", true).unwrap();
+    dispatch(
+        &mut app,
+        Message::ReplaceAllTabsRegexDone(
+            vec![(ids[0], vers[0], Ok(r0)), (ids[1], vers[1], Ok(r1))],
+            0,
+            0,
+        ),
+    );
+
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "xo a",
+        "版本没变的那一页照常落地"
+    );
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        typed,
+        "版本对不上的那一页必须整份丢弃旧结果"
+    );
+    assert!(
+        app.status.contains("1 个标签未处理"),
+        "丢弃要计入「未处理」并出声，实得 {:?}",
+        app.status
+    );
+    assert!(!app.busy);
 }
 
 #[test]
@@ -2397,10 +2460,14 @@ fn cross_tab_regex_pack_honours_read_only_and_the_cumulative_budget() {
 
     let (jobs, read_only, unprocessed) = Editpad::pack_regex_jobs(&app.tabs, 10);
 
-    let got: Vec<u64> = jobs.iter().map(|(id, _)| *id).collect();
+    let got: Vec<u64> = jobs.iter().map(|(id, _, _)| *id).collect();
     assert_eq!(got, vec![app.tabs[0].id], "只有装得下的那一页进任务");
     assert_eq!(jobs.len(), 1, "夹具自证：预算 10 只够一页");
-    assert_eq!(jobs[0].1, "12345", "进任务的是该页正文快照");
+    assert_eq!(jobs[0].2, "12345", "进任务的是该页正文快照");
+    assert_eq!(
+        jobs[0].1, app.tabs[0].version,
+        "P343：随任务一起带走该页的内容版本"
+    );
     assert_eq!(
         (read_only, unprocessed),
         (1, 1),

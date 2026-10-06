@@ -220,9 +220,11 @@ fn restore_window_geometry(s: &editpad_core::Settings) -> (iced::Size, window::P
     (size, position)
 }
 
-/// A7：跨标签正则替换的后台回报载荷——逐项 `(页 id, 该页的替换结果)`。
+/// A7：跨标签正则替换的后台回报载荷——逐项 `(页 id, 发起时该页的内容版本, 该页的替换结果)`。
+/// 版本是 P343 补的：`busy` 不挡编辑（`apply_edit` 只挡 `active_load`），后台算着的时候
+/// 那一页可能又被改过，旧结果整文覆盖就会吃掉那些改动 ⇒ 落地前先比版本，对不上就跳过。
 /// 起名字是因为裸写这层嵌套会被 clippy `type_complexity` 拒收。
-pub(crate) type CrossTabRegexResults = Vec<(u64, Result<(String, usize), String>)>;
+pub(crate) type CrossTabRegexResults = Vec<(u64, u64, Result<(String, usize), String>)>;
 
 #[derive(Debug, Clone)]
 enum Message {

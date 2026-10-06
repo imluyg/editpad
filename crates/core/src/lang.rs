@@ -834,7 +834,7 @@ pub fn fmt_replaced_in_tabs(
             format!("共 {tabs} 个标签替换 {total} 处"),
             "，",
             format!("{skipped_read_only} 个只读标签未改"),
-            format!("{skipped_unprocessed} 个标签未处理（本次替换的正文上限，或正则运行期报错）"),
+            format!("{skipped_unprocessed} 个标签未处理（本次替换的正文上限、正则运行期报错，或该页在后台期间又被改过）"),
         ),
         Lang::En => (
             match tabs {
@@ -843,7 +843,7 @@ pub fn fmt_replaced_in_tabs(
             },
             "; ",
             format!("{skipped_read_only} read-only tab(s) left untouched"),
-            format!("{skipped_unprocessed} tab(s) skipped (per-run text budget, or a regex runtime error)"),
+            format!("{skipped_unprocessed} tab(s) skipped (per-run text budget, a regex runtime error, or the tab changed while the background pass was running)"),
         ),
     };
     if skipped_read_only > 0 {

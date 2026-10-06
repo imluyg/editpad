@@ -145,7 +145,7 @@ impl Editpad {
         Task::batch([self.schedule_find_scan(), self.maybe_schedule_autosave()])
     }
 
-    /// A7 跨标签正则的装料：算出要送后台的 `(页 id, 正文)`，以及两类没送去的页
+    /// A7 跨标签正则的装料：算出要送后台的 `(页 id, 该页内容版本, 正文)`，以及两类没送去的页
     /// （只读 / 未处理）。
     ///
     /// 做成**纯函数**并把上限当参数收进来，是因为后台 Task 在 headless 夹具里
@@ -155,11 +155,13 @@ impl Editpad {
     /// * 只读页不进任务，改由 `read_only` 计数（它一步都不该动）；
     /// * `max_chars` 是**整批累计**预算：单文档正则路径今天就物化 4M 字符，
     ///   让 N 个标签共用同一份 ⇒ 峰值不超过今天；装不下的页计 `unprocessed`。
+    /// * P343：随页 id 一起带走**该页当前的内容版本**——后台期间 `busy` 不挡编辑，
+    ///   回报落地前先问这一页有没有又变过。
     pub(crate) fn pack_regex_jobs(
         tabs: &[Tab],
         max_chars: usize,
-    ) -> (Vec<(u64, String)>, usize, usize) {
-        let mut jobs: Vec<(u64, String)> = Vec::new();
+    ) -> (Vec<(u64, u64, String)>, usize, usize) {
+        let mut jobs: Vec<(u64, u64, String)> = Vec::new();
         let mut read_only = 0usize;
         let mut unprocessed = 0usize;
         let mut budget = max_chars;
@@ -175,7 +177,7 @@ impl Editpad {
                 continue;
             }
             budget -= chars;
-            jobs.push((tab.id, ed.doc.to_text()));
+            jobs.push((tab.id, tab.version, ed.doc.to_text()));
         }
         (jobs, read_only, unprocessed)
     }
@@ -198,9 +200,10 @@ impl Editpad {
         Task::perform(
             async move {
                 jobs.into_iter()
-                    .map(|(id, text)| {
+                    .map(|(id, version, text)| {
                         (
                             id,
+                            version,
                             editpad_core::replace_all_regex(
                                 &text,
                                 &pattern,
@@ -710,17 +713,25 @@ impl Editpad {
                 )
             }
             Message::ReplaceAllTabsRegexDone(results, read_only, mut unprocessed) => {
-                // busy 包裹期间文档不可变 ⇒ 回报内容与发起时刻一致，按页 id
-                // 投递即可（下标会随关页漂移，与 HlPaved 同一口径）；找不到的
-                // id＝期间被关掉的那一页，直接丢弃。
+                // 按页 id 投递（下标会随关页漂移，与 HlPaved 同一口径），找不到的
+                // id＝期间被关掉的那一页，直接丢弃。P343 补上第二问：**那一页在这段
+                // 时间有没有又被改过**——旧注释写「busy 包裹期间文档不可变」是假的
+                // （`apply_edit` 只挡 `active_load` 不挡 busy），所以版本对不上就整份
+                // 丢弃该页结果，计入「未处理」，否则后台算出的旧正文会把用户新打的字
+                // 一步盖掉。
                 self.busy = false;
                 let mut changed_tabs = 0usize;
                 let mut total = 0usize;
                 let mut touched_active = false;
-                for (tab_id, result) in results {
+                for (tab_id, version, result) in results {
                     let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
                         continue;
                     };
+                    if self.tabs[idx].version != version {
+                        // 这一页在后台期间被编辑过 ⇒ 这份结果已过期
+                        unprocessed += 1;
+                        continue;
+                    }
                     let (new_contents, count) = match result {
                         Ok(pair) => pair,
                         // 运行期报错（回溯触限那类）：这一页不动，计入「未处理」
