@@ -6,6 +6,10 @@ pub(crate) struct HeartbeatPayload {
     pub(crate) pages: Vec<editpad_core::snapshot::HeartbeatPage>,
     pub(crate) active: usize,
     pub(crate) next_untitled: u64,
+    /// 崩溃恢复提示还挂着时，那份旧清单引用的页文件名——新清单不引用它们，
+    /// 传下去让 GC 与配额两把刀都绕开（不传就等于把待恢复的内容删了）。
+    /// 提示已收起 / 从未弹出时为空。
+    pub(crate) keeping: Vec<String>,
     /// 需要重写内容的 (派发时刻下标, 页 id, 派发时刻内容版本)——回报据此
     /// 回填账目。**下标只用于取清单里对应那一项的内容文件名**（清单按派发
     /// 时刻的顺序写出），定位页必须用 id：在途关页会让下标整体左移，而版本

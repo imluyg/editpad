@@ -747,6 +747,7 @@ async fn drive_heartbeat(payload: HeartbeatPayload) -> Message {
             &payload.pages,
             payload.active,
             payload.next_untitled,
+            &payload.keeping,
         )
         .map_err(|e| e.to_string())
     })

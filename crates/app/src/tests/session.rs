@@ -1050,6 +1050,70 @@ fn external_change_prompt_ignores_survive_a_queued_tab_closing() {
 }
 
 #[test]
+fn heartbeat_while_recover_prompt_is_up_spares_the_crashed_pages() {
+    // core 侧那两条只断"名单传下去就会被保护"；这一格钉的是**应用真的把名单
+    // 传下去了**：提示挂着 → 用户敲一个字 → 心跳写出新清单 → 〔恢复〕仍要能
+    // 把崩前那页读回来（改前：新清单不引用它 ⇒ GC 删掉 ⇒ 恢复按"内容缺失"记账）。
+    let dir = snapshot_scratch_dir("p339-heartbeat-pending");
+    let mut crashed = clean_named_tab("C:/w/crash.txt");
+    crashed.dirty = true;
+    let old = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab: crashed,
+            doc: editpad_core::Document::from_str("崩前没存的那段话"),
+        }],
+        0,
+        1,
+    )
+    .unwrap();
+    let pending_tab = old.tabs[0].clone();
+    assert!(
+        pending_tab.file.is_some(),
+        "夹具前提：崩前那页确实有内容文件可被删"
+    );
+
+    let mut app = Editpad::default();
+    app.recover_prompt = Some(old);
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/w/live.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("live"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+
+    let outcome = app.run_heartbeat_cycle(&dir);
+    assert!(
+        outcome.expect("有置脏页就应有一次提交").result.is_ok(),
+        "心跳提交本身必须成功，否则保护与否都无从谈起"
+    );
+    assert_eq!(
+        editpad_core::snapshot::read_page(&dir, &pending_tab).map(|d| d.to_text()),
+        Some("崩前没存的那段话".to_owned()),
+        "提示挂着时的心跳不许回收要恢复的内容"
+    );
+
+    // 用户此刻才点〔恢复〕：这条链路的"这一页读不读得回来"是最终后果
+    let _ = app.accept_session_recover(Some(dir.clone()));
+    assert_eq!(
+        app.restore_failed, 0,
+        "恢复不得把这页记成内容缺失（改前：GC 删了文件 ⇒ 这里 +1）"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn restore_chain_resumes_after_an_unrelated_load_settles() {
     let dir = snapshot_scratch_dir("p218-park");
     let manifest = editpad_core::snapshot::write_session(
@@ -2048,6 +2112,7 @@ fn heartbeat_ok_does_not_clear_stale_when_tabs_closed_in_flight() {
         &payload.pages,
         payload.active,
         payload.next_untitled,
+        &payload.keeping,
     )
     .map_err(|e| e.to_string());
     app.heartbeat_apply(HeartbeatOutcome {
@@ -2096,6 +2161,7 @@ fn heartbeat_backfill_follows_the_page_not_the_slot() {
         &payload.pages,
         payload.active,
         payload.next_untitled,
+        &payload.keeping,
     )
     .map_err(|e| e.to_string());
     let manifest = result.clone().expect("写盘应成功");

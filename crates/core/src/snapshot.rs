@@ -192,6 +192,9 @@ pub fn write_session(
         pages,
         active,
         next_untitled,
+        // 退出流结构上没有保护名单：这一步换掉的是清单本身，崩溃前那份会话
+        // 从此再无持有者——保住它的页文件也没有人会去读（"恢复提示挂着时
+        // 该不该允许退出"是另一件事，不在本条口径内）。
         WriteMode::Full,
     )
 }
@@ -218,11 +221,17 @@ pub struct HeartbeatPage {
 /// * **逐页意图**由 [`HeartbeatPage::rewrite`] 表达：变化页重写、未变页
 ///   复用旧文件、超限页只记账不落内容。复用的旧代名由 GC 与配额护栏
 ///   按「清单引用」保护，不会被当作残留回收。
+///
+/// `keeping` ＝**新清单不引用、但此刻仍然有用**的页文件名（生产里只有一种
+/// 来源：崩溃恢复提示还挂着时，内存里那份旧清单引用的页）。心跳每拍都在写
+/// 新代次，而那份旧清单的持有者在应用状态里、不在磁盘上——不传这个名单，
+/// 回收就会把用户点〔恢复〕时要读的内容删掉（第 248 轮）。
 pub fn write_heartbeat_session(
     dir: &Path,
     pages: &[HeartbeatPage],
     active: usize,
     next_untitled: u64,
+    keeping: &[String],
 ) -> Result<SessionManifest, CoreError> {
     let flags: Vec<bool> = pages.iter().map(|p| p.rewrite).collect();
     let plain: Vec<SessionPage> = pages.iter().map(|p| p.page.clone()).collect();
@@ -232,18 +241,29 @@ pub fn write_heartbeat_session(
         &plain,
         active,
         next_untitled,
-        WriteMode::Heartbeat(&flags),
+        WriteMode::Heartbeat {
+            flags: &flags,
+            keeping,
+        },
     )
 }
 
 /// 提交模式：普通全量（退出流） vs 心跳增量（运行中周期巡检）。
+///
+/// `keeping`（只有心跳带）＝**新清单不引用、但此刻仍有持有者**的页文件名，
+/// 回收与配额两把刀都要绕开它。收在模式里而不是函数的第 6 个参数上：
+/// 退出流结构上就没有这份名单（它换掉的是清单本身），让它也传 `&[]`
+/// 只会把"谁该带名单"这件事变成每个调用点的口头上册。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WriteMode<'a> {
     /// 置脏页一律重写新文件；清单 clean_exit=true。
     Full,
-    /// 心跳增量：携带每页的 rewrite 标记（见 [`HeartbeatPage`]）；
+    /// 心跳增量：携带每页的 rewrite 标记（见 [`HeartbeatPage`]）与保护名单；
     /// 清单 clean_exit=false。
-    Heartbeat(&'a [bool]),
+    Heartbeat {
+        flags: &'a [bool],
+        keeping: &'a [String],
+    },
 }
 
 /// [`write_session`] 的可注入代次版本：测试用固定代次即可预判全部
@@ -280,7 +300,7 @@ pub(crate) fn write_session_at(
             // 心跳模式按逐页意图分流；普通模式一律写新文件
             let skip_rewrite = match mode {
                 WriteMode::Full => false,
-                WriteMode::Heartbeat(flags) => !flags.get(index).copied().unwrap_or(false),
+                WriteMode::Heartbeat { flags, .. } => !flags.get(index).copied().unwrap_or(false),
             };
             if skip_rewrite {
                 // file 已填 = 内容未变，沿用旧文件；file 为 None = 超限
@@ -320,15 +340,25 @@ pub(crate) fn write_session_at(
     )?;
 
     // 提交成功后回收残留页文件（上一代 / 中途失败孤儿）；
-    // 本清单引用的文件（含心跳复用的旧代名）受保护不回收
-    let referenced: std::collections::HashSet<String> = manifest
+    // 本清单引用的文件（含心跳复用的旧代名）受保护不回收。
+    //
+    // `keeping` 是**清单之外**还得活着的页：崩溃恢复提示挂着时，内存里那份
+    // 旧清单（`SessionManifest`）就是那些页的唯一持有者——新清单不引用它们，
+    // 而用户随时可能点〔恢复〕按名读回。回收只看"新清单引用了谁"就会把
+    // 待恢复的内容删掉（第 248 轮定案 R-13 的第 1 条）。
+    let keeping: &[String] = match mode {
+        WriteMode::Full => &[],
+        WriteMode::Heartbeat { keeping, .. } => keeping,
+    };
+    let mut referenced: std::collections::HashSet<String> = manifest
         .tabs
         .iter()
         .filter_map(|t| t.file.clone())
         .collect();
+    referenced.extend(keeping.iter().cloned());
     gc_stale_pages(dir, generation, &referenced);
-    // 配额护栏：超限时按最旧优先淘汰，永不触碰本会话引用的文件
-    enforce_quota(dir, SNAPSHOT_QUOTA_BYTES);
+    // 配额护栏：超限时按最旧优先淘汰，永不触碰本会话引用的文件（含上面那份名单）
+    enforce_quota_keeping(dir, SNAPSHOT_QUOTA_BYTES, keeping);
     Ok(manifest)
 }
 
@@ -394,9 +424,18 @@ pub fn clear_session(dir: &Path) {
 /// 直到回到限额以内。当前清单引用的文件永不淘汰（它们是活会话）。
 /// 返回被淘汰的文件数。
 pub fn enforce_quota(dir: &Path, cap_bytes: u64) -> usize {
-    let protected: std::collections::HashSet<String> = read_manifest(dir)
+    enforce_quota_keeping(dir, cap_bytes, &[])
+}
+
+/// [`enforce_quota`] 的**带保护名单版**：除了磁盘上当前清单引用的页，
+/// 额外保住 `keeping` 里那些"新清单不引用但仍有持有者"的页
+/// （见 [`write_heartbeat_session`] 的 `keeping` 口径——淘汰与回收是两把
+/// 刀，只喂住 GC 那一把等于换个地方删）。
+pub fn enforce_quota_keeping(dir: &Path, cap_bytes: u64, keeping: &[String]) -> usize {
+    let mut protected: std::collections::HashSet<String> = read_manifest(dir)
         .map(|m| m.tabs.iter().filter_map(|t| t.file.clone()).collect())
         .unwrap_or_default();
+    protected.extend(keeping.iter().cloned());
 
     // 不受保护页的 (修改时间, 大小, 路径)；受保护页只累计体积
     let mut evictable: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
@@ -487,6 +526,7 @@ mod tests {
             ],
             0,
             1,
+            &[], // 无待恢复名单
         )
         .expect("心跳提交应成功");
         assert_eq!(
@@ -831,6 +871,114 @@ mod tests {
         clear_session(&dir);
     }
 
+    // ---------- 待恢复页的保护（第 248 轮，定案 R-13） ----------
+
+    #[test]
+    fn heartbeat_keeping_spares_pages_the_pending_recovery_still_owns() {
+        // 缺陷形状：崩溃后启动弹「未保存的工作区」提示，那份旧清单持有的页文件
+        // 只登记在内存里；用户先敲一个字 → 下一拍心跳写出**不引用它们**的新清单
+        // → GC 按「新清单引用了谁」回收 → 用户点〔恢复〕时按名读回只剩"内容缺失"。
+        let dir = scratch_dir("pending-keep");
+        let mut crashed = named_tab("C:/crash.txt", true);
+        crashed.dirty = true;
+        let old = write_session(&dir, &[page(crashed, "崩前没写的这段话")], 0, 1).unwrap();
+        let pending = old.tabs[0].file.clone().expect("置脏页必须有内容文件");
+
+        let mut live = named_tab("C:/live.txt", true);
+        live.dirty = true;
+        let committed = write_heartbeat_session(
+            &dir,
+            &[HeartbeatPage {
+                page: page(live, "心跳写出的新内容"),
+                rewrite: true,
+            }],
+            0,
+            2,
+            std::slice::from_ref(&pending),
+        )
+        .unwrap();
+        assert!(
+            committed.tabs[0].file.as_deref() != Some(pending.as_str()),
+            "夹具前提：新清单确实不引用那份待恢复页（否则保护是空断言）"
+        );
+        assert!(dir.join(&pending).exists(), "带名单的心跳不得回收待恢复页");
+        assert_eq!(
+            read_page(&dir, &old.tabs[0]).map(|d| d.to_text()),
+            Some("崩前没写的这段话".to_owned()),
+            "按旧清单逐页读回必须仍拿得到内容（这才是用户点〔恢复〕要的东西）"
+        );
+
+        // 对照项：同一个目录再来一拍**没带名单**的心跳 ⇒ 必须真的被删。
+        // 少这一格，上面的"存在"就可能只是路径拼错或夹具根本没走到回收。
+        let mut live2 = named_tab("C:/live2.txt", true);
+        live2.dirty = true;
+        write_heartbeat_session(
+            &dir,
+            &[HeartbeatPage {
+                page: page(live2, "第三拍"),
+                rewrite: true,
+            }],
+            0,
+            3,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            !dir.join(&pending).exists(),
+            "对照组：不传名单时那一页必须被 GC 删掉（证明这确实是 GC 管的东西）"
+        );
+        assert!(
+            read_page(&dir, &old.tabs[0]).is_none(),
+            "删掉之后按名读回＝内容缺失，正是改前那条用户可见的后果"
+        );
+
+        clear_session(&dir);
+    }
+
+    #[test]
+    fn quota_keeping_spares_the_pending_recovery_page() {
+        // 第二把刀：`gc_stale_pages` 之外还有 `enforce_quota`——它按 mtime 从旧到
+        // 新淘汰，而"待恢复页"恰恰总是最旧的那一批。只喂住 GC 等于换个地方删。
+        let dir = scratch_dir("quota-keeping");
+        let big = "a".repeat(200_000);
+        let mut crashed = named_tab("C:/crash.txt", true);
+        crashed.dirty = true;
+        let old = write_session(&dir, &[page(crashed, &big)], 0, 1).unwrap();
+        let pending = old.tabs[0].file.clone().unwrap();
+
+        let mut live = named_tab("C:/live.txt", true);
+        live.dirty = true;
+        write_heartbeat_session(
+            &dir,
+            &[HeartbeatPage {
+                page: page(live, &big),
+                rewrite: true,
+            }],
+            0,
+            2,
+            std::slice::from_ref(&pending),
+        )
+        .unwrap();
+
+        // 总额 400KB > 300KB：带名单时两者都受保护 ⇒ 无可淘汰
+        assert_eq!(
+            enforce_quota_keeping(&dir, 300_000, std::slice::from_ref(&pending)),
+            0,
+            "带名单的配额护栏一个都不许删"
+        );
+        assert!(dir.join(&pending).exists(), "超额也不许动待恢复页");
+
+        // 对照项：同一目录、同一配额、不传名单 ⇒ 最旧的待恢复页必须出局
+        assert_eq!(
+            enforce_quota_keeping(&dir, 300_000, &[]),
+            1,
+            "对照组：不传名单时这一页正是被淘汰的那一个"
+        );
+        assert!(!dir.join(&pending).exists());
+
+        clear_session(&dir);
+    }
+
     // ---------- 配额护栏 ----------
 
     #[test]
@@ -930,6 +1078,7 @@ mod tests {
             ],
             0,
             1,
+            &[], // 无待恢复名单
         )
         .unwrap();
         assert!(
