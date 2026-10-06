@@ -508,12 +508,43 @@ fn default_snapshot_interval_secs() -> u32 {
 
 impl Settings {
     pub fn load_from(path: &Path) -> Self {
-        let mut settings: Settings = fs::read_to_string(path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut settings = Self::parse_lenient(&fs::read_to_string(path).unwrap_or_default());
         settings.normalize();
         settings
+    }
+
+    /// 解析偏好文件：**一个坏字段不许连坐其余偏好**。
+    ///
+    /// 旧形状是 `toml::from_str(&s).ok().unwrap_or_default()`：某个字段类型
+    /// 不符（手改 config.toml、或旧版本里同名字段形状不同）时 serde 把
+    /// **整份**文件判失败 ⇒ 主题／语言／键位／最近文件／窗口几何一起回默认，
+    /// 而窗口几何每次启动自动落盘＝把这一次丢失固化进磁盘。
+    ///
+    /// 做法＝先整份试解析（正常文件仍只付一次解析成本）；失败才退到「逐键
+    /// 累加，加上这一键后解析不过就丢掉这一键」。字段的合法类型仍只由
+    /// derive 出来的 `Deserialize` 定义一处——这里不维护第二份字段清单，
+    /// 将来新增字段不会在恢复路径上漏登记。
+    fn parse_lenient(text: &str) -> Self {
+        if let Ok(settings) = toml::from_str::<Self>(text) {
+            return settings;
+        }
+        let Ok(table) = toml::from_str::<toml::Table>(text) else {
+            // 语法本身坏了：没有任何键能可信地取回，回默认（旧行为）
+            return Self::default();
+        };
+        let mut kept = toml::Table::new();
+        for (key, value) in table {
+            let mut probe = kept.clone();
+            probe.insert(key, value);
+            // 加上这一键后整份仍读得通才留它，否则只有这一键回默认
+            if toml::Value::Table(probe.clone()).try_into::<Self>().is_ok() {
+                kept = probe;
+            }
+        }
+        // kept 每加一键都验证过 ⇒ 这里必然成功，default 只是不再解一次的兜底
+        toml::Value::Table(kept)
+            .try_into::<Self>()
+            .unwrap_or_default()
     }
 
     /// 把可能来自旧文件或手改文件的字段值收敛到合法域。
@@ -742,6 +773,98 @@ mod tests {
         let dir = scratch_dir("missing");
         let path = dir.join("no-such.toml");
         assert_eq!(Settings::load_from(&path), Settings::default());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 池 ⑨ 的探针（先量后果）：配置里**一个**字段类型写错时，其余偏好
+    /// 到底还留不留。这份文件模拟「用户真的用过」：主题、语言、防抖秒数、
+    /// 最近文件全偏离默认，只有 `font_size` 被写成字符串。
+    #[test]
+    fn one_bad_field_does_not_reset_the_whole_preference_file() {
+        let dir = scratch_dir("p346-one-bad");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // settings_version = 1：绕开 P63 那条 v0→v1 迁移（它会把
+        // autosave_enabled 强制打回 false），别让迁移干扰本轮要量的那一格
+        fs::write(
+            &path,
+            "settings_version = 1\n\
+             theme = \"dark\"\n\
+             language = \"en\"\n\
+             font_size = \"big\"\n\
+             autosave_enabled = true\n\
+             autosave_delay_secs = 7\n\
+             recent_files = [\"C:/a.txt\"]\n",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.font_size, DEFAULT_FONT_SIZE, "坏字段自己回默认");
+        assert_eq!(loaded.theme, THEME_DARK, "主题不该被别字段连坐");
+        assert_eq!(loaded.language, crate::lang::Lang::En, "语言同理");
+        assert!(loaded.autosave_enabled, "即时保存开关同理");
+        assert_eq!(loaded.autosave_delay_secs, 7, "防抖秒数同理");
+        assert_eq!(
+            loaded.recent_files,
+            vec!["C:/a.txt".to_owned()],
+            "最近文件同理"
+        );
+
+        // 放大器那一半（同一主张的第二层，不另立用例）：偏好一旦连坐回默认，
+        // 下一次自动落盘（窗口几何每次都写这份 config）就把这次丢失**固化**
+        // 进磁盘，重启再也找不回来
+        loaded.save_to(&path).unwrap();
+        assert_eq!(
+            Settings::load_from(&path).theme,
+            THEME_DARK,
+            "回写不得把连坐后的默认固化下来"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 上面那条只放一个坏键。若恢复路径做成「剔掉第一个坏键后重试一次就收手」，
+    /// 第二个坏键仍会连坐其余偏好——这条专门咬那种半吊子循环。
+    #[test]
+    fn several_bad_fields_lose_only_themselves() {
+        let dir = scratch_dir("p346-several-bad");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "settings_version = 1\n\
+             theme = \"dark\"\n\
+             font_size = \"big\"\n\
+             autosave_delay_secs = \"seven\"\n\
+             edge_column = 80\n\
+             recent_files = \"C:/a.txt\"\n",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.theme, THEME_DARK, "合法键一个都不许丢");
+        assert_eq!(loaded.edge_column, 80, "合法键一个都不许丢");
+        assert_eq!(
+            loaded.font_size, DEFAULT_FONT_SIZE,
+            "类型写错的那一键自己回默认"
+        );
+        assert_eq!(loaded.autosave_delay_secs, default_autosave_delay_secs());
+        assert!(loaded.recent_files.is_empty(), "该是数组却写了字符串");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 恢复路径**不**去 salvage 语法本身坏掉的文件：那时任何键的取值都不可信，
+    /// 回默认是旧行为。这条钉住「坏语法」与「坏字段」两档没被混成半读。
+    #[test]
+    fn broken_toml_syntax_still_falls_back_to_default() {
+        let dir = scratch_dir("p346-syntax");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, "theme = \"dark\"\nrecent_files = [\n").unwrap();
+
+        assert_eq!(Settings::load_from(&path), Settings::default());
+
         fs::remove_dir_all(&dir).ok();
     }
 
