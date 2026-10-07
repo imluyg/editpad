@@ -384,6 +384,8 @@ key_table! {
     { RestoreTitle => "检测到上次未正常退出的未保存工作区", "An unsaved workspace from an abnormal exit was found" },
     { ButtonRestore => "恢复", "Restore" },
     { ButtonDiscard => "丢弃", "Discard" },
+    { RestoreOverwriteWarn => "当前标签页里有未保存的改动，恢复会把它们全部替换掉。再点一次即放弃这些改动并恢复。", "Restoring would replace the unsaved changes in the open tabs. Press again to discard them and restore." },
+    { ButtonDiscardAndRestore => "放弃未保存并恢复", "Discard unsaved and restore" },
     { FindGrip => "≡  拖动（双击复位）", "≡  Drag (double-click to reset)" },
     { FindPrev => "↑ 上一个", "↑ Previous" },
     { FindNext => "↓ 下一个", "↓ Next" },

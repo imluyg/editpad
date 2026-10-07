@@ -917,6 +917,140 @@ fn crash_orphan_manifest_prompts_then_restores_or_discards() {
     fs::remove_dir_all(&dir_b).ok();
 }
 
+/// 池 ①（第 272 轮登记、本人逐行核实）：崩溃恢复提示条挂着时用户照常能敲字，
+/// 而〔恢复〕那一下原先是 `self.tabs = tabs` 整体替换 —— 期间敲的内容既不置
+/// 确认也不走关页漏斗，连 `dirty` 判定都没过就没了。改后＝当前有未保存改动时
+/// 第一次点击只起确认、第二次才替换，且替换要走关页漏斗。
+#[test]
+fn recover_accept_confirms_before_replacing_unsaved_work() {
+    let dir = snapshot_scratch_dir("p364-overwrite");
+    let crashed = editpad_core::snapshot::SessionTab {
+        path: None,
+        untitled_num: Some(2),
+        dirty: true,
+        file: None,
+        cursor_line: 0,
+        cursor_col: 0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        wrap_override: None,
+        font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
+    };
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab: crashed,
+            doc: editpad_core::Document::from_str("崩前没存的那段话"),
+        }],
+        0,
+        3,
+    )
+    .expect("写会话应成功");
+
+    let mut app = Editpad::default();
+    app.recover_prompt = Some(manifest);
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("这期间敲的字".into())),
+    );
+    assert!(
+        app.any_dirty(),
+        "夹具前提：提示挂着期间确实敲出了未保存改动，否则这一格什么都没测"
+    );
+    let dropped_gen = app.tabs[0].autosave_gen.clone();
+    let gen_before = dropped_gen.load(std::sync::atomic::Ordering::Relaxed);
+
+    // 第一次〔恢复〕：有东西会丢 ⇒ 只起确认，一条内容都不许动
+    let _ = app.accept_session_recover(Some(dir.clone()));
+    assert!(
+        app.recover_prompt.is_some(),
+        "确认之前提示条必须还挂着（改掉就等于回到静默替换）"
+    );
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "这期间敲的字",
+        "第一次点击不得替换当前标签页"
+    );
+
+    // 第二次〔恢复〕：用户已经表过态 ⇒ 真的替换，且被丢掉的页走关页漏斗
+    let _ = app.accept_session_recover(Some(dir.clone()));
+    assert!(app.recover_prompt.is_none());
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "崩前没存的那段话",
+        "确认之后要真的把崩前内容恢复回来"
+    );
+    assert!(app.tabs[0].dirty, "恢复回来的未命名草稿仍是未保存态");
+    assert_ne!(
+        dropped_gen.load(std::sync::atomic::Ordering::Relaxed),
+        gen_before,
+        "被替换掉的页必须作废在途自动保存（P146 同族：不作废就会被写盘复活到\
+         用户已经放弃的那一页上）"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// 确认态不许跨过「这次不裁决」活下去：Esc 收起提示条后下次再弹出来，第一下
+/// 点击仍然要重新确认——否则一次误按 Esc 就能把护栏永久武装掉。
+#[test]
+fn recover_confirmation_is_not_inherited_by_the_next_prompt() {
+    let dir = snapshot_scratch_dir("p364-rearm");
+    let crashed = editpad_core::snapshot::SessionTab {
+        path: None,
+        untitled_num: Some(2),
+        dirty: true,
+        file: None,
+        cursor_line: 0,
+        cursor_col: 0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        wrap_override: None,
+        font_size_override: None,
+        encoding_label: None,
+        save_encoding: None,
+    };
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab: crashed,
+            doc: editpad_core::Document::from_str("崩前草稿"),
+        }],
+        0,
+        3,
+    )
+    .expect("写会话应成功");
+
+    let mut app = Editpad::default();
+    app.recover_prompt = Some(manifest.clone());
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let _ = app.accept_session_recover(Some(dir.clone()));
+    assert!(
+        app.recover_prompt.is_some(),
+        "夹具前提：第一次点击只起了确认"
+    );
+
+    dispatch(&mut app, Message::BarsDismissed);
+    assert!(
+        app.recover_prompt.is_none(),
+        "夹具：Esc＝这次不裁决，提示条收起"
+    );
+
+    app.recover_prompt = Some(manifest);
+    let _ = app.accept_session_recover(Some(dir.clone()));
+    assert!(
+        app.recover_prompt.is_some(),
+        "重新弹出的提示条不许继承上一次的确认态"
+    );
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "x",
+        "第一下点击仍然要保住当前内容"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn remember_session_disabled_means_blank_start_and_ask_style_close() {
     // 总开关判定纯函数：两个开关都开才允许
@@ -1104,11 +1238,23 @@ fn heartbeat_while_recover_prompt_is_up_spares_the_crashed_pages() {
         "提示挂着时的心跳不许回收要恢复的内容"
     );
 
-    // 用户此刻才点〔恢复〕：这条链路的"这一页读不读得回来"是最终后果
+    // 用户此刻才点〔恢复〕：这条链路的"这一页读不读得回来"是最终后果。
+    // ⚠️ P364（池 ①）之后第一下点击只起确认（这一格期间敲过字 ⇒ 有未保存改动），
+    // 要按两次才真替换。只按一次的话 `restore_failed` 恒为 0、这一格就空转了。
     let _ = app.accept_session_recover(Some(dir.clone()));
+    let _ = app.accept_session_recover(Some(dir.clone()));
+    assert!(
+        app.recover_prompt.is_none(),
+        "夹具自证：两次点击确实走到了替换（否则下面两句都是空的）"
+    );
     assert_eq!(
         app.restore_failed, 0,
         "恢复不得把这页记成内容缺失（改前：GC 删了文件 ⇒ 这里 +1）"
+    );
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "崩前没存的那段话",
+        "内容必须真的落回标签页——restore_failed 单独不足作证"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

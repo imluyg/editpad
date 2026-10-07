@@ -64,6 +64,7 @@ impl Editpad {
             // 孤儿检测 = 崩溃恢复入口（§3 P30 第 2 条）：弹一次性提示，
             // 数据原封留在磁盘，等用户选择恢复或丢弃
             self.recover_prompt = Some(manifest);
+            self.recover_overwrite_ok = false;
             return Task::none();
         }
         self.restore_from_manifest(dir, &manifest)
@@ -376,21 +377,45 @@ impl Editpad {
     }
 
     /// 崩溃恢复提示条「恢复」：按暂存清单全量重建（含脏页内容）。
+    ///
+    /// P364（池 ①）：这条链原本直接 `self.tabs = tabs` 整体替换，而提示条挂着
+    /// 的那段时间里用户照常能敲字、开文件（可达性由 P339 那轮证明过）——于是
+    /// 那一下点击把**当前**未保存的东西一起丢掉，既不问也不留线索。现在：
+    /// 有未保存改动时第一次点击只把提示条换成「会替换掉这些改动」的口径，
+    /// 第二次（同一个按钮再按一次）才真替换。判据用 [`Self::any_dirty`]，
+    /// 与关窗确认、关页确认同一口径——干净页的内容在磁盘上，换掉不丢东西。
+    /// 真替换时被丢掉的页**走关页漏斗**（[`Self::close_tabs_now`]）：在途自动
+    /// 保存作废（P146：关页不作废就会被写盘复活到已经放弃的那一页）、进「上次
+    /// 关闭」记忆栈、光标/滚动回写最近文件、确认条与悬停态收口、清单代次推进。
     pub(crate) fn accept_session_recover(&mut self, dir: Option<PathBuf>) -> Task<Message> {
+        if self.recover_prompt.is_none() {
+            return Task::none();
+        }
+        let Some(dir) = dir else {
+            // 目录没了：无从恢复；数据仍在磁盘原处，本次空白起步
+            // （原语义：提示条就此收起，不做任何替换）
+            self.recover_prompt = None;
+            self.recover_overwrite_ok = false;
+            return Task::none();
+        };
+        if !self.recover_overwrite_ok && self.any_dirty() {
+            self.recover_overwrite_ok = true;
+            return Task::none();
+        }
+        self.recover_overwrite_ok = false;
         let Some(manifest) = self.recover_prompt.take() else {
             return Task::none();
         };
-        match dir {
-            Some(dir) => self.restore_from_manifest(&dir, &manifest),
-            // 目录没了：无从恢复；数据仍在磁盘原处，本次空白起步
-            None => Task::none(),
-        }
+        let current: Vec<usize> = (0..self.tabs.len()).collect();
+        self.close_tabs_now(&current);
+        self.restore_from_manifest(&dir, &manifest)
     }
 
     /// 「丢弃」= 连快照一起丢（P29 放弃语义同族）：清场后空白起步，
     /// 防止下次启动把已放弃的内容再次当会话恢复回来。
     pub(crate) fn discard_session_recover(&mut self, dir: Option<PathBuf>) -> Task<Message> {
         self.recover_prompt = None;
+        self.recover_overwrite_ok = false;
         if let Some(dir) = dir {
             editpad_core::snapshot::clear_session(&dir);
         }

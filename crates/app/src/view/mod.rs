@@ -678,20 +678,28 @@ impl Editpad {
         // P30 崩溃恢复一次性提示条：上次未正常收尾（崩溃/P31 心跳中间态）。
         // 「恢复」按快照全量重建；「丢弃」连快照一起丢。数据原封留在磁盘，
         // 不裁决就一直挂着——与「未保存确认条」同级的强提醒语义。
+        // P364（池 ①）：当前标签页有未保存改动时，「恢复」会把它们整体换掉，
+        // 所以第一下点击只把这一条改写成「会替换掉这些改动」的口径＋加重按钮
+        // 文案，第二下才真替换（`accept_session_recover` 里判）。
         if self.recover_prompt.is_some() {
+            let (title_key, restore_key) = if self.recover_overwrite_ok {
+                (
+                    editpad_core::Key::RestoreOverwriteWarn,
+                    editpad_core::Key::ButtonDiscardAndRestore,
+                )
+            } else {
+                (
+                    editpad_core::Key::RestoreTitle,
+                    editpad_core::Key::ButtonRestore,
+                )
+            };
             body = body.push(rule::horizontal(1)).push(
                 row![
-                    text(self.t(editpad_core::Key::RestoreTitle))
-                        .size(uipx)
-                        .font(uifont),
-                    button(
-                        text(self.t(editpad_core::Key::ButtonRestore))
-                            .size(uipx)
-                            .font(uifont)
-                    )
-                    .padding([4, 12])
-                    .style(chrome_button_style)
-                    .on_press(Message::SessionRecoverAccepted),
+                    text(self.t(title_key)).size(uipx).font(uifont),
+                    button(text(self.t(restore_key)).size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press(Message::SessionRecoverAccepted),
                     button(
                         text(self.t(editpad_core::Key::ButtonDiscard))
                             .size(uipx)

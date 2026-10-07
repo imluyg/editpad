@@ -46,6 +46,9 @@ fn esc_dismisses_every_transient_prompt() {
         next_untitled: 0,
         clean_exit: false,
     });
+    // P364：〔恢复〕的"已问过替换未保存改动"记号也归本出口收（Esc 之后必须
+    // 重新问过，否则一次误按 Esc 就把护栏武装到底）
+    app.recover_overwrite_ok = true;
     app.column_editor_visible = true;
     // P318 新增成员：书签列表面板（Esc 必须一并收起，见下方断言）
     app.bookmarks_visible = true;
@@ -67,6 +70,10 @@ fn esc_dismisses_every_transient_prompt() {
         "崩溃恢复条随 Esc 收起。注意这只清**提示条**：本出口拿不到快照目录、\
          也不调 clear_session，所以磁盘快照原样留着，下次启动仍会再问一次\
          （真删快照的是〔丢弃〕= discard_session_recover）"
+    );
+    assert!(
+        !app.recover_overwrite_ok,
+        "〔恢复〕的替换确认态（P364）也要随 Esc 归零"
     );
     assert!(
         app.column_editor_visible,

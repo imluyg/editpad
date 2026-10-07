@@ -319,6 +319,11 @@ pub(crate) struct Editpad {
     /// 一次性崩溃恢复提示条（clean_exit=false 的异常退出清单）；
     /// Some = 提示中，等用户裁决恢复或丢弃，数据原封留在磁盘。
     pub(crate) recover_prompt: Option<editpad_core::snapshot::SessionManifest>,
+    /// P364：〔恢复〕已起过确认没有。当前标签页有未保存改动时，第一次点击
+    /// 只把提示条改成「会替换掉这些改动」的口径，第二次才真替换——本字段就是
+    /// 那个「已经问过」的记号。**只跟随提示条的生命周期**：收起/丢弃/替换完成
+    /// 都归零，下次再弹出来还要重新问过。
+    pub(crate) recover_overwrite_ok: bool,
     /// 本轮恢复中未能还原原内容的页数（快照缺失/加载失败；汇总提示口径）
     pub(crate) restore_failed: usize,
     /// 因内存护栏被放弃恢复的页数（§3 P30 第 5 条的截断提示口径）
@@ -496,6 +501,7 @@ impl Default for Editpad {
             restore_queue: Vec::new(),
             restore_views: HashMap::new(),
             recover_prompt: None,
+            recover_overwrite_ok: false,
             restore_failed: 0,
             restore_dropped: 0,
             // P31：周期快照心跳状态
