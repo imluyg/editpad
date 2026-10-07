@@ -334,6 +334,8 @@ impl EditorCore {
     ///
     /// - 有选区：触及行整块加/去一层缩进；无选区：加缩进 = 插入一个
     ///   制表符（原 Tab 语义不变），反缩进 = 当前行去一层；
+    /// - 列块态：作用范围＝**块跨的行**，块在这次编辑后被收掉（幂等 no-op
+    ///   时原样留着）；
     /// - 缩进单位恒为 `\t`——显示层 `char_cols` 展开到制表位，与 Tab↔空格
     ///   转换、软换行断行同源，保存往返不失真；
     /// - 反缩进：行首一个 `\t`，否则至多 [`TAB_STOP_COLS`] 个行首空格
@@ -345,14 +347,18 @@ impl EditorCore {
     /// - 幂等：无任何行发生改动时不产快照、返回 false。
     pub fn indent_touched_lines(&mut self, outdent: bool) -> bool {
         let has_sel = self.anchor.is_some();
-        if !has_sel && !outdent {
+        // 列块态：作用范围＝**块跨的那些行**。原先这里只问 `anchor`，而块与
+        // 单选区互斥（`anchor` 恒 None）⇒ 同一族里加缩进那支（应用层转给
+        // `insert_into_block`）作用整块，反缩进这一支却只作用主光标一行。
+        let block_rows = self.active_block().map(|(r0, r1, ..)| (r0, r1));
+        if block_rows.is_none() && !has_sel && !outdent {
             self.insert_str("\t"); // 无选区 Tab：保持原插制表符语义
             return true;
         }
-        let (a, b) = if has_sel {
-            self.touched_lines()
-        } else {
-            (self.cursor.line, self.cursor.line)
+        let (a, b) = match block_rows {
+            Some((r0, r1)) => (r0, r1),
+            None if has_sel => self.touched_lines(),
+            None => (self.cursor.line, self.cursor.line),
         };
         let count = self.doc.line_count();
         let len = self.doc.text_len();
@@ -419,6 +425,13 @@ impl EditorCore {
         self.cursor.col = shifted(self.cursor.line, self.cursor.col);
         if let Some(anchor) = self.anchor.as_mut() {
             anchor.col = shifted(anchor.line, anchor.col);
+        }
+        // 块跟着这次结构变更一起收掉：剥掉行首空白之后，旧列号指向的是别的内容
+        // （与 `insert_into_block` 那支「操作消费掉块」的口径一致）。上面那条
+        // 幂等 no-op 早退不走这里 ⇒ 一行都没改时块原样留着（P351：没有后果的
+        // 动作不该有状态后果）。
+        if block_rows.is_some() {
+            self.clear_block();
         }
         self.ensure_visible();
         true

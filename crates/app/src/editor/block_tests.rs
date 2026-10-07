@@ -1711,6 +1711,49 @@ fn outdent_on_phantom_line_is_noop() {
     assert_eq!(c.doc.to_text(), "a\n");
 }
 
+#[test]
+fn block_mode_outdent_spans_every_row_of_the_block() {
+    // 列块态下的反缩进原先只作用于**主光标那一行**：加缩进那支作用的是整块，
+    // 反缩进这一支却看不见块的行范围。
+    let mut c = core_with("    alpha\n    beta\n    gamma");
+    c.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 2 },
+        head: CursorPos { line: 2, col: 5 },
+    });
+    c.cursor = CursorPos { line: 2, col: 5 };
+    assert!(c.has_block(), "夹具自证：块态成立");
+    assert!(c.indent_touched_lines(true));
+    assert_eq!(
+        c.doc.to_text(),
+        "alpha\nbeta\ngamma",
+        "块跨的每一行都要剥掉一层行首缩进"
+    );
+    assert!(
+        !c.has_block(),
+        "行首坐标系换了，块不带着旧列活过去（同「块内插入」那支）"
+    );
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 2, col: 1 },
+        "列随所在行的剥除量平移"
+    );
+
+    // 正对照：没有块时仍只作用当前行（本轮没把它改成"整篇反缩进"）
+    let mut d = core_with("  a\n  b");
+    d.cursor = CursorPos { line: 1, col: 2 };
+    assert!(d.indent_touched_lines(true));
+    assert_eq!(d.doc.to_text(), "  a\nb");
+
+    // 一行空白都剥不掉 ⇒ 幂等 no-op：正文不动，块也不许被顺手吃掉（P351 那条纪律）
+    let mut e = core_with("a\nb");
+    e.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 1, col: 1 },
+    });
+    assert!(!e.indent_touched_lines(true));
+    assert!(e.has_block(), "没有后果的动作不该有状态后果");
+}
+
 // ---------- P124：行操作扩展与词首大写 ----------
 
 #[test]

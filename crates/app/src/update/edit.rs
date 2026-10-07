@@ -625,6 +625,10 @@ impl Editpad {
         let mut hint: Option<String> = None;
         // 第 67 轮 ⑮：列块态只在白名单内存活（输入/退格/删除/块内 Tab 走
         // 块分支），其余任何编辑动作先清块——单点收口防漏清。
+        // 池 ⑩：Tab 的两向都在名单里——`TabKey(false)` 走块内插制表符，
+        // `TabKey(true)` 要让 `indent_touched_lines` **看得见块的行范围**
+        // （改前它先被这道闸清掉，于是反缩进只作用主光标那一行）。两支的块
+        // 都由操作自己收掉，不是留给这道闸。
         // 池 ⑧：Undo/Redo 同样必须在名单内（与下面 P326 那条多光标闸门同一条
         // 口径）：这道闸在 `editor.undo()` **之前**执行，改前失败的撤销（栈空）
         // 也照样吃掉用户刚框好的矩形，而回报是「没有更多可撤销」——按错一下
@@ -637,7 +641,7 @@ impl Editpad {
                 | E::Backspace
                 | E::Delete
                 | E::CancelBlock
-                | E::TabKey(false)
+                | E::TabKey(_)
                 | E::Undo
                 | E::Redo
         ) {
@@ -836,8 +840,9 @@ impl Editpad {
             E::ToggleLineComment => editor.toggle_line_comment(),
             // ---------- P121：智能缩进与选区块缩进 ----------
             // 回车不入列块白名单：列块态按回车先收块再智能缩进（原「向块
-            // 内插换行」无实用语义）；Tab 分流——列块态加缩进仍是块内插
-            // 制表符（与 InsertText 同路），其余走触及行整块缩进/反缩进
+            // 内插换行」无实用语义）；Tab 两向都在白名单里——加缩进仍是块内插
+            // 制表符（与 InsertText 同路），反缩进交给 `indent_touched_lines`
+            // 的块分支去作用**块跨的每一行**（它自己把块收掉）；无块时按原语义
             // （无选区 Tab=插制表符、Shift+Tab=当前行反缩进，函数内兜底）
             E::Enter => {
                 editor.enter();

@@ -846,6 +846,46 @@ fn block_selection_edit_and_esc_flow() {
     assert!(!app.cur_handle.borrow().has_block());
 }
 
+#[test]
+fn shift_tab_in_block_mode_reaches_every_row_of_the_block() {
+    use crate::editor::BlockSel;
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("    alpha\n    beta\n".into())),
+    );
+    // 直接构造块态（生产路径经 Alt+Shift 拖拽，core 生命周期单测覆盖）
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: crate::editor::CursorPos { line: 0, col: 2 },
+        head: crate::editor::CursorPos { line: 1, col: 5 },
+    });
+    app.cur_handle.borrow_mut().cursor = crate::editor::CursorPos { line: 1, col: 5 };
+    assert!(app.cur_handle.borrow().has_block(), "夹具自证：块态成立");
+
+    dispatch(&mut app, Message::Edit(EditOp::TabKey(true)));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "alpha\nbeta\n",
+        "块态 Shift+Tab 要作用于块跨的每一行，不是只有主光标那一行"
+    );
+    assert!(
+        !app.cur_handle.borrow().has_block(),
+        "块随这次结构变更一起收掉"
+    );
+
+    // 正对照：块态 Tab 仍是「块内插制表符」（本轮没动那一支的语义）
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: crate::editor::CursorPos { line: 0, col: 0 },
+        head: crate::editor::CursorPos { line: 1, col: 2 },
+    });
+    dispatch(&mut app, Message::Edit(EditOp::TabKey(false)));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "\tpha\n\tta\n",
+        "加缩进那支：逐行把块列 [0,2) 换成一个制表符"
+    );
+}
+
 // ---------- B9 Phase 2：列编辑器对话框 ----------
 
 /// F6 应分发到列编辑器（注册表→dispatch_action 全链路）。
