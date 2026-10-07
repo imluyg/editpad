@@ -291,6 +291,11 @@ impl Document {
 
     /// 取第 `line` 行（0 起）的文本——将来虚拟化渲染按行取数的雏形：
     /// 只碰可见行，成本与全文大小无关。
+    ///
+    /// ⚠️ **行号越界是 panic，不是空串**（实测 ropey 1.6.1 `Rope::line`，钉在
+    /// `out_of_range_line_str_panics_while_len_chars_gives_zero`）。"越界给空串"那条口径
+    /// 属于 app 侧夹紧过的 `EditorCore::line_text`，不属于这里——调用方要么自己限界，
+    /// 要么先用 `line_count()` 判（P146 在 `ReplaceCurrentRegex` 那道闸就是为此）。
     pub fn line_str(&self, line_idx: usize) -> String {
         self.rope.line(line_idx).to_string()
     }
@@ -435,7 +440,9 @@ impl Document {
     /// 「行尾只可能是 `\n` / `\r\n` / `\r` / 空」是假的，它让以 FF 结尾的行
     /// 多算 1 列，而本函数是 app 侧约 70 处列夹紧（End 键、点击、选区）唯一的
     /// 长度来源（`EditorCore::line_display_len`）。
-    /// 行号越界返回 0（与 `line_str` 的空串口径一致）。
+    /// 行号越界返回 0。⚠️ 这句**不**推广到 [`Document::line_str`]——那边越界是 panic
+    /// （原注释写的"与 `line_str` 的空串口径一致"是假的，见
+    /// `out_of_range_line_str_panics_while_len_chars_gives_zero`）。
     pub fn line_body_len_chars(&self, line_idx: usize) -> usize {
         if line_idx >= self.rope.len_lines() {
             return 0;
@@ -927,13 +934,33 @@ mod tests {
                     "{label}：第 {i} 行（原始行 {raw:?}）快速口径 {fast} != 参照 {slow}"
                 );
             }
-            // 越界恒 0，与 `line_str` 返回空串的口径一致
+            // 越界恒 0；⚠️ `line_str` 越界不是空串而是 panic（两个访问器口径不同，
+            // 见 out_of_range_line_str_panics_while_len_chars_gives_zero）
             assert_eq!(
                 doc.line_body_len_chars(doc.line_count() + 7),
                 0,
                 "{label}：越界行号须给 0"
             );
         }
+    }
+
+    /// 台账池 ⑪：`line_body_len_chars` 的注释曾写「与 `line_str` 的空串口径一致」，
+    /// 实测 ropey 1.6.1 的 `Rope::line` 越界**直接 panic**——那句是假的（"越界给空串"是
+    /// app 侧夹紧过的 `EditorCore::line_text` 的行为）。这条用例钉的是**机制本身**，
+    /// 防下一轮照着错注释去"统一"两个访问器（那样做会把越界从崩溃变成静默空行）。
+    #[test]
+    fn out_of_range_line_str_panics_while_len_chars_gives_zero() {
+        use std::panic::AssertUnwindSafe;
+        let doc = Document::from_str("a\nb");
+        let oob = doc.line_count() + 7;
+        assert_eq!(doc.line_body_len_chars(oob), 0, "快算那侧自己限界");
+        assert!(
+            std::panic::catch_unwind(AssertUnwindSafe(|| doc.line_str(oob))).is_err(),
+            "core 的 line_str 越界必须是 panic，不是空串"
+        );
+        // 界内那格不许被这条用例带偏
+        assert_eq!(doc.line_str(1), "b");
+        assert_eq!(doc.line_body_len_chars(1), 1);
     }
 
     #[test]
