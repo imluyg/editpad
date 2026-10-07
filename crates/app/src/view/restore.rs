@@ -360,8 +360,10 @@ impl Editpad {
         // 左移落到相邻页上，〔放弃并关闭〕于是清空并关掉用户根本没选过的页。
         // 存页 id 之后收口只需一句，且新增移除路径不会再漏。
         self.dismiss_close_confirm_if_gone();
-        // active_tab 可能越界：与 tabs 对齐并同步别名
-        self.refresh_cur_handle();
+        // active_tab 可能越界：与 tabs 对齐并同步别名。P368：占位页在**当前页之前**
+        // 被抽掉时，活动页下标要跟着左移——恢复期间活动页由清单指定，被移除的正是
+        // 前面某个加载失败的占位页，不跟着移就会让选中的落到下一页
+        self.realign_active_after_removal(&[idx]);
     }
 
     /// 目标页是否仍是待填充的恢复占位页（防串写护栏）：恢复期间用户

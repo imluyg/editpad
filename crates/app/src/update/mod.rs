@@ -315,6 +315,21 @@ impl Editpad {
         self.cur_handle = self.tabs[self.active_tab].editor.clone();
     }
 
+    /// 移除页之后的活动页归位（P368）：被抽掉的那些下标里，凡是**在当前页之前**的，
+    /// 当前页下标都要跟着左移一格，否则同一个下标指向的是下一页那份文档——用户关掉
+    /// 旁边的页，自己的页就悄悄换了（正文／滚动／撤销栈都是另一页的）。
+    ///
+    /// 三条移除出路共用这一句（`close_tab_now`／`close_tabs_now`／恢复链的
+    /// `drop_restore_placeholder`）。原先它们各自只调 [`Self::refresh_cur_handle`]，
+    /// 而那只钳制上界：只有"活动页正好是末页"时钳制会碰巧落对，所以这一半场景
+    /// 长期看不出来。活动页自己被移除时 `removed` 里没有比它更小的项要算，行为与
+    /// 改前一致（落到邻页）。
+    pub(crate) fn realign_active_after_removal(&mut self, removed: &[usize]) {
+        let below = removed.iter().filter(|&&i| i < self.active_tab).count();
+        self.active_tab = self.active_tab.saturating_sub(below);
+        self.refresh_cur_handle();
+    }
+
     /// 任一标签页有未保存改动（窗口关闭确认的聚合口径）。
     pub(crate) fn any_dirty(&self) -> bool {
         self.tabs.iter().any(|t| t.dirty)

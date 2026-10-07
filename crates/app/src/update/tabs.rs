@@ -45,8 +45,9 @@ impl Editpad {
         }
         // P31：页集合结构已变——下一拍重写清单，防崩溃恢复复活已关的页
         self.touch_manifest_stale();
-        // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名
-        self.refresh_cur_handle();
+        // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名。P368：被移除的那页在
+        // 当前页之前时，活动页下标要跟着左移，否则选中的会变成下一页那份文档
+        self.realign_active_after_removal(&[idx]);
         true
     }
 
@@ -86,7 +87,8 @@ impl Editpad {
             self.assign_untitled_num(last);
         }
         self.touch_manifest_stale();
-        self.refresh_cur_handle();
+        // P368：批量移除同样要把活动页左移「被抽掉的、在它之前的那几个」
+        self.realign_active_after_removal(&idxs);
         removed
     }
 

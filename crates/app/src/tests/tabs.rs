@@ -603,6 +603,71 @@ fn batch_close_never_empties_tabs_and_keeps_invariants() {
     assert_eq!(bare.close_tabs_now(&[0, 0]), 1);
 }
 
+/// P368：把**活动页之前**的页移除之后，选中的必须还是原来那一份文档。
+/// 三条移除出路（单页 `close_tab_now`／批量 `close_tabs_now`／恢复链
+/// `drop_restore_placeholder`）过去只做 `tabs.remove` ＋「与 len 对齐」的钳制，
+/// 没有把 `active_tab` 跟着左移 ⇒ 前面的页被抽掉后同一个下标指向的是**下一页**：
+/// 用户右键关掉旁边那一页，自己的页就悄悄换了（正文、滚动、撤销栈都是另一页的）。
+/// 只有"关掉的是最后那一页之前的某页、而活动页恰好是末页"时钳制会碰巧落对，
+/// 所以这条缺陷一直有一半的场景看不出来。
+#[test]
+fn removing_a_page_below_the_active_one_keeps_the_same_document_selected() {
+    // ---- 单页出路：右键菜单「关闭此页」（干净页直接关） ----
+    let mut app = app_with_tabs(4);
+    app.set_active_tab(2);
+    let wanted = app.tab().id;
+    assert!(
+        !app.tabs[1].dirty && !app.tabs[1].pinned,
+        "夹具：要关的那页必须能直接关"
+    );
+    dispatch(&mut app, Message::CloseTabAt(1));
+    assert_eq!(app.tabs.len(), 3, "夹具：确实移除了一页");
+    assert_eq!(
+        app.tab().id,
+        wanted,
+        "关掉前面的页不许把选中悄悄挪到另一页（现在落在 {:?}）",
+        app.tab().id
+    );
+
+    // ---- 批量出路：「关闭其他／右侧」共用的漏斗，一次抽掉两页 ----
+    // ⚠️ 这一格原本写成"4 页、活动页取末页"：那种形状下**改前也过**——`refresh_cur_handle`
+    // 的钳制把越界下标压回 `len-1`，恰好等于该左移的结果（探针 MUT-B 跑绿才暴露出来）。
+    // 活动页不是末页时两种算法才分得开，故这里用 5 页、活动页取第 3 页。
+    let mut batch = app_with_tabs(5);
+    batch.set_active_tab(3);
+    let wanted_batch = batch.tab().id;
+    batch.close_tabs_now(&[0, 1]);
+    assert_eq!(batch.tabs.len(), 3, "夹具：批量移除了两页");
+    assert_eq!(
+        batch.active_tab, 1,
+        "抽掉当前页之前的两页，下标要跟着左移两格（不该落到 {:?}）",
+        batch.active_tab
+    );
+    assert_eq!(
+        batch.tab().id,
+        wanted_batch,
+        "批量移除前面的页同样要跟着左移活动页，选中的必须还是那份文档"
+    );
+
+    // ---- 反例格：关掉活动页**后面**的页，下标本来就不该动 ----
+    let mut above = app_with_tabs(4);
+    above.set_active_tab(1);
+    let wanted_above = above.tab().id;
+    dispatch(&mut above, Message::CloseTabAt(2));
+    assert_eq!(above.active_tab, 1, "关掉后面的页时活动页下标不该动");
+    assert_eq!(above.tab().id, wanted_above, "选中的还是原来那份文档");
+
+    // ---- 反例格：关掉活动页**自己**，仍按既有语义落到邻页 ----
+    let mut self_close = app_with_tabs(3);
+    self_close.set_active_tab(1);
+    dispatch(&mut self_close, Message::CloseTabAt(1));
+    assert_eq!(self_close.tabs.len(), 2);
+    assert!(
+        self_close.active_tab < self_close.tabs.len(),
+        "关掉自己那页后活动页必须仍合法"
+    );
+}
+
 // ---------- P64/P65 重命名聚焦与双击触发 ----------
 
 #[test]
