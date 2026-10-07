@@ -139,30 +139,23 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
     blocks
 }
 
+/// 切行：判据与 [`crate::document::split_lines_keep_ending`] **同一份**（读侧按全集，定案
+/// R-11「读按全集、写按三种」），差别只是这里丢掉行尾。
+///
+/// 文本以行界收尾时多补一个空末段——那是编辑器的行模型里真实存在的幻影行
+/// （`empty_input_yields_no_blocks` 与预览行数都依赖这一格）。
 fn split_lines(text: &str) -> Vec<&str> {
-    let mut lines = Vec::new();
-    let mut start = 0usize;
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                lines.push(&text[start..i]);
-                start = i + 1;
-            }
-            b'\r' => {
-                lines.push(&text[start..i]);
-                // \r\n 整体消费
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    i += 1;
-                }
-                start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
+    let mut lines: Vec<&str> = crate::document::split_lines_keep_ending(text)
+        .iter()
+        .map(|seg| crate::document::trim_line_breaks(seg))
+        .collect();
+    if text
+        .chars()
+        .next_back()
+        .is_some_and(crate::search::is_line_break)
+    {
+        lines.push("");
     }
-    lines.push(&text[start..]);
     lines
 }
 
@@ -390,5 +383,48 @@ mod tests {
     fn empty_input_yields_no_blocks() {
         assert!(parse_markdown("").is_empty());
         assert!(parse_markdown("\n\r\n  \n").is_empty());
+    }
+
+    /// 预览分行必须与编辑器的行模型同源（定案 R-11「读按全集」）：用异体行界分隔的正文，
+    /// 预览该与同样内容用 `\n` 分隔时逐块相等。改前整块被当成一行＝预览说"一段"、
+    /// 编辑器里却是三行。
+    #[test]
+    fn alternative_line_breaks_split_the_preview_like_the_editor() {
+        let lf = parse_markdown("正文A\n正文B\n正文C\n");
+        let alt = parse_markdown("正文A\u{2028}正文B\u{000C}正文C\u{0085}");
+        assert_eq!(alt, lf, "三种异体行界都要断行");
+    }
+
+    /// 两份切行器并成一份之后，与上游行模型逐格对账（行界集是**上游实现**）。
+    #[test]
+    fn both_splitters_share_one_line_break_rule() {
+        for text in [
+            "a\nb\r\nc\rd\u{000B}e\u{000C}f\u{0085}g\u{2028}h\u{2029}i",
+            "a\u{2028}\n b\r\n\u{000B}",
+            "solo\n",
+        ] {
+            let kept = crate::document::split_lines_keep_ending(text);
+            let mut expect: Vec<&str> = kept
+                .iter()
+                .map(|seg| crate::document::trim_line_breaks(seg))
+                .collect();
+            if text
+                .chars()
+                .next_back()
+                .is_some_and(crate::search::is_line_break)
+            {
+                expect.push(""); // 幻影末行：与编辑器的行模型同口径
+            }
+            assert_eq!(
+                split_lines(text),
+                expect,
+                "markdown 那份必须只多一个幻影末行，判据同一份：{text:?}"
+            );
+            assert_eq!(
+                crate::document::Document::from_str(text).line_count(),
+                split_lines(text).len(),
+                "读侧切行的行数必须等于编辑器行模型的行数：{text:?}"
+            );
+        }
     }
 }

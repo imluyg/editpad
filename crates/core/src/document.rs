@@ -536,34 +536,41 @@ pub fn align_paste_indent(text: &str, target_indent: &str) -> String {
     out
 }
 
-/// 按 LF / CRLF / CR 切行，**行尾留在每段里**。
+/// 读侧切行的**唯一**判据：按 [`crate::search::LINE_BREAK_CHARS`] 全集切，`\r\n` 当一个单元
+/// 消费，**行尾留在每段里**。
 ///
-/// 判据与 `markdown::split_lines` 同一套（`\r\n` 整体消费），差别只在行尾：
-/// 那边丢掉了行尾，而粘贴对齐必须把行尾原样带回去（P322）。
-fn split_lines_keep_ending(text: &str) -> Vec<&str> {
+/// 定案 R-11「读按全集、写按三种」：编辑器底下的 ropey（`unicode_lines`）把 VT/FF/NEL/LS/PS
+/// 也当行界，所以任何「读方向」的切行都要与它同源，否则同一篇正文在编辑器里是 N 行、在预览里
+/// 是一段。写侧（`LineEnding::normalize`、[`split_line_ending`]、`EolTally`）刻意仍只认三种：
+/// 异体行界字符是用户文件里的**数据**，改写它＝静默变更内容。
+///
+/// 粘贴对齐把每段的原行尾逐字节回吐（`split_line_ending` 认不出的异体行尾就留在正文里一起回去）
+/// ⇒ 这里的判据只改变**在哪儿切**，不改变任何字节。
+///
+/// 末段规则：文本以行界收尾时**不**多切一个空段（P322 那条"不许多切幻影行"的契约原样保留）；
+/// 需要幻影末行的调用方自己补一格（见 `crate::markdown::split_lines`）。
+pub(crate) fn split_lines_keep_ending(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let bytes = text.as_bytes();
     let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\n' => {
-                out.push(&text[start..i + 1]);
-                start = i + 1;
-                i += 1;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let unit = if c == '\r' {
+            let crlf = matches!(chars.peek(), Some((j, '\n')) if *j == i + 1);
+            if crlf {
+                chars.next();
             }
-            b'\r' => {
-                let end = if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    i + 2
-                } else {
-                    i + 1
-                };
-                out.push(&text[start..end]);
-                start = end;
-                i = end;
+            if crlf {
+                2
+            } else {
+                1
             }
-            _ => i += 1,
-        }
+        } else if crate::search::is_line_break(c) {
+            c.len_utf8()
+        } else {
+            continue;
+        };
+        out.push(&text[start..i + unit]);
+        start = i + unit;
     }
     if start < text.len() {
         out.push(&text[start..]);
@@ -1196,6 +1203,26 @@ mod tests {
             "\na\nb\n",
             "基准该是「  」而不是第一行那个空行——第一版期望把空行本身丢了"
         );
+    }
+
+    /// 定案 R-11「读按全集」：编辑器的行模型把 VT/FF/NEL/LS/PS 都当行界，而两份切行器
+    /// 原先只认三种 ⇒ 一整块用异体行界分行的文本被当成"一行"，对齐整块不生效。
+    /// ⚠️ 只许改**切分**，不许改内容：异体行界必须原样回吐（写侧仍只认三种）。
+    #[test]
+    fn align_paste_indent_reads_every_alternative_line_break_kind() {
+        for brk in ['\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'] {
+            let src = format!("aaa{brk}bbb\n");
+            assert_eq!(
+                Document::from_str(&src).line_count(),
+                3,
+                "夹具自证：编辑器把 {brk:?} 当行界（正文两行＋幻影末行）"
+            );
+            assert_eq!(
+                align_paste_indent(&src, "  "),
+                format!("  aaa{brk}  bbb\n"),
+                "{brk:?} 分出来的每一行都该补上目标缩进"
+            );
+        }
     }
 
     /// 互不为前缀（块用制表符、目标行用空格）⇒ 一个字节都不改。
