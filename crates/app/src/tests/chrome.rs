@@ -46,6 +46,8 @@ fn esc_dismisses_every_transient_prompt() {
         next_untitled: 0,
         clean_exit: false,
     });
+    // P367：录键态也归本出口收（它原本只有弹窗里面的三条清除点）
+    app.hotkey_capture = Some("save");
     // P364：〔恢复〕的"已问过替换未保存改动"记号也归本出口收（Esc 之后必须
     // 重新问过，否则一次误按 Esc 就把护栏武装到底）
     app.recover_overwrite_ok = true;
@@ -74,6 +76,10 @@ fn esc_dismisses_every_transient_prompt() {
     assert!(
         !app.recover_overwrite_ok,
         "〔恢复〕的替换确认态（P364）也要随 Esc 归零"
+    );
+    assert_eq!(
+        app.hotkey_capture, None,
+        "热键录键态（P367）：弹窗关掉后没人能再取消它，必须随本出口作废"
     );
     assert!(
         app.column_editor_visible,

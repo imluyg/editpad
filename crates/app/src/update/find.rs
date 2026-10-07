@@ -925,8 +925,9 @@ impl Editpad {
                     self.set_status_error(self.t(editpad_core::Key::StColumnEditorNeedBlock));
                     return Task::none();
                 }
-                // 浮层互斥：对话框与设置弹窗/命令面板不同框
-                self.settings_visible = false;
+                // 浮层互斥：对话框与设置弹窗/命令面板不同框。P367：关设置弹窗走
+                // 唯一出口，连带作废可能挂着的录键态
+                self.close_settings_dialog();
                 self.palette_visible = false;
                 self.column_editor_visible = true;
                 Task::none()

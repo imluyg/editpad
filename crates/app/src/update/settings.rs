@@ -5,6 +5,22 @@
 use super::*;
 
 impl Editpad {
+    /// 关闭设置弹窗的**唯一出口**（P367，池 ④）：连带作废「等一个组合键」的录键态。
+    ///
+    /// 缺陷形状＝"清理点全在弹窗里面"：`hotkey_capture` 原本的清除点只有 Esc 取消、
+    /// 提交成功、恢复默认三条，都在弹窗可见时才够得着；而关掉弹窗还有开关消息、点背板、
+    /// 进 busy（P366 那份 `Backdrop` 名单）、打开列编辑器（互斥关闭）这些**外面**的出路，
+    /// 每一条都把录键态留在场上。录键拦截排在热键表**之前**（`update/edit.rs`），于是
+    /// 用户回到正文按下的下一个空闲组合键不执行本行动作，而是被当成"要绑定的键"当场
+    /// 改写那条动作的键位并落盘——他既看不见弹窗，也看不出键位已经变了。
+    pub(crate) fn close_settings_dialog(&mut self) {
+        self.settings_visible = false;
+        if self.hotkey_capture.take().is_some() {
+            // 状态栏那句"按下要绑定的组合键"是本态自己写的，作废它就在这里收
+            self.status.clear();
+        }
+    }
+
     // ---------- domain methods (round 81 Phase 1: update() split) ----------
     /// 域：设置/字体/热键。臂体自原 update() 逐字搬移，零行为变更。
     pub(super) fn update_settings(&mut self, msg: Message) -> Task<Message> {
@@ -227,14 +243,16 @@ impl Editpad {
             Message::SettingsToggled => {
                 // busy（加载/保存中）禁开，与工具栏其余按钮同一守卫语义
                 if !self.busy {
-                    self.settings_visible = !self.settings_visible;
                     if self.settings_visible {
+                        // P367：关弹窗走唯一出口（连带作废录键态），别在这里各写一遍
+                        self.close_settings_dialog();
+                        // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
+                        self.settings_search.clear();
+                    } else {
+                        self.settings_visible = true;
                         // 第 64 轮用户点单：每次进入设置默认落在第一分类，
                         // 不记忆上次浏览位置（P51 撤销）
                         self.settings_page = SettingsPage::default();
-                    } else {
-                        // P47：关弹窗顺带清搜索词，下次打开回到分类浏览
-                        self.settings_search.clear();
                     }
                 }
                 Task::none()

@@ -621,6 +621,68 @@ fn hotkey_capture_rejects_non_hotkey_keys_and_esc_cancels() {
     dispatch(&mut app, Message::HotkeyCaptureCancel);
 }
 
+/// P367（池 ④）：设置弹窗从**外面**关掉时，「等一个组合键」的录键态必须一起作废。
+/// 录键态原本的清除点（Esc／提交／恢复默认）全在弹窗**里面** ⇒ 走开关消息、点背板、
+/// 进 busy、打开列编辑器这些出路都把它留在场上，而 `update/edit.rs` 的录键拦截排在
+/// 热键表**之前** ⇒ 用户回到正文按下的下一个空闲组合键不执行本行动作，而是被当成
+/// "要绑定的键"当场改写那条动作的键位并落盘。
+#[test]
+fn closing_the_settings_dialog_voids_a_pending_hotkey_capture() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::SettingsToggled);
+    assert!(app.settings_visible, "夹具：设置弹窗开着");
+    let free = HOTKEY_ACTIONS
+        .iter()
+        .find(|a| a.default_combos.is_empty())
+        .expect("夹具：注册表里有无默认键的动作")
+        .id;
+    dispatch(&mut app, Message::HotkeyCaptureStarted(free));
+    assert_eq!(app.hotkey_capture, Some(free), "夹具：录键态已起");
+
+    // 从外面关掉弹窗（这条开关就是设置页按钮／背板点击走的那一条）
+    dispatch(&mut app, Message::SettingsToggled);
+    assert!(!app.settings_visible, "夹具：弹窗已关");
+    assert!(
+        app.hotkey_capture.is_none(),
+        "关掉弹窗必须同时作废录键态，实际 {:?}",
+        app.hotkey_capture
+    );
+
+    // 这一按本该照常走热键表；改前它被吞成"要绑定的组合键"并当场写盘
+    dispatch(
+        &mut app,
+        Message::KeyPressed(
+            keyboard::Key::Character("m".into()),
+            keyboard::Modifiers::CTRL,
+        ),
+    );
+    assert!(
+        !app.settings.hotkeys.contains_key(free),
+        "弹窗已关之后任意按键不得改写键位（更不该落盘）"
+    );
+}
+
+/// 同一条不变量的第二个出路：进 busy 会收起设置弹窗（P366 那份 `Backdrop` 名单），
+/// 所以录键态也要跟着作废——两处出路共用一个收口，不是各写一遍。
+#[test]
+fn busy_closing_the_settings_dialog_also_voids_the_capture() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::SettingsToggled);
+    dispatch(&mut app, Message::HotkeyCaptureStarted("save"));
+    assert_eq!(app.hotkey_capture, Some("save"), "夹具：录键态已起");
+    dispatch(&mut app, Message::OpenRequested);
+    assert!(app.busy, "夹具自证：OpenRequested 真的进了 busy");
+    assert!(
+        !app.settings_visible,
+        "夹具自证：P366 之后设置弹窗随 busy 收起"
+    );
+    assert!(
+        app.hotkey_capture.is_none(),
+        "弹窗被 busy 收起时录键态不许留在场上，实际 {:?}",
+        app.hotkey_capture
+    );
+}
+
 /// P320：设置页热键行不许出现空白描述。
 ///
 /// 注册表里有 15 条 `default_combos: &[]` 的动作（P316 那批＋P318/P319 两条面板入口），

@@ -813,8 +813,9 @@ impl Editpad {
         // 收尾把输入焦点还给正文——否则中文输入法在正文里失效
         self.palette_visible = false;
         self.focus_editor();
-        // P27：Esc 一并关闭设置弹窗
-        self.settings_visible = false;
+        // P27：Esc 一并关闭设置弹窗。P367：走唯一出口——弹窗关了就没人能再取消
+        // 录键态，必须连带作废「等一个组合键」
+        self.close_settings_dialog();
         // Esc 同时视作放弃关闭/打开确认
         self.confirm_visible = false;
         self.pending_close = false;

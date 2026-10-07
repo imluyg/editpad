@@ -658,7 +658,7 @@ impl Backdrop {
                 app.focus_editor();
             }
             Backdrop::ColumnEditor => app.column_editor_visible = false,
-            Backdrop::Settings => app.settings_visible = false,
+            Backdrop::Settings => app.close_settings_dialog(),
         }
     }
 
