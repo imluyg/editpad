@@ -45,9 +45,13 @@ impl Editpad {
         }
         // P31：页集合结构已变——下一拍重写清单，防崩溃恢复复活已关的页
         self.touch_manifest_stale();
-        // 与 tabs 对齐（含越界夹紧），并同步活动页句柄别名。P368：被移除的那页在
-        // 当前页之前时，活动页下标要跟着左移，否则选中的会变成下一页那份文档
+        // P368：被移除的那页在当前页之前时，活动页下标要跟着左移，否则选中的会变成
+        // 下一页那份文档
         self.realign_active_after_removal(&[idx]);
+        // P369：页集合变了 ⇒ 命中表这类**窗口级**结果必须作废。原先这句话散在
+        // 五处关页出口里各抄一遍（P303 只把「切页要作废」收进了 `set_active_tab`），
+        // 而恢复链丢占位页那条根本没抄 ⇒ 收进漏斗本身，调用侧不再各写一份。
+        self.cancel_find_scan();
         true
     }
 
@@ -89,6 +93,9 @@ impl Editpad {
         self.touch_manifest_stale();
         // P368：批量移除同样要把活动页左移「被抽掉的、在它之前的那几个」
         self.realign_active_after_removal(&idxs);
+        // P369：与 close_tab_now 同一句——真移除了页就作废命中表（上面已有
+        // `removed == 0` 的早退，走到这里必定移除过）
+        self.cancel_find_scan();
         removed
     }
 
@@ -109,8 +116,9 @@ impl Editpad {
             self.close_tab_confirm = None;
             // P213：落存为页 id（下标只在本次 dispatch 内使用）
             self.batch_close_confirm = Some(targets.iter().map(|&i| self.tabs[i].id).collect());
-        } else if self.close_tabs_now(&targets) > 0 {
-            self.cancel_find_scan();
+        } else {
+            // P369：命中表的作废已收进漏斗，调用侧不再各写一句
+            self.close_tabs_now(&targets);
         }
     }
 
@@ -228,8 +236,9 @@ impl Editpad {
                 } else if self.tabs[idx].dirty {
                     // 置脏页先确认（骨架版仅提供「放弃更改」出口）
                     self.close_tab_confirm = Some(self.tabs[idx].id);
-                } else if self.close_tab_now(idx) {
-                    self.cancel_find_scan();
+                } else {
+                    // P369：作废命中表已在 `close_tab_now` 里，这里不再手写第二遍
+                    self.close_tab_now(idx);
                 }
                 Task::none()
             }
@@ -245,9 +254,7 @@ impl Editpad {
                         .borrow_mut()
                         .reset_document(editpad_core::Document::new());
                 }
-                if self.close_tab_now(idx) {
-                    self.cancel_find_scan();
-                }
+                self.close_tab_now(idx);
                 Task::none()
             }
             Message::CancelCloseTab => {
@@ -349,8 +356,8 @@ impl Editpad {
                         // 置脏走既有单页确认条（含「保存并关闭」出口）
                         self.batch_close_confirm = None;
                         self.close_tab_confirm = Some(self.tabs[idx].id);
-                    } else if self.close_tab_now(idx) {
-                        self.cancel_find_scan();
+                    } else {
+                        self.close_tab_now(idx);
                     }
                 }
                 Task::none()
@@ -385,9 +392,7 @@ impl Editpad {
                                 .reset_document(editpad_core::Document::new());
                         }
                     }
-                    if self.close_tabs_now(&targets) > 0 {
-                        self.cancel_find_scan();
-                    }
+                    self.close_tabs_now(&targets);
                 }
                 Task::none()
             }

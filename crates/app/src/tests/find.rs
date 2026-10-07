@@ -2594,3 +2594,56 @@ fn p344_goto_stale_hit_after_the_document_shrank_does_not_panic() {
     assert_eq!(app.cur_handle.borrow().doc.line_count(), lines);
     assert!(app.cur_handle.borrow().doc.to_text().contains('z'));
 }
+
+/// P369：**三条关页漏斗各自**都要作废命中表。这句话原本散在五处调用侧各抄一遍
+/// （P303 那轮只把「切页」那一族收进 `set_active_tab`），而恢复链丢占位页那条
+/// 一次都没抄 ⇒ 恢复期丢掉一页后 `matches` 还是外地的表，Enter／下一步／
+/// 「替换当前(正则)」拿着旧坐标在当下页里动。现在作废收进漏斗本身，这一格逐条钉住：
+/// 摘掉任何一条漏斗里的那一句，都必须有一条用例红（第三条漏斗的用例在 `tests/session.rs`）。
+#[test]
+fn every_tab_removal_funnel_voids_the_hit_table() {
+    // 三页全干净的空页：批量关时不弹确认，能直接走到漏斗
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::NewTab);
+    assert_eq!(app.tabs.len(), 3, "夹具：应有三页");
+
+    // 装一张真实命中表（走生产装载入口，与 P301／P303 同口径）
+    let arm = |app: &mut Editpad| {
+        app.find_visible = true;
+        app.find_query = "ab".to_owned();
+        let seq = app.find_seq;
+        app.find_scan = Some(seq);
+        dispatch(
+            app,
+            Message::FindScanDone(
+                seq,
+                scanned(vec![editpad_core::MatchPos {
+                    line: 0,
+                    col: 0,
+                    len_chars: 2,
+                }]),
+            ),
+        );
+        assert_eq!(app.matches.hits().len(), 1, "夹具自证：命中表已装上");
+    };
+
+    // ---- 单页出路：右键菜单「关闭此页」关掉另一页 ----
+    arm(&mut app);
+    dispatch(&mut app, Message::CloseTabAt(1));
+    assert_eq!(app.tabs.len(), 2, "夹具：单页出路确实关掉了一页");
+    assert!(
+        app.matches.hits().is_empty(),
+        "单页关页这条漏斗必须作废命中表，否则 Enter 拿的是外地坐标"
+    );
+
+    // ---- 批量出路：「关闭其他」（全干净 ⇒ 不弹确认直接关）----
+    arm(&mut app);
+    let anchor = app.active_tab;
+    dispatch(&mut app, Message::CloseOtherTabs(anchor));
+    assert_eq!(app.tabs.len(), 1, "夹具：批量出路确实关到了只剩一页");
+    assert!(
+        app.matches.hits().is_empty(),
+        "批量关页这条漏斗必须作废命中表（摘掉它那一句时，全池原本一条都不红）"
+    );
+}

@@ -2445,3 +2445,73 @@ fn broken_session_manifest_is_reported_and_kept_aside_instead_of_a_blank_start()
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&clean);
 }
+
+/// 池 ⑤（第 272 轮登记，转述项，本轮先复现）：恢复链里「加载失败就丢掉占位页」
+/// 那条出路只对齐了下标与别名，**没**作废命中表——而其余五条关页路径都各自手写了一句
+/// `cancel_find_scan()`（P303 把「切页必带作废」收进 `set_active_tab` 时，关页这一族
+/// 是靠五处成对调用维持的）。后果＝查找栏挂着时恢复期丢了一页，`matches` 还是**被丢掉
+/// 那页/上一页**那张表，此后 Enter／下一步／「替换当前(正则)」拿外地坐标在当下页里动。
+///
+/// 顺带钉 P368 的同一处：被丢掉的占位页在**当前页之前**时，选中的必须还是原来那份文档。
+#[test]
+fn a_failed_restore_placeholder_keeps_the_active_page_and_voids_the_hit_table() {
+    let dir = snapshot_scratch_dir("p369-drop-placeholder");
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[
+            editpad_core::snapshot::SessionPage {
+                tab: clean_named_tab("C:/w/one.txt"),
+                doc: editpad_core::Document::new(),
+            },
+            editpad_core::snapshot::SessionPage {
+                tab: clean_named_tab("C:/w/two.txt"),
+                doc: editpad_core::Document::new(),
+            },
+        ],
+        1,
+        2,
+    )
+    .expect("写会话应成功");
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+    assert_eq!(app.tabs.len(), 2, "夹具：两页占位");
+    assert_eq!(app.active_tab, 1, "夹具：清单指定的活动页是第二页");
+    assert_eq!(app.restore_queue.len(), 1, "夹具：队首已登记在途");
+    let wanted = app.tabs[1].id;
+
+    // 给当下页装一张真实命中表（走生产装载入口，与 P303／P301 那条同口径）
+    app.find_visible = true;
+    app.find_query = "ab".to_owned();
+    let seq = app.find_seq;
+    app.find_scan = Some(seq);
+    dispatch(
+        &mut app,
+        Message::FindScanDone(
+            seq,
+            scanned(vec![editpad_core::MatchPos {
+                line: 3,
+                col: 0,
+                len_chars: 2,
+            }]),
+        ),
+    );
+    assert_eq!(app.matches.hits().len(), 1, "夹具自证：命中表已装上");
+
+    // 第一个占位页加载失败 ⇒ 这一页被丢弃
+    let job = app.active_load.as_ref().expect("恢复链应有在途任务").id;
+    dispatch(&mut app, Message::Loaded(job, Err("文件没了".to_owned())));
+
+    assert_eq!(app.tabs.len(), 1, "夹具：失败那页已被移除");
+    assert_eq!(
+        app.tab().id,
+        wanted,
+        "被移除的占位页在当前页之前 ⇒ 选中的必须还是原来那份文档（P368）"
+    );
+    assert!(
+        app.matches.hits().is_empty(),
+        "丢弃占位页这条出路也要作废命中表，否则 Enter 拿的是外地坐标，实际 {:?}",
+        app.matches.hits().len()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
