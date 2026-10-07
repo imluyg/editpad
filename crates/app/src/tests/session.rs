@@ -2119,6 +2119,72 @@ fn window_focus_prompts_for_dirty_tab_and_respects_decision() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// 池 ⑥（第 272 轮登记，转述项，本轮先复现＝成立）：`check_external_changes` 走到
+/// 「活动页干净 ⇒ 静默重载」那一支时**当场 return**，于是同一拍里排在它后面的页一个
+/// 都没扫到，`external_change` 也整个停在上一拍的值上。
+/// 后果＝后台页的「文件被外部改动」提示要等活动页那次**异步**重载真落地才可能出；
+/// 而那次重载被内存护栏拒绝、或加载失败（失败不重记比对戳＝下次还会命中）时，
+/// 这一提示永远出不来——用户看到的是"另一个窗口改了我的文件，编辑器一声不吭"。
+#[test]
+fn background_pages_are_reported_in_the_same_pass_as_a_silent_reload() {
+    let dir = scratch_dir("p370-external-queue");
+    let (pa, pb, pc) = (dir.join("a.txt"), dir.join("b.txt"), dir.join("c.txt"));
+    std::fs::write(&pa, "a").unwrap();
+    std::fs::write(&pb, "b").unwrap();
+    std::fs::write(&pc, "c").unwrap();
+
+    // 三页各装一个文件，全部干净；活动页 = 第 0 页
+    let mut app = Editpad::default();
+    for p in [&pa, &pb, &pc] {
+        dispatch(&mut app, Message::FileDropped(p.to_path_buf()));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("body"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+    }
+    assert_eq!(app.tabs.len(), 3, "夹具：三页各装一个文件");
+    dispatch(&mut app, Message::SwitchTab(0));
+    assert_eq!(app.active_tab, 0, "夹具：活动页切回第 0 页");
+
+    // 三个文件同被外部改动（每次写入长度都不同 ⇒ size 分量必然变化，无计时依赖）
+    std::fs::write(&pa, "a changed").unwrap();
+    std::fs::write(&pb, "b changed longer").unwrap();
+    std::fs::write(&pc, "c changed even longer still").unwrap();
+
+    dispatch(&mut app, Message::WindowFocused);
+    assert!(
+        app.active_load.is_some(),
+        "夹具自证：活动页(0) 走的是静默重载那一支，不是进队列"
+    );
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[1, 2]),
+        "同一拍里两个后台页也要进队列——改前那句提前 return 把它们整个丢掉，\
+         并把 external_change 停在旧值上"
+    );
+
+    // 那次静默重载**失败**（失败不重记比对戳，P50 语义）⇒ 下一次聚焦必须照样报出来，
+    // 而不是"活动页一直命中、后台页永远排不到"
+    let job = app.active_load.as_ref().expect("夹具：在途重载任务").id;
+    dispatch(&mut app, Message::Loaded(job, Err("读不了".to_owned())));
+    dispatch(&mut app, Message::WindowFocused);
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[1, 2]),
+        "重载失败/被拒时后台页的提示不能就此永久失踪"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn external_change_prompt_queues_multiple_tabs() {
     // P52 聚合：两个置脏后台页同被外部修改 → 队列按序聚合；
@@ -2160,9 +2226,13 @@ fn external_change_prompt_queues_multiple_tabs() {
     );
     assert_eq!(app.active_tab, 1, "第二个打开落新页并聚焦");
 
-    // 两页同被外部修改 → 聚焦后队列 [0, 1]（活动页1干净本可静默重载，
-    // 但页0置脏在先——巡检按序扫描，页0先命中进队列；页1是干净活动页
-    // 走静默重载分支并提前返回，队列只收页0。此处钉住该优先级语义。）
+    // 两页同被外部修改 → 聚焦后队列 [0]：页0 置脏，属"等用户裁决"那一支；
+    // 页1 是干净活动页，走静默重载那一支（这条优先级 P370 之后仍未变——干净活动页
+    // 自己重载，不进队列）。
+    // ⚠️ 改判记录：这一格原先把"页1 那一支当场 return、于是队列只收页0"写成
+    // **优先级语义**并钉住——那是把缺陷当契约（第 176 轮那条老账的同族）。P370 之后
+    // 扫描会走完，排在活动页之后的页同拍就进队列；本用例的断言点在这之后
+    // （页1 的重载已结算），队列内容不变 ⇒ 判据无需放宽，只把理由改对。
     //
     // 确定性构造（取代历轮一路加宽的 sleep：25→50→150ms）：外部修改
     // 判定是 (mtime, size) **任一**分量变化即算改过（见
@@ -2175,7 +2245,7 @@ fn external_change_prompt_queues_multiple_tabs() {
     dispatch(&mut app, Message::WindowFocused);
     assert!(
         app.active_load.is_some(),
-        "干净活动页(1)优先静默重载并提前返回"
+        "干净活动页(1)走静默重载那一支（P370 之后扫描仍会走完，只是这一页不进队列）"
     );
     let s3 = app.job_seq;
     dispatch(

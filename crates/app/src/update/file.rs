@@ -906,6 +906,13 @@ impl Editpad {
             return;
         }
         let mut queue: Vec<u64> = Vec::new();
+        // P370（池 ⑥）：活动页那次静默重载改成**扫完之后**再发起。原先这一支在循环里
+        // 就地 `start_loading(...)` 然后 `return`——排在活动页后面的页一个都没扫到，
+        // 函数末尾那行队列入库也被跳过（`external_change` 整个停在上一拍的值上）。
+        // 后果＝后台页的「文件被外部改动」提示要等活动页那次**异步**重载真落地才可能出；
+        // 而那次重载被内存护栏拒绝、或加载失败（失败不重记比对戳＝下次还会命中）时，
+        // 这条提示就永远出不来。
+        let mut reload: Option<(usize, PathBuf)> = None;
         for (idx, tab) in self.tabs.iter().enumerate() {
             let Some(path) = tab.path.as_deref() else {
                 continue;
@@ -926,15 +933,18 @@ impl Editpad {
                     let pre_view = (ed.cursor.line, ed.cursor.col, ed.scroll_top, ed.scroll_left);
                     self.monitor_pending = Some((tab.id, follow, Some(pre_view)));
                 }
-                let path = tab.path.clone().expect("上方已判 Some");
-                // 加载流由 subscription 依据 active_load 重建接管，返回的
-                // Task 恒为 none——显式弃置（加载管线语义见 start_loading）
-                let _ = self.start_loading(path, idx);
-                return;
+                reload = Some((idx, path.to_path_buf()));
+                // 这一页由静默重载接手，不进"等用户裁决"的队列
+                continue;
             }
             queue.push(tab.id);
         }
         self.external_change = if queue.is_empty() { None } else { Some(queue) };
+        if let Some((idx, path)) = reload {
+            // 加载流由 subscription 依据 active_load 重建接管，返回的
+            // Task 恒为 none——显式弃置（加载管线语义见 start_loading）
+            let _ = self.start_loading(path, idx);
+        }
     }
 
     /// P55：就地重命名提交——校验名称 → 磁盘改名 → 页路径/比对戳/
