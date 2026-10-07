@@ -266,11 +266,21 @@ impl Editpad {
                 }
             }
             Message::PasteRequested => {
-                // clipboard::read 返回 Task<Option<String>>
-                iced::clipboard::read().map(|content| Message::Pasted(content.unwrap_or_default()))
+                // P357（R-14 家族）：剪贴板读取是**异步往返**，期间切页/关页都不被
+                // 任何闸拦 ⇒ 回报必须点名它属于哪一页，否则文本会插进"回报那一刻的
+                // 活动页"。id 在请求那一刻取，不在回报时取。
+                let tab_id = self.tab().id;
+                iced::clipboard::read()
+                    .map(move |content| Message::Pasted(tab_id, content.unwrap_or_default()))
             }
-            Message::Pasted(text) => {
+            Message::Pasted(tab_id, text) => {
                 if text.is_empty() {
+                    Task::none()
+                } else if self.tab().id != tab_id {
+                    // 发起页已不是当前页（切走了，或那一页已被关掉）⇒ **当场作废并出声**。
+                    // 不落到"现在这一页"＝不写错页；内容仍在系统剪贴板里，再按一次
+                    // Ctrl+V 就得到，而静默插进别的页是要命的（P340／P341 同族）。
+                    self.set_status_error(editpad_core::Key::StPasteStaleTab.text(self.lang()));
                     Task::none()
                 } else {
                     // P322：缩进预处理（开关关着＝原样）
@@ -289,8 +299,10 @@ impl Editpad {
                 self.clip_history.remove(i);
                 self.clip_history.insert(0, text.clone());
                 // 插入走既有粘贴路径 ⇒ 置脏、撤销、只读前置闸全部继承，
-                // 本功能不长第二个写正文的入口。
-                self.update(Message::Pasted(text))
+                // 本功能不长第二个写正文的入口。P357：面板取用是**同步**的
+                // （点击与插入在同一次 update 里，中间不可能切页），id 取当下这页。
+                let tab_id = self.tab().id;
+                self.update(Message::Pasted(tab_id, text))
             }
             // ---------- 正文右键菜单（P308） ----------
             Message::EditorContextMenu(x, y) => {

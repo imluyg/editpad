@@ -23,7 +23,9 @@ fn app_with_indented_caret() -> Editpad {
 }
 
 fn paste(app: &mut Editpad, text: &str) -> String {
-    dispatch(app, Message::Pasted(text.to_owned()));
+    // P357：回报带发起页 id。测试里"发起页"就是当下这一页（同步夹具，中间没人切页）
+    let tab_id = app.tab().id;
+    dispatch(app, Message::Pasted(tab_id, text.to_owned()));
     app.cur_handle.borrow().doc.to_text()
 }
 

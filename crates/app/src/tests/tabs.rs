@@ -1159,6 +1159,70 @@ fn close_confirm_bar_survives_restore_placeholder_removal() {
     );
 }
 
+/// P357（R-14 家族的又一格）：粘贴的回报必须认得它是**哪一页**按的 Ctrl+V。
+///
+/// 剪贴板读取是一次异步往返（`iced::clipboard::read()` 走 Task），而切页既不看 busy
+/// 也不看有没有粘贴在途 ⇒ 不带页 id 的旧写法把文本插进「回报那一刻的活动页」，
+/// 还把它置脏。与 P340（另存为落错页）／P341（放弃更改点错页）同一扇门。
+#[test]
+fn a_paste_lands_only_on_the_tab_that_asked_for_it() {
+    let mut app = app_with_tabs(2);
+    let origin = app.tabs[0].id;
+    assert_ne!(origin, app.tabs[1].id, "夹具前提：两页 id 不同");
+    app.set_active_tab(1);
+    let other_text = app.tabs[1].editor.borrow().doc.to_text();
+    let origin_text = app.tabs[0].editor.borrow().doc.to_text();
+    let other_dirty = app.tabs[1].dirty;
+    let origin_dirty = app.tabs[0].dirty;
+
+    // 缺陷那一格：A 页按 Ctrl+V → 切到 B → 回报才到
+    dispatch(&mut app, Message::Pasted(origin, "STALE".to_owned()));
+    assert_eq!(
+        app.tabs[1].editor.borrow().doc.to_text(),
+        other_text,
+        "别页正文不许被这次粘贴写"
+    );
+    assert_eq!(app.tabs[1].dirty, other_dirty, "别页的脏账目不许被点着");
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        origin_text,
+        "发起页也不写：它已不在眼前，落下去用户看不见＝另一种静默丢失"
+    );
+    assert_eq!(app.tabs[0].dirty, origin_dirty, "同理不许悄悄把发起页置脏");
+    assert!(!app.status.is_empty(), "作废必须出声，否则用户以为粘上了");
+
+    // 正对照：没切页时同一份文本必须照常落地（否则上面四条红的是"粘贴坏了"）
+    let mut fine = app_with_tabs(2);
+    fine.set_active_tab(0);
+    let here = fine.tab().id;
+    let before = fine.tab().editor.borrow().doc.to_text();
+    dispatch(&mut fine, Message::Pasted(here, "OK".to_owned()));
+    assert_eq!(
+        fine.tab().editor.borrow().doc.to_text(),
+        format!("{before}OK"),
+        "同页到货必须插进去"
+    );
+    assert!(
+        !fine.status.contains("取消"),
+        "正常粘贴不该有取消提示，实际 {:?}",
+        fine.status
+    );
+
+    // 第三格：发起页已被关掉 ⇒ 谁也不该收到这次粘贴（不 panic＋不落幸存页）
+    let mut closed = app_with_tabs(2);
+    let gone = closed.tabs[0].id;
+    closed.set_active_tab(1);
+    closed.tabs.remove(0);
+    closed.refresh_cur_handle();
+    let survivor_text = closed.tab().editor.borrow().doc.to_text();
+    dispatch(&mut closed, Message::Pasted(gone, "GHOST".to_owned()));
+    assert_eq!(
+        closed.tab().editor.borrow().doc.to_text(),
+        survivor_text,
+        "页都没了，这次粘贴不该被任何一页收下"
+    );
+}
+
 #[test]
 fn batch_close_clears_confirm_bar_when_confirmed_tab_in_targets() {
     // 批量移除把确认页自身也关掉 → 确认条必须清空（陈旧 id 解析不到）。

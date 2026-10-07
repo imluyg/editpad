@@ -264,9 +264,12 @@ enum Message {
     CutRequested,
     /// 请求读系统剪贴板（Ctrl+V），内容经 Pasted 回来
     PasteRequested,
-    /// 剪贴板读取完成：按普通插入入文
-    /// （换行归一由 insert_str 按文档主导行尾完成，P9 起不再在 app 层预处理）
-    Pasted(String),
+    /// 剪贴板读取完成：**第一个参数是发起那次 Ctrl+V 的页 id**（P357，R-14 家族），
+    /// 第二个是文本。按普通插入入文
+    /// （换行归一由 insert_str 按文档主导行尾完成，P9 起不再在 app 层预处理）。
+    /// ⚠️ id 不是装饰：`iced::clipboard::read()` 是一次异步往返，期间用户按
+    /// `Ctrl+Tab` 或关掉那一页都完全可行，不带 id 的回报会把文本插进**另一页**。
+    Pasted(u64, String),
     /// P319：从剪贴板历史面板取用第 N 条。载荷是**存储下标**而非过滤后的行号
     /// ——全文不进消息（一条几兆的历史会让每次投递抄一遍它），下标在
     /// [`Editpad::clip_history`] 上现取；越界按 no-op 处理。
