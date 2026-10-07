@@ -213,19 +213,19 @@ impl Editpad {
     ///
     /// ⚠️ P356：清单里**必须**包含每一类带整窗背板的浮层。正文右键菜单（P308）
     /// 是在这条收口写完之后才加进来的，当时没登记 ⇒ 菜单挂着时进 busy，背板照旧
-    /// 挡整窗点击、busy 结束后菜单还悬在旧坐标上。表驱动用例
-    /// `every_dismissal_entry_closes_every_full_window_backdrop_overlay` 现在把四类
-    /// 逐个钉住，第五类浮层再加进来时它会逼着登记。
+    /// 挡整窗点击、busy 结束后菜单还悬在旧坐标上。
+    /// ⚠️ P366（池 ③）：同一格又漏了四类（菜单栏／命令面板／列编辑器／设置弹窗），
+    /// 因为"数全"这件事由这里的一份手写清单和用例里的另一份手抄名单各自维持——两份
+    /// 都可能少一类。现在名单收成一处 `Backdrop::ALL`，读与收同一个来源：加一类带
+    /// 整窗背板的浮层只可能在那一处登记，而表驱动用例
+    /// `every_backdrop_in_the_production_list_yields_to_busy` 枚举的正是它。
     /// （判据是"有没有整窗背板"，不是"数据属于哪一页"——后者归 `set_active_tab` 管，
     /// 那里 P336 已裁决状态栏两个菜单不带页专属数据、切页时不收。）
     pub(crate) fn enter_busy(&mut self) {
         self.busy = true;
-        self.tab_context_menu = None;
-        // P308：正文右键菜单与标签菜单同锚点、同背板，同收
-        self.editor_context_menu = false;
-        // P67：状态栏弹出菜单同样会被 busy 互斥挡住，直接收起
-        self.encoding_menu = false;
-        self.eol_menu = false;
+        for backdrop in Backdrop::ALL {
+            backdrop.close(self);
+        }
     }
 
     /// 当前激活标签页。

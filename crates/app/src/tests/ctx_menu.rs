@@ -449,17 +449,68 @@ fn switching_pages_closes_both_context_menus() {
     );
 }
 
-/// P356（第 261 轮扫描池 ⑤）：**每一类**带整窗背板的浮层，在**每一个**"必须让路"的
-/// 入口都得收起。
+/// P356（第 261 轮池 ⑤）＋P366（第 272 轮池 ③）：**每一类**带整窗背板的浮层，在每个
+/// "必须让路"的入口都得收起。
 ///
-/// 形状＝"清单只写了一半"：`enter_busy` 收三类、唯独漏后来才加的正文右键菜单（P308）
-/// ⇒ 菜单挂着时按 `Ctrl+O`，busy 的透明背板与菜单背板叠着挡整窗点击，busy 结束后菜单
-/// 还悬在**旧坐标**上、内容还是旧页那组命令。这条收口的存在理由（P39）是**背板挡点击**，
-/// 不是"数据属于哪一页"——所以判据是"有没有整窗背板"，四类全中。
-/// 两个入口都钉：`enter_busy` 与 Esc 的统一收起出口（`dismiss_all_prompts`）。
-/// ⚠️ **切页那一列故意不钉**：P336 已裁决状态栏编码／行尾菜单**不带页专属数据**
-/// （目标就是"当下活动页"），切页时不收＝既定语义，不是漏做；两类右键菜单在切页那
-/// 一列由既有用例 `switching_pages_closes_both_context_menus` 钉着。
+/// 形状＝"清单只写了一半"：`enter_busy` 原本收三类、唯独漏后来才加的正文右键菜单
+/// （P356 补的那格）；而 P366 又量出它仍漏四类（菜单栏／命令面板／列编辑器／设置弹窗），
+/// 且下面那条 P356 用例的浮层名单是**在测试里手抄的四类**⇒ 对漏掉的四类天生失明、照旧全绿。
+/// 症状都同形：busy 的透明背板与浮层背板叠着挡整窗点击，busy 结束后浮层还悬在旧状态上。
+/// 现在名单只有一份（`Backdrop::ALL`，读与收同处），本用例枚举它——加一类就没法只加一半。
+/// 判据是**有没有整窗背板**（这条收口的存在理由是 P39 那句"背板挡点击"），不是"数据属于
+/// 哪一页"——后者归 `set_active_tab`（P336 已裁：状态栏两个菜单不带页专属数据，切页不收）。
+///
+/// ⚠️ 列编辑器对话框在 Esc 那一列**故意不收**＝S-2/P336 既定裁决（模态浮层由
+/// `update/edit.rs` 按键分支顶层优先自收），这里钉成反向断言。
+/// ⚠️ 切页那一列不钉；两类右键菜单在切页那一列由 `switching_pages_closes_both_context_menus` 钉着。
+#[test]
+fn every_backdrop_in_the_production_list_yields_to_busy() {
+    type Entry = (&'static str, &'static str, fn(&mut Editpad));
+    let entries: Vec<Entry> = vec![
+        ("busy", "进 busy（打开对话框）", |a| {
+            dispatch(a, Message::OpenRequested)
+        }),
+        ("esc", "Esc（统一收起出口）", |a| {
+            dispatch(a, Message::BarsDismissed)
+        }),
+    ];
+
+    for b in Backdrop::ALL {
+        for (key, label, entry) in &entries {
+            let mut app = Editpad::default();
+            b.open(&mut app);
+            assert!(
+                b.is_open(&app),
+                "夹具自证：{} 本来就开得起来（入口＝{label}）——开不起来的话下面那句是空转",
+                b.label()
+            );
+            entry(&mut app);
+            let stays_by_ruling = *key == "esc" && matches!(b, Backdrop::ColumnEditor);
+            assert_eq!(
+                b.is_open(&app),
+                stays_by_ruling,
+                "入口「{label}」之后 {}{}",
+                b.label(),
+                if stays_by_ruling {
+                    "必须留在场上（模态浮层由按键分支自收＝S-2 既定裁决）"
+                } else {
+                    "必须收起——它的整窗背板会挡住 busy 期间的一切点击"
+                }
+            );
+        }
+    }
+
+    // 反空转自证：进 busy 那条入口确实把 busy 置起来了
+    let mut probe = Editpad::default();
+    dispatch(&mut probe, Message::OpenRequested);
+    assert!(probe.busy, "夹具自证：OpenRequested 真的走 enter_busy");
+}
+
+/// P356（第 261 轮扫描池 ⑤）
+///
+/// ⚠️ P366 起这条是上面那条生产名单用例的**子集**（名单在这里手抄四类，只对这四类
+/// 有效）。新增浮层请改 `Backdrop::ALL`，别只往本用例的 vec 里加一行——那正是
+/// "清单没数全"这一族的成因。保留它是为了留住 P356 那轮的原始判据文本。
 #[test]
 fn every_dismissal_entry_closes_every_full_window_backdrop_overlay() {
     // 表驱动的三份类型别名（clippy 的 `type_complexity` 在提醒：这条矩阵的类型确实长）

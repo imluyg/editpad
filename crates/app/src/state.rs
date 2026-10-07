@@ -567,3 +567,123 @@ pub(crate) enum FindDrag {
     /// 已锚定：`Point` = 上一帧光标位置（窗口坐标，与 `on_move` 同空间）
     At(Point),
 }
+
+/// 定案 R-20 判据 A 的**唯一名单**：会画出整窗背板的浮层，因而「进 busy 必须让路」。
+///
+/// P366（池 ③）：这一族的缺陷从来是「清单没数全」——`enter_busy` 那份手写清单
+/// 在 P356 补齐正文右键菜单之后又漏了四类（菜单栏／命令面板／列编辑器／设置弹窗），
+/// 而 P356 那条表驱动用例的名单也是**在测试里手抄的那四类**，于是它对漏掉的四类
+/// 天生失明。现在读与收只有这一份，且用例直接枚举 [`Backdrop::ALL`]。
+///
+/// ⚠️ 判据是「有没有整窗背板」（挡住整窗点击），**不是**「数据属于哪一页」——后者
+/// 归 `set_active_tab` 管（P336 已裁：状态栏两个菜单不带页专属数据，切页时不收）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Backdrop {
+    /// P39：标签页右键菜单
+    TabMenu,
+    /// P308：正文右键菜单
+    EditorMenu,
+    /// P67：状态栏编码菜单
+    EncodingMenu,
+    /// P67：状态栏行尾菜单
+    EolMenu,
+    /// 第 69 轮：顶部菜单栏浮层
+    Menubar,
+    /// P151：命令面板／剪贴板历史面板
+    Palette,
+    /// B9：列编辑器对话框
+    ColumnEditor,
+    /// P27/P40：设置弹窗
+    Settings,
+}
+
+impl Backdrop {
+    /// 全部带整窗背板的浮层。`enter_busy` 与表驱动用例都从这一份取名单。
+    pub(crate) const ALL: &'static [Backdrop] = &[
+        Backdrop::TabMenu,
+        Backdrop::EditorMenu,
+        Backdrop::EncodingMenu,
+        Backdrop::EolMenu,
+        Backdrop::Menubar,
+        Backdrop::Palette,
+        Backdrop::ColumnEditor,
+        Backdrop::Settings,
+    ];
+
+    /// 名单里这一类的中文名（只给用例的失败信息用；生产路径不需要名字）。
+    #[cfg(test)]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Backdrop::TabMenu => "标签右键菜单",
+            Backdrop::EditorMenu => "正文右键菜单",
+            Backdrop::EncodingMenu => "状态栏编码菜单",
+            Backdrop::EolMenu => "状态栏行尾菜单",
+            Backdrop::Menubar => "菜单栏浮层",
+            Backdrop::Palette => "命令面板",
+            Backdrop::ColumnEditor => "列编辑器对话框",
+            Backdrop::Settings => "设置弹窗",
+        }
+    }
+
+    /// 本帧会不会画出整窗背板（读各浮层自己的在场标记）。
+    ///
+    /// ⚠️ `#[cfg(test)]`：生产路径只需要"收"这一半（`enter_busy` 无条件 close 全部），
+    /// 读侧的唯一读者就是那条表驱动用例——留成 `pub(crate)` 会撞 `clippy -D warnings`
+    /// 的 dead-code（同 P301 那口 `#[cfg(test)]` 夹具入口）。
+    #[cfg(test)]
+    pub(crate) fn is_open(self, app: &Editpad) -> bool {
+        match self {
+            Backdrop::TabMenu => app.tab_context_menu.is_some(),
+            Backdrop::EditorMenu => app.editor_context_menu,
+            Backdrop::EncodingMenu => app.encoding_menu,
+            Backdrop::EolMenu => app.eol_menu,
+            Backdrop::Menubar => app.menu_bar_open.is_some(),
+            Backdrop::Palette => app.palette_visible,
+            Backdrop::ColumnEditor => app.column_editor_visible,
+            Backdrop::Settings => app.settings_visible,
+        }
+    }
+
+    /// 收起它（写侧与读侧同一份名单，所以「加了一类、收口少一类」无从发生）。
+    pub(crate) fn close(self, app: &mut Editpad) {
+        match self {
+            Backdrop::TabMenu => app.tab_context_menu = None,
+            Backdrop::EditorMenu => app.editor_context_menu = false,
+            Backdrop::EncodingMenu => app.encoding_menu = false,
+            Backdrop::EolMenu => app.eol_menu = false,
+            Backdrop::Menubar => app.menu_bar_open = None,
+            Backdrop::Palette => {
+                app.palette_visible = false;
+                // P151：面板关掉要把输入焦点还给正文，否则中文输入法失效
+                app.focus_editor();
+            }
+            Backdrop::ColumnEditor => app.column_editor_visible = false,
+            Backdrop::Settings => app.settings_visible = false,
+        }
+    }
+
+    /// 从**生产入口**把它开起来（只给表驱动用例：这一列同时自证「这类浮层本来就
+    /// 开得起来」，否则在场标记一直是 false 也能让收口断言空过）。
+    #[cfg(test)]
+    pub(crate) fn open(self, app: &mut Editpad) {
+        use crate::editor::{BlockSel, CursorPos};
+        let msg = match self {
+            Backdrop::TabMenu => Message::TabContextMenu(0),
+            Backdrop::EditorMenu => Message::EditorContextMenu(120.0, 90.0),
+            Backdrop::EncodingMenu => Message::ToggleEncodingMenu,
+            Backdrop::EolMenu => Message::ToggleEolMenu,
+            Backdrop::Menubar => Message::MenuToggled(0),
+            Backdrop::Palette => Message::PaletteToggled(PaletteMode::Commands),
+            Backdrop::Settings => Message::SettingsToggled,
+            Backdrop::ColumnEditor => {
+                // B9 的打开守卫要求「当前页有列块」：夹具照生产口径造一块
+                app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+                    anchor: CursorPos { line: 0, col: 1 },
+                    head: CursorPos { line: 1, col: 2 },
+                });
+                Message::ColumnEditorToggled
+            }
+        };
+        let _ = app.update(msg);
+    }
+}
