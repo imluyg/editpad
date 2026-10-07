@@ -1174,6 +1174,71 @@ fn saved_ok_surfaces_stashed_backup_notice() {
 }
 
 #[test]
+fn backup_notice_does_not_outlive_the_page_it_was_stashed_for() {
+    // 提示暂存的取走必须发生在「这一页还在不在」的判定**之前**：晚到的成功
+    // 回报找不到发起页时只收 busy，那份提示便留下来，被之后某一次**根本没
+    // 有备份**的保存补显出来（报的是另一个文件的旧版）。
+    let (mut app, path) = loaded_real_file_app("backup-notice-stale");
+    let dir = path.parent().unwrap().to_path_buf();
+    // 第二页：发起页关掉后幸存，用来接住后一次保存
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::SwitchTab(0));
+    app.settings.backup_mode = editpad_core::settings::BACKUP_MODE_SIMPLE.to_owned();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let id0 = app.tabs[0].id;
+    let v0 = app.tabs[0].version;
+
+    // 走生产入口（Ctrl+S）：写前备份与提示暂存都在 `start_save` 里同步发生
+    dispatch(&mut app, Message::SaveRequested);
+    assert!(
+        dir.join("note.txt.bak").is_file(),
+        "夹具自证：这次保存真的做了写前备份"
+    );
+    assert!(
+        app.pending_backup_notice.is_some(),
+        "夹具自证：备份提示由生产路径暂存（非夹具手填）"
+    );
+
+    // 落盘在途期间用户关掉发起页（Ctrl+W → 确认放弃更改），再让回报到货
+    dispatch(&mut app, Message::CloseTabRequest);
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+    assert!(
+        app.tabs.iter().all(|t| t.id != id0),
+        "夹具自证：发起页确已不在"
+    );
+    dispatch(
+        &mut app,
+        Message::Saved(id0, v0, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert!(
+        app.pending_backup_notice.is_none(),
+        "发起页已关 ⇒ 那份提示当场弃置，不许留给下一次保存"
+    );
+
+    // 后果格：目标文件磁盘上本不存在 ⇒ 这次保存不会产生任何备份，
+    // 状态栏就该是空的（陈旧提示若留住，正是从这里冒出来的）
+    app.tabs[0].path = Some(dir.join("fresh.txt"));
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+    let id1 = app.tabs[0].id;
+    let v1 = app.tabs[0].version;
+    dispatch(&mut app, Message::SaveRequested);
+    assert!(app.busy, "夹具自证：第二次保存确实启动了写盘");
+    assert!(
+        !dir.join("fresh.txt.bak").is_file(),
+        "夹具自证：这次保存没有备份可留（目标文件磁盘上本不存在）"
+    );
+    dispatch(
+        &mut app,
+        Message::Saved(id1, v1, Ok(editpad_core::EncodeNotice::default())),
+    );
+    assert!(
+        app.status.is_empty(),
+        "这次保存既没转码也没备份，状态栏该被清空，实际 {:?}",
+        app.status
+    );
+}
+
+#[test]
 fn error_status_survives_edit_noise() {
     // 「保存失败」等错误必须持久：编辑噪声不清除，直到下一条信息
     // 状态让位。旧实现打一个字就把错误抹掉且无日志可查。

@@ -387,6 +387,11 @@ impl Editpad {
                 // 落到哪个分支都不许留残值（留着就会被之后一次无关的落盘成功
                 // 认领，把页改名成一个从没写出去的路径）。
                 let save_as = self.pending_save_as.take().filter(|(id, _)| *id == tab_id);
+                // P358（池⑦）：备份提示也**在定位发起页之前**取走（同 `TabSaved`
+                // 的次序）。它记的是「刚才那次落盘之前留了档」这件事，与回报最后
+                // 落到哪一页无关；留在场上就会被之后一次没有产生备份的保存补显出
+                // 来——报的是另一个文件的旧版，而这一次磁盘上根本没有旧版可备份。
+                let backup_note = self.pending_backup_notice.take();
                 // P146 路由：按发起页 id 归账——保存异步期间切页/关页，
                 // 曾按「完成时刻的活动页」记账（错清别页置脏标记 → 关页
                 // 不再弹确认 → 未保存内容无声丢失）。
@@ -432,8 +437,7 @@ impl Editpad {
                 let (prev_label, target_label) = self.settle_saved_page(idx);
                 // P6 编码知情权：发生转码/BOM 丢失/不可映射字符时明确告知；
                 // 无转码时补显暂存的备份提示（备份消息写在异步落盘完成
-                // 之前，直接进状态栏会被本分支立即覆盖/抹掉）
-                let backup_note = self.pending_backup_notice.take();
+                // 之前，直接进状态栏会被本分支立即覆盖/抹掉；取走已提到定位页之前）
                 if let Some(text) =
                     transcode_notice(self.lang(), &prev_label, target_label, notice.unmappable)
                 {
