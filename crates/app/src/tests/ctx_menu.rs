@@ -240,6 +240,141 @@ fn headless_alt_double_click_adds_extra_cursor_owning_a_selection() {
     assert_eq!(core.doc.to_text(), "alpha beta", "手势本身一字不改文档");
 }
 
+/// 池 ⑨：Alt+Shift 建块那条分支必须**先于** dnd 候选裁决。视图层的注释本来就写着
+/// 「Alt+Shift 仍走建块；先于 dnd 候选」，实际次序却排在 dnd 之后 ⇒ 在已选中的文本上
+/// 做这个手势时，dnd 先把按下拦成拖拽候选：拉开是真的把那段文本搬走，原地松手则选区
+/// 被吞、光标落到按下点。core 层的建块算式有单测，这一格盯的是鼠标事件真能走到那条分支。
+#[test]
+fn headless_alt_shift_drag_inside_a_selection_builds_a_column_block() {
+    let mut app = Editpad::default();
+    type_into(
+        &mut app,
+        "alpha beta\ncharlie delta\necho foxtrot\ngolf hotel\nindia juliet\nkilo lima",
+    );
+    let press = {
+        let body = ViewTree::layout_default(&app).editor_body();
+        Point::new(body.x + body.width * 0.3, body.y + 8.0)
+    };
+    // 夹具不自填 anchor：先用一次真实双击造出选区
+    {
+        let mut ui = ViewTree::layout_default(&app);
+        let _ = ui.double_click(press);
+    }
+    {
+        let core = app.cur_handle.borrow();
+        assert!(
+            core.selected_text().is_some(),
+            "夹具自证：此刻真有一段选区（dnd 候选的前提成立）"
+        );
+        assert!(core.dnd.is_none(), "夹具自证：双击本身没起拖拽会话");
+    }
+
+    // 同一处按 Alt+Shift 按下、往下拖一行以上、松开——应当得到列块
+    let lower = {
+        let body = ViewTree::layout_default(&app).editor_body();
+        Point::new(body.x + body.width * 0.3, body.y + body.height * 0.6)
+    };
+    let mods_alt_shift = iced::keyboard::Modifiers::ALT | iced::keyboard::Modifiers::SHIFT;
+    {
+        let mut ui = ViewTree::layout_default(&app);
+        let _ = ui.send(
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods_alt_shift)),
+            press,
+        );
+        let _ = ui.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            press,
+        );
+        // 裁决就在这一刻分岔：改前按下被 dnd 拦成拖拽候选，建块分支轮不到。
+        // 此刻块还是「anchor == head」的空块，`has_block()` 要到拖动之后才成立，
+        // 所以这一格盯的是**谁接住了这次按下**。
+        {
+            let core = app.cur_handle.borrow();
+            assert!(
+                core.dnd.is_none(),
+                "已选文本上的 Alt+Shift 按下不该被 dnd 候选拦下（改前正是这一格）"
+            );
+            assert!(
+                core.block_dragging,
+                "这次按下应交给列块拖拽建块（`begin_block_select`）"
+            );
+        }
+        let _ = ui.send(
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: lower }),
+            lower,
+        );
+        let _ = ui.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+            lower,
+        );
+    }
+    let core = app.cur_handle.borrow();
+    let block = core
+        .active_block()
+        .expect("向下拖动并松开后应留下有效的列块");
+    assert_eq!(block.0, 0, "块上缘=按下那一行（读到 {block:?}）");
+    assert!(
+        block.1 > block.0,
+        "块应跨到下面那行（本次读到行 {block:?}）"
+    );
+    assert_eq!(
+        core.doc.to_text(),
+        "alpha beta\ncharlie delta\necho foxtrot\ngolf hotel\nindia juliet\nkilo lima",
+        "列块是选区态，一个字都不该动"
+    );
+    assert!(core.dnd.is_none(), "收尾也不该留拖拽会话");
+}
+
+/// 池 ⑨ 的兄弟格：本轮删掉了 P307 那块里 `if core.mods.alt() { click_last = None }`
+/// 这一 arm（改后 Alt 与 Alt+Shift 都在更前面就返回，它永不可达）。这一格钉住**它曾经
+/// 排在外面的那条 Shift+点击**没被误伤——修饰键裁决的顺序改动最容易被邻居带伤。
+#[test]
+fn headless_shift_click_still_extends_the_selection() {
+    let mut app = Editpad::default();
+    // 一行足够长的正文：0.9 宽度的落点仍在行内（行短的话会被钳到行尾，
+    // 扩展量读成 0、这格就变成假红）
+    type_into(&mut app, "alpha beta charlie delta echo foxtrot golf hotel");
+    let at = {
+        let body = ViewTree::layout_default(&app).editor_body();
+        // 落在第一个词上（0.3 那一档在这台机器的度量下正好命中间隔空格，
+        // 自证就退化成"选到一个空白"）
+        Point::new(body.x + body.width * 0.12, body.y + 8.0)
+    };
+    {
+        let mut ui = ViewTree::layout_default(&app);
+        let _ = ui.double_click(at);
+    }
+    let word = app.cur_handle.borrow().selected_text().unwrap_or_default();
+    assert!(
+        !word.is_empty() && word.chars().all(|c| c.is_alphabetic()),
+        "夹具自证：双击先造出一段**词**选区（读到 {word:?}）"
+    );
+
+    let far = {
+        let body = ViewTree::layout_default(&app).editor_body();
+        Point::new(body.x + body.width * 0.9, body.y + 8.0)
+    };
+    {
+        let mut ui = ViewTree::layout_default(&app);
+        let _ = ui.send(
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(
+                iced::keyboard::Modifiers::SHIFT,
+            )),
+            far,
+        );
+        let _ = ui.click(far);
+    }
+    let core = app.cur_handle.borrow();
+    let sel = core.selected_text().unwrap_or_default();
+    assert!(
+        sel.starts_with(word.as_str()) && sel.chars().count() > word.chars().count(),
+        "Shift+点击应把那段词选区向右扩展到按下点，实得 {sel:?}（原本 {word:?}）"
+    );
+    assert!(!core.has_block(), "Shift+点击不建列块");
+}
+
 /// P336：两类右键菜单都绑在「打开它那一刻的那一页」上——正文菜单锚在旧页坐标、
 /// 菜单项动的却是新页；标签菜单带的是旧页下标。作废原本由三条切页路径各手写一句
 /// （只收标签菜单），`FifGoto` 跳页与装载那条路连这一句都没有，正文菜单则全程没人

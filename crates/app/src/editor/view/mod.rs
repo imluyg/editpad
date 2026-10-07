@@ -2557,17 +2557,32 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                             return;
                         }
                     }
+                    // 池 ⑨：Alt+Shift 建块要排在 dnd 候选**之前**。上面 B10 那段注释
+                    // 一直写着「Alt+Shift 仍走建块；先于 dnd 候选」，实际次序却是反的：
+                    // 在已选中的文本上做这个手势，按下先被 dnd 拦成拖拽候选，建块永远
+                    // 轮不到（无选区时 dnd 不起，才勉强走到建块那支——同一只手勢两种
+                    // 结果）。＝P307 那条"连击裁决必须在 dnd 之前"的兄弟格。
+                    {
+                        let mut core = self.core.borrow_mut();
+                        if core.mods.contains(iced_mods_alt_shift()) {
+                            let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
+                            core.begin_block_select(hit);
+                            drop(core);
+                            shell.publish(crate::Message::EditorNavChanged);
+                            shell.request_redraw();
+                            shell.capture_event();
+                            return;
+                        }
+                    }
                     // P307：连击裁决——必须在 dnd 候选**之前**。双击落在已经
                     // 选中的词上（用户对同一个词再双击一次）若先被 dnd 拦下，
                     // 选词就永远不成立。Shift+点击同理先接。
-                    // Alt/Alt+Shift 不在此列：Alt+Click 上面已返回，Alt+Shift
-                    // 归列块（既有语义），只断链不计数。
+                    // Alt 与 Alt+Shift 都到不了这里：前者被上面 Alt+Click 分支接走，
+                    // 后者被更前面的建块分支接走（池 ⑨）。
                     {
                         let mut core = self.core.borrow_mut();
                         let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
-                        if core.mods.alt() {
-                            core.click_last = None;
-                        } else if core.mods.shift() {
+                        if core.mods.shift() {
                             core.extend_selection_to(hit);
                             drop(core);
                             shell.publish(crate::Message::EditorNavChanged);
@@ -2604,14 +2619,6 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                     {
                         let mut core = self.core.borrow_mut();
                         let hit = core.hit_test(pos.x - bounds.x, pos.y - bounds.y);
-                        // 第 67 轮 ⑮：Alt+Shift+按下 = 列块拖拽建块
-                        if core.mods.contains(iced_mods_alt_shift()) {
-                            core.begin_block_select(hit);
-                            shell.publish(crate::Message::EditorNavChanged);
-                            shell.request_redraw();
-                            shell.capture_event();
-                            return;
-                        }
                         // 普通点击退出块态（与单选区互斥）；B10：折叠多光标
                         // （普通点击 = 重置为单光标，主流口径）
                         core.clear_block();
