@@ -12,8 +12,9 @@
 //! 同一位置时数据延续（同一路径 → 同一哈希）。首次运行迁移：P101 前
 //! 布局的遗留 `%APPDATA%\editpad\` 目录整体搬入首个实例目录（原拷贝
 //! 数据无缝续用），之后所有拷贝各自建实例目录、互不互通。迁移判据是
-//! 「遗留 config 还在不在」，所以半途而废的那次会在下次启动自动续上
-//! （P350）。
+//! 「遗留树里还有没搬走的条目吗」，所以半途而废的那次会在下次启动自动续上
+//! （P350 把闸门从「实例目录是否存在」改过来，P365 又把它从「遗留 config 还在吗」
+//! 改到位——后者只要 config 搬成功就会关门，把失败的快照永远留在原地）。
 
 use std::path::{Path, PathBuf};
 
@@ -45,9 +46,11 @@ pub fn data_root_for_base(exe: Option<&Path>, appdata: Option<&Path>) -> Option<
     // P350（池 ⑫）：闸门不能是「实例目录已存在」。`create_dir_all(dir)` 跑在
     // 搬运**之前**，进程在这两步之间被杀、或整批 rename/copy 失败，都会留下一
     // 个空目录 ⇒ 从此每次启动都在这里早退，遗留 config 与崩前快照被永久埋掉，
-    // 用户看到的是「设置没了」且没有任何一处会再试。真正的判据是「遗留
-    // config 还在不在」（`migrate_legacy` 自己问这一问，并逐条跳过已存在的
-    // 目标 ⇒ 天然幂等），代价只是每次多一个 stat。
+    // 用户看到的是「设置没了」且没有任何一处会再试。真正的判据是「遗留树里
+    // 还有没搬走的条目吗」（`migrate_legacy` 自己问这一问，并逐条跳过已存在的
+    // 目标 ⇒ 天然幂等），代价只是每次多一个 read_dir（P365 把这一问补全：旧写法
+    // 问的是「遗留 config 还在吗」，而 config 恰恰是那条最先被搬走、一搬走就把
+    // 门关上的条目）。
     migrate_legacy(appdata, &dir);
     Some(dir)
 }
@@ -88,34 +91,60 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// 把遗留 `%APPDATA%\editpad` 目录内容搬入 `dir`（尽力而为，可反复调用）。
 ///
-/// 判据是「`legacy/config.toml` 还在」而不是「`dir` 不存在」⇒ 半途而废的迁移
-/// 会在下次启动自动续上（P350）。顺序固定 **config.toml 在先**：并发下最多一个
-/// 进程搬走它，其余进程在「源缺失」判定处立即作罢，不会与胜者交错搬同一批文件。
-/// `instances` 子目录本身（本目录的家）与已存在的条目跳过。
+/// 判据是「遗留树里还有 `migration_order` 看得见的条目吗」，而不是「`dir` 不存在」
+/// 也不是「`legacy/config.toml` 还在」——前者让半途而废的迁移在下次启动自动续上
+/// （P350），后者只要 config 搬成功就关门、把同一批里失败的快照永久留下（P365）。
+/// 次序由 `migration_order` 做出来：config.toml 恒在最前、其余按名字升序，所以
+/// 「并发下最多一个进程搬走 config、其余进程在已存在判定处作罢」这句论证现在有
+/// 代码撑着（`read_dir` 本身不保证顺序）。`instances` 子目录（本目录的家）永不进
+/// 名单，已存在的目标一律跳过。
 fn migrate_legacy(appdata: &Path, dir: &Path) {
     let legacy = appdata.join("editpad");
-    if !legacy.join("config.toml").is_file() {
-        return; // 无遗留数据（含已被并发进程抢先迁移的情形）
+    // P365（池 ②）：闸门问的是「遗留树里还有没搬走的条目吗」，不是「config 还在吗」。
+    // 旧判据的问题在于 config 是**唯一会被搬走**的那一格判据：它一搬成功闸门就关，
+    // 而同一批里失败的条目（典型＝`snapshot/`，里面正是崩前未保存的页）从此没人再搬，
+    // 用户看到的只是「设置和上次没存的会话一起没了」，且再也没有一次启动会去试。
+    let entries = migration_order(&legacy);
+    if entries.is_empty() {
+        return; // 无遗留数据（含已被并发进程搬完的情形）
     }
     let _ = std::fs::create_dir_all(dir);
-    let Ok(entries) = std::fs::read_dir(&legacy) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    for entry in entries {
         let name = entry.file_name();
-        if name.to_str() == Some(INSTANCES_DIR) {
-            continue; // 不得把实例目录搬进自己
-        }
         let target = dir.join(&name);
         if target.exists() {
             continue;
         }
-        // 移动失败（占用/权限等）退化为复制：数据要到实例目录，目录
-        // 里残留副本无碍（下次启动不再读遗留目录）
+        // 移动失败（占用/权限等）退化为复制：数据要到实例目录，遗留侧留下的副本
+        // 由上面那道 `target.exists()` 挡着，不会反过来盖掉实例里更新的那一份
         if std::fs::rename(entry.path(), &target).is_err() {
             let _ = copy_entry(&entry.path(), &target);
         }
     }
+}
+
+/// 遗留目录里本轮要搬的条目，按**可复现的次序**：`config.toml` 恒在最前，其余按
+/// 名字升序；`instances`（实例目录的家，就在遗留根底下）永不进名单。
+///
+/// P365（池 ②）：排序前那句「顺序固定 config.toml 在先，所以并发下最多一个进程搬走
+/// 它、其余进程立即作罢」只写在注释里——`read_dir` 不保证顺序，那句论证从没成立过。
+/// 次序做成代码之后它还有一层用处：名单非空 = 「遗留树里还有没搬走的东西」，
+/// 这正是迁移闸门该问的问题（旧闸门问的是「config 还在吗」，config 一旦搬走闸门就关，
+/// 半途失败的 `snapshot/` 从此没人再搬＝崩前会话永久失踪且零提示）。
+fn migration_order(legacy: &Path) -> Vec<std::fs::DirEntry> {
+    let Ok(entries) = std::fs::read_dir(legacy) else {
+        return Vec::new();
+    };
+    let mut items: Vec<(String, std::fs::DirEntry)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (name != INSTANCES_DIR).then_some((name, entry))
+        })
+        .collect();
+    // `false < true` ⇒ 第一键为 0 的只有 config.toml，其余按名字升序排在它后面
+    items.sort_by_key(|(name, _)| (name != "config.toml", name.clone()));
+    items.into_iter().map(|(_, entry)| entry).collect()
 }
 
 /// 条目复制：`std::fs::copy` 只认文件（对目录返回 InvalidInput），所以
@@ -280,6 +309,76 @@ mod tests {
         assert!(
             !legacy.join("config.toml").exists(),
             "搬完的遗留 config 不该再留着（否则另一拷贝会抢）"
+        );
+
+        fs::remove_dir_all(&appdata).ok();
+    }
+
+    /// 池 ②：**闸门问错了问题 ⇒ 半途失败之后崩前会话永久失踪**。旧闸门只问
+    /// 「`legacy/config.toml` 还在吗」，而搬运次序根本没保证 config 在先（`read_dir`
+    /// 不保证顺序），config 又是唯一会被搬走的那一格判据 ⇒ 只要 config 先搬成功、
+    /// 别的条目（典型＝`snapshot/`，里面正是崩前未保存的页）那次搬失败，下一次启动
+    /// 闸门已经关上，剩下的条目就永远躺在遗留目录里，且零提示。
+    #[test]
+    fn leftovers_without_legacy_config_still_get_moved() {
+        let appdata =
+            std::env::temp_dir().join(format!("editpad-paths-leftover-{}", std::process::id()));
+        let legacy = appdata.join("editpad");
+        let exe = appdata.join("prod").join("editpad.exe");
+        let dir = legacy.join(INSTANCES_DIR).join(instance_key(&exe));
+        // 夹具直接造出"半途失败之后"的现场：config 已进实例，快照还留在遗留目录
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.toml"), b"theme = \"dark\"").unwrap();
+        fs::create_dir_all(legacy.join("snapshot")).unwrap();
+        fs::write(legacy.join("snapshot").join("s1.snap"), b"draft").unwrap();
+        assert!(
+            !legacy.join("config.toml").is_file(),
+            "夹具自证：旧闸门的判据在这一现场已经关上了"
+        );
+
+        let root = data_root_for_base(Some(&exe), Some(&appdata)).unwrap();
+        assert_eq!(root, dir);
+        assert!(
+            dir.join("snapshot").join("s1.snap").is_file(),
+            "遗留目录里还有没搬的条目就必须续搬，否则崩前会话永久失踪：{:?}",
+            dir
+        );
+        assert!(
+            !legacy.join("snapshot").exists(),
+            "搬成功的那条不该在遗留目录留下副本（否则每次启动都重搬）"
+        );
+
+        fs::remove_dir_all(&appdata).ok();
+    }
+
+    /// 「顺序固定 config.toml 在先」原本只写在注释里，代码没有任何排序——所以
+    /// 「并发下最多一个进程搬走它」这句论证从来没成立过。改法是把次序做出来，
+    /// 这一格钉的就是次序本身：config 恒为第一个，其余按名字升序（可复现），
+    /// 而 `instances`（本目录的家）永不进名单。
+    #[test]
+    fn migration_order_puts_legacy_config_first_and_skips_instances_dir() {
+        let appdata =
+            std::env::temp_dir().join(format!("editpad-paths-order-{}", std::process::id()));
+        let legacy = appdata.join("editpad");
+        fs::create_dir_all(legacy.join(INSTANCES_DIR)).unwrap();
+        fs::create_dir_all(legacy.join("snapshot")).unwrap();
+        fs::write(legacy.join("z.log"), b"").unwrap();
+        fs::write(legacy.join("a.txt"), b"").unwrap();
+        fs::write(legacy.join("config.toml"), b"theme = \"dark\"").unwrap();
+
+        let names = migration_order(&legacy)
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "config.toml".to_owned(),
+                "a.txt".to_owned(),
+                "snapshot".to_owned(),
+                "z.log".to_owned()
+            ],
+            "config 必须在最前、其余按名升序、instances 不进名单"
         );
 
         fs::remove_dir_all(&appdata).ok();
