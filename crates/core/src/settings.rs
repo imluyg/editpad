@@ -582,9 +582,15 @@ impl Settings {
         } else {
             DEFAULT_FONT_SIZE
         };
-        // P102 窗口尺寸同上一条：非有限或非正一律丢弃为「未记录」（启动
-        // 回默认 1024×768）。留着 NaN 不只是几何错位——TOML 不支持非有限
-        // 浮点，它会让之后任意一次 save() 的**整份清单**序列化失败。
+        // P102 窗口尺寸同上一条：非有限或非正一律丢弃为「未记录」（启动回默认
+        // 1024×768）。⚠️ 理由订正（第 271 轮，测量见
+        // `nan_geometry_round_trips_so_the_old_serialize_failure_claim_is_false`）：
+        // 原注释写「TOML 不支持非有限浮点，留着它会让之后任意一次 save() 的整份清单
+        // 序列化失败」——**假的**：实测 toml 0.8 把它写成字面量 `window_width = nan`，
+        // 序列化照样成功，而我们自己的读侧也认得它（解析回 Some(NaN)）。
+        // 丢它的真理由只剩两条：① NaN 过不了任何几何钳制，窗口尺寸/位置会退化；
+        // ② 那是只有宽容解析器认得的字面量，而 config.toml 是用户会手改的文件——
+        // 把语义不明的值留在里面＝给下一次读取埋雷。丢弃动作本身不变。
         self.window_width = self.window_width.filter(|w| w.is_finite() && *w > 0.0);
         self.window_height = self.window_height.filter(|h| h.is_finite() && *h > 0.0);
         // P20：关闭「记住最近文件」时，存量列表一并清空——
@@ -678,11 +684,14 @@ impl Settings {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        // 序列化失败必须上抛，**不能**退化成「写一份空配置出去」：
-        // toml 不接受非有限浮点（`window_width = nan` 是合法 TOML 字面量，
-        // 加载后随任意一次 save() 让整个清单序列化失败），旧实现的
-        // `unwrap_or_default()` 会把这条失败变成一次静默的原子覆盖，
+        // 序列化失败必须上抛，**不能**退化成「写一份空配置出去」：旧实现的
+        // `unwrap_or_default()` 会把任意一次失败变成一次静默的原子覆盖，
         // 最近文件/主题/热键全没。失败时目标文件原封不动才是正确语义。
+        // ⚠️ 第 271 轮订正：这里原先举的例子「toml 不接受非有限浮点，NaN 会让整份清单
+        // 序列化失败」是**假的**——实测 NaN 被原样写成 `window_width = nan`，序列化照样
+        // 成功（见 `nan_geometry_round_trips_so_the_old_serialize_failure_claim_is_false`）。
+        // 这道闸守的是"任意序列化失败"这个泛型失败面（今天没有已知的具体触发点），
+        // 不是那条例子；失败了要出声＝P347 那条状态栏留痕。
         let serialized = toml::to_string_pretty(self).map_err(|source| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -959,6 +968,30 @@ mod tests {
     /// 测试**——造不出失败输入，硬写一个两头都绿的断言只会冒充覆盖。有实际
     /// 效果的是几何值归一，见 `non_finite_window_geometry_is_dropped_on_load_
     /// not_carried_into_save`。
+    /// 台账池 ⑬：把「NaN 会让整份清单序列化失败」这句错解释**用测量顶掉**。
+    /// 实测（toml 0.8，本仓锁里的版本）：`Settings { window_width: Some(NaN), .. }`
+    /// ①序列化成功、写出的是字面量 `window_width = nan`；②我们自己的读侧也能把它
+    /// 解析回来（`Some(NaN)`），随后由 `normalize` 丢弃。⇒ 两条旧注释（`normalize` 与
+    /// `save_to`）说的"随任意一次 save() 让整份清单序列化失败"都不成立。
+    /// 这条用例钉的是**机制**（不是丢弃动作——丢弃由上面两条用例守），防下一轮据此放宽
+    /// 或反过来"为了防序列化失败"再加一道写侧消毒。
+    #[test]
+    fn nan_geometry_round_trips_so_the_old_serialize_failure_claim_is_false() {
+        let mut s = Settings::default();
+        s.window_width = Some(f32::NAN);
+        let text = toml::to_string_pretty(&s).expect("实测：非有限浮点不阻断序列化");
+        assert!(
+            text.lines().any(|l| l.trim() == "window_width = nan"),
+            "写出的该是字面量 nan，实际 {text:?}"
+        );
+        let back: Settings =
+            toml::from_str(&text).expect("实测：本仓的读侧接受这个字面量（不是整份读不回）");
+        assert!(
+            back.window_width.is_some_and(|w| w.is_nan()),
+            "解析结果应是 Some(NaN)，随后才由 normalize 丢弃（丢弃那一步由上面两条用例守）"
+        );
+    }
+
     #[test]
     fn nan_geometry_serializes_so_load_side_must_sanitize_it() {
         // 反证报告假设：nan 不会让保存失败——正因如此，毒值会在配置里长期
