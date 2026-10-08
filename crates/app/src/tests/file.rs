@@ -2072,6 +2072,86 @@ fn monitor_tail_follow_does_not_leak_into_the_next_load() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P371（池 ⑦）：被内存护栏拒掉的监视重载，不得把归页意图留给这一页。
+///
+/// 意图写在 `start_loading` 之前，而拒载出口原本只按 P215 作废了链接/FIF 两份
+///  goto。拒掉的那次重载根本没开始，比「加载失败」更空——它留下的视图意图要等
+/// **下一次落到同一页的装载**才兑现，而巡检只给监视页重写这份意图，用户关掉
+/// 监视之后那次重写就不发生了。
+#[test]
+fn monitor_reload_refused_by_mem_guard_leaves_no_pending_intent() {
+    let dir = scratch_dir("p371-monitor-refused");
+    let path = dir.join("tail.log");
+    std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(path.clone()));
+    let s1 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s1,
+            Ok((
+                editpad_core::Document::from_str("line1\nline2\nline3\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::ToggleMonitorFile);
+    assert!(app.tab().monitor, "夹具：监视已开");
+
+    // 外部把文件撑成 300 MB 稀疏文件（护栏读的是元数据长度）⇒ 这次重载被拒
+    std::fs::File::create(&path)
+        .expect("撑开待巡检的文件")
+        .set_len(300_000_000)
+        .expect("置长度");
+    dispatch(&mut app, Message::MonitorTick);
+    assert!(
+        app.active_load.is_none(),
+        "夹具：超上限的重载必须被拒（不登记任务）"
+    );
+    let leaked = app.monitor_pending.is_some();
+
+    // 用户关掉监视，文件恢复正常大小；聚焦巡检仍会重载这一页（它照常与磁盘不符），
+    // 但不再记新意图——于是陈旧的 tail 跟随被带进这次装载
+    dispatch(&mut app, Message::ToggleMonitorFile);
+    std::fs::write(&path, "line1\nline2\nline3\nline4\n").unwrap();
+    dispatch(&mut app, Message::WindowFocused);
+    let job = app
+        .active_load
+        .clone()
+        .expect("夹具：关掉监视后聚焦巡检仍重载这一页");
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job.id,
+            Ok((
+                editpad_core::Document::from_str("line1\nline2\nline3\nline4\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    let ed = app.cur_handle.borrow();
+    assert_eq!(
+        ed.doc.to_text(),
+        "line1\nline2\nline3\nline4\n",
+        "夹具：重载确实落进了这一页"
+    );
+    assert_eq!(
+        ed.cursor.line, 0,
+        "陈旧 tail 跟随不得把这次重载的光标打到文末（旧实现在这里是 4）"
+    );
+    assert_eq!(ed.scroll_top, 0.0, "同理不得顺手滚动这份文档");
+    assert!(
+        !leaked,
+        "拒载＝这次重载根本没开始，它的归页意图必须当场作废（旧实现把它留了下来）"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn monitor_skips_dirty_page() {
     let dir = std::env::temp_dir().join("editpad-p130-test");

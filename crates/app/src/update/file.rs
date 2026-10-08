@@ -850,6 +850,12 @@ impl Editpad {
             // 否则行号/命中选中会等到下一次无关装载才被兑现。
             self.pending_link_goto = None;
             self.pending_fif_goto = None;
+            // P371（池 ⑦）：同族第三份一次性意图。监视重载的归页意图是在
+            // `check_external_changes` 里、调用本函数**之前**写下的；不作废它，
+            // 它会等到「下一次落到同一页的装载」才兑现，而那次装载可能不再重写它
+            // （巡检只给监视页记意图 ⇒ 用户关掉监视后的聚焦重载照单收下）。
+            // ⚠️ 上面那道 busy 早退不能跟着清：在途那次装载的意图正挂在这里。
+            self.monitor_pending = None;
             return Task::none();
         }
         if tab >= self.tabs.len() {
