@@ -2148,6 +2148,89 @@ fn read_only_lock_blocks_edits_but_allows_navigation() {
 }
 
 #[test]
+fn read_only_lock_blocks_a_drag_that_started_before_the_lock() {
+    // P379：拖拽起步判的是**按下那一刻**的锁定态（dnd.rs 的 begin_dnd_at），
+    // 释放执行判的是**释放那一刻**的锁定态（apply_edit 总闸）。中途一次
+    // Ctrl+R 上锁后，这次释放仍把字搬走并置脏＝只读页被改＋自动保存覆写磁盘。
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("abcd\nefgh\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 自证这确实是一次已经起步的拖拽（未锁态下候选→超阈值→拖拽态）
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+        assert!(
+            ed.begin_dnd_at(crate::editor::CursorPos { line: 0, col: 2 }),
+            "夹具自证：未锁时拖拽应能起步"
+        );
+        assert!(ed.update_dnd(60.0, 60.0), "夹具自证：越过阈值应进入拖拽态");
+        assert!(ed.dnd.as_ref().unwrap().started);
+        // 视图侧在发布释放消息之前就 take 掉了会话
+        ed.dnd.take();
+    }
+    dispatch(&mut app, Message::ToggleReadOnly);
+    assert!(app.cur_handle.borrow().read_only, "夹具自证：中途上锁成功");
+    let locked = app.t(editpad_core::Key::StDocReadOnlyLocked).to_owned();
+    // 两个变体各钉一格：move 改内容，copy **也**改内容（在落点插入一份）
+    for copy in [false, true] {
+        dispatch(
+            &mut app,
+            Message::Edit(EditOp::DropSelection {
+                line: 1,
+                col: 2,
+                copy,
+            }),
+        );
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "abcd\nefgh\n",
+            "锁定之后 copy={copy} 都搬不动字"
+        );
+        assert!(
+            !app.tab().dirty,
+            "被拒动作不得置脏（脏一次＝排一次自动保存）"
+        );
+        assert_eq!(app.status, locked, "被拒要出声，与其余写操作同口径");
+    }
+    // 反面对照：解锁后同一手势照旧生效（挡住"拖拽一律拒收"这种过窄修法）
+    dispatch(&mut app, Message::ToggleReadOnly);
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+    }
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::DropSelection {
+            line: 1,
+            col: 2,
+            copy: false,
+        }),
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "ad\nefbcgh\n",
+        "解锁后拖拽仍照常"
+    );
+    assert!(app.tab().dirty);
+}
+
+#[test]
 fn edit_op_mutates_classification_is_failsafe() {
     // P126：白名单外默认按可变拒绝（fail-safe）——新变体忘登记时
     // 只读误伤导航会被本测试的显式断言暴露
@@ -2177,6 +2260,19 @@ fn edit_op_mutates_classification_is_failsafe() {
     assert!(!crate::update::edit_op_mutates(
         &EditOp::SplitSelectionByLines
     ));
+    // P379：拖拽释放两个变体都改内容（move 先删后插、copy 在落点插一份）
+    // ⇒ 白名单里不该有它。这一格此前是反向断言的缺席＝注释说"一律按可变
+    // 处理"而代码把它放进了"不改内容"，两个变体各钉一次防"只修一半"。
+    assert!(crate::update::edit_op_mutates(&EditOp::DropSelection {
+        line: 0,
+        col: 0,
+        copy: false,
+    }));
+    assert!(crate::update::edit_op_mutates(&EditOp::DropSelection {
+        line: 0,
+        col: 0,
+        copy: true,
+    }));
     // P310（A6）：命中→书签是标注、复制命中行是纯读取 ⇒ 同族放行
     assert!(!crate::update::edit_op_mutates(
         &EditOp::MarkHitLinesAsBookmarks

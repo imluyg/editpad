@@ -1234,6 +1234,10 @@ const GEOMETRY_PERSIST_INTERVAL: std::time::Duration = std::time::Duration::from
 /// P126：只读锁定的动作分类——true = 会改动文档内容（只读下拒收）。
 /// 白名单只列「纯导航/纯标注/纯状态」动作；**默认 true**（fail-safe）：
 /// 未来新增变体若忘登记将自动被只读拒收，如属纯导航需显式加入白名单。
+///
+/// `DropSelection` 两个变体都不许进白名单：move 先删后插、copy 也在落点插入
+/// 一份，都写正文。dnd 的只读判据只看**起步**（按下那一刻），拖拽中途一次
+/// Ctrl+R 上锁后仍会走到释放——那一格由这里兜住。
 pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
     !matches!(
         op,
@@ -1258,9 +1262,6 @@ pub(crate) fn edit_op_mutates(op: &EditOp) -> bool {
             // B10 二期首批：拆行多选同族——只把选区换成「每行一条光标」，
             // 正文一字不动 ⇒ 只读页同样放行
             | EditOp::SplitSelectionByLines
-            // P135：DropSelection 的 copy 变体不改内容，但 move 变体改——
-            // fail-safe 口径一律按可变处理（只读态拖拽本就禁启动）
-            | EditOp::DropSelection { .. }
     )
 }
 
