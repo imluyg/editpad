@@ -22,6 +22,20 @@ impl Editpad {
         }
     }
 
+    /// 真的移除了页 ⇒ 标签条上那三份**按裸下标找页**的瞬态一律作废：悬停染色、
+    /// 右键菜单锚点、双击记账。三条移除出路（[`Self::close_tab_now`]／
+    /// [`Self::close_tabs_now`]／[`Self::drop_restore_placeholder`]）共用这一句，
+    /// 调用侧不再各写一份。
+    ///
+    /// 旧写法只清了悬停那份（P112，理由就写在注释里＝「陈旧下标会染色到错页」），
+    /// 另两份留着同一条理由却没人执行：菜单换锚到邻居页（〔固定／另存为／关闭其他〕
+    /// 打在没右键过的那一页上），跨关页的两次单击被折算成一次双击而弹出重命名框。
+    pub(crate) fn clear_index_addressed_tab_ui(&mut self) {
+        self.hovered_tab = None;
+        self.tab_context_menu = None;
+        self.last_tab_click = None;
+    }
+
     /// 关闭第 `idx` 个标签页；关到最后一个时重置为新的空标签页
     /// （新页分配下一个未命名序号）。返回是否真的移除了页面。
     pub(super) fn close_tab_now(&mut self, idx: usize) -> bool {
@@ -35,9 +49,9 @@ impl Editpad {
         // P146：作废在途自动保存——「放弃更改并关闭」的页曾被人写盘复活
         self.tabs[idx].invalidate_autosave();
         self.tabs.remove(idx);
-        // P112：悬停的页被关掉 → 悬停态清空（下一个指针移动事件会
-        // 按新下标重新置位；不清的话陈旧下标会悬停染色到错页）
-        self.hovered_tab = None;
+        // 页集合变了 ⇒ 标签条上按裸下标找页的三份瞬态全部作废
+        //（P112 起这里原本只清悬停态，另两份留着同一条理由却没人执行）
+        self.clear_index_addressed_tab_ui();
         // P145→S-1：确认条存页 id，这里只需「目标页没了就收起」，不再平移下标
         self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {
@@ -85,9 +99,8 @@ impl Editpad {
         if removed == 0 {
             return 0;
         }
-        // P112：悬停页可能在被移除之列——批量移除后悬停态统一清空
-        // （下一个指针移动事件按新下标重新置位）
-        self.hovered_tab = None;
+        // 同上：悬停页可能在被移除之列，作废与 close_tab_now 收进同一处
+        self.clear_index_addressed_tab_ui();
         // S-1：同 close_tab_now——按页 id 存在性收口，不数移除了几个
         self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {

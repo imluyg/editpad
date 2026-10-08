@@ -1381,3 +1381,152 @@ fn pinning_a_page_while_a_close_confirm_is_up_is_honored() {
         "没被固定的那一页照常关闭（豁免只针对固定页，不是整条命令作废）"
     );
 }
+
+/// 载入一个带路径的干净页（内容夹具直发，不经磁盘）。
+fn open_named_page(app: &mut Editpad, name: &'static str, body: &'static str) {
+    dispatch(app, Message::FileDropped(PathBuf::from(name)));
+    let seq = app.job_seq;
+    dispatch(
+        app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str(body),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+}
+
+/// 关页把后页下标整体左移一格，而标签条上有三份状态存的是**裸下标**：
+/// `tab_context_menu`（菜单项把那个下标烧进〔固定/另存为/关闭其他〕）、
+/// `last_tab_click`（双击记账）与 `hovered_tab`。P112 当年只为 `hovered_tab`
+/// 写了清空，理由就印在注释里——「陈旧下标会染色到错页」；同一条理由对另外
+/// 两份成立却没人执行。修＝三条移除出路共用一处作废（同
+/// `dismiss_close_confirm_if_gone` 的收法）。下面三条各钉一条出路。
+#[test]
+fn tab_menu_does_not_reanchor_when_an_earlier_page_closes() {
+    let mut app = Editpad::default();
+    open_named_page(&mut app, "C:/doc/a.txt", "a1\n");
+    open_named_page(&mut app, "C:/doc/b.txt", "b1\n");
+    open_named_page(&mut app, "C:/doc/c.txt", "c1\n");
+    assert_eq!(app.tabs.len(), 3, "夹具自证：三页都带上了路径");
+    let b_id = app.tabs[1].id;
+    let c_id = app.tabs[2].id;
+    app.set_active_tab(0);
+    dispatch(&mut app, Message::TabContextMenu(1));
+    assert_eq!(app.tab_context_menu, Some(1), "夹具自证：菜单开在 B 页上");
+    assert_eq!(
+        app.tabs[app.tab_context_menu.unwrap()].id,
+        b_id,
+        "夹具自证：这份状态确实是按下标找页的，下标换了就是页换了"
+    );
+
+    // Ctrl+W 关掉**当前**（干净的 A）页：键盘路径不经过任何菜单入口，菜单原样留着
+    dispatch(&mut app, Message::CloseTabRequest);
+    assert_eq!(app.tabs.len(), 2, "夹具自证：A 页已移除");
+    assert_eq!(app.tabs[1].id, c_id, "夹具自证：C 页顶进了下标 1");
+    if let Some(i) = app.tab_context_menu {
+        assert_eq!(
+            app.tabs[i].id,
+            b_id,
+            "菜单不许换锚：视图会把〔固定/另存为/关闭其他〕打在 {} 那一页上，\
+             而用户右键的是 b.txt",
+            app.tabs[i].path.clone().unwrap_or_default().display()
+        );
+    }
+    assert_eq!(
+        app.tab_context_menu, None,
+        "关页之后那枚下标已无意义，必须作废"
+    );
+    // 反向对照：作废≠禁用——重新右键一次照样开得起来
+    dispatch(&mut app, Message::TabContextMenu(0));
+    assert_eq!(
+        app.tab_context_menu,
+        Some(0),
+        "关页后新开的菜单不该被一并吞掉"
+    );
+}
+
+/// 双击记账 `last_tab_click` 存的同样是裸下标：关掉刚点过的那页后，下一页坐进
+/// 同一个下标，双击窗内的一次单击被折算成「E 页双击」⇒ 弹出用户根本没连点两次的
+/// 那一页的就地重命名框。这条出路＝`close_tab_now`。
+#[test]
+fn one_click_after_closing_a_page_is_not_a_double_click() {
+    let mut app = Editpad::default();
+    open_named_page(&mut app, "C:/doc/d.txt", "d1\n");
+    open_named_page(&mut app, "C:/doc/e.txt", "e1\n");
+    open_named_page(&mut app, "C:/doc/f.txt", "f1\n");
+    app.set_active_tab(1); // 停在 E 页（下标 1）
+    let e_id = app.tabs[1].id;
+    let f_id = app.tabs[2].id;
+
+    // 单击 E 页签：只切换、只记账，还不构成双击
+    dispatch(&mut app, Message::SwitchTab(1));
+    assert_eq!(app.renaming_tab, None, "夹具自证：单击不进重命名");
+    assert_eq!(
+        app.last_tab_click.map(|(i, _)| i),
+        Some(1),
+        "夹具自证：这笔单击记在了下标 1（={}）",
+        e_id
+    );
+
+    // 关掉刚点过的 E 页 ⇒ F 页左移进下标 1，而记账还挂在"下标 1 = E"上
+    dispatch(&mut app, Message::CloseTabRequest);
+    assert_eq!(app.tabs.len(), 2, "夹具自证：E 页已移除");
+    assert_eq!(app.tabs[1].id, f_id, "夹具自证：F 页现在坐在下标 1");
+    assert!(
+        app.last_tab_click.is_none(),
+        "那笔记账指向已经不存在的页，关页时必须作废"
+    );
+
+    // 双击窗内单击 F 页：不得被折算成"E 页双击"而弹出 F 的重命名框
+    dispatch(&mut app, Message::SwitchTab(1));
+    assert_eq!(
+        app.renaming_tab, None,
+        "单击 F 页不该触发就地重命名（旧写法这里会重命名 F，页 id={f_id}）"
+    );
+    assert_eq!(
+        app.last_tab_click.map(|(i, _)| i),
+        Some(1),
+        "反向对照：双击检测本身还活着，这一下照常记账"
+    );
+}
+
+/// 第三条移除出路＝恢复链丢掉加载失败的占位页（`drop_restore_placeholder`）。
+/// 这条路上三份状态此前**一份都没清**（悬停态只写在另两条用户关页漏斗里），
+/// 而恢复期间悬停与单击都不看 busy、照常记账 ⇒ 占位页被抽掉后悬停染色落到
+/// 后面的页上。同一条作废收口把这条出路一起纳进来。
+#[test]
+fn restore_placeholder_removal_invalidates_tab_strip_index_state() {
+    let mut app = Editpad::default();
+    app.tabs[0].untitled_num = None; // 摆成 drop_restore_placeholder 的准入形状
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+    let third = app.tabs[2].id;
+    dispatch(&mut app, Message::TabHovered(Some(2)));
+    dispatch(&mut app, Message::SwitchTab(2));
+    assert_eq!(app.hovered_tab, Some(2), "夹具自证：悬停态已置位");
+    assert_eq!(
+        app.last_tab_click.map(|(i, _)| i),
+        Some(2),
+        "夹具自证：单击已记账"
+    );
+
+    app.drop_restore_placeholder(0);
+    assert_eq!(app.tabs.len(), 2, "夹具自证：占位页被移除");
+    assert_eq!(app.tabs[1].id, third, "夹具自证：第三页顶进了下标 1");
+    assert!(
+        app.hovered_tab.is_none(),
+        "悬停染色同样按裸下标找页，这条出路此前连悬停态都没清"
+    );
+    assert!(
+        app.last_tab_click.is_none(),
+        "同一条作废覆盖三条出路，这条是第三条"
+    );
+    dispatch(&mut app, Message::TabHovered(Some(1)));
+    assert_eq!(app.hovered_tab, Some(1), "反向对照：作废≠禁用悬停染色");
+}

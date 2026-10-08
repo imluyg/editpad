@@ -121,6 +121,8 @@ pub(crate) struct Editpad {
     /// 同页在 [`TAB_DOUBLE_CLICK_MS`] 窗内再点一次 = 重命名意图。
     /// 纯应用层检测——内层 button 会捕获左键，外层 MouseArea 收不到
     /// on_double_click（iced 事件流实测），故在 SwitchTab 里记账判定。
+    /// ⚠️ 存的是裸下标 ⇒ 页集合一变就换页，移除路径统一按
+    /// `Editpad::clear_index_addressed_tab_ui` 作废。
     pub(crate) last_tab_click: Option<(usize, std::time::Instant)>,
     /// P112：指针悬停的页签下标（页签胶囊悬停底色的数据源；纯 UI 态，
     /// 不落盘）。离开页签 = None；页签被关闭/移除时关闭路径清空，
@@ -296,7 +298,9 @@ pub(crate) struct Editpad {
     /// 下标整体左移，〔放弃并关闭〕落到别的页，越界时直接 panic）。
     pub(crate) close_tab_confirm: Option<u64>,
     // ---------- 标签右键菜单（P28） ----------
-    /// Some(idx) = 正在展示第 idx 个标签页的右键菜单
+    /// Some(idx) = 正在展示第 idx 个标签页的右键菜单。菜单项把这个下标烧进
+    /// 命令里，所以它同样是裸下标态——移除页时由 `clear_index_addressed_tab_ui`
+    /// 作废，否则菜单换锚到邻居页。
     pub(crate) tab_context_menu: Option<usize>,
     /// P308：正文右键菜单是否展示中（与标签右键菜单互斥，同一时刻只有一个
     /// 浮层菜单；锚点共用 [`Self::menu_anchor`]）

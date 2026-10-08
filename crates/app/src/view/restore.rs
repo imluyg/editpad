@@ -350,6 +350,10 @@ impl Editpad {
         // 占位页也走同一收口（不变量见 Editpad::ensure_nonempty_tabs）：
         // 恢复期间删掉唯一占位页而队列尚有后续时，不能让 tabs 变空。
         let _ = self.ensure_nonempty_tabs();
+        // 占位页被抽掉后其后的页整体左移，标签条上按裸下标找页的三份瞬态
+        // 全部换锚。这条出路此前连悬停态都没清（另两条清了），所以作废
+        // 同样收进漏斗本身，不由调用侧各写一份。
+        self.clear_index_addressed_tab_ui();
         // P382：平移动作原本只有这一条出路手写了一份（`close_tab_now`／
         // `close_tabs_now` 两条用户关页漏斗一次都没写过）⇒ 收成与
         // `realign_active_after_removal` 同一条纪律的一份。这一条路上队列里不会有
