@@ -255,6 +255,15 @@ impl Editpad {
             }
             Message::ConfirmCloseTabDiscard(idx) => {
                 self.close_tab_confirm = None;
+                // P387（池 M3）：落地时重查固定标记。豁免原本只写在两处"发起关闭"的闸上，
+                // 而〔固定〕在确认条停留期间是可达的（`TabContextMenu` 只挡 busy）⇒
+                // 用户刚按下 📌 的那一页连未保存内容被〔放弃并关闭〕一起带走，
+                // 破的是 `tab.rs` 那句"固定页豁免**一切**关闭路径"。
+                // 出声沿用发起那条的同一句文案，不发明新键。
+                if self.tabs.get(idx).is_some_and(|t| t.pinned) {
+                    self.set_status(self.t(editpad_core::Key::StPinnedMustUnpin).to_owned());
+                    return Task::none();
+                }
                 if idx < self.tabs.len() {
                     // 关最后一页时槽位会被复用：先清空内容与路径
                     let tab = &mut self.tabs[idx];
@@ -387,10 +396,24 @@ impl Editpad {
                     // 存下来的裸下标就会整体左移，「放弃并关闭」于是清空并
                     // 移除用户根本没选过的页（P145 修 close_tab_confirm 时
                     // 漏了这条同族的批量列表）。解析不到 = 期间已被关掉，跳过。
-                    let targets: Vec<usize> = ids
+                    let listed: Vec<usize> = ids
                         .iter()
                         .filter_map(|&id| self.tabs.iter().position(|t| t.id == id))
                         .collect();
+                    // P387：同单页那条——列表是在〔关闭其他〕那一刻算好的（那时非固定页
+                    // 才被收进来），确认条停留期间被固定的那一页要在落地时摘掉。
+                    // 摘掉而不是整条作废：用户确实要关的是其余那些。
+                    let targets: Vec<usize> = listed
+                        .iter()
+                        .copied()
+                        .filter(|&i| !self.tabs[i].pinned)
+                        .collect();
+                    if targets.len() != listed.len() {
+                        self.set_status(self.t(editpad_core::Key::StPinnedMustUnpin).to_owned());
+                    }
+                    if targets.is_empty() {
+                        return Task::none();
+                    }
                     // 统一放弃：先清各页置脏与内容（与 ConfirmCloseTabDiscard
                     // 同款，防「已移除页的 rope 仍被别名引用」的错觉），再移除。
                     for &idx in &targets {

@@ -1303,3 +1303,81 @@ fn batch_close_clears_confirm_bar_when_confirmed_tab_in_targets() {
         "确认页自身被批量移除应清空确认条"
     );
 }
+
+/// P387（池 M3）：固定页的豁免写在两处"发起关闭"的闸上（`CloseTabRequest` 与
+/// `CloseTabAt`），但两条**〔放弃并关闭〕的落地臂**一次都不重查 ——而确认条停留期间
+/// 右键〔固定〕是可达的（`TabContextMenu` 只挡 busy）。于是 `tab.rs:65` 那条不变量
+/// "固定页豁免**一切**关闭路径"被破：刚被用户按下 📌 的那一页连未保存内容一起没了。
+#[test]
+fn pinning_a_page_while_a_close_confirm_is_up_is_honored() {
+    // ── ①单页那条：Ctrl+W 起确认条 → 〔固定〕→ 〔放弃并关闭〕
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("改过的内容".into())),
+    );
+    assert!(app.tab().dirty, "夹具自证：这一页已置脏");
+    dispatch(&mut app, Message::CloseTabRequest);
+    let page = app.tab().id;
+    assert_eq!(
+        app.close_tab_confirm,
+        Some(page),
+        "夹具自证：确认条已起（裸 id）"
+    );
+    dispatch(&mut app, Message::TabContextMenu(0));
+    dispatch(&mut app, Message::TogglePinTab(0));
+    assert!(app.tab().pinned, "夹具自证：确认条停留期间这一页被固定了");
+
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+    assert!(
+        app.tabs.iter().any(|t| t.id == page && t.pinned),
+        "固定页不许被〔放弃并关闭〕带走，实际剩 {:?}",
+        app.tabs
+            .iter()
+            .map(|t| (t.id, t.pinned))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        app.tab().id,
+        page,
+        "被豁免的那一页仍是当前页（不许顺手关掉别的页）"
+    );
+    assert!(
+        app.status.contains("固定"),
+        "要按单页那条的同一口径出声（StPinnedMustUnpin），实际 {:?}",
+        app.status
+    );
+
+    // ── ②批量那条：〔关闭其他〕起聚合确认 → 把列表里一页固定 → 〔放弃并关闭〕
+    let mut app2 = app_with_tabs(3);
+    app2.set_active_tab(1);
+    dispatch(&mut app2, Message::Edit(EditOp::InsertText("d1".into())));
+    assert!(app2.tab().dirty, "夹具自证：目标里有置脏页 ⇒ 走聚合确认条");
+    dispatch(&mut app2, Message::CloseOtherTabs(0));
+    let listed = app2
+        .batch_close_confirm
+        .clone()
+        .expect("夹具自证：批量确认条已起");
+    assert_eq!(listed.len(), 2, "夹具自证：列表里是第 1、2 两页");
+    let keep = listed[1];
+    let k = app2
+        .tabs
+        .iter()
+        .position(|t| t.id == keep)
+        .expect("夹具自证：列表页都还在");
+    dispatch(&mut app2, Message::TogglePinTab(k));
+
+    dispatch(&mut app2, Message::ConfirmBatchCloseDiscard);
+    assert!(
+        app2.tabs.iter().any(|t| t.id == keep && t.pinned),
+        "批量列表里被固定的那一页不许被带走，实际 {:?}",
+        app2.tabs
+            .iter()
+            .map(|t| (t.id, t.pinned))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !app2.tabs.iter().any(|t| t.id == listed[0]),
+        "没被固定的那一页照常关闭（豁免只针对固定页，不是整条命令作废）"
+    );
+}
