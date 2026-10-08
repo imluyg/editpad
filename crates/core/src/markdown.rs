@@ -230,6 +230,14 @@ fn inline(text: &str) -> Vec<MdSpan> {
             i += 1;
             continue;
         }
+        // 代码段内的一切都是字面量：`*` 不参与样式开关（池 ⑬＝P376）。代码段的语义
+        // 就是"原样显示"，而 `` `a**b**c` `` 曾把中间那个 b 染成 CODE|BOLD。
+        // ⚠️ 反引号那一支必须排在这道闸**之前**——它是代码段的唯一闭合出口。
+        if style & MD_CODE != 0 {
+            current.push(c);
+            i += 1;
+            continue;
+        }
         if c == '*' && i + 1 < n && chars[i + 1] == '*' {
             flush!();
             style ^= MD_BOLD;
@@ -332,6 +340,60 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(blocks[4], MdBlock::Rule);
+    }
+
+    /// P376（池 ⑬）：行内代码段里的 `*` 是**字面量**，不参与样式开关。
+    ///
+    /// 改前 `inline` 的三个分支只看字符本身、不看"此刻是否已在代码段里"，于是
+    /// `` `a**b**c` `` 被拆成三段、中间那个 b 带着 `MD_CODE | MD_BOLD`——预览里
+    /// 一个代码片段中的星号被染成粗体，而代码段的语义恰恰是"原样显示"。
+    #[test]
+    fn code_span_keeps_asterisks_literal() {
+        assert_eq!(
+            inline("`a**b**c`"),
+            vec![MdSpan {
+                text: "a**b**c".into(),
+                style: MD_CODE,
+            }],
+            "代码段整段原样（改前实测：三段、b 带着 CODE|BOLD）"
+        );
+        // 单星号同理
+        assert_eq!(
+            inline("`2 * 3`"),
+            vec![MdSpan {
+                text: "2 * 3".into(),
+                style: MD_CODE,
+            }],
+            "代码段里的单个 `*` 也不许被吃掉"
+        );
+
+        // 反面对照：代码段**外**的标记照常开关样式（别把机制改没）
+        assert_eq!(
+            inline("`x` *y* **z**"),
+            vec![
+                MdSpan {
+                    text: "x".into(),
+                    style: MD_CODE
+                },
+                MdSpan {
+                    text: " ".into(),
+                    style: 0
+                },
+                MdSpan {
+                    text: "y".into(),
+                    style: MD_ITALIC
+                },
+                MdSpan {
+                    text: " ".into(),
+                    style: 0
+                },
+                MdSpan {
+                    text: "z".into(),
+                    style: MD_BOLD
+                },
+            ],
+            "代码段外仍是既定语义"
+        );
     }
 
     #[test]
