@@ -24,10 +24,14 @@ pub struct MatchPos {
 
 use crate::document::Document;
 
-/// 单字符相等判断：`case_sensitive=false` 时仅对 ASCII 折叠大小写。
+/// 单字符相等判断：`case_sensitive=false` 时**只对 ASCII 折叠大小写**。
 ///
-/// P15 起作为全项目唯一的大小写折叠实现——app 层「选中文本是否等于查询」
-/// 也复用这里，避免两处手写、改语义必漏一边。
+/// ⚠️ 原注释曾写"P15 起作为全项目唯一的大小写折叠实现"——那是假话（第 303 轮 M10 核实）：
+/// 正则那一侧走 `(?i)`＝Unicode 折叠（`compile_regex`），两种模式在非 ASCII 大小写对上
+/// **命中集不同**（实测 16 对，清单与守卫用例见 `docs/决策记录.md` **R-21**）。
+/// 这不是缺陷而是刻意的性能取舍：字节窗口扫描（O-11/O-13）成立的前提就是"折叠＝XOR 0x20"
+/// 这种逐字节运算，而它在 UTF-8 上只对 ASCII 存在。
+/// app 层「选中文本是否等于查询」复用这里＝与字面查找同口径，**不等于**正则那一侧。
 pub fn ascii_case_eq(a: char, b: char, case_sensitive: bool) -> bool {
     if case_sensitive {
         a == b
@@ -3323,5 +3327,116 @@ mod tests {
             .is_empty());
         // 无效模式在两种档位上同样报错（不因封顶而吞掉）
         assert!(find_all_regex_document_limited(&doc, "(unclosed", true, 5).is_err());
+    }
+
+    /// M10／定案 **R-21**：字面查找与正则查找的**大小写折叠口径不同**，这一格把分歧
+    /// 清单钉成事实而不是传说——字面＝仅 ASCII 折叠（字节快路径的前提），正则＝`(?i)`
+    /// Unicode 折叠。两侧都不许有人"顺手统一"而不重跑这条表；真要统一（M10b）时，
+    /// 这张表就是"改完之后应当全部 AGREE"的验收单。
+    #[test]
+    fn case_folding_scope_literal_is_ascii_only_while_regex_is_unicode() {
+        // (查询那一位, 正文那一位, 期望：字面命中数, 期望：正则命中数)
+        // 期望值全部来自本轮实测（--nocapture 逐行读数），不是照抄实现推演。
+        let diverge: &[(char, char)] = &[
+            ('Ä', 'ä'),
+            ('É', 'é'),
+            ('Ö', 'ö'),
+            ('Ü', 'ü'),
+            ('Å', 'å'),
+            ('Σ', 'σ'),
+            ('Σ', 'ς'),
+            ('Ω', 'ω'),
+            ('Α', 'α'),
+            ('А', 'а'),
+            ('И', 'и'),
+            ('ẞ', 'ß'),
+            ('ǅ', 'ǆ'),
+            ('Ŋ', 'ŋ'),
+            // 「折进 ASCII」的两个异体：正文是异体字、查询是普通字母
+            ('K', '\u{212A}'),
+            ('S', '\u{017F}'),
+        ];
+        for (upper, lower) in diverge {
+            for (q, hay) in [(*upper, *lower), (*lower, *upper)] {
+                let text = format!("x{hay}x");
+                let query = q.to_string();
+                let lit = find_all(&text, &query, false).len();
+                let rex = find_all_regex(&text, &query, false)
+                    .unwrap_or_else(|e| panic!("{query:?}: 正则不该报错，实际 {e}"))
+                    .len();
+                assert_eq!(
+                    (lit, rex),
+                    (0, 1),
+                    "U+{:04X} ↔ U+{:04X}：字面只折 ASCII ⇒ 这一对应当 0 命中，而 (?i) 应当命中",
+                    q as u32,
+                    hay as u32
+                );
+            }
+        }
+
+        // AGREE 的三族（缺了它们，这张表就只是"两边不同"而无一句"两边相同"）：
+        // ① ASCII 大小写——两口径重合
+        for (q, hay) in [('A', 'a'), ('Z', 'z'), ('z', 'Z')] {
+            let text = format!("x{hay}x");
+            assert_eq!(
+                (
+                    find_all(&text, &q.to_string(), false).len(),
+                    find_all_regex(&text, &q.to_string(), false).unwrap().len()
+                ),
+                (1, 1),
+                "ASCII 那一对必须两侧都命中"
+            );
+        }
+        // ② 无大小写之分的字符
+        for c in ['中', '0', '。'] {
+            let text = format!("x{c}x");
+            assert_eq!(
+                (
+                    find_all(&text, &c.to_string(), false).len(),
+                    find_all_regex(&text, &c.to_string(), false).unwrap().len()
+                ),
+                (1, 1),
+                "{c:?} 与大小写无关，两侧都应命中"
+            );
+        }
+        // ③ 两种口径**都不**折叠的多字符映射（regex 的 (?i) 也不做 full folding）
+        for (q, hay) in [('İ', 'i'), ('i', 'İ'), ('I', 'ı'), ('ı', 'I')] {
+            let text = format!("x{hay}x");
+            assert_eq!(
+                (
+                    find_all(&text, &q.to_string(), false).len(),
+                    find_all_regex(&text, &q.to_string(), false).unwrap().len()
+                ),
+                (0, 0),
+                "U+{:04X} ↔ U+{:04X}：多字符映射两侧都不折（这条也防止有人误以为正则更全）",
+                q as u32,
+                hay as u32
+            );
+        }
+
+        // 大小写**敏感**时两侧当然一致（都是精确比较）
+        let text = "xäx".to_owned();
+        assert_eq!(
+            (
+                find_all(&text, "Ä", true).len(),
+                find_all_regex(&text, "Ä", true).unwrap().len()
+            ),
+            (0, 0),
+            "开着大小写敏感，两侧都必须一个不中"
+        );
+
+        // ⚠️ 另有一条**走字符比较**的字面路径：查询本身跨行时用 `scan_multiline_str`
+        // （内部经 `char_eq` → `ascii_case_eq`）。上面那些单行查询都走字节快路径，
+        // 所以这张表要同时钉住字符那一侧，否则有人改了折叠原语而表格毫无反应。
+        let hay_multi = "xÄ\ny".to_owned();
+        let q_multi = "xä\ny".to_owned();
+        assert_eq!(
+            (
+                find_all(&hay_multi, &q_multi, false).len(),
+                find_all_regex(&hay_multi, &q_multi, false).unwrap().len()
+            ),
+            (0, 1),
+            "跨行查询走字符那一侧：字面仍只折 ASCII（正则折 Unicode）"
+        );
     }
 }
