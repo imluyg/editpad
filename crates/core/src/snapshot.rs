@@ -357,8 +357,11 @@ pub(crate) fn write_session_at(
         .collect();
     referenced.extend(keeping.iter().cloned());
     gc_stale_pages(dir, generation, &referenced);
-    // 配额护栏：超限时按最旧优先淘汰，永不触碰本会话引用的文件（含上面那份名单）
-    enforce_quota_keeping(dir, SNAPSHOT_QUOTA_BYTES, keeping);
+    // 配额护栏：超限时按最旧优先淘汰。**名单直接把上面那份 `referenced` 递进去**
+    // （它已含 `keeping`）——让护栏再去重读一遍刚写下的清单＝给同一件事开第二个
+    // 真相源，而重读可能瞬时失败（占用／权限／坏档），失败旧实现按「没人引用」处理
+    // ⇒ 删掉活会话正在用的页（池 ⑨＝P373）。淘汰与回收是两把刀，两把都喂同一份名单。
+    enforce_quota_keeping(dir, SNAPSHOT_QUOTA_BYTES, &referenced);
     Ok(manifest)
 }
 
@@ -499,21 +502,32 @@ pub fn clear_session(dir: &Path) {
 }
 
 /// 配额护栏：页快照总量超过 `cap_bytes` 时按修改时间从旧到新淘汰，
-/// 直到回到限额以内。当前清单引用的文件永不淘汰（它们是活会话）。
-/// 返回被淘汰的文件数。
-pub fn enforce_quota(dir: &Path, cap_bytes: u64) -> usize {
-    enforce_quota_keeping(dir, cap_bytes, &[])
-}
-
-/// [`enforce_quota`] 的**带保护名单版**：除了磁盘上当前清单引用的页，
-/// 额外保住 `keeping` 里那些"新清单不引用但仍有持有者"的页
-/// （见 [`write_heartbeat_session`] 的 `keeping` 口径——淘汰与回收是两把
-/// 刀，只喂住 GC 那一把等于换个地方删）。
-pub fn enforce_quota_keeping(dir: &Path, cap_bytes: u64, keeping: &[String]) -> usize {
-    let mut protected: std::collections::HashSet<String> = read_manifest(dir)
-        .map(|m| m.tabs.iter().filter_map(|t| t.file.clone()).collect())
-        .unwrap_or_default();
-    protected.extend(keeping.iter().cloned());
+/// 直到回到限额以内。返回被淘汰的文件数。
+///
+/// `referenced` = **调用方手里那份权威保护名单**（谁还活着）。生产路径在
+/// `write_session_at` 的提交点刚算出这份名单，隔两行就把同一个问题交给第二次
+/// 磁盘读取＝同一件事两个真相源；而重读可能瞬时失败（占用／权限／坏档），旧实现
+/// 把「读不出」当成「没有页被引用」，于是按 mtime 从最旧开始删掉**活会话正引用的**
+/// 页文件（池 ⑨＝P373）。名单为空时（如公开门面 [`enforce_quota`]）仍按磁盘清单兜底。
+pub fn enforce_quota_keeping(
+    dir: &Path,
+    cap_bytes: u64,
+    referenced: &std::collections::HashSet<String>,
+) -> usize {
+    let mut protected: std::collections::HashSet<String> = referenced.iter().cloned().collect();
+    match read_manifest_checked(dir) {
+        ManifestRead::Good(m) => {
+            protected.extend(m.tabs.iter().filter_map(|t| t.file.clone()));
+        }
+        // 清单不存在＝磁盘上没有任何东西引用这些页，孤儿页该被淘汰（照旧执行）
+        ManifestRead::Absent => {}
+        // 有名单 ⇒ 名单就是权威值，坏清单不影响这一刀
+        ManifestRead::Broken { .. } if !protected.is_empty() => {}
+        // 清单存在却读不出，而调用方也没给名单＝「谁还活着」这件事**不可知**，
+        // 此时只能按 mtime 猜；猜错就是不可逆地删掉正在用的页 ⇒ 这一拍什么都不删，
+        // 下一次提交把清单重写好之后自然重试（超额只是暂时占盘，不丢内容）。
+        ManifestRead::Broken { .. } => return 0,
+    }
 
     // 不受保护页的 (修改时间, 大小, 路径)；受保护页只累计体积
     let mut evictable: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
@@ -559,6 +573,11 @@ pub fn enforce_quota_keeping(dir: &Path, cap_bytes: u64, keeping: &[String]) -> 
         }
     }
     removed
+}
+
+/// [`enforce_quota_keeping`] 的**无名单门面**：保护关系只能来自磁盘清单本身。
+pub fn enforce_quota(dir: &Path, cap_bytes: u64) -> usize {
+    enforce_quota_keeping(dir, cap_bytes, &std::collections::HashSet::new())
 }
 
 #[cfg(test)]
@@ -1081,8 +1100,10 @@ mod tests {
         .unwrap();
 
         // 总额 400KB > 300KB：带名单时两者都受保护 ⇒ 无可淘汰
+        let mut pending_only = std::collections::HashSet::new();
+        pending_only.insert(pending.clone());
         assert_eq!(
-            enforce_quota_keeping(&dir, 300_000, std::slice::from_ref(&pending)),
+            enforce_quota_keeping(&dir, 300_000, &pending_only),
             0,
             "带名单的配额护栏一个都不许删"
         );
@@ -1090,7 +1111,7 @@ mod tests {
 
         // 对照项：同一目录、同一配额、不传名单 ⇒ 最旧的待恢复页必须出局
         assert_eq!(
-            enforce_quota_keeping(&dir, 300_000, &[]),
+            enforce_quota_keeping(&dir, 300_000, &std::collections::HashSet::new()),
             1,
             "对照组：不传名单时这一页正是被淘汰的那一个"
         );
@@ -1131,6 +1152,66 @@ mod tests {
         assert_eq!(enforce_quota(&dir, SNAPSHOT_QUOTA_BYTES), 0);
 
         clear_session(&dir);
+    }
+
+    /// P373（池 ⑨）：清单「存在却读不出」时，配额那把刀不许按 mtime 猜着删。
+    ///
+    /// 旧形状＝护栏自己去 `read_manifest(dir)` 取保护名单，而那条门面按 P348 的
+    /// 既定契约把坏清单收敛成 `None` ⇒ 名单为空 ⇒ 目录里**所有**页文件都被当成
+    /// 「无人引用的孤儿」，按最旧先淘汰——删掉的正是活会话刚提交、清单正引用的那些页。
+    /// 调用方两行之上就握着权威名单（生产路径已改成直接把 `referenced` 递进去）；
+    /// 而名单也没给的时候，只能什么都不删：**「读不出谁活着」不等于「没人引用」**。
+    #[test]
+    fn quota_does_not_evict_when_the_manifest_cannot_be_read() {
+        let dir = scratch_dir("quota-broken-manifest");
+        let big = "a".repeat(200_000);
+        let mut t = named_tab("C:/cur.txt", true);
+        t.dirty = true;
+        let session = write_session(&dir, &[page(t, &big)], 0, 1).unwrap();
+        let page_name = session.tabs[0].file.clone().unwrap();
+
+        // 把清单改成本模块读不出的样子：文件**在**，TOML 语法坏＝P348 的 Broken 档
+        let manifest = dir.join(MANIFEST_NAME);
+        fs::write(&manifest, "generation = [").unwrap();
+        assert!(
+            matches!(read_manifest_checked(&dir), ManifestRead::Broken { .. }),
+            "夹具：这份清单必须是「存在但读不出」，不是缺失"
+        );
+        assert!(
+            read_manifest(&dir).is_none(),
+            "夹具：旧门面对它的回答仍是 None（改前的名单就是这么空的）"
+        );
+
+        // 总额 200KB ≫ 配额 1 字节：改前 protected 为空 ⇒ 把活页当孤儿淘汰
+        assert_eq!(
+            enforce_quota(&dir, 1),
+            0,
+            "读不出谁活着 ⇒ 这一拍一个都不许删"
+        );
+        assert!(
+            dir.join(&page_name).exists(),
+            "那一页是清单正引用的内容，删掉就是不可逆的"
+        );
+
+        // 反面对照（挡住「逢坏清单就什么都不做」这种过窄修法）：清单**缺失**时
+        // 磁盘上确实没人引用任何东西，孤儿页照常淘汰
+        let dir2 = scratch_dir("quota-absent-manifest");
+        fs::create_dir_all(&dir2).unwrap();
+        let orphan = dir2.join("s1-t0.snap");
+        fs::write(&orphan, &big).unwrap();
+        assert!(
+            matches!(read_manifest_checked(&dir2), ManifestRead::Absent),
+            "夹具：这里根本没有清单文件"
+        );
+        assert_eq!(
+            enforce_quota(&dir2, 1),
+            1,
+            "无清单＝孤儿页照常淘汰，这条别改没"
+        );
+        assert!(!orphan.exists());
+
+        clear_session(&dir);
+        clear_session(&dir2);
     }
 
     // ---------- P31 周期快照心跳 ----------
