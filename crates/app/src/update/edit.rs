@@ -245,6 +245,16 @@ impl Editpad {
                 self.clip_write(text)
             }
             Message::CutRequested => {
+                // P380：只读闸排在这里，**先于取文与记账**。剪切＝"复制＋删除"，
+                // 删除那半边由 `apply_edit` 的总闸拒收，可剪贴板与 `clip_history`
+                // 是**先**落的账 ⇒ 只读页按 Ctrl+X 会得到"只复制不剪"外加一条永远
+                // 剪不成的废记录，而系统剪贴板已被改写（出了本程序）。菜单那侧早就
+                // 按 `menu_writable()` 滤掉了〔剪切〕（`view/overlays.rs:179`），
+                // 热键这侧没有＝同一件事两把尺子（定案 R-4／R-20 那一族）。
+                // 取文本身也要物化（无选区那支按整行取），所以这道闸还排在它前面。
+                if self.read_only_blocks_write() {
+                    return Task::none();
+                }
                 // P319：同 CopyRequested 的单出口口径；三种来源的**后续删除**
                 // 分叉一字未改：列块/选区删选区（列块那支仍走同步递归 update，
                 // 继承置脏与自动保存调度——Pasted 先例），无选区整行删触及行。

@@ -93,6 +93,96 @@ fn block_cut_records_the_block_and_still_deletes_it() {
 }
 
 #[test]
+fn cut_on_a_locked_page_records_nothing_while_copy_still_records() {
+    // P380：`CutRequested` 里"先记账再删"的次序本身没错，错在**这道只读闸不排在它前面**——
+    // 只读页按 Ctrl+X 时剪贴板与 `clip_history` 先落账，随后那一次删除才被 `apply_edit`
+    // 的只读总闸拒收 ⇒ 用户得到"只复制不剪"，历史里永久躺着一条"从来没剪成过"的废条目。
+    // 而同一页的正文右键菜单早就按 `menu_writable()` 把〔剪切〕滤掉了
+    // （`view/overlays.rs:179`）＝两把尺子各守一头（定案 R-4／R-20 那一族）。
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("abcdef\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 框住 "bc"
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+    }
+    dispatch(&mut app, Message::ToggleReadOnly);
+    assert!(app.cur_handle.borrow().read_only, "夹具自证：这一页已锁定");
+    assert!(app.clip_history.is_empty(), "夹具自证：起手历史是空的");
+    assert!(!app.tab().dirty, "夹具自证：刚加载完不该带脏");
+
+    dispatch(&mut app, Message::CutRequested);
+    assert!(
+        app.clip_history.is_empty(),
+        "被拒的剪切不许在历史里留废条目＝「一次手势⇒恰好一条记录」的另半边"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "abcdef\n",
+        "只读页剪不掉字"
+    );
+    assert!(
+        !app.tab().dirty,
+        "被拒动作不得置脏（脏一次＝排一次自动保存）"
+    );
+    assert_eq!(
+        app.status,
+        app.t(editpad_core::Key::StDocReadOnlyLocked).to_owned(),
+        "要出声，与其余写操作同一句"
+    );
+
+    // 反面对照 A：同一锁定页上〔复制〕是合法读取，照常恰好记一条
+    // ⇒ 挡住"把剪贴板出口一起堵掉"这种过窄修法
+    dispatch(&mut app, Message::CopyRequested);
+    assert_eq!(
+        app.clip_history,
+        vec!["bc".to_owned()],
+        "只读页仍可复制，且仍恰好记一条"
+    );
+
+    // 反面对照 B：解锁后同一手势真把字剪走（挡住"剪切一律拒收"）。用**列块**那一支，
+    // 它的后续删除走同步递归 update，headless `dispatch` 才看得见"删"这半边
+    // （选区／整行两支的删除走 `Task::done`，dispatch 会丢＝本仓既有夹具边界）。
+    dispatch(&mut app, Message::ToggleReadOnly);
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::Motion(crate::editor::Motion::DocEnd, false)),
+    );
+    app.cur_handle.borrow_mut().block_sel = Some(crate::editor::BlockSel {
+        anchor: crate::editor::CursorPos { line: 0, col: 1 },
+        head: crate::editor::CursorPos { line: 0, col: 4 },
+    });
+    dispatch(&mut app, Message::CutRequested);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "aef\n",
+        "解锁后剪切照常删块"
+    );
+    assert_eq!(
+        app.clip_history.first(),
+        Some(&"bcd".to_owned()),
+        "记的是块内容并挪到栈顶"
+    );
+    assert!(app.tab().dirty, "成功的剪切该置脏");
+}
+
+#[test]
 fn copying_the_same_text_moves_it_to_top_without_growing() {
     let mut app = Editpad::default();
     clip(&mut app, "A");
