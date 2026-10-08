@@ -158,7 +158,7 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
         return out;
     }
     let q: Vec<char> = query.chars().collect();
-    if query_is_multiline(&q) {
+    if query_is_multiline(q.iter().copied()) {
         scan_multiline_str(text, &q, case_sensitive, &mut out);
         return out;
     }
@@ -190,7 +190,7 @@ pub(crate) fn find_all_limited(
         return out;
     }
     let q: Vec<char> = query.chars().collect();
-    if query_is_multiline(&q) {
+    if query_is_multiline(q.iter().copied()) {
         let mut all = find_all(text, query, case_sensitive);
         all.truncate(limit);
         return all;
@@ -256,7 +256,7 @@ pub fn find_all_document_limited(
 
     // P26：跨行查询与 find_all 共用同一个扫描器（对拍不发散的结构保证），
     // rope 按存储块流式喂入，窗口缓冲 O(查询长度)
-    if query_is_multiline(&q) {
+    if query_is_multiline(q.iter().copied()) {
         scan_multiline_chunks(doc, &q, case_sensitive, &mut out);
         out.truncate(limit);
         return out;
@@ -507,8 +507,8 @@ fn query_tokens(q: &[char]) -> Vec<ScanToken> {
 }
 
 /// 该查询是否需要走跨行滑动窗口内核——**全仓唯一判据**（`find_all`、
-/// `find_all_limited`、`find_all_document` 与测试侧 oracle 共用，防止四份
-/// 副本各自漂移）。
+/// `find_all_limited`、`find_all_document`、`replace_all_word` 的「跨行命中一律
+/// 保留」与测试侧 oracle 共用，防止五份副本各自漂移）。
 ///
 /// 判据不能只认 `\n`：字面 `\r` 在文本侧同样是换行单元，替换侧
 /// （`replace_all_document` 内部的 `eol.normalize(query)`，P26 钉住的既定
@@ -516,8 +516,14 @@ fn query_tokens(q: &[char]) -> Vec<ScanToken> {
 /// 显示侧结构性 0 命中、全部替换却报告并执行 N 处——实测 LF 文档
 /// `a\nb\nc\na\nb\n` 以 Find=`\r`/Replace=`X` 得 `aXbXcXaXbX`（整篇行尾被
 /// 改掉），而面板写着「无匹配」。
-fn query_is_multiline(q: &[char]) -> bool {
-    q.iter().any(|&c| c == '\n' || c == '\r')
+///
+/// ⚠️ 判据是**两种**而不是行界全集，这与 [`query_tokens`] 那条有意裁决成套：
+/// 异体行界（VT/FF/NEL/LS/PS）在查询侧按普通字符处理，文本侧却把它们折成
+/// Newline 单元 ⇒ 含异体行界的查询在显示侧结构性 0 命中。P335 把全集做成
+/// [`LINE_BREAK_CHARS`] 之后，`replace_all_word` 那半改用 `line_break_byte_len`
+/// 判跨行＝凭空把整词边界检查跳过了（池 ⑧＝P372 修回同一个判据）。
+fn query_is_multiline(mut q: impl Iterator<Item = char>) -> bool {
+    q.any(|c| c == '\n' || c == '\r')
 }
 
 /// token 判等：普通字符走 ASCII 折叠；查询的换行单元恰好对应文本侧
@@ -804,7 +810,11 @@ pub fn replace_all_word(
     // 保留**（行内边界语义不成立）。字面查询是否跨行只取决于查询自身含不含
     // 行界字符，故在此提前判定——P222 之前这里无条件按「命中两侧字符」判界，
     // 于是含换行的查询出现「条上显示 N 处命中、按全部替换报 0 处」的单向分叉。
-    let crosses_line = query.chars().any(|c| line_break_byte_len(c, None) > 0);
+    // ⚠️ 这一问句的答案必须来自显示侧那份 [`query_is_multiline`]：P335 之后这里
+    // 写的是行界**全集**，于是含异体行界（VT 等）的查询被当成跨行、整词边界
+    // 一并跳过，而显示侧对这类查询结构性 0 命中＝「面板无匹配／已替换 N 处」
+    // 的反向分叉（池 ⑧＝P372，判据收回同一个入口）。
+    let crosses_line = query_is_multiline(query.chars());
     let mut out = String::with_capacity(text.len());
     let mut count = 0usize;
     let mut pos = 0usize; // 已确认写出的原文边界
@@ -1941,7 +1951,7 @@ mod tests {
             return out;
         }
         let q: Vec<char> = query.chars().collect();
-        if query_is_multiline(&q) {
+        if query_is_multiline(q.iter().copied()) {
             return find_all(text, query, case_sensitive);
         }
         let mut lc: Vec<char> = Vec::new();
@@ -2958,6 +2968,45 @@ mod tests {
             loaded > 500,
             "自检：这批组合里必须有足够多真的发生替换，否则整条用例是空转（实际 {loaded}）"
         );
+    }
+
+    /// P372（池 ⑧）：整词替换的「跨行」判据必须与显示侧**同一份**。
+    ///
+    /// 异体行界字符（VT/FF/NEL/LS/PS）在查询侧按**普通字符**处理（[`query_tokens`]
+    /// 里那条有意裁决），于是这类查询在显示侧结构性 0 命中；而 `replace_all_word`
+    /// 那半把「是否跨行」判成了行界**全集** ⇒ 整词边界检查被一并跳过，面板写着
+    /// 「无匹配」、按全部替换却报「已替换 N 处」并真的改掉文档——正是 P257 那条
+    /// 不变式（替换数不得超过面板显示数）剩下的那一角。
+    #[test]
+    fn whole_word_replace_with_exotic_break_does_not_outnumber_the_panel() {
+        let text = "xa\u{000B}by\n";
+        let query = "a\u{000B}b";
+        let doc = Document::from_str(text);
+        // 夹具自证：显示侧结构性 0 命中（查询里的 VT 在文本侧被折成 Newline 单元）
+        let hits = find_all(text, query, true);
+        assert!(
+            hits.is_empty(),
+            "夹具：含异体行界的查询面板应 0 命中，实际 {hits:?}"
+        );
+        let kept = filter_whole_word(&doc, hits);
+        assert!(kept.is_empty(), "夹具：整词过滤器同样 0 命中");
+
+        let (out, n) = replace_all_word(text, query, "X", true);
+        assert_eq!(n, 0, "面板 0 处的整词查询不得替换任何东西（改前实测 n=1）");
+        assert_eq!(out, text, "一个字节都不该动");
+
+        // 反面对照：真跨行查询（含 `\n`）仍走「跨行命中一律保留」，P222 那半没被改弱
+        let ml_text = "xa\nby\n";
+        let ml_doc = Document::from_str(ml_text);
+        let ml_kept = filter_whole_word(&ml_doc, find_all(ml_text, "a\nb", true));
+        assert_eq!(
+            ml_kept.len(),
+            1,
+            "夹具：跨行命中应保留（行内边界语义不适用）"
+        );
+        let (ml_out, ml_n) = replace_all_word(ml_text, "a\nb", "X", true);
+        assert_eq!(ml_n, 1, "两侧同为 1 才叫一致");
+        assert_eq!(ml_out, "xXy\n", "且真的换了（防空转）");
     }
 
     /// P257：**查找面板显示的命中数**与**全部替换报告的次数**必须同源。
