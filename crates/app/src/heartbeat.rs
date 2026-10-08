@@ -10,6 +10,9 @@ pub(crate) struct HeartbeatPayload {
     /// 传下去让 GC 与配额两把刀都绕开（不传就等于把待恢复的内容删了）。
     /// 提示已收起 / 从未弹出时为空。
     pub(crate) keeping: Vec<String>,
+    /// P377（池 ⑩）：**派发时刻**的界面语言。快照失败的说明在写盘线程成形后
+    /// 只以字符串回传，语言只能在这里带上（与 `LoadJob.lang`／`AutosaveTask.lang` 同款）。
+    pub(crate) lang: editpad_core::Lang,
     /// 需要重写内容的 (派发时刻下标, 页 id, 派发时刻内容版本)——回报据此
     /// 回填账目。**下标只用于取清单里对应那一项的内容文件名**（清单按派发
     /// 时刻的顺序写出），定位页必须用 id：在途关页会让下标整体左移，而版本

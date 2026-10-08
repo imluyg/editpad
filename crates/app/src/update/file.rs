@@ -886,6 +886,8 @@ impl Editpad {
             path,
             tab,
             tab_id,
+            // P377：登记时刻的语言随任务走（后台线程拿不到设置）
+            lang: self.settings.language,
         });
         self.progress = Some((0, 0));
         self.enter_busy();
@@ -1185,10 +1187,14 @@ impl Editpad {
             self.pending_close_tab = Some(tab_id);
         }
         let path = path.to_path_buf();
+        // P377（池 ⑩）：语言随任务带走——失败文案在后台线程成形，那里拿不到设置。
+        // 改前这里 `e.to_string()` 取的是 `CoreError::Display`（恒中文），英文界面的
+        // 「保存失败：」后面跟着一句中文。
+        let lang = self.lang();
         let task = Task::perform(
             async move {
                 let saved = editpad_core::save_document_encoded(&path, &doc, encoding)
-                    .map_err(|e| e.to_string());
+                    .map_err(|e| e.message(lang));
                 (version, saved)
             },
             move |(version, result)| {
@@ -1266,6 +1272,7 @@ impl Editpad {
                 encoding: enc,
                 expected_stamp: self.tabs[idx].file_stamp,
                 delay: std::time::Duration::from_secs(u64::from(self.settings.autosave_delay_secs)),
+                lang: self.lang(),
             };
             self.tabs[idx].autosave_inflight = true;
             // P146：带走发起页 id 与调度时刻的代次——回报按 id 归页；

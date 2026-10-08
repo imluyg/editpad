@@ -16,6 +16,10 @@ pub(crate) struct LoadJob {
     /// P145：目标页的稳定 id——`Loaded` 归页按 id 解析实际位置，
     /// 期间关页/换位导致的下标漂移不再串页/越界。
     pub(crate) tab_id: u64,
+    /// P377（池 ⑩）：**登记时刻**的界面语言。错误文案在后台线程成形，那里拿不到
+    /// 设置；跟着任务走而不是跟着订阅走——中途换语言不会撤销在途加载，
+    /// 也不会让已经发起的那次失败换一种说法。
+    pub(crate) lang: editpad_core::Lang,
 }
 
 /// 把一次加载任务构造成事件流（OS 线程做阻塞 IO，std mpsc 桥接到异步端）。
@@ -26,6 +30,7 @@ pub(crate) fn build_load_stream(job: &LoadJob) -> impl iced::futures::Stream<Ite
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
             drive_load(
                 job.id,
+                job.lang,
                 job.path,
                 |path, on_progress| editpad_core::load_document_streaming(path, on_progress),
                 &mut output,
@@ -44,6 +49,7 @@ pub(crate) fn build_load_stream(job: &LoadJob) -> impl iced::futures::Stream<Ite
 ///   补发一条失败消息。
 pub(crate) async fn drive_load<L>(
     job_id: u64,
+    lang: editpad_core::Lang,
     path: PathBuf,
     loader: L,
     output: &mut iced::futures::channel::mpsc::Sender<Message>,
@@ -65,14 +71,20 @@ pub(crate) async fn drive_load<L>(
             })
         }));
         let done = match outcome {
-            Ok(result) => LoadEvent::Done(result.map_err(|e| e.to_string())),
+            // P377（池 ⑩）：文案在后台线程成形，界面语言只能随任务带进来——
+            // 原先直接 `to_string()` 取的是 `CoreError` 的 `Display`（恒中文），
+            // 于是英文界面的「打开失败：」后面跟着一句中文。
+            Ok(result) => LoadEvent::Done(result.map_err(|e| e.message(lang))),
             Err(payload) => {
                 // 必须显式 &*payload 解出内部值：直接传 &payload 时，
                 // 因为 Box<dyn Any + Send> 自身也实现了 Any，编译器会走
                 // unsize 强制转换（把整个 Box 当作 Any 对象）而不是解引用，
                 // downcast 的 TypeId 就对不上了（实测踩坑）。
                 let message = panic_message(&*payload);
-                LoadEvent::Done(Err(format!("加载线程崩溃: {message}")))
+                LoadEvent::Done(Err(format!(
+                    "{}{message}",
+                    editpad_core::Key::StLoadThreadCrashed.text(lang)
+                )))
             }
         };
         let _ = notify_tx.send(done);
@@ -99,7 +111,7 @@ pub(crate) async fn drive_load<L>(
         let _ = output
             .send(Message::Loaded(
                 job_id,
-                Err("加载流意外终止（未收到完成事件）".to_owned()),
+                Err(editpad_core::Key::StLoadStreamEnded.text(lang).to_owned()),
             ))
             .await;
     }

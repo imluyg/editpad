@@ -761,7 +761,7 @@ async fn drive_heartbeat(payload: HeartbeatPayload) -> Message {
             payload.next_untitled,
             &payload.keeping,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.message(payload.lang))
     })
     .await
     .unwrap_or_else(|e| {

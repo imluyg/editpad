@@ -25,6 +25,9 @@ pub(crate) struct AutosaveTask {
     pub(crate) expected_stamp: Option<(std::time::SystemTime, u64)>,
     /// 防抖窗时长
     pub(crate) delay: std::time::Duration,
+    /// P377（池 ⑩）：**调度时刻**的界面语言。失败文案在写盘线程成形，那里拿不到设置；
+    /// 跟着任务走＝中途换语言不会改写已经发出去的那次失败说明。
+    pub(crate) lang: editpad_core::Lang,
 }
 
 /// 一次自动保存的驱动：专属 OS 线程「睡满防抖窗 → 代次校验 → 写前校验
@@ -60,7 +63,7 @@ pub(crate) async fn drive_autosave_once(
         } else if autosave_must_skip(task.expected_stamp, file_stamp(&path)) {
             AutosaveOutcome::SkippedExternalChange
         } else {
-            write_to_disk(&path, &doc, task.encoding)
+            write_to_disk(&path, &doc, task.encoding, task.lang)
         }
     })
     .await
@@ -114,10 +117,13 @@ pub(crate) fn write_to_disk(
     path: &Path,
     doc: &editpad_core::Document,
     encoding: editpad_core::SaveEncoding,
+    lang: editpad_core::Lang,
 ) -> AutosaveOutcome {
     match editpad_core::save_document_encoded(path, doc, encoding) {
         Ok(_) => AutosaveOutcome::Written(encoding),
-        Err(e) => AutosaveOutcome::Failed(e.to_string()),
+        // P377：CoreError 的 `Display` 恒中文，界面那条要用键表（外层前缀已是本地化的，
+        // detail 再是中文就是「英文半句 + 中文半句」）
+        Err(e) => AutosaveOutcome::Failed(e.message(lang)),
     }
 }
 
@@ -374,7 +380,7 @@ mod tests {
         let enc = autosave_encoding(None, "GBK").expect("GBK 必须能反查回来");
         assert!(
             matches!(
-                write_to_disk(&target, &doc, enc),
+                write_to_disk(&target, &doc, enc, editpad_core::Lang::default()),
                 AutosaveOutcome::Written(_)
             ),
             "按 GBK 自动保存应当成功"
@@ -408,6 +414,7 @@ mod tests {
             &target,
             &editpad_core::Document::from_str("disk v2"),
             editpad_core::SaveEncoding::Utf8,
+            editpad_core::Lang::default(),
         );
         assert!(
             matches!(outcome, AutosaveOutcome::Written(_)),

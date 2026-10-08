@@ -562,7 +562,12 @@ fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
     let path = dir.join("gbk.txt");
     let text = "中文内容";
     let doc = editpad_core::Document::from_str(text);
-    let outcome = write_to_disk(&path, &doc, editpad_core::SaveEncoding::Gbk);
+    let outcome = write_to_disk(
+        &path,
+        &doc,
+        editpad_core::SaveEncoding::Gbk,
+        editpad_core::Lang::default(),
+    );
     assert!(
         matches!(outcome, AutosaveOutcome::Written(_)),
         "落盘应成功，实际 {outcome:?}"
@@ -675,6 +680,7 @@ fn drive_reported_autosave(app: &mut Editpad, path: &std::path::Path) -> Message
         encoding: enc,
         expected_stamp: None,
         delay: std::time::Duration::from_millis(20),
+        lang: editpad_core::Lang::default(),
     };
     block_on(drive_autosave_once(
         tid,
@@ -1538,6 +1544,7 @@ fn load_stream_happy_path_emits_progress_then_done() {
         let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
         drive_load(
             7,
+            editpad_core::Lang::default(),
             path.clone(),
             |p, cb| editpad_core::load_document_streaming(p, cb),
             &mut tx,
@@ -1590,6 +1597,7 @@ fn load_stream_reports_failure_when_loader_panics() {
         let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
         drive_load(
             9,
+            editpad_core::Lang::default(),
             path.clone(),
             |_p, _cb| -> Result<editpad_core::LoadedDocument, editpad_core::CoreError> {
                 panic!("模拟加载线程崩溃");
@@ -1982,6 +1990,85 @@ fn non_log_file_open_is_untouched() {
 
 // ---------- P130：文件监视（tail 跟随） ----------
 
+/// P377（池 ⑩ 的加载链那一半）：加载失败的文案按**界面语言**取文。
+///
+/// 改前＝后台线程直接把 `CoreError` 的 `Display`（恒中文）`to_string()` 进
+/// `Loaded(Err(..))`，界面只剩前缀本地化 ⇒ 英文界面看到「Failed to open: 」＋一句
+/// 中文；两条兜底串（加载线程崩溃／加载流意外终止）同样硬编中文，而 lang.rs 里
+/// `ErrRead`／`ErrWrite`／`ErrBinaryDetected`／`StLoadThreadCrashed`／`StLoadStreamEnded`
+/// 五条键早已备好、零引用。
+#[test]
+fn load_failure_text_follows_the_ui_language() {
+    let dir = scratch_dir("load-lang");
+    let path = dir.join("bin.dat");
+    std::fs::write(&path, [0u8, 1, 2, 3, 0, 7]).unwrap(); // NUL ⇒ 二进制防护拒开
+
+    // 生产入口：drive_load 就是那句文案的成形处（loader 失败/panic 两支都走它）
+    let failure = |lang, crash: bool| {
+        let path = path.clone();
+        block_on(async move {
+            let (mut tx, mut rx) = iced::futures::channel::mpsc::channel::<Message>(64);
+            if crash {
+                drive_load(
+                    11,
+                    lang,
+                    path,
+                    |_p, _cb| -> Result<editpad_core::LoadedDocument, editpad_core::CoreError> {
+                        panic!("模拟崩溃");
+                    },
+                    &mut tx,
+                )
+                .await;
+            } else {
+                drive_load(
+                    12,
+                    lang,
+                    path,
+                    |p, cb| editpad_core::load_document_streaming(p, cb),
+                    &mut tx,
+                )
+                .await;
+            }
+            drop(tx);
+            let mut out: Option<String> = None;
+            while let Some(message) = rx.next().await {
+                if let Message::Loaded(_, Err(text)) = message {
+                    out = Some(text);
+                }
+            }
+            out.unwrap_or_default()
+        })
+    };
+
+    // 拒开二进制：CoreError → 键表
+    let zh = failure(editpad_core::Lang::ZhCn, false);
+    let en = failure(editpad_core::Lang::En, false);
+    assert!(
+        zh.contains("疑似二进制文件"),
+        "夹具：中文界面该走 `ErrBinaryDetected` 的中文文，实得 {zh:?}"
+    );
+    assert!(
+        en.contains("binary file") && !en.contains('疑'),
+        "英文界面不许夹中文，实得 {en:?}"
+    );
+    assert!(en.contains("bin.dat"), "路径还得带着，实得 {en:?}");
+
+    // 兜底前缀同一条规矩（panic 支）。⚠️ 只断**前缀**：panic 载荷是抛出方写的原文，
+    // 不在键表覆盖范围内（把它翻译了才是假话）。
+    let zh2 = failure(editpad_core::Lang::ZhCn, true);
+    let en2 = failure(editpad_core::Lang::En, true);
+    assert!(
+        zh2.contains("加载线程崩溃") && zh2.contains("模拟崩溃"),
+        "中文兜底：{zh2:?}"
+    );
+    assert!(
+        en2.starts_with("Load thread crashed: ") && en2.contains("模拟崩溃"),
+        "英文界面的兜底前缀须是英文、载荷原样保留：{en2:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn monitor_toggle_and_tick_reload_with_tail_follow() {
     let dir = std::env::temp_dir().join("editpad-p130-test");
@@ -2350,6 +2437,7 @@ fn autosave_superseded_by_generation_bump_skips_write() {
         encoding: editpad_core::SaveEncoding::Utf8,
         expected_stamp: None,
         delay: std::time::Duration::from_millis(50),
+        lang: editpad_core::Lang::default(),
     };
     let fut = drive_autosave_once(
         1,
@@ -2372,6 +2460,7 @@ fn autosave_superseded_by_generation_bump_skips_write() {
         encoding: editpad_core::SaveEncoding::Utf8,
         expected_stamp: None,
         delay: std::time::Duration::from_millis(50),
+        lang: editpad_core::Lang::default(),
     };
     let fut = drive_autosave_once(
         1,

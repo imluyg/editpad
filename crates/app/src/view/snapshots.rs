@@ -93,6 +93,7 @@ impl Editpad {
             pages: self.build_heartbeat_pages(&plan),
             active: self.active_tab,
             next_untitled: self.untitled_next,
+            lang: self.lang(),
             // 恢复提示挂着＝内存里那份旧清单是那些页文件的唯一持有者，而本轮
             // 写的新清单不引用它们。不带下去，这一拍心跳就把「点恢复时要读的
             // 内容」删了（GC 与配额各删一次）。
@@ -161,7 +162,7 @@ impl Editpad {
             payload.next_untitled,
             &payload.keeping,
         )
-        .map_err(|e| e.to_string());
+        .map_err(|e| e.message(self.lang()));
         let outcome = HeartbeatOutcome {
             plan: payload.plan,
             rev: payload.rev,

@@ -98,7 +98,8 @@ impl Editpad {
                 self.set_status_error(editpad_core::fmt_suffix(
                     self.lang(),
                     editpad_core::Key::StSessionSnapshotFailed,
-                    &error.to_string(),
+                    // P377：CoreError 走键表（`to_string()` 那句恒中文）
+                    &error.message(self.lang()),
                 ));
                 self.confirm_or_close()
             }
