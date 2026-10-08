@@ -6,6 +6,12 @@
 //!
 //! 错误以「行 : 列」报告，均按 Unicode 字符计——与本编辑器光标列
 //! 口径一致（CJK/emoji 各算 1 个标量），可直接用于状态栏提示与跳转。
+//! 行界同样按**读侧全集**数（[`crate::search::LINE_BREAK_CHARS`]，定案 R-11，
+//! `\r\n` 当一个单元）——M9 之前只在 `\n` 上进线，CR-only 或正文含 NEL/LS/PS 的文档上
+//! 报出的行号比编辑器少，"可直接跳转"那句承诺当时不成立。（VT/FF 属 C0 控制字符，
+//! 出现在字符串里会被当场拦下，但它们**前面**那些没数到的行界同样会让落点漂。）
+
+use crate::search::is_line_break;
 
 /// JSON 语法错误：1 起的行号与字符列 + 可读描述。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +77,8 @@ fn run<W: FnMut(&str)>(text: &str, formatted: bool, emit: W) -> Result<(), JsonE
 ///
 /// **游标形态（O-14）**：`text` + 字节偏移 `pos`（恒落在字符边界），
 /// 不再是 `Vec<char>` 全文拷贝；行/列仍按 **Unicode 字符**推进（`bump`
-/// 每吃一个字符 col +1，`\n` 换行），错误定位与改前逐字段一致。
+/// 每吃一个字符 col +1，行界按读侧全集进线、`\r\n` 当一个单元——见 [`Scanner::bump`]），
+/// 错误定位与改前逐字段一致。
 /// 输出只能经 [`Scanner::out`] / [`Scanner::out_char`]，它们在
 /// `formatted=false` 时直接返回——校验模式因此零写入、零分配。
 struct Scanner<'a, W: FnMut(&str)> {
@@ -79,6 +86,9 @@ struct Scanner<'a, W: FnMut(&str)> {
     pos: usize,
     line: usize,
     col: usize,
+    /// 上一个吃掉的字符是 `\r`——用来把 `\r\n` 数成**一个**行界单元
+    /// （读侧全集，与 ropey 切行同源；见 [`Self::bump`]）。
+    after_cr: bool,
     formatted: bool,
     emit: W,
 }
@@ -90,6 +100,7 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
             pos: 0,
             line: 1,
             col: 1,
+            after_cr: false,
             formatted,
             emit,
         }
@@ -127,10 +138,19 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
         self.text[self.pos..].chars().nth(ahead)
     }
 
+    /// 吃一个字符并推进行列。行界按**读侧全集**数（[`is_line_break`]，定案 R-11），
+    /// 而 `\r\n` 当一个单元：`\r` 那一下已经进线并把列复位，紧跟的 `\n` 只消费、
+    /// 不再进线也不动列 ⇒ CRLF 与 LF 在坐标系里给出同一个落点（用例
+    /// `error_line_counts_the_editors_line_breaks_not_just_lf` 的两格控制行钉的就是这条）。
     fn bump(&mut self) -> Option<char> {
         let c = self.peek()?;
         self.pos += c.len_utf8();
-        if c == '\n' {
+        let closes_crlf = self.after_cr && c == '\n';
+        self.after_cr = c == '\r';
+        if closes_crlf {
+            return Some(c);
+        }
+        if is_line_break(c) {
             self.line += 1;
             self.col = 1;
         } else {
@@ -720,6 +740,85 @@ mod tests {
         assert_eq!(e_v, e_f, "深度错误的两种模式逐字段相等");
         assert!(e_v.message.contains("嵌套过深"), "{}", e_v.message);
         assert_eq!((e_v.line, e_v.col), (1, 513), "深度错误定位在第 513 个 '['");
+    }
+
+    /// M9：报错行号必须落在**编辑器的那一行**上。本文件开头承诺"行 : 列 与本编辑器
+    /// 光标口径一致、可直接用于状态栏提示与跳转"，而跳转用的坐标是按读侧全集切行的
+    /// （定案 R-11：ropey `unicode_lines` 把 VT/FF/NEL/LS/PS 也算行界，`\r\n` 当一个单元）；
+    /// 改前 `bump()` 只在 `\n` 上进线 ⇒ 这些文档里"报错之后还有几个行界"全部漏计，
+    /// 行号整片偏小（列同样跟着错），用户按提示跳过去落在别的行。
+    /// 期望值全部手算（不是"跟实现再对一遍"）：每一格的错误字符都坐在我数出来的第 3 行第 1 列。
+    #[test]
+    fn error_line_counts_the_editors_line_breaks_not_just_lf() {
+        // (正文, 消息片段, 期望行, 期望列, 这一格盯的是什么)
+        let cases: &[(&str, &str, usize, usize, &str)] = &[
+            // 控制格：纯 LF——改前改后都必须是 3:1（挡住"修完把正常情形弄坏"）
+            ("{\n  \"a\": 1,\n}", "对象键必须是字符串", 3, 1, "LF"),
+            // 控制格：CRLF 当一个单元（只按全集数、不配对的话会变成 5:1）
+            (
+                "{\r\n  \"a\": 1,\r\n}",
+                "对象键必须是字符串",
+                3,
+                1,
+                "CRLF 配对",
+            ),
+            // 缺陷格：经典 Mac 的 CR-only（加载器明确支持的那种）
+            ("{\r  \"a\": 1,\r}", "对象键必须是字符串", 3, 1, "孤立 CR"),
+            // 缺陷格：NEL/LS/PS 是合法的**正文数据**（本扫描器只拦 `c < 0x20`），
+            // 而编辑器的行模型认它们为行界 ⇒ 之后的错误行号要跟着走
+            (
+                "{\"t\": \"x\u{0085}y\",\n}",
+                "对象键必须是字符串",
+                3,
+                1,
+                "NEL",
+            ),
+            (
+                "{\"t\": \"x\u{2028}y\",\n}",
+                "对象键必须是字符串",
+                3,
+                1,
+                "LS",
+            ),
+            (
+                "{\"t\": \"x\u{2029}y\",\n}",
+                "对象键必须是字符串",
+                3,
+                1,
+                "PS",
+            ),
+            // 缺陷格：VT/FF 自己必然报错（C0 控制字符未转义），所以它们**只能**
+            // 作为"错误落点"出现；这里盯的是"它们前面那个没被数到的行界"——
+            // 报错坐标仍然要落在编辑器的那一行那一列
+            (
+                "{\r\"k\": \"a\u{000B}",
+                "未转义的控制字符",
+                2,
+                8,
+                "VT 前有孤立 CR",
+            ),
+            (
+                "{\r\"k\": \"a\u{000C}",
+                "未转义的控制字符",
+                2,
+                8,
+                "FF 前有孤立 CR",
+            ),
+        ];
+        for (text, note, line, col, kind) in cases {
+            let e_v = validate_json(text).expect_err("用例前提：尾随逗号非法");
+            let e_f = format_json(text).expect_err("两种模式同判非法");
+            assert_eq!(
+                e_v, e_f,
+                "{kind}: 校验与格式化必须逐字段相等，实得 {e_v:?} vs {e_f:?}"
+            );
+            assert!(e_v.message.contains(note), "{kind}: 消息 {e_v:?}");
+            assert_eq!(
+                (e_v.line, e_v.col),
+                (*line, *col),
+                "{kind}: 行号必须按编辑器的行界数（实得 {e_v:?}，正文 {text:?}）"
+            );
+        }
     }
 
     #[test]
