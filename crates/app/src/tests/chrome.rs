@@ -648,3 +648,69 @@ fn status_menu_card_height_covers_every_encoding_item() {
         "弹层条目数与编码全集条目数不等——有侧漏抄"
     );
 }
+
+/// P386（池 M2）：主窗口 id 只在〔关窗请求〕那一条路上被捕获（`state.rs:237` 的注释
+/// 自己登记了"只能从 close_requests 订阅捕获"），所以全新会话里 `main_window` 恒为
+/// `None` ⇒ `window::set_mode` 根本没发出去，可标志翻了、状态栏还写"已进入全屏"。
+/// 用户看到的是按了没反应，而界面向他保证成功了。次生害＝`persist_geometry_if_due`
+/// 见 `fullscreen == true` 就短路 ⇒ 此后拖动/拉伸的窗口几何再不落盘。
+#[test]
+fn window_toggles_without_a_known_window_id_do_not_claim_success() {
+    let mut app = Editpad::default();
+    assert!(
+        app.main_window.is_none(),
+        "夹具自证：全新会话还没捕获主窗口 id"
+    );
+    app.status.clear();
+
+    dispatch(&mut app, Message::ToggleFullscreen);
+    assert!(
+        !app.fullscreen,
+        "没把 set_mode 发出去就不许翻全屏标志（改前：翻了）"
+    );
+    assert_eq!(
+        app.status, "",
+        "也不许写「已进入全屏」——那是句假话（改前实测如此）"
+    );
+
+    dispatch(&mut app, Message::ToggleAlwaysOnTop);
+    assert!(!app.always_on_top, "置顶同理：没发 set_level 就不许翻标志");
+    assert_eq!(app.status, "", "置顶失败同样不该谎报");
+
+    // ② 拿到 id 之后，挂起的那一次要照原样兑现（这才叫"按了没反应"被修好）
+    let id = iced::window::Id::unique();
+    dispatch(&mut app, Message::MainWindowResolved(Some(id)));
+    assert_eq!(app.main_window, Some(id), "回报要把主窗口 id 补齐");
+    assert!(app.always_on_top, "挂着的那次置顶在拿到 id 后兑现");
+    assert_eq!(app.status, app.t(editpad_core::Key::StAlwaysOnTopOn));
+    assert_eq!(app.pending_window_toggle, None, "兑现即作废，不许留第二次");
+
+    // ③ id 已就绪 ⇒ 同一手势当场翻、不再走挂起路径
+    dispatch(&mut app, Message::ToggleFullscreen);
+    assert!(app.fullscreen, "有 id 时第一次按 F11 就该进全屏");
+    assert_eq!(app.status, app.t(editpad_core::Key::StFullscreenOn));
+    dispatch(&mut app, Message::ToggleFullscreen);
+    assert!(!app.fullscreen, "再按一次退出全屏（标志与真实态同步翻转）");
+    assert_eq!(app.status, app.t(editpad_core::Key::StFullscreenOff));
+
+    // ④ 问不到 id ⇒ 挂起的那次**整份作废**，不许留到下一次无关回报再兑现
+    //（P215／P221／P371 同一条规矩）
+    let mut fresh = Editpad::default();
+    fresh.status.clear();
+    dispatch(&mut fresh, Message::ToggleFullscreen);
+    assert_eq!(
+        fresh.pending_window_toggle,
+        Some(PendingWindowToggle::Fullscreen),
+        "夹具自证：这一次是挂在等 id"
+    );
+    dispatch(&mut fresh, Message::MainWindowResolved(None));
+    assert_eq!(fresh.pending_window_toggle, None, "问不到就该丢掉意图");
+    assert!(!fresh.fullscreen, "没兑现成就不许翻标志");
+    fresh.status.clear();
+    dispatch(&mut fresh, Message::MainWindowResolved(Some(id)));
+    assert!(
+        !fresh.fullscreen && fresh.status.is_empty(),
+        "迟到的无关回报不许把已经作废的那次偷偷兑现（实际 {:?}）",
+        fresh.status
+    );
+}

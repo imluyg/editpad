@@ -241,6 +241,9 @@ enum Message {
     OpenContainingFolder,
     /// P126：切换全屏（F11；全屏期间窗口几何不记忆）
     ToggleFullscreen,
+    /// P386：向运行时问过"最早那个窗口"（＝本应用唯一的主窗口）之后的回报。
+    /// `None` = 问不到窗口 ⇒ 挂起的那次切换整份作废。
+    MainWindowResolved(Option<window::Id>),
     /// P126：切换窗口置顶（F9）
     ToggleAlwaysOnTop,
     /// P129：打开/切换/关闭命令面板（目标模式；同模式再按 = 关闭）

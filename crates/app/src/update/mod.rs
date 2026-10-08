@@ -685,6 +685,7 @@ impl Editpad {
             | Message::SnapshotHeartbeatTick
             | Message::HeartbeatDone(..)
             | Message::ToggleFullscreen
+            | Message::MainWindowResolved(..)
             | Message::ToggleAlwaysOnTop
             | Message::WindowMoved(..) => self.update_session(message),
             // ---------- P318：书签列表面板（开关／逐条跳／逐条摘） ----------
@@ -977,16 +978,24 @@ impl Editpad {
             }
             // P126：全屏切换（F11）。iced 0.14：window::set_mode。
             Message::ToggleFullscreen => {
+                // P386（池 M2）：主窗口 id 只在〔关窗请求〕那一条路上被捕获
+                // （`state.rs` 的注释自认"只能从 close_requests 订阅捕获"），
+                // 而 iced 0.14 没有 `Id::MAIN` ⇒ 全新会话第一次按 F11 时这里是
+                // `None`：改前照旧翻标志＋写「已进入全屏」，可一个 Task 都没发出去
+                // ＝功能没动、还谎报一次（次生害＝`persist_geometry_if_due` 见
+                // `fullscreen == true` 短路 ⇒ 此后窗口几何再不落盘）。
+                // 现问运行时"最早那个窗口"（本应用只有主窗口），拿到 id 再兑现这一次。
+                let Some(id) = self.main_window else {
+                    self.pending_window_toggle = Some(PendingWindowToggle::Fullscreen);
+                    return iced::window::oldest().map(Message::MainWindowResolved);
+                };
                 self.fullscreen = !self.fullscreen;
                 let mode = if self.fullscreen {
                     iced::window::Mode::Fullscreen
                 } else {
                     iced::window::Mode::Windowed
                 };
-                let task: Task<Message> = match self.main_window {
-                    Some(id) => iced::window::set_mode(id, mode),
-                    None => Task::none(),
-                };
+                let task = iced::window::set_mode(id, mode);
                 self.set_status(if self.fullscreen {
                     self.t(editpad_core::Key::StFullscreenOn).to_owned()
                 } else {
@@ -994,18 +1003,36 @@ impl Editpad {
                 });
                 task
             }
+            // P386：主窗口 id 的回报——先取走挂起意图，两种结果都不许把它留在场上
+            // （P215／P221／P371 同一条规矩：一次性意图不能被下一次无关动作兑现）。
+            Message::MainWindowResolved(id) => {
+                let pending = self.pending_window_toggle.take();
+                let Some(id) = id else {
+                    return Task::none();
+                };
+                self.main_window = Some(id);
+                match pending {
+                    Some(PendingWindowToggle::Fullscreen) => self.update(Message::ToggleFullscreen),
+                    Some(PendingWindowToggle::AlwaysOnTop) => {
+                        self.update(Message::ToggleAlwaysOnTop)
+                    }
+                    None => Task::none(),
+                }
+            }
             // P126：置顶切换（F9）。iced 0.14：window::set_level。
             Message::ToggleAlwaysOnTop => {
+                // P386：同 F11——没有 id 就先去问，问到了再翻标志＋出声（见上面那臂）。
+                let Some(id) = self.main_window else {
+                    self.pending_window_toggle = Some(PendingWindowToggle::AlwaysOnTop);
+                    return iced::window::oldest().map(Message::MainWindowResolved);
+                };
                 self.always_on_top = !self.always_on_top;
                 let level = if self.always_on_top {
                     iced::window::Level::AlwaysOnTop
                 } else {
                     iced::window::Level::Normal
                 };
-                let task: Task<Message> = match self.main_window {
-                    Some(id) => iced::window::set_level(id, level),
-                    None => Task::none(),
-                };
+                let task = iced::window::set_level(id, level);
                 self.set_status(if self.always_on_top {
                     self.t(editpad_core::Key::StAlwaysOnTopOn).to_owned()
                 } else {

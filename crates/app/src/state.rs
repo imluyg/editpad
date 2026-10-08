@@ -1,6 +1,13 @@
 use super::*;
 use std::rc::Rc;
 
+/// P386：主窗口 id 未就绪时挂起的窗口切换种类（F11 全屏／F9 置顶）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingWindowToggle {
+    Fullscreen,
+    AlwaysOnTop,
+}
+
 /// B9 列编辑器对话框草稿（Phase 2）。数值字段以字符串承载——输入框
 /// 原始态，确认时统一校验解析（无效输入不关闭对话框、状态栏提示）。
 /// 草稿跨开合保留（命令面板查询串同口径），不落盘不入快照。
@@ -236,6 +243,11 @@ pub(crate) struct Editpad {
     pub(crate) pending_close: bool,
     /// 主窗口 id。iced 0.14 没有 Id::MAIN 之类的常量，只能从 close_requests 订阅捕获
     pub(crate) main_window: Option<window::Id>,
+    /// P386：主窗口 id 还没拿到时挂起的那次窗口切换（F11／F9）。
+    /// 一次性意图 ⇒ 兑现点与作废点都在 `Message::MainWindowResolved` 那一条臂上：
+    /// 拿到 id 就照原样重放一次，拿不到就整份作废（不许留到下一次无关回报再兑现
+    /// ＝P215／P221／P371 同一条规矩）。
+    pub(crate) pending_window_toggle: Option<PendingWindowToggle>,
     /// P126：全屏态（F11）。全屏期间窗口几何不记忆（尺寸是全屏值，
     /// 退出后按它恢复会错）。
     pub(crate) fullscreen: bool,
@@ -462,6 +474,7 @@ impl Default for Editpad {
             confirm_visible: false,
             pending_close: false,
             main_window: None,
+            pending_window_toggle: None,
             fullscreen: false,
             palette_visible: false,
             palette_mode: PaletteMode::Commands,
