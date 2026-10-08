@@ -430,7 +430,18 @@ impl Editpad {
         let discarded = self.recover_prompt.take();
         self.recover_overwrite_ok = false;
         if let (Some(dir), Some(manifest)) = (dir, discarded.as_ref()) {
-            editpad_core::snapshot::discard_session(&dir, manifest);
+            // P383（池 N6）：删除失败不再被吞。提示条照旧收起（用户已经表过态，
+            // 留着只会让他以为点错了按钮），但**部分失败必须出声**：清单删掉了而
+            // 页文件没删掉＝他弃掉的那份正文还躺在盘上；反过来清单没删掉＝下次启动
+            // 同一份会话又弹一次。两种都和他刚做的那个动作不一致，静默就是撒谎。
+            let outcome = editpad_core::snapshot::discard_session(&dir, manifest);
+            if outcome.left > 0 {
+                self.set_status_error(format!(
+                    "{}{}",
+                    outcome.left,
+                    self.t(editpad_core::Key::StDiscardLeftSuffix)
+                ));
+            }
         }
         Task::none()
     }

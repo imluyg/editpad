@@ -977,6 +977,75 @@ fn discard_recovery_spares_the_live_session_snapshot() {
     fs_remove_dir_all(&dir);
 }
 
+/// 池 N6（第 292 轮）：〔丢弃〕先把提示条无条件收走、再删快照，而删除失败被
+/// `discard_session` 吞掉 ⇒ 用户以为"已丢弃"的那份内容仍躺在磁盘上（而磁盘上那份
+/// 清单没删掉时，下次启动还会再弹一次同一份会话），界面给的却是"什么都没发生"。
+///
+/// 失败注入＝把清单引用的那个页路径**占成目录**：`fs::remove_file` 对目录恒失败
+/// （Windows ERROR_ACCESS_DENIED／Unix EISDIR），跨平台确定，且是本仓既有的造法
+/// （E-7 那条"故意把路径占成文件让 `remove_dir_all` 恒失败"的镜像）。
+#[test]
+fn discard_that_failed_to_delete_the_manifest_says_so() {
+    const MANIFEST: &str = editpad_core::snapshot::MANIFEST_NAME;
+
+    // ① 页文件删不掉的那一格＝要出声
+    let dir = snapshot_scratch_dir("p383-discard-locked");
+    plant_orphan_session(&dir);
+    let crashed = editpad_core::snapshot::read_manifest(&dir).expect("夹具：崩前清单可读");
+    let page = crashed.tabs[0]
+        .file
+        .clone()
+        .expect("夹具：崩前页有内容文件");
+    // 把这个页路径换成"删不掉的目录"（里面留一个子项，连整体移除都不可能顺手成功）
+    std::fs::remove_file(dir.join(&page)).unwrap();
+    std::fs::create_dir_all(dir.join(&page)).unwrap();
+    std::fs::write(dir.join(&page).join("holder.bin"), b"hold").unwrap();
+    let mut app = Editpad::default();
+    app.recover_prompt = Some(crashed);
+    app.status.clear();
+
+    let _ = app.discard_session_recover(Some(dir.clone()));
+    assert!(app.recover_prompt.is_none(), "提示条要收起");
+    assert!(
+        dir.join(&page).exists(),
+        "夹具自证：这一格的删除确实失败了（页路径还占着）"
+    );
+    assert!(
+        !app.status.is_empty(),
+        "部分失败的丢弃必须出声，不许静默收起提示条（实际 {:?}）",
+        app.status
+    );
+    assert!(
+        !dir.join(MANIFEST).exists(),
+        "夹具自证：清单那一份是删掉了的＝这次失败只剩\"内容还留着\"这一半"
+    );
+
+    // ② 反面对照：全都删得掉的时候不许冒出那句
+    let dir2 = snapshot_scratch_dir("p383-discard-clean");
+    plant_orphan_session(&dir2);
+    let crashed2 = editpad_core::snapshot::read_manifest(&dir2).expect("夹具：崩前清单可读");
+    let mut app2 = Editpad::default();
+    app2.recover_prompt = Some(crashed2);
+    app2.status.clear();
+    let _ = app2.discard_session_recover(Some(dir2.clone()));
+    assert!(
+        app2.status.is_empty(),
+        "丢弃成功时不该打扰用户，实际 {:?}",
+        app2.status
+    );
+    assert!(
+        !dir2.join(MANIFEST).exists() && !dir2.join("s7-t0.snap").exists(),
+        "成功那格：清单与页文件都不该留在盘上"
+    );
+
+    // ③ 清单删不掉的那一格（同一失败被吞的第二半：下次启动会再弹同一份会话）
+    //    ＝页路径同样占成目录，此时清单也不该被删（P378 的"磁盘上这份就是被弃的那份
+    //    才删"在前，页删失败不影响它），所以这一格靠页残留出信号即可，不再叠第二层。
+    drop(app);
+    fs_remove_dir_all(&dir);
+    fs_remove_dir_all(&dir2);
+}
+
 /// 池 ①（第 272 轮登记、本人逐行核实）：崩溃恢复提示条挂着时用户照常能敲字，
 /// 而〔恢复〕那一下原先是 `self.tabs = tabs` 整体替换 —— 期间敲的内容既不置
 /// 确认也不走关页漏斗，连 `dirty` 判定都没过就没了。改后＝当前有未保存改动时

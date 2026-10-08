@@ -547,6 +547,8 @@ key_table! {
     { StBackupFailed => "备份失败（继续保存）：", "Backup failed (saving continues): " },
     { StSettingsSaveFailed => "设置保存失败（本次改动不会记住）：", "Failed to save settings (this change will not be remembered): " },
     { StSessionManifestBroken => "上次会话的清单读不出来，原文已留档：", "The last session's manifest could not be read; the original was kept aside: " },
+    // P383：〔丢弃〕部分失败时的后缀（数字在前，语言无关）
+    { StDiscardLeftSuffix => " 个快照文件没能删掉，被丢弃的内容可能仍留在磁盘上", " snapshot file(s) could not be deleted; the discarded content may still be on disk" },
     { StSettingsUnreadable => "配置文件读不出来，本次启动按默认值，原文见：", "The config file could not be read; this session uses defaults. Original at: " },
     { StPasteStaleTab => "粘贴已取消：剪贴板回来之前那一页已不在眼前（内容仍在剪贴板，可再粘一次）", "Paste cancelled: that tab was no longer in view when the clipboard arrived (the text is still on the clipboard)" },
     { StLoadThreadCrashed => "加载线程崩溃：", "Load thread crashed: " },

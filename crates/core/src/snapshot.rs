@@ -512,9 +512,22 @@ pub fn clear_session(dir: &Path) {
 /// 心跳已提交新清单时删掉它＝又把当前会话的保护丢了一次。读不出代次时不删
 /// （P348 同规：「读不出」不等于「没有」）。
 ///
-/// 返回删掉的条目数（页文件 ＋ 可能的清单）；0 不代表失败，本来就没什么可删。
-pub fn discard_session(dir: &Path, discarded: &SessionManifest) -> usize {
+/// 结果两个计数怎么用见 [`DiscardOutcome`]。
+pub struct DiscardOutcome {
+    pub removed: usize,
+    pub left: usize,
+}
+
+/// 〔丢弃〕的结果：`removed` = 真删掉的条目数；`left` = **想删而没删掉**的条目数
+/// （页文件删除失败，加上"磁盘上这份就是被弃的那一份"却没删掉）。
+///
+/// `left` 才是调用方该出声的量。只看 `removed` 会把**部分失败**读成成功：清单删掉了
+/// ⇒ 下次启动不再提示，而用户以为已经丢掉的那份正文还躺在盘上——这既是他"丢弃"这个
+/// 动作没兑现，也是隐私残留；反过来清单没删掉时他下次又会被问一遍同一份会话。
+/// 两种失败都不该静默。
+pub fn discard_session(dir: &Path, discarded: &SessionManifest) -> DiscardOutcome {
     let mut removed = 0usize;
+    let mut left = 0usize;
     for tab in &discarded.tabs {
         let Some(name) = tab.file.as_deref() else {
             continue;
@@ -523,18 +536,25 @@ pub fn discard_session(dir: &Path, discarded: &SessionManifest) -> usize {
         if parse_page_generation(name).is_none() {
             continue;
         }
-        if fs::remove_file(dir.join(name)).is_ok() {
-            removed += 1;
+        match fs::remove_file(dir.join(name)) {
+            Ok(()) => removed += 1,
+            // 「本来就不在」＝目的已达成，不算失败（清单可能指向已被 GC 淘汰的页）
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(..) => left += 1,
         }
     }
     let disk_is_the_discarded_one = matches!(
         read_manifest_checked(dir),
         ManifestRead::Good(m) if m.generation == discarded.generation
     );
-    if disk_is_the_discarded_one && fs::remove_file(dir.join(MANIFEST_NAME)).is_ok() {
-        removed += 1;
+    if disk_is_the_discarded_one {
+        if fs::remove_file(dir.join(MANIFEST_NAME)).is_ok() {
+            removed += 1;
+        } else {
+            left += 1;
+        }
     }
-    removed
+    DiscardOutcome { removed, left }
 }
 
 /// 配额护栏：页快照总量超过 `cap_bytes` 时按修改时间从旧到新淘汰，
