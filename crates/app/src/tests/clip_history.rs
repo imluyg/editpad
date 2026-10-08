@@ -5,7 +5,9 @@
 //!    各管一头（条数上限、总量上限），且总量触顶时**宁可逐出旧条目也不截断
 //!    内容**（"取回来的就是当时复制的那一份"是这项功能唯一的契约）；
 //! ② **取用**——插入走既有粘贴路径，所以只读页拒收、撤销可回、越界不 panic
-//!    三格都是继承来的口径，本功能不长第二个写正文的入口；
+//!    三格都是继承来的口径，本功能不长第二个写正文的入口；被拒那两种还各有
+//!    第二半边（M6／P390）：`clip_history` 这本账**也不许动**——被拒的取用原本
+//!    会把那条挪到栈顶＝把没用成的东西记成"用过"，而只读那一种要照旧出声；
 //! ③ **面板**——条目只带预览与规模、绝不带全文。`palette_all_entries` 每帧
 //!    重建这个 Vec，把几兆的历史抄进条目就是每帧抄几兆（本仓性能池反复
 //!    量到的那类无声退化，这里提前装一道闸）。
@@ -393,19 +395,104 @@ fn picking_an_index_that_no_longer_exists_is_a_silent_no_op() {
 
 #[test]
 fn picking_on_a_read_only_page_changes_not_a_character() {
-    // 取用经 `Pasted → Edit(InsertText)` ⇒ 只读前置闸自动继承，本功能没开新洞
+    // 取用经 `Pasted → Edit(InsertText)` ⇒ 只读前置闸自动继承，本功能没开新洞。
+    // ⚠️ 这一格原本**取的是下标 0**＝栈顶那一条，"挪到栈顶"是恒等操作，所以它
+    // 看不见被拒手势留下的第二笔账（历史被重排＝那条被当成"用过"）；
+    // 现在取下标 1，并补上"历史原样"与"仍然出声"两条断言。
     let mut app = app_with("locked");
+    clip(&mut app, "older");
     dispatch(&mut app, Message::Edit(EditOp::SelectAll));
     dispatch(&mut app, Message::CopyRequested);
     dispatch(&mut app, Message::ToggleReadOnly);
     assert!(app.cur_handle.borrow().read_only, "用例前提：已切只读");
+    assert_eq!(
+        app.clip_history,
+        vec!["locked".to_owned(), "older".to_owned()],
+        "夹具前提：下标 1 不在栈顶＝被拒重排在这一格**看得见**"
+    );
     let before = app.cur_handle.borrow().doc.to_text();
-    dispatch(&mut app, Message::ClipPick(0));
+    dispatch(&mut app, Message::ClipPick(1));
     assert_eq!(
         app.cur_handle.borrow().doc.to_text(),
         before,
         "只读页取历史不该写进正文"
     );
+    assert_eq!(
+        app.clip_history,
+        vec!["locked".to_owned(), "older".to_owned()],
+        "被拒的取用不许重排历史＝「被拒动作不留任何状态痕迹」（只读闸那句契约的另一半）"
+    );
+    assert_eq!(
+        app.status,
+        app.t(editpad_core::Key::StDocReadOnlyLocked).to_owned(),
+        "闸前移到发起侧，也不许把唯一的反馈一起吞掉"
+    );
+}
+
+/// 被拒的取用会留下两笔不同的账，两道闸各一种：只读那一道**出声**（上一格），
+/// 装载在途那一道**静默**（`apply_edit` 第一道闸连状态栏都不写）⇒ 这一格里
+/// 重排是唯一留下的痕迹，用户既没插进字也没听到任何话。
+#[test]
+fn picking_while_a_load_is_in_flight_leaves_the_history_order_alone() {
+    let dir = scratch_dir("clip-pick-in-flight");
+    let path = dir.join("incoming.txt");
+    std::fs::write(&path, "payload").unwrap();
+
+    let mut app = Editpad::default();
+    clip(&mut app, "older");
+    clip(&mut app, "body");
+    let expected = vec!["body".to_owned(), "older".to_owned()];
+    assert_eq!(app.clip_history, expected, "夹具前提：下标 1 不在栈顶");
+
+    // 起一次装载但**不**投递 Loaded ⇒ 装载在途、busy 已置
+    // ⚠️ 起手页必须是**空净页**：置脏页的打开会转成「打开确认条」而根本不起装载
+    dispatch(&mut app, Message::FileDropped(path.clone()));
+    assert!(app.active_load.is_some(), "夹具前提：装载在途");
+    assert!(app.busy, "夹具前提：busy 已置");
+    // 面板这条路在装载期间依然走得通：`PaletteToggled` 与 `PalettePick`
+    // 都不判 busy（热键直接把消息投进 update），所以这不是只能手工捏出来的形状
+    dispatch(&mut app, Message::PaletteToggled(PaletteMode::Clipboard));
+    assert!(app.palette_visible, "夹具前提：装载在途时面板打得开");
+    let seq = app.job_seq;
+    let doc_before = app.cur_handle.borrow().doc.to_text().to_owned();
+
+    dispatch(&mut app, Message::PalettePick(1));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        doc_before,
+        "装载在途时取用不许写进正文（apply_edit 第一道闸）"
+    );
+    assert_eq!(
+        app.clip_history, expected,
+        "被拒的取用同样不许重排历史——这一格连出声都没有，重排就是唯一痕迹"
+    );
+
+    // 反面对照：装载落地之后，同一下标照常插入并挪顶（前移的闸不是把功能堵死）
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("payload"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(app.active_load.is_none(), "夹具自证：装载已落地");
+    dispatch(&mut app, Message::ClipPick(1));
+    assert_eq!(
+        app.clip_history,
+        vec!["older".to_owned(), "body".to_owned()],
+        "落地之后取用照常算一次「用」：挪到栈顶、条数不变"
+    );
+    assert!(
+        app.cur_handle.borrow().doc.to_text().contains("older"),
+        "落地之后取用照常插进正文，实际 {:?}",
+        app.cur_handle.borrow().doc.to_text()
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

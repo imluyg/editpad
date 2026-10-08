@@ -314,10 +314,23 @@ impl Editpad {
                 let Some(text) = self.clip_history.get(i).cloned() else {
                     return Task::none();
                 };
+                // M6（池）：取用要动正文 ⇒ 先过 `apply_edit` 那两道写入闸，再改历史这本账。
+                // 改前顺序＝先把那条挪到栈顶、再走可能被拒的插入 ⇒ 正文一字未动，
+                // 历史却悄悄换了顺序（还被当成"用过"）。两种拒绝都得挡：
+                //   · 只读锁定＝出声那一种（闸用 `read_only_blocks_write`，与其余写操作同一句文案，
+                //     前移之后反馈一个字都没少）；
+                //   · 装载在途＝**静默**那一种（连状态栏都不写），而面板在装载期间仍打得开
+                //     （`PaletteToggled`／`PalettePick` 都不判 busy）⇒ 重排是唯一留下的痕迹。
+                // 这里按"发起时的判据"查是成立的：取用与插入在同一次 `update()` 里
+                // （P357 已证面板点击与插入之间没有 await），两道闸的输入不会在途中变——
+                // 与 P379／P387 那一族"跨异步时刻不对称"不是一回事。判据形状同 `CutRequested`。
+                if self.read_only_blocks_write() || self.active_load.is_some() {
+                    return Task::none();
+                }
                 // 取用也是一次"用"：挪到栈顶（MRU），条数不变
                 self.clip_history.remove(i);
                 self.clip_history.insert(0, text.clone());
-                // 插入走既有粘贴路径 ⇒ 置脏、撤销、只读前置闸全部继承，
+                // 插入走既有粘贴路径 ⇒ 置脏、撤销、装载在途那道闸全部继承，
                 // 本功能不长第二个写正文的入口。P357：面板取用是**同步**的
                 // （点击与插入在同一次 update 里，中间不可能切页），id 取当下这页。
                 let tab_id = self.tab().id;
