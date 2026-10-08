@@ -6,13 +6,17 @@ pub(crate) enum LoadEvent {
     Done(Result<editpad_core::LoadedDocument, String>),
 }
 
-/// 后台加载任务：订阅标识 + 目标路径 + 目标标签页（P21 路由归属）。
+/// 后台加载任务：订阅标识 + 目标路径 + 目标页的稳定 id（P21 路由归属）。
+///
+/// M11：这里原本还带一个 `tab: usize`（登记时刻的标签下标），而它**在生产路径零读者**——
+/// `Loaded` 归页从 P145 起只认 `tab_id`。更糟的是它的注释写着"恢复队列的平移记账仍用它"，
+/// 那是假的：队列平移作用在另一份下标（`RestoreLoad.tab`）上，这个字段从 P145 之后
+/// 就没人读过、也从没被平移过。留着＝"跨异步持裸下标"这一族的诱饵，
+/// 删掉字段才是把载体拿掉（同 S-1 把确认条改存页 id 的思路）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct LoadJob {
     pub(crate) id: u64,
     pub(crate) path: PathBuf,
-    /// 结果应写入的标签下标（登记时刻的值；恢复队列的平移记账仍用它）
-    pub(crate) tab: usize,
     /// P145：目标页的稳定 id——`Loaded` 归页按 id 解析实际位置，
     /// 期间关页/换位导致的下标漂移不再串页/越界。
     pub(crate) tab_id: u64,

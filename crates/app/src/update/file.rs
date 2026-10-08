@@ -911,7 +911,6 @@ impl Editpad {
         self.active_load = Some(LoadJob {
             id,
             path,
-            tab,
             tab_id,
             // P377：登记时刻的语言随任务走（后台线程拿不到设置）
             lang: self.settings.language,

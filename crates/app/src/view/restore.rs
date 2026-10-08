@@ -251,9 +251,10 @@ impl Editpad {
     /// 生产代码零读者、只有测试在断言它。改成从队列与在途任务派生之后，
     /// 「计数器与队列不同步」这类账目漂移就没有载体了。
     /// 在途的那个用 `restore_views` 判定（只有恢复链的加载任务在里面）。
-    /// `#[cfg(test)]`：生产路径不读它（恢复进度提示直接用队列与汇总计数），
-    /// 留着会撞 `clippy -D warnings` 的 dead-code。
-    #[cfg(test)]
+    /// M11 起它有了**生产读者**：`shift_restore_queue_after_removal` 用它判断
+    /// "恢复链是否真到头了"（队列可能被关页的 retain 抽空，而不是被结算排空），
+    /// 归零那一刻才交付汇总。S-3 那次把它改成派生量的理由同样支持这件事——
+    /// 拿派生量当判据，就不会出现"计数器与队列不同步"那类漏口。
     pub(crate) fn restore_outstanding(&self) -> usize {
         let inflight = self
             .active_load
@@ -305,7 +306,11 @@ impl Editpad {
 
     /// 恢复收尾汇总：只有出现值得告知的情况才打扰状态栏
     /// （失败页/截断页）；全部成功则保持安静，界面本身即是恢复事实。
-    pub(super) fn finish_restore_summary(&mut self) {
+    ///
+    /// **交付即消费**：函数末尾把 `restore_failed`／`restore_dropped` 清零，所以
+    /// 这条汇总天然只说一次——多个出口（结算排空、链子中途中断、关页把队列抽空）
+    /// 可以同时叫它，不必担心重复出声。
+    pub(crate) fn finish_restore_summary(&mut self) {
         let mut notes: Vec<String> = Vec::new();
         if self.restore_failed > 0 {
             notes.push(editpad_core::fmt_restore_note(

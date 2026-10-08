@@ -344,6 +344,16 @@ impl Editpad {
         for entry in &mut self.restore_queue {
             entry.tab -= removed.iter().filter(|&&r| r < entry.tab).count();
         }
+        // M11：队列除了被"结算"排空，还可能被上面这句 retain **抽空**——用户在这条链
+        // 挂起期间（P218 那个形状：通道被用户自己的装载占着）用 Ctrl+W 关掉还没落地的
+        // 排队页。那一路上原本再没有别人叫 `finish_restore_summary` ⇒ 规划期就计入的
+        // 「N 页未能恢复原内容」一个字都不说，用户以为整份会话都回来了。
+        // 判据用派生量 [`Editpad::restore_outstanding`]（队列＋在途的那一个恢复任务）：
+        // 归零＝链子真到头；还有恢复任务在途时不抢话，留给那一次 Loaded 交付。
+        // 重复调用无害——`finish_restore_summary` 交付即把两个计数清零。
+        if self.restore_outstanding() == 0 {
+            self.finish_restore_summary();
+        }
     }
 
     /// 任一标签页有未保存改动（窗口关闭确认的聚合口径）。

@@ -490,7 +490,10 @@ fn session_restore_rebuilds_tabs_content_active_and_pending_loads() {
     // 干净命名页：占位页已建、加载任务已自动开跑（不抢焦点）
     assert!(app.restore_placeholder_ready(1));
     let job = app.active_load.as_ref().expect("命名页应立即开载").clone();
-    assert_eq!(job.tab, 1);
+    assert_eq!(
+        job.tab_id, app.tabs[1].id,
+        "M11：任务的归属只按页 id 记（旧 `job.tab` 那枚下标生产路径没人读，已删）"
+    );
     assert!(app.busy);
     assert_eq!(app.active_tab, 0, "恢复链绝不把用户拽到加载页");
 
@@ -1501,7 +1504,11 @@ fn restore_skips_unloadable_page_and_keeps_chain_going() {
         .as_ref()
         .expect("失败后必须续排下一页")
         .clone();
-    assert_eq!(job_b.tab, 0, "队列下标必须随页面移除整体左移");
+    assert_eq!(
+        job_b.tab_id, app.tabs[0].id,
+        "队列落点随页面移除左移之后，续排任务记的目标页就是幸存那一页（M11：按 id 断，\
+         旧写法断的是 `job.tab` 那枚没人读的下标）"
+    );
     dispatch(
         &mut app,
         Message::Loaded(
@@ -1525,6 +1532,172 @@ fn restore_skips_unloadable_page_and_keeps_chain_going() {
         "失败页要有状态栏汇总:{:?}",
         app.status
     );
+
+    editpad_core::snapshot::clear_session(&dir);
+}
+
+/// M11：恢复汇总的交付点漏了**第三条**出路。汇总原本只挂在两个"结算"出口上
+/// （`begin_restore_load` 见队列已空、`settle_restore_step` 见队列已空），
+/// 可队列还可能被**关页时的 retain** 抽空（P382 为平移补的那一句）——那一路上
+/// 再没有别人叫 `finish_restore_summary` ⇒ 规划期就计入的「N 页未能恢复原内容」
+/// 一个字都不说，用户以为整份会话都回来了。
+///
+/// 走得到的手势：恢复条挂着时用户自己打开一个文件（通道被占，〔恢复〕把队列挂起
+/// ＝P218 那个形状），随后在挂起期间用 `Ctrl+W` 把还没落地的排队页关掉
+/// （`CloseTabRequest` 不判 busy，所以这条真能按出来）。
+#[test]
+fn draining_the_restore_queue_by_closing_pages_still_delivers_the_summary() {
+    let dir = snapshot_scratch_dir("m11-summary");
+    // 手工种一份「异常退出中间态」清单：两页都是**有路径、置脏、却没有快照文件**
+    // 的形状（P31 超限节流页那一类）——规划期就把它们记进失败汇总并排进队列，
+    // 不需要任何一次 Loaded 才产生计数。⚠️ 不能用 `write_session` 造这一格：
+    // 它会按真正写出的快照重写 dirty/file 两个字段，把"置脏但内容不可得"抹平
+    // （本轮第一版夹具就红在这里：`restore_failed` 恒 0）。
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(editpad_core::snapshot::MANIFEST_NAME),
+        concat!(
+            "generation = 7\n",
+            "active = 0\n",
+            "next_untitled = 3\n",
+            "clean_exit = false\n",
+            "\n",
+            "[[tabs]]\n",
+            "path = \"C:/m11/lost.txt\"\n",
+            "dirty = true\n",
+            "cursor_line = 0\n",
+            "cursor_col = 0\n",
+            "\n",
+            "[[tabs]]\n",
+            "path = \"C:/m11/stays.txt\"\n",
+            "dirty = true\n",
+            "cursor_line = 0\n",
+            "cursor_col = 0\n",
+        ),
+    )
+    .unwrap();
+    let manifest = editpad_core::snapshot::read_manifest(&dir).unwrap();
+    assert!(!manifest.clean_exit, "夹具前提：异常退出才有那条恢复条");
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_dir(&dir);
+    assert!(
+        app.recover_prompt.is_some(),
+        "夹具前提：恢复条已挂起（未裁决前不动当前标签）"
+    );
+    // 用户自己打开一个文件——通道被这次装载占住
+    let user_path = dir.join("user.txt");
+    fs::write(&user_path, "user body").unwrap();
+    dispatch(&mut app, Message::FileDropped(user_path.clone()));
+    assert!(app.active_load.is_some(), "夹具前提：用户那次打开正在装载");
+
+    // 〔恢复〕：规划照做，但 `begin_restore_load` 见通道被占 ⇒ 整条链挂起在队列上
+    let _ = app.accept_session_recover(Some(dir.clone()));
+    assert_eq!(app.restore_failed, 2, "夹具前提：规划期已计入两笔失败");
+    assert_eq!(
+        app.restore_queue.len(),
+        2,
+        "夹具前提：两页都还挂在队列上（恢复链被用户的装载挡在前面）"
+    );
+    assert!(app.status.is_empty(), "夹具前提：此刻还没有任何汇总说过话");
+
+    // 用户在挂起期间把还没落地的排队页逐个关掉（Ctrl+W 不判 busy）
+    for _ in 0..2 {
+        dispatch(&mut app, Message::CloseTabRequest);
+    }
+    assert!(
+        app.restore_queue.is_empty(),
+        "夹具自证：队列确实是被关页的 retain 抽空的，实际 {:?}",
+        app.restore_queue.len()
+    );
+
+    assert!(
+        app.status.contains("2 页未能恢复"),
+        "队列被关页抽空这一路也必须交付恢复汇总，实得 {:?}",
+        app.status
+    );
+    assert_eq!(
+        app.restore_failed, 0,
+        "交付即消费计数：第二次调用不会重复出声"
+    );
+
+    editpad_core::snapshot::clear_session(&dir);
+}
+
+/// M11 的另一半＝**交付时机的判据**：`shift_restore_queue_after_removal` 里那句
+/// `restore_outstanding() == 0` 不是装饰。恢复链还在跑（有一页在途）时就把汇总说出去，
+/// 同一场恢复会出现两句各说一半的话（先「1 页未能恢复」再「2 页未能恢复」），
+/// 而汇总的语义是"这次恢复的最终账目"。这一格钉的就是"没到头不许出声"。
+#[test]
+fn the_restore_summary_waits_for_the_last_in_flight_page() {
+    let dir = snapshot_scratch_dir("m11-timing");
+    // 正常退出的会话（clean_exit=true）＝静默恢复，链子在 boot 就直接开跑，
+    // 第一页登记成在途任务、第二页还挂在队列上。
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(editpad_core::snapshot::MANIFEST_NAME),
+        concat!(
+            "generation = 8\n",
+            "active = 0\n",
+            "next_untitled = 3\n",
+            "clean_exit = true\n",
+            "\n",
+            "[[tabs]]\n",
+            "path = \"C:/m11/inflight.txt\"\n",
+            "dirty = false\n",
+            "cursor_line = 0\n",
+            "cursor_col = 0\n",
+            "\n",
+            "[[tabs]]\n",
+            "path = \"C:/m11/queued.txt\"\n",
+            "dirty = true\n",
+            "cursor_line = 0\n",
+            "cursor_col = 0\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_dir(&dir);
+    assert!(
+        app.active_load.is_some(),
+        "夹具前提：第一页已登记为在途恢复任务"
+    );
+    assert_eq!(app.restore_queue.len(), 1, "夹具前提：第二页还在队列里");
+    assert_eq!(
+        app.restore_failed, 1,
+        "夹具前提：那页置脏却没快照内容，规划期已记一笔"
+    );
+    assert_eq!(app.restore_outstanding(), 2, "夹具自证：在途 1 ＋ 排队 1");
+
+    // 用户切到排队那一页并关掉它 ⇒ 队列被 retain 抽空，但链子**还没到头**（在途那页没结算）
+    dispatch(&mut app, Message::SwitchTab(1));
+    dispatch(&mut app, Message::CloseTabRequest);
+    assert!(
+        app.restore_queue.is_empty(),
+        "夹具自证：队列确实空了（是被关页抽空的）"
+    );
+    assert_eq!(
+        app.restore_outstanding(),
+        1,
+        "夹具自证：还剩在途那一页没落地"
+    );
+    assert!(
+        app.status.is_empty(),
+        "链子没到头不许出声，实得 {:?}",
+        app.status
+    );
+
+    // 在途那一页也失败：此刻才是最终账目，汇总应当**一次**说出去
+    let seq = app.active_load.as_ref().expect("在途任务还在").id;
+    dispatch(&mut app, Message::Loaded(seq, Err("文件不存在".to_owned())));
+    assert!(
+        app.status.contains("未能恢复原内容"),
+        "最后一次结算之后必须交付汇总，实得 {:?}",
+        app.status
+    );
+    assert_eq!(app.restore_failed, 0, "交付即消费计数");
+    assert_eq!(app.restore_outstanding(), 0, "链子确实到头了");
 
     editpad_core::snapshot::clear_session(&dir);
 }
