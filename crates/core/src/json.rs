@@ -462,11 +462,18 @@ impl<'a, W: FnMut(&str)> Scanner<'a, W> {
     /// true/false/null 字面量。
     fn literal(&mut self, word: &str) -> JsonResult<()> {
         for expected in word.chars() {
+            // 先看后吃（池 ⑫＝P375）：`bump` 会把列推进到问题字符**之后**，报错定位
+            // 要指向那个字符本身。本模块其余报错点都按 `peek` 走（不吃字符），只有
+            // 这一臂是「先吃后看」＝`:284` 那条契约的漏网之鱼。
+            let start = (self.line, self.col);
             match self.bump() {
                 Some(c) if c == expected => self.out_char(c),
                 Some(c) => {
-                    let _ = (self.line, self.col);
-                    return Err(self.error_here(format!("非法字面量：期望 {word:?}，遇到 {c:?}")));
+                    return Err(JsonError {
+                        line: start.0,
+                        col: start.1,
+                        message: format!("非法字面量：期望 {word:?}，遇到 {c:?}"),
+                    })
                 }
                 None => return Err(self.error_here("意外结束：字面量不完整")),
             }
@@ -564,6 +571,48 @@ mod tests {
         // 空容器保持单行
         assert_eq!(format_json("{}").unwrap(), "{}");
         assert_eq!(format_json("[ ]").unwrap(), "[]");
+    }
+
+    /// P375（池 ⑫）：非法字面量的报错列号必须指向那个字符本身。
+    ///
+    /// `literal` 是全模块唯一「先吃后看」的报错点：`bump()` 已经把列推进到问题字符
+    /// **之后**，于是列号整体偏右一格——用户照着报错去找会找空。`:284` 立的
+    /// 「先看后吃」契约在 `string_verbatim` 与 `hex4` 都照做了（`hex4` 那句
+    /// `let start = (self.line, self.col);` 正是干这个的），本臂只留下一个被丢掉的
+    /// 快照（`let _ = (self.line, self.col);`）。
+    #[test]
+    fn illegal_literal_error_points_at_the_offending_char() {
+        // 单行：`{"a": truce}` —— 't' 在第 7 列，坏字符 'c' 在第 10 列
+        let e = err_of(r#"{"a": truce}"#);
+        assert!(e.message.contains("非法字面量"), "{}", e.message);
+        assert_eq!(
+            (e.line, e.col),
+            (1, 10),
+            "列号须指向 'c' 本身（改前实测 11）"
+        );
+
+        // 跨行：坏字符在第二行，行号也不许漂
+        let e = err_of("{\n  \"a\": truce\n}");
+        assert!(e.message.contains("非法字面量"), "{}", e.message);
+        assert_eq!(
+            (e.line, e.col),
+            (2, 11),
+            "第二行里 'c' 在第 11 列（改前实测 12）"
+        );
+
+        // 字面量被截断：`[tru]` 里 ']' 不是 'e'
+        let e = err_of("[tru]");
+        assert!(e.message.contains("非法字面量"), "{}", e.message);
+        assert_eq!((e.line, e.col), (1, 5), "指向 ']' 本身（改前实测 6）");
+
+        // 对照：本模块其余报错点都走 peek（不吃字符），定位本来就对——
+        // 这一格挡住"把所有报错统一往左挪一格"这种错修法
+        let e = err_of("{\"a\" 1}");
+        assert_eq!(
+            (e.line, e.col),
+            (1, 6),
+            "对照：缺冒号指向 '1' 本身，不该被动过"
+        );
     }
 
     #[test]
