@@ -207,6 +207,45 @@ fn format_json_pretty_prints_and_is_revertible() {
 }
 
 #[test]
+fn format_json_keeps_the_document_line_ending_instead_of_forcing_lf() {
+    // P384：`format_json` 的输出只发 `"\n"`，而调用方把那份文本直接 `from_str` 回写
+    // ⇒ 一份 CRLF 的 .json（Windows 上最常见形态）格式化一次，行尾整篇被改成 LF：
+    // 状态栏行尾徽章跳档、整文件被记成已改并排一次自动保存＝磁盘上整篇翻动。
+    // 〔行尾转换〕是一条**显式命令**，用户从没要求过它。兄弟入口
+    // `replace_all_document` 恰恰刻意把替换文本归一到文档的主导行尾＝同一件事两份口径。
+    const LF_BODY: &str = "{\n  \"a\": 1\n}"; // 格式化后的**唯一**正确形状（LF 版）
+    for target in [
+        editpad_core::LineEnding::CrLf,
+        editpad_core::LineEnding::Cr,
+        editpad_core::LineEnding::Lf,
+    ] {
+        // 输入用该目标行尾写成一份"已经带换行"的 JSON ⇒ detect 一定认得出主导行尾
+        // （`{"a":1}` 那种单行输入根本不含换行，那样造出来的夹具看不见这一格）
+        let input = target.normalize("{\n\"a\": 1\n}");
+        let mut app = json_app(&input);
+        assert_eq!(
+            app.cur_handle.borrow().doc.line_ending(),
+            target,
+            "夹具自证：格式化之前这一页的主导行尾就是 {target:?}"
+        );
+        let expected = target.normalize(LF_BODY);
+
+        dispatch(&mut app, Message::FormatJson);
+
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            expected,
+            "格式化只该改缩进与换行位置，不该顺手改行尾（{target:?}）"
+        );
+        assert_eq!(
+            app.cur_handle.borrow().doc.line_ending(),
+            target,
+            "格式化之后行尾必须还是原来那一种（{target:?}）"
+        );
+    }
+}
+
+#[test]
 fn format_json_reports_error_position_and_keeps_document() {
     let bad = "{\"a\": 1,,}";
     let mut app = json_app(bad);

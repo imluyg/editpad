@@ -429,9 +429,9 @@ impl Editpad {
                 if self.read_only_blocks_write() {
                     return Task::none();
                 }
-                let (text, chars) = {
+                let (text, chars, eol) = {
                     let ed = self.cur_handle.borrow();
-                    (ed.doc.to_text(), ed.doc.text_len())
+                    (ed.doc.to_text(), ed.doc.text_len(), ed.doc.line_ending())
                 };
                 if chars > FORMAT_JSON_MAX_CHARS {
                     // 单遍重排是同步操作，超大文件会冻结 UI——先挡下并提示
@@ -445,6 +445,15 @@ impl Editpad {
                 }
                 match editpad_core::format_json(&text) {
                     Ok(pretty) => {
+                        // P384：格式化只该改缩进与换行的**位置**，不该顺手改行尾。
+                        // `format_json` 的输出只发 "\n"，而 `Document::from_str` 按内容
+                        // 检出行尾 ⇒ 一份 CRLF 的 .json（Windows 最常见形态）格式化一次
+                        // 就整篇变 LF：状态栏行尾徽章跳档、整文件被记成已改并排一次自动
+                        // 保存＝磁盘上整篇翻动。〔行尾转换〕是一条显式命令，用户没要求过。
+                        // 归一复用兄弟入口 `ConvertEol` 的同一份算式（`LineEnding::normalize`），
+                        // 不长第二个归一器；JSON 串里的换行都以 `\n` 转义形式写出（json.rs:315），
+                        // 所以输出里每个裸换行都是结构换行，整体归一是安全的。
+                        let pretty = eol.normalize(&pretty);
                         // replace_whole_document 内部快照 → 可撤销；光标复位到文首
                         self.cur()
                             .borrow_mut()
