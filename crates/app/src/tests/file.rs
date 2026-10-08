@@ -3427,6 +3427,66 @@ fn pending_open_claim_recovers_leftover_taking_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// M7：抢到之后**读失败**的那一半。改前顺序＝rename 抢占 → `read_to_string`
+/// 失败当空串 → 照旧 `remove_file` ⇒ 用户双击转发的整批文件永久失踪、零提示。
+/// 而且残骸若停在认领名上（本机这一格：`remove_file` 对目录恒失败），此后每一轮
+/// `rename(新批次 → 同一个认领名)` 都失败 ⇒ 本会话的转发通道被一次读失败**焊死**。
+#[test]
+fn an_unreadable_batch_is_retried_and_never_swallows_the_channel() {
+    let dir = scratch_dir("m7-unreadable");
+    // 读失败的确定性注入＝把批次路径占成**目录**（不能用"占着句柄"那一招：
+    // std 的 File::open 带 FILE_SHARE_DELETE，在 Windows 上挡不住删除）
+    let stray = dir.join("pending_open.555.txt");
+    std::fs::create_dir(&stray).unwrap();
+    std::fs::write(stray.join("keep"), "非空目录 ⇒ remove 也必失败").unwrap();
+
+    assert!(
+        crate::single_instance::take_pending_open_in(&dir).is_empty(),
+        "夹具自证：这一拍确实读不出来"
+    );
+
+    // 用户此刻再双击一个文件转发过来：下一拍必须照常取得到
+    std::fs::write(dir.join("pending_open.777.txt"), "C:/m7/next.txt").unwrap();
+    assert_eq!(
+        crate::single_instance::take_pending_open_in(&dir),
+        vec![PathBuf::from("C:/m7/next.txt")],
+        "一次读失败之后，本会话后续转发的文件仍必须打得开（改前：认领名被残骸占着 ⇒ 空表）"
+    );
+    assert!(
+        stray.is_dir(),
+        "读不出来的那一条要回到**自己的名字**下等待重试＝它是待认领的账，不是垃圾；\
+         改前它被改名成认领残骸，路径就此失踪"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M7 的读取侧另一半：`fs::write` **不是原子的**，第二实例写一半崩溃会让批次文件
+/// 尾部只剩半截多字节序列，而 `read_to_string` 对这种内容整份报错 ⇒ 改前一行坏码
+/// 带走整批（三个双击的文件一起没）。现在按字节读、lossy 解码：好行照常取出，
+/// 坏行那一条变成打不开的路径由装载侧如实报错，不再牵连其余。
+#[test]
+fn a_torn_batch_file_still_yields_its_intact_lines() {
+    let dir = scratch_dir("m7-torn");
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"C:/m7/good.txt\n");
+    bytes.extend_from_slice(b"C:/\xF7\xBF\xBFbroken.txt\n"); // 非法 UTF-8 续字节
+    bytes.extend_from_slice(b"C:/m7/last.txt\n");
+    std::fs::write(dir.join("pending_open.888.txt"), &bytes).unwrap();
+
+    let mut got = crate::single_instance::take_pending_open_in(&dir);
+    got.sort();
+    assert!(
+        got.contains(&PathBuf::from("C:/m7/good.txt"))
+            && got.contains(&PathBuf::from("C:/m7/last.txt")),
+        "整批不许因为一行解码失败就全丢，实得 {got:?}"
+    );
+    assert!(
+        !dir.join("pending_open.888.txt").exists(),
+        "读成功（含 lossy）之后照常删除，不留残骸"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// P345 夹具：走到「〔保存并关闭〕已落盘成功，但期间用户又编辑了一笔 ⇒
 /// 页没关掉、仍置脏」这一步，返回 `(app, 文件路径, 落盘时刻的版本)`。
 ///

@@ -87,19 +87,26 @@ pub(crate) fn notify_already_running() {
 /// 第二实例的文件转发：把待开路径写进实例目录的**本实例专属**批次
 /// 文件（pid 命名）后正常退出（不弹提示——用户意图是打开文件，不是
 /// 看弹窗）。已运行实例经轮询按文件逐个取走后在新标签页逐个打开。
-/// exe 路径不可得（无法定位实例目录）时无处可写，静默放弃。
+/// exe 路径不可得（无法定位实例目录）＝无处可写，与写失败同口径**回报调用点**
+/// （M7：不再静默放弃，见下方返回值说明）。
 ///
 /// P148：曾写单个共享握手文件（读旧内容+追加+rename 覆盖）——两个
 /// 第二实例并发转发时，后 rename 者的快照不含先写者的新行，整批文件
 /// 被静默吞掉；共享临时名 `pending_open.txt.tmp` 同样互踩。pid 命名
 /// 天然无并发写者，批次之间互不覆盖。
+///
+/// M7：返回值＝**这批路径到底交出去没有**。改前 `let _ = std::fs::write` 吞掉失败，
+/// 而调用点紧接着就 `return`＝第二实例一声不响地退出：用户双击了文件，既没打开
+/// 也没有任何解释（写失败并非罕见——实例目录不可写、磁盘满、同名残骸占位）。
+/// 现在失败由调用点退回那条「已在运行，请切到已打开的窗口」提示（沿用既有文案，
+/// 不发明新键）。
 #[cfg(windows)]
-pub(crate) fn forward_pending_open(files: &[std::path::PathBuf]) {
+pub(crate) fn forward_pending_open(files: &[std::path::PathBuf]) -> bool {
     let Some(base) = editpad_core::pending_open_path() else {
-        return;
+        return false;
     };
     let Some(dir) = base.parent() else {
-        return;
+        return false;
     };
     let batch = dir.join(format!("pending_open.{}.txt", std::process::id()));
     let mut content = String::new();
@@ -107,22 +114,28 @@ pub(crate) fn forward_pending_open(files: &[std::path::PathBuf]) {
         content.push_str(&f.to_string_lossy());
         content.push('\n');
     }
-    let _ = std::fs::write(&batch, content.as_bytes());
+    std::fs::write(&batch, content.as_bytes()).is_ok()
 }
 
-/// 非 Windows 平台无单实例分支，自然也没有转发。
+/// 非 Windows 平台无单实例分支，自然也没有转发（返回值恒为"不必提示"）。
 #[cfg(not(windows))]
-pub(crate) fn forward_pending_open(_files: &[std::path::PathBuf]) {}
+pub(crate) fn forward_pending_open(_files: &[std::path::PathBuf]) -> bool {
+    true
+}
 
 /// 已运行实例侧：取走实例目录里全部批次文件的待开路径。文件不存在 =
 /// 无转发（常态快速路径）。
 ///
 /// P148：读后即删曾是两步——间隙里第二实例 rename 覆盖的新握手文件
 /// 会被本实例的 remove 一起删掉，用户双击打开的文件被静默吞掉。改为
-/// 逐文件「rename 原子抢占」：先把握手文件改名成本进程独占的名字
-/// （目标已存在或源已消失即失败，天然互斥），再读再删；抢不到 = 已被
-/// 并发取走（多屏双击等极端时序），跳过即可。遗留的 `.taking-` 半途
-/// 文件（取走后进程崩溃）会被下一轮照常认领读取，自愈。
+/// 逐文件「rename 原子抢占」：先把握手文件改名为本进程独占的名字
+/// （`taking-<pid>`；目标已存在或源已消失即失败，天然互斥），再读再删；
+/// 抢不到 = 已被并发取走（多屏双击等极端时序），跳过即可。遗留的 `.taking-` 半途
+/// 文件（取走后进程崩溃）会被下一轮照常认领读取，自愈——同名（自己上一拍留下的）
+/// `rename` 在本机实测是**成功的空操作**，所以不依赖 pid 是否被回收。
+/// **M7 改的两处**：①读失败不再删，改回放回原名等下一轮重试（残骸停在认领名上＝
+/// 此后每一轮抢占都失败＝转发通道被一次读失败焊死）；②按字节读 + lossy 解码，
+/// 半截 UTF-8 的批次只坏一行、不再带走整批。
 pub(crate) fn take_pending_open() -> Vec<std::path::PathBuf> {
     let Some(base) = editpad_core::pending_open_path() else {
         return Vec::new();
@@ -142,6 +155,11 @@ pub(crate) fn take_pending_open_in(dir: &std::path::Path) -> Vec<std::path::Path
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
     };
+    // M7（认领名保持 P148 的 taking-<pid>）：曾考虑再补一个 per-call nonce，
+    // 理由是"本进程自己的半途文件与认领目标同名 ⇒ rename(源 → 自身) 会失败而
+    // 永远认不回"——**本机实测不成立**（同路径 rename 是空操作、返回成功），
+    // 相应用例在把命名改回只带 pid 之后照样绿＝恒绿的守卫比没有更糟，故撤掉。
+    // 真正有牙、且被用例钉住的是下面两句：读失败不许删，且要把残骸放回它自己的名字。
     let claimed = dir.join(format!("pending_open.taking-{}.txt", std::process::id()));
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -152,11 +170,22 @@ pub(crate) fn take_pending_open_in(dir: &std::path::Path) -> Vec<std::path::Path
         if std::fs::rename(entry.path(), &claimed).is_err() {
             continue; // 已被并发轮询认领 / 目录抖动
         }
-        let content = std::fs::read_to_string(&claimed).unwrap_or_default();
+        // M7：抢到之后**读失败就不许删**——那是用户双击转发的整批文件，删了永久失踪；
+        // 改名放回它自己的名字，下一轮照常重试（`fs::read` 按字节读，坏内容不再是读失败）。
+        // 另外这里曾用 `read_to_string`：`fs::write` 不是原子的，第二实例写一半崩溃会留下
+        // 半截多字节序列，那种内容整份解码报错 ⇒ 一行坏码带走整批。现在 lossy 解码，
+        // 好行照常取出，坏行那一条变成打不开的路径、由装载侧如实报错。
+        let Ok(bytes) = std::fs::read(&claimed) else {
+            // 读不出来＝暂时读不出来（被杀软占着、目录抖动、这一条根本是个目录）：
+            // 放回它自己的名字，下一轮照常重试——残骸若停在认领名上，此后每一轮
+            // `rename(新批次 → 同名)` 都失败＝一次读失败把本会话的转发通道焊死。
+            let _ = std::fs::rename(&claimed, entry.path());
+            continue;
+        };
         let _ = std::fs::remove_file(&claimed);
+        let text = String::from_utf8_lossy(&bytes);
         out.extend(
-            content
-                .lines()
+            text.lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
                 .map(std::path::PathBuf::from),

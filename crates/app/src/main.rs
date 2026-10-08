@@ -67,8 +67,12 @@ fn main() -> iced::Result {
     if !single_instance::acquire_single_instance() {
         if cli_files.is_empty() {
             single_instance::notify_already_running();
-        } else {
-            single_instance::forward_pending_open(&cli_files);
+        } else if !single_instance::forward_pending_open(&cli_files) {
+            // M7：转发没写成（实例目录不可写、磁盘满、同名残骸占位）时不许一声不响地
+            // 退出——用户双击了文件却什么都没发生，唯一的解释通道就是那个提示框。
+            // 也不在这里"自己开一份"：拦截点必须早于任何配置初始化，与已运行实例并发
+            // 跑迁移等副作用才是更大的坑（本函数开头那句）。
+            single_instance::notify_already_running();
         }
         return Ok(());
     }
