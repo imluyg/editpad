@@ -601,6 +601,16 @@ impl Editpad {
                 // P220：入参是页 id，出队按 id，动作按 id 现地解析下标——
                 // 解析不到 = 那一页已被关掉，什么都不该做（旧口径会把动作
                 // 落到「现在占着那个下标的页」上）。
+                // P388（池 M4）：**先问通道再摘队列**。改前顺序反了：这一臂先把该页
+                // 从 `external_change` 里 `retain` 掉（队列空就整条收起提示条），
+                // 再去调 `start_loading`，而它开头的 busy 早退是静默的 ⇒ 通道被占那一次
+                // 点击＝提示条消失、磁盘新版没进来，用户以为已经重载（继续编辑后
+                // 一次保存才被 P63 拦下报"文件被外部修改"）。保持静默是 house style
+                // （`begin_batch_close`／`TabContextMenu` 的 busy 早退同样不出声），
+                // 关键是这一页还留在队列里 ⇒ 下一次聚焦巡检还会照实提示。
+                if !self.load_channel_available() {
+                    return Task::none();
+                }
                 if let Some(queue) = self.external_change.as_mut() {
                     queue.retain(|i| *i != tab_id);
                     if queue.is_empty() {
@@ -833,8 +843,17 @@ impl Editpad {
     /// P21：`tab` 指明结果应落入的标签页（可能等于 `tabs.len()`，
     /// 表示「新开一页」——此处先占位创建，保证路由目标恒存在）；
     /// 期间用户切走标签也不影响结果归页。
+    /// 装载通道此刻是否可用——[`Self::start_loading`] 开头那道早退闸的判据本体。
+    /// 单独收成一份是因为**消费"一次性决定"的入口**（〔重新加载〕那颗按钮要从
+    /// `external_change` 队列里摘掉自己）必须先问它再摘：先看队列再看通道，
+    /// 就会出现"提示条被吃掉而什么都没做"（P388）。判据长在网络里，
+    /// 两处各抄一遍迟早分叉。
+    pub(crate) fn load_channel_available(&self) -> bool {
+        !self.busy
+    }
+
     pub(crate) fn start_loading(&mut self, path: PathBuf, tab: usize) -> Task<Message> {
-        if self.busy {
+        if !self.load_channel_available() {
             return Task::none();
         }
         // P21 内存护栏（§3 P19 总则第 2 条的骨架实现）：全部页内容按**实际 UTF-8

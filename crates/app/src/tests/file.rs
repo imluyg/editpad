@@ -593,6 +593,83 @@ fn acknowledging_external_change_rearms_autosave() {
 }
 
 #[test]
+fn reload_clicked_while_a_load_is_running_keeps_the_prompt() {
+    // P388（池 M4）：〔重新加载〕那颗按钮先把自己从队列里摘掉（队列空就整条收起提示条），
+    // **然后**才调 `start_loading`，而后者开头的 busy 早退是静默的（`file.rs:837`）。
+    // 于是通道被占的那一次点击＝提示条没了、什么都没重载，用户以为已经取回磁盘新版；
+    // 继续编辑后一次保存才被 P63 拦下报"文件被外部修改"。
+    let (mut app, path) = loaded_real_file_app("reload-busy-keeps-prompt");
+    app.settings.autosave_enabled = true;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let (tid, version) = (app.tabs[0].id, app.tabs[0].version);
+    std::fs::write(&path, "externally replaced").unwrap();
+    dispatch(
+        &mut app,
+        Message::TabAutosaved(
+            tid,
+            version,
+            path.clone(),
+            AutosaveOutcome::SkippedExternalChange,
+        ),
+    );
+    let page = app.tabs[0].id;
+    assert!(
+        app.external_change
+            .as_ref()
+            .is_some_and(|q| q == &vec![page]),
+        "夹具自证：外部改动已交给提示条裁决，实际 {:?}",
+        app.external_change
+    );
+
+    // 占住装载通道：新建一页（干净空页 ⇒ 拖开的文件就地落进它），于是 busy == true
+    dispatch(&mut app, Message::NewTab);
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/other.txt")),
+    );
+    let job = app.active_load.clone().expect("夹具自证：应有一次装载在途");
+    assert!(app.busy, "夹具自证：通道此刻被占");
+
+    dispatch(&mut app, Message::ConfirmExternalReload(page));
+    assert!(
+        app.external_change
+            .as_ref()
+            .is_some_and(|q| q.contains(&page)),
+        "这一次什么都没重载 ⇒ 提示条不许被吃掉，实际 {:?}",
+        app.external_change
+    );
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.id),
+        Some(job.id),
+        "被占的通道也不该顺手起第二次装载"
+    );
+
+    // 反面对照：通道空出来后同一颗按钮真的去重载（挡住"提示条永远不消失"那种过宽修法）
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job.id,
+            Ok((
+                editpad_core::Document::from_str("other\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(!app.busy, "夹具自证：上一次装载已结算");
+    dispatch(&mut app, Message::ConfirmExternalReload(page));
+    assert!(
+        !app.external_change
+            .as_ref()
+            .is_some_and(|q| q.contains(&page)),
+        "真的发起了重载 ⇒ 这一页该从队列里出去，实际 {:?}",
+        app.external_change
+    );
+    assert!(app.active_load.is_some(), "此刻应为那一页重新起一次装载");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
     // 自动保存落盘必须按标签页的保存编码：旧实现恒 UTF-8，会把用户
     // 选定 GBK 的文件静默转码覆写回磁盘。直击防抖线程体的落盘动作，
