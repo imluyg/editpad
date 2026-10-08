@@ -93,6 +93,96 @@ fn block_cut_records_the_block_and_still_deletes_it() {
 }
 
 #[test]
+fn cut_while_a_load_is_in_flight_records_nothing_and_evicts_nothing() {
+    // P385（池 M1）：P380 只补了只读那半闸，`active_load` 这半漏着——装载在途时
+    // `apply_edit` 第一道闸就 **静默** return false（`update/edit.rs:629`），
+    // 而 `clip_write` 排在它前面 ⇒ 剪贴板被改写、历史记一条，正文一字未删、零提示。
+    // 更狠的一格：历史是按条数/字节封顶的队列，被拒那一条会**挤掉真正有用的旧记录**。
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/a.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("abcd\nefgh\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 把历史填到条数上限（内容互不相同，"挤掉尾条"才看得见）
+    for i in 0..20usize {
+        clip(&mut app, &format!("older-{i}"));
+    }
+    let before: Vec<String> = app.clip_history.clone();
+    assert_eq!(before.len(), MAX_ENTRIES, "夹具自证：历史已填到条数上限");
+
+    // 另起一次装载：这一页有路径 ⇒ `target_tab_for_open` 落**新页**（不动这一页正文），
+    // 而 `start_loading` 会把焦点切到新页 ⇒ 要看回原来那页，才能复现"编辑着 A 页、
+    // 后台正在装 B 文件"这个形状。
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/b.txt")),
+    );
+    assert!(app.active_load.is_some(), "夹具自证：此刻应有一次装载在途");
+    app.set_active_tab(0);
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        assert_eq!(
+            ed.doc.to_text(),
+            "abcd\nefgh\n",
+            "夹具自证：切回来还是原来那一页"
+        );
+        ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+    }
+    app.status.clear();
+
+    dispatch(&mut app, Message::CutRequested);
+    assert_eq!(
+        app.clip_history, before,
+        "被拒的剪切不许动历史账目：既不记新条，也不许挤掉旧记录"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "abcd\nefgh\n",
+        "装载在途时正文本来就不该被改"
+    );
+
+    // 反面对照：装载落地之后同一手势照常记账（挡住"剪切一律不记账"这种过窄修法）
+    let seq2 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq2,
+            Ok((
+                editpad_core::Document::from_str("loaded\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(app.active_load.is_none(), "夹具自证：装载已落地");
+    app.set_active_tab(0);
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+    }
+    dispatch(&mut app, Message::CutRequested);
+    assert_eq!(
+        app.clip_history.first(),
+        Some(&"bc".to_owned()),
+        "落地之后同一手势要照常记一条（栈顶＝刚剪的那一份）"
+    );
+}
+
+#[test]
 fn cut_on_a_locked_page_records_nothing_while_copy_still_records() {
     // P380：`CutRequested` 里"先记账再删"的次序本身没错，错在**这道只读闸不排在它前面**——
     // 只读页按 Ctrl+X 时剪贴板与 `clip_history` 先落账，随后那一次删除才被 `apply_edit`

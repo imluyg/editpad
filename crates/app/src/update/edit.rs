@@ -255,6 +255,15 @@ impl Editpad {
                 if self.read_only_blocks_write() {
                     return Task::none();
                 }
+                // P385（池 M1）：同一道闸的**另一半**——装载在途时 `apply_edit` 第一道闸
+                // 就静默 `return false`（本函数 `:629`，连状态栏都不写），所以剪切在这里
+                // 会"记了账却没剪成"。排在只读闸之后是刻意的：两种拒绝里只读那一种要出声
+                // （P383 钉过的既有契约），装载在途这一种本来就没有文案，别为它发明一句。
+                // ⚠️ 这里**不判 `busy`**：`busy` 不挡打字（`apply_edit` 只挡 `active_load`），
+                // 把它一起堵上＝改打字语义，超出这一格范围。
+                if self.active_load.is_some() {
+                    return Task::none();
+                }
                 // P319：同 CopyRequested 的单出口口径；三种来源的**后续删除**
                 // 分叉一字未改：列块/选区删选区（列块那支仍走同步递归 update，
                 // 继承置脏与自动保存调度——Pasted 先例），无选区整行删触及行。
