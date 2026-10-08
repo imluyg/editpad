@@ -347,6 +347,79 @@ fn whole_document_write_entries_refuse_read_only_pages() {
 
 // ---------- P18 即时保存 ----------
 
+/// P374（池 ⑪）：直接换整份文档的旁路入口，**忙时**一律不许动手。
+///
+/// 兄弟 `ConvertEol` 早就带着 `busy || active_load` 那道闸，`FormatJson` 在 P334
+/// 补只读闸时没补忙闸＝定案 R-4 那族剩下的半格。可复现的形状＝**当前这一页正被一次
+/// 在途重载换掉**（〔重载〕按页 id 落回同一页、不切页）：改前那一下格式化会写到"即将
+/// 被整体替换"的旧正文上、置脏并推进版本，状态栏还写着「已格式化 JSON」；到货之后
+/// `reset_document` 把这一切抹掉＝用户按的那一下什么都没留下，只留下一句假话。
+#[test]
+fn whole_document_entries_refuse_while_a_load_is_in_flight() {
+    let json_doc = || json_app("{\n\"b\":1\n}");
+    // (入口名, 夹具, 要派发的消息)
+    type Entry = (&'static str, fn() -> Editpad, fn() -> Message);
+    let cases: [Entry; 2] = [
+        ("FormatJson", json_doc, || Message::FormatJson),
+        ("ConvertEol", json_doc, || {
+            Message::ConvertEol(editpad_core::LineEnding::CrLf)
+        }),
+    ];
+
+    for (what, build, msg) in cases {
+        let before = build().cur_handle.borrow().doc.to_text();
+
+        // 对照趟：不忙时必须照改——否则下面那三格在"夹具压根没走到写入"时也会全绿
+        let mut idle = build();
+        let v0 = idle.tab().version;
+        dispatch(&mut idle, msg());
+        assert_ne!(
+            idle.cur_handle.borrow().doc.to_text(),
+            before,
+            "对照组：不忙的 {what} 必须改写正文"
+        );
+        assert_eq!(idle.tab().version, v0 + 1, "对照组：{what} 应推进版本");
+
+        // 被测趟：这一页正有一次在途加载要把它整体换掉
+        let mut app = build();
+        let tab_id = app.tab().id;
+        dispatch(&mut app, Message::ConfirmExternalReload(tab_id));
+        let job = app
+            .active_load
+            .clone()
+            .expect("夹具：应有一次落在当前页的在途加载");
+        assert!(app.busy, "夹具：加载在途即 busy");
+        assert_eq!(job.tab_id, tab_id, "夹具：那一页就是要被替换的当前页");
+
+        let _ = app.update(msg());
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            before,
+            "{what} 不得往「正被整体替换」的那一页写（改前实测：旧正文被格式化并置脏）"
+        );
+        assert!(!app.tab().dirty, "{what} 不得在途期间置脏");
+        assert_eq!(app.tab().version, v0, "{what} 不得在途期间推进版本");
+
+        // 后果留档：那次在途加载照常到货，改前的写入在这一步被抹干净
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                job.id,
+                Ok((
+                    editpad_core::Document::from_str("{\n  \"b\": 2\n}\n"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        assert_eq!(
+            app.cur_handle.borrow().doc.to_text(),
+            "{\n  \"b\": 2\n}\n",
+            "夹具：到货确实整体替换了这一页"
+        );
+    }
+}
+
 #[test]
 fn edit_schedules_single_inflight_autosave_and_success_clears_dirty() {
     let mut app = loaded_txt_app();
