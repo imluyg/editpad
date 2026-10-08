@@ -70,6 +70,8 @@ impl Editpad {
     ///
     /// 算式只有一份，在 `editpad_core::document::align_paste_indent`；从剪贴板
     /// 历史取用（P319 的 `ClipPick`）也走这一条 ⇒ 同一份行为，不长第二个粘贴入口。
+    /// "在哪儿收口行尾"同样只有一份＝`editpad_core::is_line_break`（读侧全集，定案 R-11）；
+    /// M8 之前 `line_leading_whitespace` 里还另写了一份 `\n`/`\r`，那句"只有一份"当时不成立。
     pub(crate) fn paste_text_to_apply(&self, text: String) -> String {
         if !self.settings.paste_align_indent {
             return text;

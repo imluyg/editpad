@@ -209,8 +209,11 @@ impl EditorCore {
     /// - 走 `doc.chars_from` 的零拷贝字符流，**不物化整行**——主用例是单行
     ///   50 MB 的日志，为拿"行首那点空白"去 `line_str` 会把整份文件抄一遍
     ///   （P298 立下的口径）；
-    /// - 行尾符不算缩进：空行的字符流第一个就是 `\n`，它 `is_whitespace` 为真，
-    ///   不收口就会把换行当缩进粘进正文。
+    /// - 行尾符不算缩进：空行的字符流第一个就是行界，它 `is_whitespace` 为真，
+    ///   不收口就会把换行当缩进粘进正文。收口判据用 [`editpad_core::is_line_break`]
+    ///   那**一份**（定案 R-11＝读按全集：VT/FF/NEL/LS/PS 都是行界）——M8 之前这里
+    ///   只比 `\n`/`\r`，于是"以异体行界收尾的空行"会把那个行界连同下一行的缩进
+    ///   一起交出去＝粘贴凭空多出一个换行。
     ///
     /// 上限纯属兜底：正常缩进远到不了这么多字符。
     pub(crate) fn line_leading_whitespace(&self, line: usize) -> String {
@@ -218,7 +221,7 @@ impl EditorCore {
         let line = line.min(self.doc.line_count().saturating_sub(1));
         let mut out = String::new();
         for c in self.doc.chars_from(self.doc.line_to_char(line)) {
-            if c == '\n' || c == '\r' || !c.is_whitespace() {
+            if editpad_core::is_line_break(c) || !c.is_whitespace() {
                 break;
             }
             if out.chars().count() >= MAX_INDENT_SCAN_CHARS {

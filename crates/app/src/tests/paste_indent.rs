@@ -183,3 +183,47 @@ fn the_row_appears_on_the_appearance_page_with_a_control() {
         "这一行必须有控件（复选框），否则开关只能在配置文件里改"
     );
 }
+
+/// M8：`line_leading_whitespace` 收口用的"行到尾"判据必须与**读侧全集**同源
+/// （定案 R-11：ropey 把 VT/FF/NEL/LS/PS 也当行界，全集见 `LINE_BREAK_CHARS`）。
+/// 改前只比 `\n`/`\r`，而这五个字符 `char::is_whitespace` 全为真 ⇒ 在一个以异体行界
+/// 收尾的**空行**上，扫描会越过行尾把下一个行的缩进连同那个行界字符一起当成
+/// "本行缩进" ⇒ 粘贴平白多出一个换行（`update/edit.rs:71` 那句"算式只有一份"当时不成立：
+/// 算式在 core 一份，行界判据在这侧还有一份）。
+#[test]
+fn an_empty_line_ended_by_an_exotic_break_supplies_no_indent() {
+    // 全集里除 `\n`/`\r` 之外的五个（写侧只认三种，读侧认全部＝这里要钉的那一侧）
+    for brk in ['\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'] {
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::Edit(EditOp::InsertText(format!("{brk}    x"))),
+        );
+        {
+            let core = app.cur_handle.borrow();
+            assert_eq!(
+                core.doc.line_count(),
+                2,
+                "夹具自证：{brk:?} 确实切出了第二行（读侧按全集）"
+            );
+            // 纯判据那一半：空行（第 0 行）的缩进必须是空串
+            assert_eq!(
+                core.line_leading_whitespace(0),
+                "",
+                "{brk:?} 收尾的空行不该交出缩进，实得 {:?}",
+                core.line_leading_whitespace(0)
+            );
+            // 正面对照：同一份正文里真带缩进的那一行照常交出 4 个空格
+            // （挡住"一律返回空串"这种把功能堵死的修法）
+            assert_eq!(core.line_leading_whitespace(1), "    ");
+        }
+        app.cur_handle.borrow_mut().cursor = CursorPos { line: 0, col: 0 };
+        dispatch(&mut app, Message::SettingsPasteAlignIndentToggled(true));
+        let after = paste(&mut app, "aaa\nbbb\n");
+        assert_eq!(
+            after,
+            format!("aaa\nbbb\n{brk}    x"),
+            "{brk:?} 那一格：粘贴不许凭空造出一个行界字符"
+        );
+    }
+}
