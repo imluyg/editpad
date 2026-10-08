@@ -330,6 +330,22 @@ impl Editpad {
         self.refresh_cur_handle();
     }
 
+    /// 恢复队列里存的是**规划期记下的落点下标**（`view/restore.rs` 按 `tabs.len()`
+    /// 记的），所以页集合一变小，这份下标就整体失真：不平移的话排队页会落进别人的
+    /// 槽位（内容/路径/编码标签全不对），或者越界——`register_load_job` 把越界折成
+    /// `tab_id = 0`，装载结果被丢弃分支吃掉＝**那一页静默不开、也不报失败**。
+    /// 每一条真的移除了页的出路都要过这里（与 [`Self::realign_active_after_removal`]
+    /// 同一条纪律）：`close_tab_now`／`close_tabs_now`／恢复链丢占位页那三条漏斗。
+    ///
+    /// 目标页自己被关掉的那一条**作废**而不是改投别处：用户关的就是那一页，
+    /// 把它的文件塞进幸存页的槽位是凭空造出一份他没要过的内容。
+    pub(crate) fn shift_restore_queue_after_removal(&mut self, removed: &[usize]) {
+        self.restore_queue.retain(|e| !removed.contains(&e.tab));
+        for entry in &mut self.restore_queue {
+            entry.tab -= removed.iter().filter(|&&r| r < entry.tab).count();
+        }
+    }
+
     /// 任一标签页有未保存改动（窗口关闭确认的聚合口径）。
     pub(crate) fn any_dirty(&self) -> bool {
         self.tabs.iter().any(|t| t.dirty)

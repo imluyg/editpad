@@ -48,6 +48,9 @@ impl Editpad {
         // P368：被移除的那页在当前页之前时，活动页下标要跟着左移，否则选中的会变成
         // 下一页那份文档
         self.realign_active_after_removal(&[idx]);
+        // P382：同一条纪律的第二份账——恢复队列里存的是裸下标，页少了不平移就会
+        // 让排队页落进别人的槽位或越界静默不开（此前只有丢占位页那条出路平移了）
+        self.shift_restore_queue_after_removal(&[idx]);
         // P369：页集合变了 ⇒ 命中表这类**窗口级**结果必须作废。原先这句话散在
         // 五处关页出口里各抄一遍（P303 只把「切页要作废」收进了 `set_active_tab`），
         // 而恢复链丢占位页那条根本没抄 ⇒ 收进漏斗本身，调用侧不再各写一份。
@@ -93,6 +96,14 @@ impl Editpad {
         self.touch_manifest_stale();
         // P368：批量移除同样要把活动页左移「被抽掉的、在它之前的那几个」
         self.realign_active_after_removal(&idxs);
+        // P382：批量关页同样要平移（`idxs` 是原下标空间的升序去重集合，
+        // 与 helper 里"数有几个被移项在它下面"的算法同一前提）
+        // ⚠️ 这一句眼下**没有独立看守**：`begin_batch_close` 开头有 `busy` 早退，
+        // 而恢复链在队列非空期间恒占着 busy（`register_load_job` 里 `enter_busy`），
+        // 所以"批量关页 + 队列还有剩余"这个形状在进程内构造不出来。留着它的理由＝
+        // 它与 `realign_active_after_removal` 是同一条纪律（真的移除了页就调），
+        // 而新增的移除出路不会自己想到要平移。详录见 `docs/days/` 当日档。
+        self.shift_restore_queue_after_removal(&idxs);
         // P369：与 close_tab_now 同一句——真移除了页就作废命中表（上面已有
         // `removed == 0` 的早退，走到这里必定移除过）
         self.cancel_find_scan();

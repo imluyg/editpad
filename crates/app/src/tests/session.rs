@@ -2645,3 +2645,85 @@ fn a_failed_restore_placeholder_keeps_the_active_page_and_voids_the_hit_table() 
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn closing_a_page_while_restoring_shifts_the_pending_restore_queue() {
+    // P382（池 N3）：恢复队列里存的是**裸下标**（规划期按 `tabs.len()` 记的落点），
+    // 而用户关页那条漏斗（`close_tab_now`）这些年补上了 active_tab 左移（P368）、
+    // 命中表作废（P369）、确认条收口（S-1），唯独没平移这份下标 ⇒ 页集合变小后，
+    // 剩下的排队页要么落进别人的槽位，要么越界被静默丢弃（尾页根本不开）。
+    // 同族的另一条出路 `drop_restore_placeholder` 是**做**了这个平移的（:353-357），
+    // 所以这不是"设计上不平移"，是那一条漏了。
+    let dir = snapshot_scratch_dir("p382-close-during-restore");
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[
+            editpad_core::snapshot::SessionPage {
+                tab: clean_named_tab("C:/w/one.txt"),
+                doc: editpad_core::Document::new(),
+            },
+            editpad_core::snapshot::SessionPage {
+                tab: clean_named_tab("C:/w/two.txt"),
+                doc: editpad_core::Document::new(),
+            },
+            editpad_core::snapshot::SessionPage {
+                tab: clean_named_tab("C:/w/three.txt"),
+                doc: editpad_core::Document::new(),
+            },
+        ],
+        0,
+        3,
+    )
+    .expect("写会话应成功");
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+    assert_eq!(app.tabs.len(), 3, "夹具：三页占位");
+    assert_eq!(app.active_tab, 0, "夹具：活动页是第一页");
+    assert_eq!(
+        app.restore_queue.len(),
+        2,
+        "夹具：队首已登记在途，队列还剩两页"
+    );
+
+    // 恢复链在途时用户按 Ctrl+W 关掉当前页（干净占位页 ⇒ 直接关，不起确认条）
+    dispatch(&mut app, Message::CloseTabRequest);
+    assert_eq!(app.tabs.len(), 2, "夹具自证：那一页真的被移除了");
+
+    // 逐条结算剩下的装载：载荷按**任务自己的 path** 造，与真实读文件同形
+    let mut settled = 0usize;
+    while let Some(job) = app.active_load.clone() {
+        let path = job.path.clone();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                job.id,
+                Ok((
+                    editpad_core::Document::from_str(&name),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        settled += 1;
+        assert!(settled < 8, "夹具：结算链必须有穷尽的一刻");
+    }
+    let mut got: Vec<String> = app
+        .tabs
+        .iter()
+        .filter_map(|t| {
+            t.path
+                .as_ref()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec!["three.txt", "two.txt"],
+        "关页之后剩下的两页要各自落在自己的位置上，一份都不许丢（实际落地：{:?}）",
+        got
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

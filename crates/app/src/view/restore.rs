@@ -350,11 +350,12 @@ impl Editpad {
         // 占位页也走同一收口（不变量见 Editpad::ensure_nonempty_tabs）：
         // 恢复期间删掉唯一占位页而队列尚有后续时，不能让 tabs 变空。
         let _ = self.ensure_nonempty_tabs();
-        for entry in &mut self.restore_queue {
-            if entry.tab > idx {
-                entry.tab -= 1;
-            }
-        }
+        // P382：平移动作原本只有这一条出路手写了一份（`close_tab_now`／
+        // `close_tabs_now` 两条用户关页漏斗一次都没写过）⇒ 收成与
+        // `realign_active_after_removal` 同一条纪律的一份。这一条路上队列里不会有
+        // 指向 `idx` 的项（那一项已出队成在途任务），所以"作废目标页被移掉的那一条"
+        // 在这里是空操作，两条出路的语义仍然各自成立。
+        self.shift_restore_queue_after_removal(&[idx]);
         // S-1：恢复在途时用户可能已弹起关闭确认条。这条移除路径过去只平移
         // restore_queue 的下标，没管确认条——其前的占位页被移除后，条子会整体
         // 左移落到相邻页上，〔放弃并关闭〕于是清空并关掉用户根本没选过的页。
