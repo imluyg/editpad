@@ -694,6 +694,81 @@ fn drive_reported_autosave(app: &mut Editpad, path: &std::path::Path) -> Message
 }
 
 #[test]
+fn reload_voids_the_autosave_still_in_flight_from_the_discarded_buffer() {
+    // P381：〔重新加载〕的语义＝"丢掉我这一份、取磁盘那一份"，而它没作废在途的
+    // 自动保存 ⇒ 那次写盘醒来时把**刚被用户丢掉的旧缓冲**写回磁盘＝磁盘上的内容
+    // 被一份"已经不存在于任何界面"的文本覆写。兄弟场景（改路径 P146／手动保存
+    // 接管／关页）都调了 `invalidate_autosave`，唯独重载这一条漏了。
+    // 两格共用同一段"调度→醒来"，只有中不中间发生重载不同 ⇒ 反向那一格
+    // 是反空转自证：不重载时同一份在途写盘必须**真的**落盘。
+    use std::sync::atomic::Ordering;
+    for reload in [false, true] {
+        let (mut app, path) = loaded_real_file_app(&format!("reload-voids-autosave-{reload}"));
+        app.settings.autosave_enabled = true;
+        // 用户在磁盘版本后面敲了两个字：页面置脏，调度时刻＝现在
+        // （刚加载完光标在文首，不先移到文末就成了"插在 base 前面"＝夹具自证逮到）
+        dispatch(
+            &mut app,
+            Message::Edit(EditOp::Motion(crate::editor::Motion::DocEnd, false)),
+        );
+        dispatch(&mut app, Message::Edit(EditOp::InsertText("XX".into())));
+        let stale = app.tabs[0].editor.borrow().doc.clone();
+        assert_eq!(
+            stale.to_text(),
+            "baseXX",
+            "夹具自证：手里那份是被丢弃的旧缓冲"
+        );
+        let (tid, version) = (app.tabs[0].id, app.tabs[0].version);
+        // 与生产调度点同一套取法：带走页 id、代次 Arc 与调度时刻的代次值
+        let gen = app.tabs[0].autosave_gen.clone();
+        let my_gen = gen.load(Ordering::Relaxed);
+        let enc = crate::autosave::autosave_encoding(
+            app.tabs[0].save_encoding,
+            &app.tabs[0].encoding_label,
+        )
+        .expect("夹具的标签必须指得到可写编码");
+
+        if reload {
+            // 提示条上那颗〔重新加载〕（按发起页 id 落地）
+            dispatch(&mut app, Message::ConfirmExternalReload(tid));
+        }
+
+        // 那一份在途写盘此刻醒来（真跑写盘线程，与 `drive_reported_autosave` 同款）
+        let msg = block_on(drive_autosave_once(
+            tid,
+            path.clone(),
+            stale,
+            version,
+            gen,
+            my_gen,
+            AutosaveTask {
+                encoding: enc,
+                expected_stamp: None,
+                delay: std::time::Duration::from_millis(20),
+                lang: editpad_core::Lang::default(),
+            },
+        ));
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        if reload {
+            assert_eq!(on_disk, "base", "重载之后，被丢弃的旧缓冲不得写回磁盘");
+            assert!(
+                matches!(
+                    msg,
+                    Message::TabAutosaved(_, _, _, AutosaveOutcome::Superseded)
+                ),
+                "回报必须是\"已被作废\"，而不是写完了还说没写"
+            );
+        } else {
+            assert_eq!(
+                on_disk, "baseXX",
+                "反空转自证：不重载时同一份在途写盘要真的落盘"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[test]
 fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
     let mut app = loaded_txt_app();
     app.settings.autosave_enabled = true;
