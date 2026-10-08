@@ -501,6 +501,42 @@ pub fn clear_session(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// 〔丢弃〕一次崩溃恢复的清理：**只删这份被弃清单自己引用的页文件**。
+///
+/// 旧形状是调用 [`clear_session`]（`remove_dir_all`）。恢复提示挂着期间心跳照常
+/// 提交当前会话（P339 那条），于是用户点〔丢弃〕本想丢掉崩前那一份，实际把
+/// **当前会话**的页文件与清单一起删了；而内存里各页的 `heartbeat_snap` 仍指着
+/// 刚被删掉的文件名，下一次提交就写出「清单说有、磁盘上没有」的记录。
+///
+/// 清单文件本身只在「磁盘上这份就是刚被弃掉的那一份」（代次相同）时才删——
+/// 心跳已提交新清单时删掉它＝又把当前会话的保护丢了一次。读不出代次时不删
+/// （P348 同规：「读不出」不等于「没有」）。
+///
+/// 返回删掉的条目数（页文件 ＋ 可能的清单）；0 不代表失败，本来就没什么可删。
+pub fn discard_session(dir: &Path, discarded: &SessionManifest) -> usize {
+    let mut removed = 0usize;
+    for tab in &discarded.tabs {
+        let Some(name) = tab.file.as_deref() else {
+            continue;
+        };
+        // 只认页文件名形态（与 GC/配额同一判据）：不给坏清单指到目录外留通道
+        if parse_page_generation(name).is_none() {
+            continue;
+        }
+        if fs::remove_file(dir.join(name)).is_ok() {
+            removed += 1;
+        }
+    }
+    let disk_is_the_discarded_one = matches!(
+        read_manifest_checked(dir),
+        ManifestRead::Good(m) if m.generation == discarded.generation
+    );
+    if disk_is_the_discarded_one && fs::remove_file(dir.join(MANIFEST_NAME)).is_ok() {
+        removed += 1;
+    }
+    removed
+}
+
 /// 配额护栏：页快照总量超过 `cap_bytes` 时按修改时间从旧到新淘汰，
 /// 直到回到限额以内。返回被淘汰的文件数。
 ///

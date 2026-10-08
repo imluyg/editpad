@@ -421,10 +421,15 @@ impl Editpad {
     /// 「丢弃」= 连快照一起丢（P29 放弃语义同族）：清场后空白起步，
     /// 防止下次启动把已放弃的内容再次当会话恢复回来。
     pub(crate) fn discard_session_recover(&mut self, dir: Option<PathBuf>) -> Task<Message> {
-        self.recover_prompt = None;
+        // P378（第 286 轮，第三路扫描头名）：〔丢弃〕丢的是**崩前那一份会话**，
+        // 不是整个快照目录。原先这里调 `clear_session`＝`remove_dir_all`：提示挂着
+        // 期间心跳照常把当前会话提交过（P339 那条），那一下连带删掉当前会话的页文件
+        // 与清单，而各页内存里的 `heartbeat_snap` 仍指着刚被删掉的文件名 ⇒ 下一次
+        // 提交写出「清单说有、磁盘没有」的记录，当前会话的崩溃保护静默失效。
+        let discarded = self.recover_prompt.take();
         self.recover_overwrite_ok = false;
-        if let Some(dir) = dir {
-            editpad_core::snapshot::clear_session(&dir);
+        if let (Some(dir), Some(manifest)) = (dir, discarded.as_ref()) {
+            editpad_core::snapshot::discard_session(&dir, manifest);
         }
         Task::none()
     }

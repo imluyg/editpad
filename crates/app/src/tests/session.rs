@@ -917,6 +917,66 @@ fn crash_orphan_manifest_prompts_then_restores_or_discards() {
     fs::remove_dir_all(&dir_b).ok();
 }
 
+/// P378（第三路扫描头名）：〔丢弃〕只丢崩前那一份会话，不许把**当前会话**的快照一起删。
+///
+/// 恢复提示挂着期间心跳照常提交当前会话（P339 那条），而 `discard_session_recover`
+/// 原本调 `clear_session`＝`remove_dir_all`：那一下把当前会话的页文件与清单一起删掉，
+/// 而内存里各页的 `heartbeat_snap` 仍指着刚被删的文件名 ⇒ 下一次提交写出「清单说有、
+/// 磁盘没有」的记录，当前会话就此没有可用的崩溃保护——用户看到的是〔丢弃〕只针对崩前
+/// 那份，实际丢的是这一轮新敲的内容。
+#[test]
+fn discard_recovery_spares_the_live_session_snapshot() {
+    let dir = snapshot_scratch_dir("p378-discard-live");
+    // 崩前那一份：清单（generation=7）＋它引用的页文件
+    plant_orphan_session(&dir);
+    let crashed = editpad_core::snapshot::read_manifest(&dir).expect("夹具：崩前清单可读");
+    let pending_page = crashed.tabs[0]
+        .file
+        .clone()
+        .expect("夹具：崩前页有内容文件");
+
+    // 提示挂着期间：敲字 + 一次心跳提交当前会话（新清单 + 新页文件，
+    // 而崩前那页靠 P339 的 `keeping` 名单活着）
+    let mut app = heartbeat_app(&dir);
+    app.recover_prompt = Some(crashed);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let outcome = app
+        .run_heartbeat_cycle(&dir)
+        .expect("夹具：心跳应提交一次当前会话");
+    let live = outcome.result.as_ref().expect("夹具：提交成功").tabs[0]
+        .file
+        .clone()
+        .expect("夹具：当前页有内容文件");
+    assert!(
+        dir.join(&pending_page).exists() && dir.join(&live).exists(),
+        "夹具：丢弃之前两份页文件都在磁盘上（{pending_page} / {live}）"
+    );
+
+    // 〔丢弃〕
+    let _ = app.discard_session_recover(Some(dir.clone()));
+    assert!(app.recover_prompt.is_none(), "提示条要收起");
+    assert!(
+        !dir.join(&pending_page).exists(),
+        "崩前那一页的内容文件要删掉＝用户确实弃了它（不留下次启动复活的路）"
+    );
+    assert!(
+        dir.join(&live).exists(),
+        "当前会话的页文件不许被删（改前实测：remove_dir_all 把它一起删了）"
+    );
+    let still = editpad_core::snapshot::read_manifest(&dir);
+    assert!(
+        still.is_some(),
+        "改前实测：清单也没了 ⇒ 当前会话从此没有崩溃记录"
+    );
+    assert_eq!(
+        still.unwrap().tabs[0].file.as_deref(),
+        Some(live.as_str()),
+        "留在磁盘上的清单必须还指得上那个存在的文件"
+    );
+
+    fs_remove_dir_all(&dir);
+}
+
 /// 池 ①（第 272 轮登记、本人逐行核实）：崩溃恢复提示条挂着时用户照常能敲字，
 /// 而〔恢复〕那一下原先是 `self.tabs = tabs` 整体替换 —— 期间敲的内容既不置
 /// 确认也不走关页漏斗，连 `dirty` 判定都没过就没了。改后＝当前有未保存改动时
