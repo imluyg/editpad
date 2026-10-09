@@ -133,7 +133,7 @@ impl EditorCore {
             drop_off
         } else {
             self.doc.remove_range(start_off, end_off);
-            let removed_lines = text.matches('\n').count();
+            let removed_lines = editpad_core::line_break_units(&text);
             self.remap_removed_rows(sel_start_line, removed_lines);
             if drop_off > end_off {
                 drop_off - sel_len
@@ -142,7 +142,9 @@ impl EditorCore {
             }
         };
         self.doc.insert(insert_off, &text);
-        let inserted_lines = text.matches('\n').count();
+        // 行数按 [`editpad_core::line_break_units`]（R-22）：选区里带的可能是
+        // VT/FF/NEL/LS/PS 或孤立 `\r`，它们在编辑器里同样是行界，少算一格书签就漂一格。
+        let inserted_lines = editpad_core::line_break_units(&text);
         if inserted_lines > 0 {
             let drop_line = self.doc.char_to_line(insert_off);
             self.remap_shift_below(drop_line, inserted_lines as isize);
@@ -200,6 +202,69 @@ mod tests {
             "abcd\nefbcgh\n",
             "复制只在落点插入（ef 之后）"
         );
+    }
+
+    #[test]
+    fn dnd_move_over_an_exotic_break_keeps_bookmarks_on_the_same_text() {
+        // R-22：拖拽移动的书签平移按「编辑器里少了几行」记，而编辑器把 VT 也算行界。
+        // 旧算式 `matches('\n').count()` 在 "a\u{000B}b" 上得 0 ⇒ 删除那一步不平移、
+        // 插入那一步也不平移 ⇒ 书签停在原行号上，指向的却是搬走后的**另一行**。
+        for (sep, want) in [
+            ('\u{000B}', "异体行界（VT）"),
+            ('\n', "控制行：纯 LF 同结论"),
+        ] {
+            let mut c = core_with(&format!("a{sep}b\nX\n"));
+            c.cursor = CursorPos { line: 2, col: 0 };
+            c.toggle_bookmark();
+            assert_eq!(c.bookmarked_lines(), vec![2], "{want}：夹具前提");
+            select(&mut c, 0, 0, 1, 1); // 选中 "a{sep}b"——内含一个行界单元
+            assert!(
+                c.finish_drop_selection(CursorPos { line: 3, col: 0 }, false),
+                "{want}：移动应落地"
+            );
+            assert_eq!(c.doc.to_text(), format!("\nX\na{sep}b"), "{want}");
+            assert_eq!(
+                c.bookmarked_lines(),
+                vec![1],
+                "{want}：书签要跟住 'X' 那一行（删一行界单元后它在下标 1）"
+            );
+            assert_eq!(
+                c.line_body_without_eol(*c.bookmarked_lines().first().unwrap()),
+                "X",
+                "{want}：书签指向的必须还是 'X'"
+            );
+        }
+    }
+
+    /// 落点在书签**之上**时，主角换成「插入侧」的单元数：搬进来的那段含一个行界
+    /// 单元 ⇒ 落点之下的行整体下移一格。旧算式在 VT 上得 0 ⇒ 一格都不移。
+    #[test]
+    fn dnd_move_into_the_middle_shifts_bookmarks_below_by_the_inserted_units() {
+        for (sep, want) in [
+            ('\u{000B}', "异体行界（VT）"),
+            ('\n', "控制行：纯 LF 同结论"),
+        ] {
+            let mut c = core_with(&format!("a{sep}b\nX\nY\n"));
+            c.cursor = CursorPos { line: 3, col: 0 };
+            c.toggle_bookmark(); // 书签在 'Y' 那一行
+            select(&mut c, 0, 0, 1, 1);
+            assert!(
+                c.finish_drop_selection(CursorPos { line: 2, col: 1 }, false),
+                "{want}：移动应落地"
+            );
+            assert_eq!(
+                c.doc.to_text(),
+                format!("\nXa{sep}b\nY\n"),
+                "{want}：正文形状"
+            );
+            let bm = c.bookmarked_lines();
+            assert_eq!(bm.len(), 1, "{want}：书签不多不少一条");
+            assert_eq!(
+                c.line_body_without_eol(bm[0]),
+                "Y",
+                "{want}：搬进一个换行单元 ⇒ 落点之下的书签要下移，指着的必须还是 'Y'"
+            );
+        }
     }
 
     #[test]

@@ -167,29 +167,20 @@ pub(crate) fn visible_window_of_xs(
     (lo, hi)
 }
 
-/// 统计待插入文本的「换行单元数」与末行列数（P9）：
-/// `\r\n` 与孤立 `\r` 也各算一次换行——旧实现 `split('\n')` 只认 `\n`，
-/// CRLF 文本入文后光标列会漂移一个字符。
+/// 统计待插入文本的「换行单元数」与末行列数（P9）：行界按**读侧全集**数
+/// （[`editpad_core::line_break_units`] 同一条判据，R-22），切行复用
+/// [`editpad_core::for_each_line`] 那一份实现。
+///
+/// 历史：旧实现 `split('\n')` 只认 LF，CRLF 文本入文后光标列漂移一格（P9 修）；
+/// 再往前行界只含 `\r\n`/`\r`/`\n` 三种，而编辑器（ropey `unicode_lines`）把
+/// VT/FF/NEL/LS/PS 也算行界 ⇒ 粘贴含这些字符的文本时末行行号少算、书签平移漂一格。
 pub(crate) fn measure_insertion(text: &str) -> (usize, usize) {
     let mut lines = 0usize;
     let mut tail_cols = 0usize;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                lines += 1;
-                tail_cols = 0;
-            }
-            '\n' => {
-                lines += 1;
-                tail_cols = 0;
-            }
-            _ => tail_cols += 1,
-        }
-    }
+    editpad_core::for_each_line(text, |idx, body| {
+        lines = idx;
+        tail_cols = body.chars().count();
+    });
     (lines, tail_cols)
 }
 

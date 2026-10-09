@@ -1136,6 +1136,101 @@ fn split_line_cursor_selection_and_noop() {
 }
 
 #[test]
+fn line_body_without_eol_strips_the_full_break_set() {
+    // R-22 的同族第五处：ropey 的 `line()` 带行尾，而这里把「一行的内容」交给
+    // 合并／排序／去重／复制命中行／拆行比对。旧写法只剥 `\r\n`/`\n`/`\r` 三种
+    // ⇒ VT/FF/NEL/LS/PS 结尾的行把行界字符当成正文带回去（合并行拼出双分隔符、
+    // 复制多一个空行）。剥法复用 core 的 `trim_line_breaks` 那一份。
+    let rows = [
+        ("a\n", "a", "控制行：纯 LF"),
+        ("a\r\n", "a", "控制行：CRLF 配对只剥一次"),
+        ("a\r", "a", "控制行：孤立 CR"),
+        ("a\u{000B}", "a", "VT"),
+        ("a\u{000C}", "a", "FF"),
+        ("a\u{0085}", "a", "NEL"),
+        ("a\u{2028}", "a", "LS"),
+        ("a\u{2029}", "a", "PS"),
+        ("a", "a", "末行没有行尾：一字不剥"),
+        ("a b\u{000B}", "a b", "行内有空白，尾部仍只剥行界"),
+        ("", "", "空文档的末行"),
+    ];
+    for (doc, want_body, why) in rows {
+        let c = core_with(doc);
+        assert_eq!(
+            c.line_body_without_eol(0),
+            want_body,
+            "{why}：行内容不该带行界字符"
+        );
+    }
+}
+
+#[test]
+fn split_line_crlf_multiline_selection_leaves_no_stray_cr() {
+    // R-22 的另一半：切分要按行界**配对**收口。旧写法先把选区 normalize 到主导
+    // 行尾、再 `split('\n')` ⇒ CRLF 的前半 `\r` 留在片段尾部，而片段之间又用主导
+    // 行尾 "\r\n" 重新 join ⇒ 正文里多出 "X\r\r\n"＝一个凭空空行（行数与书签映射
+    // 都按少算的那几格走）。控制行＝同形状的纯 LF 文档，改前改后必须一字不差。
+    let mut lf = core_with("aX\nYb\n");
+    lf.anchor = Some(CursorPos { line: 0, col: 1 });
+    lf.cursor = CursorPos { line: 1, col: 1 };
+    assert!(lf.split_line());
+    assert_eq!(lf.doc.to_text(), "a\nX\nY\nb\n", "纯 LF：本次改动零影响");
+    assert_eq!(lf.doc.line_count(), 5, "含行尾产生的末空行");
+
+    let mut c = core_with("aX\r\nYb\r\n");
+    c.anchor = Some(CursorPos { line: 0, col: 1 });
+    c.cursor = CursorPos { line: 1, col: 1 };
+    assert!(c.split_line());
+    assert_eq!(c.doc.to_text(), "a\r\nX\r\nY\r\nb\r\n");
+    assert_eq!(
+        c.doc.line_count(),
+        5,
+        "CRLF 文档拆行不得凭空多出一个空行（旧写法得 6 行：\"X\\r\" 与 \"\\r\\n\" 之间那格）"
+    );
+}
+
+#[test]
+fn split_line_treats_exotic_breaks_like_the_dominant_one() {
+    // 同一条命令、同一个行结构，分隔符是 LF／VT／LS 必须给同一张结果表：
+    // 旧写法 `split('\n')` 只在 LF 处切开，VT/LS 留在片段里 ⇒ `middle.len()` 少算
+    // ⇒ 块内书签映射按错的行数记账（选区内部明明有 3 个行界却只当 1 行搬）。
+    // 参照格＝纯 LF，那是改前改后都不变的既定行为。
+    let mut reference: Option<(String, Vec<String>, Vec<usize>, String)> = None;
+    for sep in ['\n', '\u{000B}', '\u{2028}'] {
+        let mut c = core_with(&format!("a{sep}b{sep}c{sep}d\n"));
+        c.cursor = CursorPos { line: 2, col: 0 };
+        c.toggle_bookmark();
+        c.anchor = Some(CursorPos { line: 0, col: 1 });
+        c.cursor = CursorPos { line: 3, col: 1 };
+        assert!(c.split_line(), "分隔符 {sep:?}：拆行必须落地");
+        let bodies: Vec<String> = (0..c.doc.line_count())
+            .map(|i| c.line_body_without_eol(i))
+            .collect();
+        let bm = c.bookmarked_lines();
+        assert_eq!(bm.len(), 1, "分隔符 {sep:?}：书签不多不少一条");
+        let got = (
+            c.doc.to_text(),
+            bodies,
+            bm.clone(),
+            c.line_body_without_eol(bm[0]),
+        );
+        match &reference {
+            None => {
+                assert_eq!(
+                    got.0, "a\n\nb\nc\nd\n\n",
+                    "参照格（纯 LF）钉住改前行为，免得整族一起漂"
+                );
+                reference = Some(got);
+            }
+            Some(want) => assert_eq!(
+                &got, want,
+                "分隔符 {sep:?} 应与纯 LF 同结论（行结构相同，只有分隔符字节不同）"
+            ),
+        }
+    }
+}
+
+#[test]
 fn split_line_bookmark_shifts_below_block() {
     // 摘出行首片段：块 [0..=0] 由 1 行变 3 行，块外 low 书签 +2
     let mut c = core_with("aXb\nlow\n");

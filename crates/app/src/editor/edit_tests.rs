@@ -116,6 +116,48 @@ fn backspace_and_delete_forward_report_whether_anything_was_deleted() {
 }
 
 #[test]
+fn paste_with_exotic_break_advances_the_cursor_like_the_rope_does() {
+    // R-22：`measure_insertion` 数的「换行单元」必须与文本入文后 ropey 实际多出的
+    // 行数同源。旧实现只认 `\r\n`/`\r`/`\n` 三种 ⇒ 粘贴含 FF/LS 的文本时文档多了一行
+    // 而代码不知道：光标停在上一行、列号还把行界字符算进行内，书签平移同样少一格。
+    // 第一格是**控制行**（纯 LF，改前改后同结论），第二、三格才是这条修复咬住的东西。
+    let rows = [
+        ("p\nq", 2, 1, "控制行：LF 换行"),
+        ("p\u{000C}q", 2, 1, "FF 在编辑器里同样是行界"),
+        ("p\u{2028}q\r\nr", 3, 1, "LS 一个单元 + CRLF 配对一个单元"),
+    ];
+    for (text, want_line, want_col, why) in rows {
+        let mut c = core_with("start\nbelow\n");
+        c.cursor = CursorPos { line: 1, col: 0 };
+        c.insert_str(text);
+        // 夹具自证：粘贴确实造出了那一串行（否则下面的列号断言是空对空）
+        assert_eq!(
+            (0..c.doc.line_count())
+                .map(|i| c.line_body_without_eol(i))
+                .collect::<Vec<_>>(),
+            if want_line == 2 {
+                vec!["start", "p", "qbelow", ""]
+            } else {
+                vec!["start", "p", "q", "rbelow", ""]
+            },
+            "{why}：入文后的行结构"
+        );
+        assert_eq!(
+            c.cursor,
+            CursorPos {
+                line: want_line,
+                col: want_col
+            },
+            "{why}：光标要落在插入文本的真正末尾（行号按全集、列号不含行界字符）"
+        );
+        assert!(
+            c.doc.line_ending() == LineEnding::Lf,
+            "{why}：夹具是 LF 文档"
+        );
+    }
+}
+
+#[test]
 fn enter_and_paste_follow_dominant_line_ending() {
     // CRLF 文档：回车（插 \n）与粘贴的混合行尾都归一为 \r\n
     let mut c = core_with("a\r\nb");

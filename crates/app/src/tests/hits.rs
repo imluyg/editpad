@@ -48,6 +48,33 @@ fn mark_hit_lines_reports_the_new_count() {
 }
 
 #[test]
+fn copy_hit_lines_counts_lines_in_the_documents_own_line_ending() {
+    // R-22：状态栏那句「已复制 N 行」按行界全集数。串是本仓按**主导行尾**拼的，
+    // CR-only（经典 Mac 文件，加载器明确支持）文档上分隔符是孤立 `\r` ⇒ 旧算式
+    // `matches('\n').count()` 恒为 0，复制三行会报「已复制 0 行」。
+    let mut app = Editpad::default();
+    app.cur_handle
+        .borrow_mut()
+        .reset_document(editpad_core::Document::from_str("one\rtwo\rthree\r"));
+    let ed = app.cur_handle.borrow();
+    assert_eq!(
+        ed.doc.line_ending(),
+        editpad_core::LineEnding::Cr,
+        "夹具前提：主导行尾确实是孤立 \\r"
+    );
+    assert!(ed.copy_hit_lines_text().is_none(), "夹具前提：还没标命中");
+    drop(ed);
+    set_hits(&mut app, &[0, 1, 2]);
+    dispatch(&mut app, Message::Edit(EditOp::CopyHitLines));
+    assert!(!app.status_is_error, "有命中不该报错：{:?}", app.status);
+    assert!(
+        app.status.contains('3') && !app.status.contains('0'),
+        "状态栏应报 3 行，实得 {:?}",
+        app.status
+    );
+}
+
+#[test]
 fn mark_and_copy_without_hits_say_so() {
     let mut app = Editpad::default();
     put_text(&mut app, "alpha\nbeta");

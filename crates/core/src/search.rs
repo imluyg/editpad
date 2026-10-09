@@ -72,6 +72,40 @@ pub fn is_line_break(c: char) -> bool {
     LINE_BREAK_CHARS.contains(&c)
 }
 
+/// `text` 里的**行界单元**个数（R-22：全仓"这段文本跨了几行"只问这一句）。
+///
+/// CRLF 计一个单元，异体行界（VT/FF/NEL/LS/PS）各计一个 ⇒ 与 ropey 的行号增量
+/// 同源。算式**不重写一遍**，而是复用 [`for_each_line`] 那一份切行（其内核
+/// `for_each_line_until`）：行界单元数恒等于最后一行的下标。此前各处各写一份
+/// `matches('\n').count()`，那是同一判据的第二份抄本，只认 `\n` ⇒ 异体行界与
+/// CR-only 文档上少算（书签重映射漂移、状态栏报「已复制 0 行」）。
+pub fn line_break_units(text: &str) -> usize {
+    let mut last_index = 0usize;
+    let _ = for_each_line_until(text, |line_idx, _| {
+        last_index = line_idx;
+        std::ops::ControlFlow::Continue(())
+    });
+    last_index
+}
+
+/// 去掉 `text` **末尾**的所有行界（[`str::trim_end_matches`] 的全集版：
+/// 反复剥掉末尾那一个行界单元，直到末尾不是行界为止）。
+///
+/// 单个单元的剥法复用 [`crate::document::trim_line_breaks`] 那一份（CRLF 配对
+/// 只在它那里判一次），本函数只负责「反复」；异体行界各算一个单元，故 `"a\r\n"`
+/// 剥到 `"a"`、`"a\u{000B}"` 也剥到 `"a"`，而只 `trim_end_matches('\n')` 的旧写法
+/// 会在前者留下孤立的 `"a\r"`。
+pub fn trim_end_line_breaks(text: &str) -> &str {
+    let mut rest = text;
+    loop {
+        let next = crate::document::trim_line_breaks(rest);
+        if next.len() == rest.len() {
+            return rest;
+        }
+        rest = next;
+    }
+}
+
 /// ropey `unicode_lines` 行界全集的判定：`c` 构成的行界共几字节
 /// （CRLF 配对算一个单元计 2 字节），非行界返回 0。
 ///
@@ -1797,6 +1831,51 @@ mod tests {
             7,
             "行数与判据的格数不匹配（改表要连这条一起改）"
         );
+    }
+
+    /// R-22：「这段文本跨了几行」的**唯一算式**。
+    ///
+    /// 两个判据都从 [`is_line_break`] 那一份派生（切行复用 [`for_each_line_until`]），
+    /// 所以这张表同时钉住三件事：①行界全集（VT/FF/NEL/LS/PS 各算一个单元）；
+    /// ②CRLF 只算一个单元（**控制行**：纯 LF 与 CRLF 成对出现，配对必须同数——
+    /// 「按全集数但不配对」的错修法会被控制行当场抓住）；③末尾收口连 `\r` 一起剥
+    /// （只 `trim_end_matches('\n')` 会在 `"a\r\n"` 上留下 `"a\r"`）。
+    /// 最后一格 `line_count == units + 1` 才是「与编辑器同源」的证明：少算一格的
+    /// 旧算式（`matches('\n').count()`）在这里直接红。
+    #[test]
+    fn line_break_units_and_trim_follow_the_full_break_set() {
+        let rows: &[(&str, usize, &str)] = &[
+            ("", 0, ""),
+            ("a", 0, "a"),
+            ("a\nb", 1, "a\nb"),
+            ("a\r\nb", 1, "a\r\nb"), // 控制行：CRLF 配对与纯 LF 同数
+            ("a\n", 1, "a"),         // 控制行：纯 LF 收尾
+            ("a\r\n", 1, "a"),       // 收尾要连 \r 一起剥
+            ("a\r", 1, "a"),
+            ("a\u{000B}b", 1, "a\u{000B}b"),         // VT
+            ("a\u{000C}b\u{000C}", 2, "a\u{000C}b"), // FF 两处，尾部剥一个
+            ("a\u{0085}\nb", 2, "a\u{0085}\nb"),     // NEL 紧邻 LF＝两个单元，不是「2 字节＝一对」
+            ("x\u{2028}y\u{2029}z", 2, "x\u{2028}y\u{2029}z"),
+            ("\n\n", 2, ""),
+            ("a\n\nb", 2, "a\n\nb"),
+            ("中\u{000B}文", 1, "中\u{000B}文"), // 多字节字符旁的行界
+        ];
+        use crate::document::Document;
+        for &(text, units, trimmed) in rows {
+            assert_eq!(line_break_units(text), units, "行界单元数: {text:?}");
+            assert_eq!(trim_end_line_breaks(text), trimmed, "尾部收口: {text:?}");
+            assert_eq!(
+                Document::from_str(text).line_count(),
+                units + 1,
+                "编辑器里 {text:?} 的行数应等于单元数 +1（不同源即坐标系分叉）"
+            );
+        }
+        // 反向对照：本条存在的理由——只认 '\n' 的旧算式在异体行界与 CR-only 上少算。
+        // 修复退回旧写法时红在这一格，而不是红在"期望值写错了"。
+        assert_eq!("a\u{000B}b".matches('\n').count(), 0);
+        assert_eq!(line_break_units("a\u{000B}b"), 1);
+        assert_eq!("a\rb\rc".matches('\n').count(), 0);
+        assert_eq!(line_break_units("a\rb\rc"), 2);
     }
 
     /// P217 回归：行界字符**后面紧跟另一个行界字符**时必须切成两行。

@@ -154,7 +154,10 @@ impl Editpad {
                 let text = self.cur_handle.borrow().copy_hit_lines_text();
                 match text {
                     Some(text) => {
-                        let n = text.matches('\n').count();
+                        // 「几行」按行界全集数（R-22）：串是本仓按**主导行尾**拼的，
+                        // CR-only 文档上分隔符是孤立 `\r`，`matches('\n')` 恒为 0
+                        // ⇒ 状态栏会报「已复制 0 行」。
+                        let n = editpad_core::line_break_units(&text);
                         self.set_status(format!("{} {n}", self.t(K::StHitsCopiedPrefix)));
                         self.clip_write(text)
                     }

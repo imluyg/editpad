@@ -437,14 +437,15 @@ impl EditorCore {
         true
     }
 
+    /// 一行的**内容**（不含行尾）。ropey 的 `line()` 把行尾一并带回，剥法复用
+    /// core 那一份全集实现 [`editpad_core::trim_line_breaks`]（R-22）。
+    ///
+    /// 旧写法在这里手写「`\r\n` / `\n` / `\r` 三选一」，是同一判据的第二份抄本：
+    /// VT/FF/NEL/LS/PS 结尾的行会把行界字符**留在正文里**回去，而调用方把返回值当
+    /// 「一行的内容」用——合并行拼出双分隔符、复制命中行多带一个空行、拆行的
+    /// no-op 比对恒不相等。行结构按 ropey（读侧全集）算，读出来的行内容必须同源。
     pub(crate) fn line_body_without_eol(&self, i: usize) -> String {
-        let mut s = self.doc.line_str(i);
-        if s.ends_with("\r\n") {
-            s.truncate(s.len() - 2);
-        } else if s.ends_with('\n') || s.ends_with('\r') {
-            s.pop();
-        }
-        s
+        editpad_core::trim_line_breaks(&self.doc.line_str(i)).to_owned()
     }
 
     pub(crate) fn collect_line_block(&self) -> LineBlock {
@@ -827,11 +828,13 @@ impl EditorCore {
         let middle: Vec<String> = if middle_normalized.is_empty() {
             Vec::new()
         } else {
-            middle_normalized
-                .trim_end_matches('\n')
-                .split('\n')
-                .map(|p| p.to_owned())
-                .collect()
+            // 切分按行界全集（R-22）：旧写法 `trim_end_matches('\n').split('\n')`
+            // 只认 LF ⇒ ①CRLF 文档上 `\r` 被留在片段尾部，join 回主导行尾后凭空
+            // 多出一个空行；②VT/FF/NEL/LS/PS 根本不切开，书签映射按少的行数记账。
+            let trimmed = editpad_core::trim_end_line_breaks(&middle_normalized);
+            let mut parts = Vec::new();
+            editpad_core::for_each_line(trimmed, |_, body| parts.push(body.to_owned()));
+            parts
         };
         // 区域尾形态：与 merge 同一通判——选中真实末行时其行尾即文档
         // 末尾换行，重建必须补回；无尾随换行的文档则不加
