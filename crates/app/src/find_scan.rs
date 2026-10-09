@@ -82,8 +82,9 @@ where
     Message::FindScanDone(payload.seq, table)
 }
 
-/// 与 core::search 一致的大小写语义：实现已下沉到 core（P15 去重），
-/// 这里只保留「区分大小写走整串比较」的快速路径。
+/// 与 core 字面查找同一个折叠判据（`editpad_core::case_fold_eq`＝Unicode 简单折叠，
+/// 第 306 轮 R-21 改判后与正则 `(?i)` 同表）；这里只保留「区分大小写走整串比较」的快速路径。
+/// ⚠️ 折叠判据**不许在 app 侧再写一份**：第 303 轮实测过那种分叉的代价（见 R-21）。
 pub(crate) fn strings_equal(a: &str, b: &str, case_sensitive: bool) -> bool {
     if case_sensitive {
         a == b
@@ -91,7 +92,7 @@ pub(crate) fn strings_equal(a: &str, b: &str, case_sensitive: bool) -> bool {
         a.chars().count() == b.chars().count()
             && a.chars()
                 .zip(b.chars())
-                .all(|(x, y)| editpad_core::ascii_case_eq(x, y, false))
+                .all(|(x, y)| editpad_core::case_fold_eq(x, y, false))
     }
 }
 

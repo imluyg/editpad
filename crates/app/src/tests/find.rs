@@ -52,6 +52,73 @@ fn find_and_replace_support_escaped_tab_and_newline() {
 
 // ---------- P70 正则查找/替换 ----------
 
+/// M10b／定案 R-21 改判的**用户可见面**：查找框里输入 `Ä`（字面档、不开正则、
+/// 大小写不敏感）必须命中正文里的 `ä`。改前＝同一句查询开到正则模式命中、字面档
+/// 结构性 0 命中，面板写「无匹配」而〔全部替换〕报 0 处——两种模式对同一份正文
+/// 给出两个答案，这正是第 303 轮记下、本轮统一掉的那条分歧。
+/// 反向也钉：`ß` 与 `ss` 是**多字符**映射，两侧都不折 ⇒ 不许被顺手"统一"进来。
+#[test]
+fn p397_literal_find_folds_unicode_like_the_regex_mode() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/t/a.txt")));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("Käln\nstraße\nÄhnlich\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    app.find_visible = true;
+    assert!(!app.case_sensitive, "夹具前提：默认大小写不敏感");
+    dispatch(&mut app, Message::FindQueryChanged("Ä".into()));
+    dispatch(&mut app, Message::ReplaceQueryChanged("A".into()));
+    // 查询变更会排一次后台扫描；无头测试里任务被丢弃 ⇒ 手动收口，
+    // 否则〔全部替换〕看到的是"扫描在途"，根本不走替换那一步
+    app.find_scan = None;
+    dispatch(&mut app, Message::ReplaceAll);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "KAln\nstraße\nAhnlich\n",
+        "Ä 要命中 ä 与 Ä 两处；straße 里的 ß 不参与折叠（多字符映射）"
+    );
+    assert!(
+        app.status.contains('2'),
+        "替换计数应与命中同口径（2 处），实得 {:?}",
+        app.status
+    );
+}
+
+/// 同一轮改到的**第二个读者**：「选中文本是否等于查询」这句比较决定〔替换当前〕
+/// 是否可点。它此前用 `ascii_case_eq`（只折 ASCII），与查找档那道分叉是同一个洞的两面
+/// ⇒ 现在也走 `case_fold_eq`。这一格是本仓第一次直接盯这条判据（改前无人看守）。
+#[test]
+fn p397_selection_equals_query_uses_the_same_folding_as_find() {
+    use crate::find_scan::strings_equal;
+    assert!(
+        strings_equal("Käln", "KÄLN", false),
+        "不敏感：变音大小写算同一个词"
+    );
+    assert!(strings_equal("straße", "straße", false));
+    assert!(
+        !strings_equal("straße", "strasse", false),
+        "ß↔ss 是多字符映射，不许折"
+    );
+    assert!(!strings_equal("Käln", "KÄLN", true), "敏感档一个字都不许折");
+    assert!(
+        !strings_equal("ä", "äx", false),
+        "长度不同必不等（字符数口径，不是字节）"
+    );
+    assert!(
+        strings_equal("中🚀", "中🚀", false),
+        "无大小写之分的字符照常相等"
+    );
+}
+
 #[test]
 fn p70_regex_toggle_rescans_and_invalid_pattern_surfaces_error() {
     let mut app = loaded_txt_app();

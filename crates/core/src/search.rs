@@ -3,9 +3,11 @@
 //! M1 采用 O(n·m) 字符级扫描，几十 MB 量级完全够用；
 //! M2 随 rope 化升级为增量匹配。
 //!
-//! 大小写语义：仅对 ASCII 做大小写折叠（`a == A`），非 ASCII 字符
-//! （如中文）本身没有大小写概念，始终精确比较——这样所有位置
-//! 计数都不会受 Unicode 折叠改变字符数的影响。
+//! 大小写语义（第 306 轮 M10b＝定案 R-21 **改判**）：不敏感时按 **Unicode 简单大小写折叠**，
+//! 与正则 `(?i)` 用同一份表、同一个算法（判据只有一份，在 [`crate::case_fold`]）。
+//! 折叠是 1:1 的字符映射 ⇒ 命中跨度的字符数不受折叠影响，位置计数仍然安全。
+//! 字节窗口扫描（O-11／O-13 量出来的快路径）只在"整段是 ASCII"时使用——
+//! ASCII 上逐字节 XOR 0x20 与 Unicode 折叠逐对等价，那条等价由用例穷举 128×128 钉住。
 
 /// 一个匹配的位置：行号、行内字符列（均从 0 计）。
 ///
@@ -22,32 +24,13 @@ pub struct MatchPos {
     pub len_chars: usize,
 }
 
+use crate::case_fold::{case_fold_eq, compare_key};
 use crate::document::Document;
-
-/// 单字符相等判断：`case_sensitive=false` 时**只对 ASCII 折叠大小写**。
-///
-/// ⚠️ 原注释曾写"P15 起作为全项目唯一的大小写折叠实现"——那是假话（第 303 轮 M10 核实）：
-/// 正则那一侧走 `(?i)`＝Unicode 折叠（`compile_regex`），两种模式在非 ASCII 大小写对上
-/// **命中集不同**（实测 16 对，清单与守卫用例见 `docs/决策记录.md` **R-21**）。
-/// 这不是缺陷而是刻意的性能取舍：字节窗口扫描（O-11/O-13）成立的前提就是"折叠＝XOR 0x20"
-/// 这种逐字节运算，而它在 UTF-8 上只对 ASCII 存在。
-/// app 层「选中文本是否等于查询」复用这里＝与字面查找同口径，**不等于**正则那一侧。
-pub fn ascii_case_eq(a: char, b: char, case_sensitive: bool) -> bool {
-    if case_sensitive {
-        a == b
-    } else {
-        a.eq_ignore_ascii_case(&b)
-    }
-}
 
 /// 整词判定的词字符：Unicode 字母/数字 + 下划线（`\w` 的宽松近似；
 /// CJK 连续段落同属一个词，与主流编辑器的整词口径一致）。
 pub fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
-}
-
-fn char_eq(a: char, b: char, case_sensitive: bool) -> bool {
-    ascii_case_eq(a, b, case_sensitive)
 }
 
 // ---------- 行界口径（查找 ↔ ropey 对齐） ----------
@@ -421,21 +404,25 @@ pub fn filter_whole_word(doc: &Document, hits: Vec<MatchPos>) -> Vec<MatchPos> {
     out
 }
 
-/// 单行窗口扫描：在 `line` 的字符序列上滑动长度 `q.len()` 的窗口逐一比较。
-///
 /// 字面查询的预处理产物（O-11）：一次备好，逐行复用。
 ///
-/// `folded` 是**按大小写口径折叠后的查询字节**，直接喂 [`find_next`]；
-/// `chars` 是查询字符数（= 命中的 `len_chars`，单行命中无换行跨越，显示跨度
-/// 就等于它）。旧实现逐行把整行 `extend` 进 `Vec<char>`，一次查找等于把全文
-/// 按 4 字节/字符搬一遍；本结构让扫描全程只碰字节。
+/// 两套备料对应两条扫描路（[`LiteralQuery::byte_scan_ok`] 裁决走哪条）：
+/// * `folded`＝**按 ASCII 折过**的查询字节，喂 [`find_next`] 的字节窗口扫描；
+/// * `keys`＝查询各字符的比较键（[`crate::case_fold::compare_key`]），喂 [`next_char_match`] 的字符窗口扫描。
+///
+/// `chars` 是查询字符数＝命中的 `len_chars`（单行命中无换行跨越，显示跨度就等于它；
+/// 简单折叠是 1:1 映射 ⇒ 命中窗口的字符数恒等于它，异体字命中也一样）。
 struct LiteralQuery {
     /// 折叠后的查询字节（大小写敏感时即原始字节）
     folded: Vec<u8>,
+    /// 查询各字符的折叠代表（Unicode 简单折叠）
+    keys: Vec<char>,
     /// 查询字符数
     chars: usize,
     /// 大小写口径（透传给 [`find_next`] 的首字节过滤与逐字节比较）
     case_sensitive: bool,
+    /// 查询本身是否纯 ASCII——不敏感时它决定字节快路径还能不能用
+    ascii_query: bool,
 }
 
 impl LiteralQuery {
@@ -446,19 +433,176 @@ impl LiteralQuery {
                 .iter()
                 .map(|&b| fold_byte(b, case_sensitive))
                 .collect(),
+            keys: query
+                .chars()
+                .map(|c| compare_key(c, case_sensitive))
+                .collect(),
             chars: query.chars().count(),
             case_sensitive,
+            ascii_query: query.is_ascii(),
+        }
+    }
+
+    /// 这段正文能不能走**字节**窗口扫描（不敏感时字节折叠＝XOR 0x20，只对 ASCII 成立）。
+    ///
+    /// 敏感时永远能——折叠是恒等映射，字节比较就是逐字节相等。
+    /// 不敏感时要求**两侧都纯 ASCII**：
+    /// ①查询含非 ASCII ⇒ 它的折叠类里可能有 ASCII 成员（U+017F LONG S 与 's' 同类），
+    ///   而字节比较只会拿那 2 个 UTF-8 字节去等；
+    /// ②正文含非 ASCII ⇒ 那种异体字符就落在正文里，同一个理由漏掉。
+    /// ASCII∩ASCII 那一档，"逐字节 XOR 0x20 相等"与"Unicode 折叠同类"**逐对等价**
+    /// （128×128 穷举钉住，见 `case_fold_eq_on_ascii_matches_unicode_folding`），
+    /// 加上 UTF-8 自同步性保证命中起点必落在字符边界 ⇒ 快路径不是"近似"而是同一个集合。
+    fn byte_scan_ok(&self, hay: &str) -> bool {
+        self.case_sensitive || (self.ascii_query && hay.is_ascii())
+    }
+
+    /// 流式替换跨块时要留多少尾字节才装得下"可能的半个命中"。
+    ///
+    /// 敏感／字节档＝查询字节数；不敏感的字符档＝命中窗口最长按每字符 4 字节算
+    /// （查询 `"K"` 可以命中 3 字节的 U+212A ⇒ 按 `folded.len()` 留会把跨块命中切碎）。
+    /// 多留无害（carry 只是晚一点冲刷），少留才会漏命中。
+    fn tail_reserve(&self) -> usize {
+        if self.case_sensitive {
+            self.folded.len()
+        } else {
+            4 * self.chars
+        }
+    }
+
+    /// 给一段正文**一次**定档（判据本身要过一遍正文，别在每个命中上重问，见 [`ScanArm`]）。
+    fn arm_for(&self, hay: &str) -> ScanArm {
+        #[cfg(test)]
+        ARM_DECISIONS.with(|c| c.set(c.get() + 1));
+        if self.byte_scan_ok(hay) {
+            ScanArm::Byte
+        } else {
+            ScanArm::Char
         }
     }
 }
 
-/// 单行字面扫描：在 UTF-8 **字节**上滑动窗口，只在真正命中时才折算字符列号。
+/// 这一段正文这次扫描走哪条档（[`LiteralQuery::byte_scan_ok`] 的两种答案）。
 ///
-/// 正确性依据同 [`find_next`]：UTF-8 自同步性保证命中起点必落在字符边界
-/// （续字节一律在 `0x80..0xC0`，等不上任何 ASCII 或前导字节的查询首字节），
-/// 所以字节级匹配与逐字符匹配的命中集合完全相同。字符列号靠**游标推进**：
-/// 命中按字节序递增，每次只把「上次结算点到本次命中点」的缺口折成字符数
-/// （非续字节计数），故一行的折算总量 = 该行字节数，与命中数无关。
+/// **一次定档、整段复用**：分派判据本身要过一遍正文（`is_ascii`），若每个命中都重问
+/// 一次，整篇替换就退化成 O(正文 × 命中数)——第 306 轮 `search_fold_bench` 的
+/// `replace_all ascii` 那一格就是这么卡住的（15 MB 正文 × 20 万命中）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanArm {
+    /// 字节窗口扫描（ASCII 正文／大小写敏感）
+    Byte,
+    /// 逐字符比较折叠代表（正文或查询含非 ASCII）
+    Char,
+}
+
+/// 在 `hay[from..]` 中找下一个折叠命中窗口，返回**字节区间** `[起, 止)`。
+///
+/// 两条扫描路共用这一个入口 ⇒ 结构上不可能出现"查找用一套折叠、替换用另一套"
+/// （M8/M9 那一族分叉的形状就是这么关掉的）。走哪条由调用方按段一次定档（[`ScanArm`]）。
+fn next_match_in(
+    arm: ScanArm,
+    hay: &str,
+    lq: &LiteralQuery,
+    from: usize,
+) -> Option<(usize, usize)> {
+    match arm {
+        ScanArm::Byte => {
+            #[cfg(test)]
+            BYTE_ARM_SCANS.with(|c| c.set(c.get() + 1));
+            find_next(hay.as_bytes(), &lq.folded, lq.case_sensitive, from)
+                .map(|i| (i, i + lq.folded.len()))
+        }
+        ScanArm::Char => {
+            #[cfg(test)]
+            CHAR_ARM_SCANS.with(|c| c.set(c.get() + 1));
+            next_char_match(hay, lq, from)
+        }
+    }
+}
+
+// 测试仪表（M10b）：两条扫描档各被调用了几次。
+// 统一折叠之后，"字节快路径没被顺手关掉"必须**数出来**——把分派恒写成字符档也能让
+// 全套命中用例一字不差地全绿（只是每次查找都退化成逐字符），那条收益点就无声消失了。
+#[cfg(test)]
+thread_local! {
+    static BYTE_ARM_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CHAR_ARM_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 取走并清零两个档的计数（测试仪表）。
+#[cfg(test)]
+pub(crate) fn take_arm_scans() -> (usize, usize) {
+    (
+        BYTE_ARM_SCANS.with(|c| c.replace(0)),
+        CHAR_ARM_SCANS.with(|c| c.replace(0)),
+    )
+}
+
+// 测试仪表（M10b 成本形状契约，同 O-12 的 WHOLE_WORD_LINE_BUILDS 那一族）：
+// 定档发生了多少次。判据本身要过一遍正文，所以"每段一次"与"每命中一次"是
+// O(正文) 与 O(正文 × 命中数) 的差别——命中用例对这两种全绿，只能数出来。
+#[cfg(test)]
+thread_local! {
+    static ARM_DECISIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_arm_decisions() -> usize {
+    ARM_DECISIONS.with(|c| c.replace(0))
+}
+
+/// 字符窗口扫描：按**字节偏移**推进，比较两侧字符的比较键
+/// （[`crate::case_fold::compare_key`]）。
+///
+/// 折叠判据换成 Unicode 那一侧之后，字节窗口不再够用（UTF-8 上不存在"逐字节的折叠"
+/// 运算），这条就是 O-11 之前那个形状，只在字节档不成立的正文／查询上走。
+/// 三点成本纪律——第 306 轮第一版用 `char_indices()` 从头走一遍再丢前缀，密集命中下
+/// 退化成 O(正文 × 命中数)，40 MB 整篇替换直接跑不动（`search_fold_bench` 当场量到的）：
+/// * 起点**夹到字符边界**后从那里开始，不从头重走；
+/// * 首字符不等就前进一个字符，不起窗口比对；
+/// * 零分配（不养滑动窗口缓冲：命中要连续比下去，失配就整窗作废重来）。
+///
+/// `from` 允许落在字符中间（调用方按字节前进 1 以保留重叠命中语义）：非边界的起点夹到
+/// 下一个边界 ⇒ 命中集合不变，因为命中本来就只能从字符边界起。
+fn next_char_match(hay: &str, lq: &LiteralQuery, from: usize) -> Option<(usize, usize)> {
+    let keys = &lq.keys;
+    let mut base = from;
+    while base < hay.len() && !hay.is_char_boundary(base) {
+        base += 1;
+    }
+    while base < hay.len() {
+        let first = hay[base..].chars().next()?;
+        if compare_key(first, lq.case_sensitive) != keys[0] {
+            base += first.len_utf8();
+            continue;
+        }
+        let mut end = base + first.len_utf8();
+        let mut matched = true;
+        for &k in &keys[1..] {
+            if end >= hay.len() {
+                return None; // 正文不够长：这个位置往后的窗口更补不满
+            }
+            let c = hay[end..].chars().next()?;
+            if compare_key(c, lq.case_sensitive) != k {
+                matched = false;
+                break;
+            }
+            end += c.len_utf8();
+        }
+        if matched {
+            return Some((base, end));
+        }
+        base += first.len_utf8();
+    }
+    None
+}
+
+/// 单行字面扫描：滑动窗口找命中，只在真正命中时才折算字符列号。
+///
+/// 正确性依据见 [`LiteralQuery::byte_scan_ok`] 与 [`next_char_match`]：字节档与字符档
+/// 给出同一个命中集合。字符列号靠**游标推进**：命中按字节序递增，每次只把
+/// 「上次结算点到本次命中点」的缺口折成字符数（非续字节计数），
+/// 故一行的折算总量 = 该行字节数，与命中数无关。
 ///
 /// 命中后起点前进 **1 字节**而非查询长度：保留重叠命中语义（旧实现的
 /// `for start in 0..=(len-q.len())` 天然重叠，`"aaa"` 搜 `"aa"` 得两处）。
@@ -473,10 +617,11 @@ fn scan_line(
     limit: usize,
 ) {
     let hay = line.as_bytes();
+    let arm = lq.arm_for(line);
     let mut from = 0usize;
     let mut settled = 0usize; // 已折进 col 的字节前缀
     let mut col = 0usize;
-    while let Some(i) = find_next(hay, &lq.folded, lq.case_sensitive, from) {
+    while let Some((i, _)) = next_match_in(arm, line, lq, from) {
         for &b in &hay[settled..i] {
             // 续字节 (10xx_xxxx) 不起始新字符 ⇒ 非续字节数即字符数
             col += (b & 0xC0 != 0x80) as usize;
@@ -564,11 +709,11 @@ fn query_is_multiline(mut q: impl Iterator<Item = char>) -> bool {
     q.any(|c| c == '\n' || c == '\r')
 }
 
-/// token 判等：普通字符走 ASCII 折叠；查询的换行单元恰好对应文本侧
-/// 归一换行单元。查询字面 `\r` 对任何文本 token 都失配。
+/// token 判等：普通字符走 [`case_fold_eq`]（Unicode 简单折叠，全仓唯一判据）；
+/// 查询的换行单元恰好对应文本侧归一换行单元。查询字面 `\r` 对任何文本 token 都失配。
 fn token_matches(qt: ScanToken, tt: ScanToken, case_sensitive: bool) -> bool {
     match (qt, tt) {
-        (ScanToken::Char(a), ScanToken::Char(b)) => char_eq(a, b, case_sensitive),
+        (ScanToken::Char(a), ScanToken::Char(b)) => case_fold_eq(a, b, case_sensitive),
         (ScanToken::Newline, ScanToken::Newline) => true,
         _ => false,
     }
@@ -751,8 +896,13 @@ pub fn prev_from(matches: &[MatchPos], line: usize, col: usize) -> Option<usize>
         })
 }
 
-/// 单字节大小写折叠：仅 ASCII 受影响，与 [`ascii_case_eq`] 同一口径
-/// （≥0x80 的 UTF-8 字节原样保留，多字节字符永远精确比较）。
+/// 单字节大小写折叠（**只**对 ASCII 有效）＝字节快路径专用。
+/// （≥0x80 的 UTF-8 字节原样保留。）
+///
+/// 它与 [`crate::case_fold::case_fold_eq`] 给出同一个集合**仅在 ASCII 上**：
+/// 那条等价由 `case_fold_eq_on_ascii_matches_unicode_folding` 对 128×128 全对穷举钉住，
+/// 而 [`LiteralQuery::byte_scan_ok`] 保证只有"查询与正文都是 ASCII"时才走到这里。
+/// 换句话说：这不是折叠口径的第二份定义，是它在 ASCII 档上的等价形式。
 #[inline]
 fn fold_byte(b: u8, case_sensitive: bool) -> u8 {
     if case_sensitive {
@@ -793,11 +943,11 @@ fn find_next(hay: &[u8], fq: &[u8], case_sensitive: bool, from: usize) -> Option
 
 /// 全部替换，返回 (新文本, 替换次数)。
 ///
-/// P11 重写：直接在 UTF-8 字节上扫描推进，不再把全文收集成
-/// `Vec<char>`（每字符 4 字节，50MB 文档的替换峰值曾达原文 ×5），
-/// 内存峰值降为「输入 + 输出」两份。折叠语义与旧实现完全一致：
-/// 仅 ASCII 折叠、最左优先、命中后整体跳过查询长度（不重叠）、
-/// 空查询是 no-op。
+/// P11 重写：扫描推进不经过全文 `Vec<char>`（每字符 4 字节，50MB 文档的替换峰值
+/// 曾达原文 ×5），内存峰值降为「输入 + 输出」两份；ASCII 正文继续走字节窗口。
+/// 折叠语义＝与查找同一个判据（`next_match_in` 一条入口 ⇒ 不可能出现「条上显示
+/// N 处命中、按全部替换报 0 处」那种分叉）：最左优先、命中后整体跳过命中窗口
+/// （不重叠）、空查询是 no-op。
 pub fn replace_all(
     text: &str,
     query: &str,
@@ -807,17 +957,15 @@ pub fn replace_all(
     if query.is_empty() {
         return (text.to_owned(), 0);
     }
-    let fq: Vec<u8> = query
-        .bytes()
-        .map(|b| fold_byte(b, case_sensitive))
-        .collect();
+    let lq = LiteralQuery::new(query, case_sensitive);
     let mut out = String::with_capacity(text.len());
     let mut count = 0usize;
     let mut pos = 0usize; // 已消费的原文边界 = 下一个搜索起点
-    while let Some(hit) = find_next(text.as_bytes(), &fq, case_sensitive, pos) {
+    let arm = lq.arm_for(text);
+    while let Some((hit, end)) = next_match_in(arm, text, &lq, pos) {
         out.push_str(&text[pos..hit]);
         out.push_str(replacement);
-        pos = hit + fq.len();
+        pos = end;
         count += 1;
     }
     out.push_str(&text[pos..]);
@@ -840,10 +988,7 @@ pub fn replace_all_word(
     if query.is_empty() {
         return (text.to_owned(), 0);
     }
-    let fq: Vec<u8> = query
-        .bytes()
-        .map(|b| fold_byte(b, case_sensitive))
-        .collect();
+    let lq = LiteralQuery::new(query, case_sensitive);
     // 整词边界规则的行内口径由 [`whole_word_bounds_ok`] 钉住：**跨行命中一律
     // 保留**（行内边界语义不成立）。字面查询是否跨行只取决于查询自身含不含
     // 行界字符，故在此提前判定——P222 之前这里无条件按「命中两侧字符」判界，
@@ -857,21 +1002,19 @@ pub fn replace_all_word(
     let mut count = 0usize;
     let mut pos = 0usize; // 已确认写出的原文边界
     let mut i = 0usize; // 下一个搜索起点
-    while let Some(hit) = find_next(text.as_bytes(), &fq, case_sensitive, i) {
-        // UTF-8 自同步性保证 hit 与 hit+len 均为字符边界（find_next 契约）
+    let arm = lq.arm_for(text);
+    while let Some((hit, end)) = next_match_in(arm, text, &lq, i) {
+        // [`next_match_in`] 两条扫描路都只从字符边界起命中 ⇒ hit 与 end 恒为字符边界
         let before_ok = hit == 0 || !text[..hit].chars().next_back().is_some_and(is_word_char);
-        let after_ok = !text[hit + fq.len()..]
-            .chars()
-            .next()
-            .is_some_and(is_word_char);
+        let after_ok = !text[end..].chars().next().is_some_and(is_word_char);
         if crosses_line || (before_ok && after_ok) {
             out.push_str(&text[pos..hit]);
             out.push_str(replacement);
-            pos = hit + fq.len();
+            pos = end;
             count += 1;
             i = pos;
         } else {
-            // 边界失格：只前进一个字符继续扫，保持与 find_all 的
+            // 边界失格：只前进一个字节继续扫，保持与 find_all 的
             // 非重叠命中序列可对拍
             i = hit + 1;
         }
@@ -906,10 +1049,7 @@ pub fn replace_all_document(
     let eol = doc.line_ending();
     let query = eol.normalize(query);
     let replacement = eol.normalize(replacement);
-    let fq: Vec<u8> = query
-        .bytes()
-        .map(|b| fold_byte(b, case_sensitive))
-        .collect();
+    let lq = LiteralQuery::new(&query, case_sensitive);
     // 输出容量提示（O-15b）：原状 `String::new()` 从 0 翻倍长到全文大小，
     // 50MB 即 20+ 次 realloc、等量 memcpy，峰值还多一倍。
     // ⚠️ 只在**替换不短于查询**时预容量——那时输出长度 ≥ 输入长度，按文档
@@ -928,30 +1068,17 @@ pub fn replace_all_document(
     let mut count = 0usize;
     for chunk in doc.chunks() {
         carry.push_str(chunk);
-        count += drain_matches(
-            &mut carry,
-            &mut out,
-            &fq,
-            &replacement,
-            case_sensitive,
-            false,
-        );
+        count += drain_matches(&mut carry, &mut out, &lq, &replacement, false);
     }
-    count += drain_matches(
-        &mut carry,
-        &mut out,
-        &fq,
-        &replacement,
-        case_sensitive,
-        true,
-    );
+    count += drain_matches(&mut carry, &mut out, &lq, &replacement, true);
     (out, count)
 }
 
 /// 把 `carry` 里能确定的扫描结果冲进 `out`（流式替换的内核）。
 ///
-/// * `final_pass=false`：块迭代进行中——末尾不足一个查询长度的残段
-///   可能与下一块拼出跨块命中，保留在 `carry` 里等待后续数据；
+/// * `final_pass=false`：块迭代进行中——末尾可能构成跨块命中的残段
+///   保留在 `carry` 里等待后续数据（留多少由 [`LiteralQuery::tail_reserve`] 定，
+///   折叠后的命中窗口可能比查询字节串更长：查询 `"K"` 能命中 3 字节的 U+212A）；
 /// * `final_pass=true`：数据到齐，冲刷全部剩余内容并清空 `carry`。
 ///
 /// 返回本次确认的替换次数。ropey 的块边界必落在字符边界上，但本函数
@@ -959,17 +1086,17 @@ pub fn replace_all_document(
 fn drain_matches(
     carry: &mut String,
     out: &mut String,
-    fq: &[u8],
+    lq: &LiteralQuery,
     replacement: &str,
-    case_sensitive: bool,
     final_pass: bool,
 ) -> usize {
     let mut count = 0usize;
     let mut consumed = 0usize; // carry 中已确认处理完的边界（恒为字符边界）
-    while let Some(hit) = find_next(carry.as_bytes(), fq, case_sensitive, consumed) {
+    let arm = lq.arm_for(carry); // 每块定一次档，不在每个命中上重过正文
+    while let Some((hit, end)) = next_match_in(arm, carry, lq, consumed) {
         out.push_str(&carry[consumed..hit]);
         out.push_str(replacement);
-        consumed = hit + fq.len();
+        consumed = end;
         count += 1;
     }
     if final_pass {
@@ -977,8 +1104,9 @@ fn drain_matches(
         carry.clear();
         return count;
     }
-    // 末尾不足一个查询长度的残段留给下一轮；其余已确认无命中的原文直接冲走
-    let mut keep_from = consumed.max(carry.len().saturating_sub(fq.len() - 1));
+    // 末尾可能构成跨块命中的残段留给下一轮；其余已确认无命中的原文直接冲走
+    let tail = lq.tail_reserve().saturating_sub(1);
+    let mut keep_from = consumed.max(carry.len().saturating_sub(tail));
     while keep_from > consumed && !carry.is_char_boundary(keep_from) {
         keep_from -= 1;
     }
@@ -1365,25 +1493,256 @@ fn spans_to_matchpos(text: &str, spans: &[(usize, usize)]) -> Vec<MatchPos> {
 mod tests {
     use super::*;
 
-    // ---------- P15：唯一大小写折叠实现 ----------
+    // ---------- 大小写折叠：ASCII 档的等价、Unicode 档的口径、与正则逐对同结论 ----------
 
+    /// **字节快路径的成立依据**：不敏感时「逐字节 XOR 0x20 相等」与「Unicode 简单折叠
+    /// 同类」在 ASCII×ASCII 上**逐对等价**——128×128 全穷举，一个字符都不放过。
+    /// [`LiteralQuery::byte_scan_ok`] 就是靠这条才敢在 ASCII 正文上继续走字节窗口
+    /// （O-11／O-13 那两组量出来的收益点不必为此变慢）。它红了＝快路径在骗人。
     #[test]
-    fn ascii_case_eq_folds_only_ascii() {
-        // ASCII 折叠生效
-        assert!(ascii_case_eq('a', 'A', false));
-        assert!(ascii_case_eq('Z', 'z', false));
-        assert!(!ascii_case_eq('a', 'B', false));
-        // 区分大小写时退化为精确比较
-        assert!(!ascii_case_eq('a', 'A', true));
-        assert!(ascii_case_eq('a', 'a', true));
+    fn case_fold_eq_on_ascii_matches_unicode_folding() {
+        for a in 0u8..=127 {
+            for b in 0u8..=127 {
+                let (ca, cb) = (a as char, b as char);
+                assert_eq!(
+                    ca.eq_ignore_ascii_case(&cb),
+                    case_fold_eq(ca, cb, false),
+                    "ASCII 档上两套折叠分叉：U+{a:02X} ↔ U+{b:02X}"
+                );
+            }
+        }
+        // 大小写敏感时字节比较＝精确比较（这条永远走快路径，与 ASCII 无关）
+        for a in 0u8..=127 {
+            for b in 0u8..=127 {
+                assert_eq!(
+                    a == b,
+                    case_fold_eq(a as char, b as char, true),
+                    "敏感档不该折：U+{a:02X} ↔ U+{b:02X}"
+                );
+            }
+        }
+    }
 
-        // 非 ASCII 永不折叠（土耳其 İ、希腊 Σ、德语 ß 都不算同一字符）
-        assert!(!ascii_case_eq('\u{130}', 'i', false)); // İ vs i
-        assert!(!ascii_case_eq('\u{3A3}', '\u{3C2}', false)); // Σ vs ς
-        assert!(!ascii_case_eq('ß', 's', false));
-        // 中文无大小写概念，始终精确
-        assert!(ascii_case_eq('中', '中', false));
-        assert!(!ascii_case_eq('中', '文', false));
+    /// 非 ASCII 折叠按 **Unicode 简单折叠**（第 306 轮 R-21 改判：此前只折 ASCII）。
+    /// 折得的与折不得的都钉：İ↔i、I↔ı、ß↔s 是多字符映射 ⇒ 两侧都不折，
+    /// 这一族顺带防住"以为 Unicode 折叠就能折一切"的误解（R-21 那三族重合）。
+    #[test]
+    fn case_fold_eq_folds_unicode_but_not_multigraph_mappings() {
+        assert!(case_fold_eq('a', 'A', false));
+        assert!(!case_fold_eq('a', 'B', false));
+        assert!(!case_fold_eq('a', 'A', true));
+        assert!(case_fold_eq('a', 'a', true));
+        for (a, b) in [
+            ('Ä', 'ä'),
+            ('É', 'é'),
+            ('Ö', 'ö'),
+            ('Ü', 'ü'),
+            ('Å', 'å'),
+            ('Σ', 'σ'),
+            ('Σ', 'ς'),
+            ('Ω', 'ω'),
+            ('Α', 'α'),
+            ('А', 'а'),
+            ('И', 'и'),
+            ('ẞ', 'ß'),
+            ('ǅ', 'ǆ'),
+            ('Ŋ', 'ŋ'),
+            ('µ', 'μ'),
+            ('K', '\u{212A}'), // KELVIN SIGN 折进 ASCII
+            ('S', '\u{17F}'),  // LONG S 同理
+        ] {
+            assert!(
+                case_fold_eq(a, b, false),
+                "U+{:04X} ↔ U+{:04X} 该折叠",
+                a as u32,
+                b as u32
+            );
+            assert!(case_fold_eq(b, a, false), "反向也该折：U+{:04X}", b as u32);
+            assert!(
+                !case_fold_eq(a, b, true),
+                "敏感档不该折：U+{:04X}",
+                a as u32
+            );
+        }
+        for (a, b) in [('\u{130}', 'i'), ('I', '\u{131}'), ('ß', 's'), ('ı', 'i')] {
+            assert!(
+                !case_fold_eq(a, b, false),
+                "U+{:04X} ↔ U+{:04X} 是多字符映射或无映射，两侧都不折",
+                a as u32,
+                b as u32
+            );
+        }
+        // 中文无大小写概念：同字相等、异字不等
+        assert!(case_fold_eq('中', '中', false));
+        assert!(!case_fold_eq('中', '文', false));
+    }
+
+    /// 类代表是**幂等**的（`class_key(class_key(c)) == class_key(c)`），扫遍 BMP＋
+    /// 常用补充平面。这是"拿最小码点当类身份证"这个做法的前提——不幂等就意味着
+    /// 同一个类有两个代表，判等会漏。
+    #[test]
+    fn class_key_is_idempotent_over_a_wide_sweep() {
+        use crate::case_fold::class_key;
+        for cp in (0u32..=0x10_FFFF).step_by(7) {
+            if let Some(c) = char::from_u32(cp) {
+                let k = class_key(c);
+                assert_eq!(
+                    class_key(k),
+                    k,
+                    "U+{:04X} 的类代表 U+{:04X} 自己不稳定",
+                    c as u32,
+                    k as u32
+                );
+            }
+        }
+    }
+
+    /// 统一口径的**正面证明**：逐对问两套引擎同一个问题，答案必须一样——
+    /// 判据 `case_fold_eq(a, b, false)` ⇔ 正则 `(?i)a` 命中 `b`。
+    /// 用的是真·fancy-regex（不是我对它行为的想象），字符表覆盖 R-21 那 16 对、
+    /// 三族重合、以及折进 ASCII 的两个异体。
+    #[test]
+    fn literal_folding_matches_regex_case_insensitivity_pairwise() {
+        let alphabet: Vec<char> = vec![
+            'a', 'A', 'k', 'K', 's', '\u{17F}', '\u{212A}', 'Ä', 'ä', 'Ö', 'ö', 'ß', '\u{1E9E}',
+            'Σ', 'σ', 'ς', 'Ω', 'ω', 'Α', 'α', 'А', 'а', 'И', 'и', 'Ŋ', 'ŋ', 'ǅ', 'ǆ', 'İ', 'i',
+            'ı', 'µ', 'μ', '中', '文', '0', '_', '-',
+        ];
+        assert!(alphabet.len() >= 30, "字符表被裁小了＝这条对拍失去判别力");
+        for &a in &alphabet {
+            let re = compile_regex(&a.to_string(), false)
+                .unwrap_or_else(|e| panic!("{a:?} 当模式不该报错：{e}"));
+            for &b in &alphabet {
+                let by_regex = re
+                    .is_match(&b.to_string())
+                    .unwrap_or_else(|e| panic!("{a:?} 匹配 {b:?} 报错：{e}"));
+                assert_eq!(
+                    case_fold_eq(a, b, false),
+                    by_regex,
+                    "字面与正则在 U+{:04X} ↔ U+{:04X} 上分叉",
+                    a as u32,
+                    b as u32
+                );
+            }
+        }
+    }
+
+    /// 统一折叠**不许把字节快路径一起关掉**（O-11／O-13 那两组量出来的收益点）：分派要真的
+    /// 发生，而且得用观察量数出来——把 [`LiteralQuery::byte_scan_ok`] 恒写成 `false` 也能让
+    /// 全套命中用例一字不差地全绿（只是每次查找退化成逐字符），那种"悄悄没了"必须有闸。
+    /// 夹具一律用打不中的查询 ⇒ 每行恰好一次扫描，计数才是确定的。
+    #[test]
+    fn unicode_folding_still_dispatches_ascii_text_to_the_byte_arm() {
+        take_arm_scans();
+        find_all("alpha line\nbeta line\ngamma", "zzz", false);
+        assert_eq!(
+            take_arm_scans(),
+            (3, 0),
+            "纯 ASCII 正文＋ASCII 查询：一行都不许掉进字符档"
+        );
+
+        find_all("alpha\n世界你好\nbeta", "zzz", false);
+        assert_eq!(take_arm_scans(), (2, 1), "只有含非 ASCII 的那一行走字符档");
+
+        find_all("alpha\nbeta", "\u{212A}", false);
+        assert_eq!(
+            take_arm_scans(),
+            (0, 2),
+            "查询含非 ASCII：正文是 ASCII 也走字符档"
+        );
+
+        find_all("世界你好\n再见", "zzz", true);
+        assert_eq!(
+            take_arm_scans(),
+            (2, 0),
+            "大小写敏感＝折叠恒等，非 ASCII 也走字节档"
+        );
+
+        // 字符档不是摆设：异体字命中确实只在它上面才看得见
+        assert_eq!(find_all("x\u{212A}x", "K", false).len(), 1);
+        assert!(take_arm_scans().1 > 0, "字符档确实被走过");
+    }
+
+    /// **成本形状契约**（M10b）：定档按"每段正文一次"走，不随命中数增长。
+    /// 分派判据本身要过一遍正文（`is_ascii`），所以"每段一次"与"每命中一次"的差别是
+    /// O(正文) 与 O(正文 × 命中数)——命中用例对两种写法**一律全绿**，只能数出来。
+    /// 这条不是预防性的：第 306 轮第一版就是把定档写在了扫描循环里，
+    /// `search_fold_bench` 的 `replace_all ascii`（15 MB × 20 万命中）当场跑不完。
+    #[test]
+    fn scan_arm_is_decided_per_haystack_not_per_match() {
+        // 每行 3 处命中、共 500 行 ⇒ "按行/按段"与"按命中"这两种写法数出来不同
+        let text = "batch batch batch line\n".repeat(500);
+        take_arm_decisions();
+        let (out, hits) = replace_all(&text, "batch", "X", false);
+        assert_eq!(
+            (hits, out.matches("X line").count()),
+            (1500, 500),
+            "夹具前提：1500 处替换落在 500 行上"
+        );
+        assert_eq!(
+            take_arm_decisions(),
+            1,
+            "整篇替换＝一次定档；每命中定一次就是 O(正文 × 命中数)"
+        );
+
+        take_arm_decisions();
+        assert_eq!(find_all(&text, "batch", false).len(), 1500);
+        assert_eq!(
+            take_arm_decisions(),
+            501,
+            "查找按行定档：500 行＋尾随行尾后的空行＝501 次，不随 1500 个命中增长"
+        );
+
+        take_arm_decisions();
+        let doc = Document::from_str(&text);
+        assert_eq!(replace_all_document(&doc, "batch", "X", false).1, 1500);
+        let decisions = take_arm_decisions();
+        assert!(
+            decisions < 1500,
+            "流式替换按块定档，次数应与块数同阶而不是贴上命中数，实得 {decisions}"
+        );
+    }
+
+    /// 分派只决定**成本**，不许决定语义：把同一段正文强行按任意一档扫，命中集合要一致。
+    /// 第 306 轮探针（把分派钉死成"永远字符档"再跑全套用例）就是靠这条抓出真 bug：
+    /// 字符档一度无条件比 `class_key` ⇒ 敏感档在 `"ab AB ab"` 上多命中一处 `AB`，
+    /// 当时只靠"敏感档永远走字节档"侥幸不发作。比较键因此改成跟着口径走
+    /// （[`crate::case_fold::compare_key`]），这一格把那次发现永久钉住。
+    #[test]
+    fn scan_arms_agree_and_sensitive_mode_never_folds() {
+        let forced = |text: &str, query: &str, cs: bool, arm: ScanArm| -> Vec<(usize, usize)> {
+            let lq = LiteralQuery::new(query, cs);
+            let mut out = Vec::new();
+            let mut from = 0usize;
+            while let Some((s, e)) = next_match_in(arm, text, &lq, from) {
+                out.push((s, e));
+                from = s + 1; // 与 scan_line 同款：前进一字节，保留重叠命中语义
+            }
+            out
+        };
+        // 两档本就等价的那些形状（ASCII 正文＋ASCII 查询）：集合与字节跨度都逐格对
+        for (text, query, cs) in [
+            ("ab AB ab\nbaba\n", "ab", true),
+            ("ab AB ab\nbaba\n", "ab", false),
+            ("aaa", "aa", false),
+            ("kake", "ak", false),
+        ] {
+            assert_eq!(
+                forced(text, query, cs, ScanArm::Byte),
+                forced(text, query, cs, ScanArm::Char),
+                "两档不等价: {text:?} 查询 {query:?} cs={cs}"
+            );
+        }
+        // 敏感档即便走字符档也不许折叠；不敏感档则必须折叠
+        assert_eq!(
+            forced("ab AB ab", "ab", true, ScanArm::Char).len(),
+            2,
+            "敏感档：字符档多命中一处 AB＝比较键没跟口径走"
+        );
+        assert_eq!(forced("ab AB ab", "ab", false, ScanArm::Char).len(), 3);
+        // 异体字只有字符档看得见（这一格同时说明"永远字节"是错的＝探针 B 的红点）
+        assert_eq!(forced("x\u{212A}x", "k", false, ScanArm::Char).len(), 1);
+        assert_eq!(forced("x\u{212A}x", "k", false, ScanArm::Byte).len(), 0);
     }
 
     /// 第 208 轮 L-15：这张命中表是否"按行升序、且同行内按列不重叠"。
@@ -2046,11 +2405,11 @@ mod tests {
             }
             let first = q[0];
             'window: for start in 0..=(lc.len() - q.len()) {
-                if !char_eq(first, lc[start], case_sensitive) {
+                if !case_fold_eq(first, lc[start], case_sensitive) {
                     continue;
                 }
                 for (offset, &qc) in q.iter().enumerate().skip(1) {
-                    if !char_eq(qc, lc[start + offset], case_sensitive) {
+                    if !case_fold_eq(qc, lc[start + offset], case_sensitive) {
                         continue 'window;
                     }
                 }
@@ -2468,7 +2827,7 @@ mod tests {
         let mut i = 0usize;
         let mut count = 0usize;
         while i <= t.len() - q.len() {
-            if (0..q.len()).all(|k| ascii_case_eq(q[k], t[i + k], case_sensitive)) {
+            if (0..q.len()).all(|k| case_fold_eq(q[k], t[i + k], case_sensitive)) {
                 out.push_str(replacement);
                 i += q.len();
                 count += 1;
@@ -2653,6 +3012,41 @@ mod tests {
             assert_eq!(out, expected, "offset={offset} 替换结果不一致");
             offset += 511; // 步长取奇数，覆盖相对块边界的全部相位
         }
+    }
+
+    /// 跨块命中的**字符档**孪生格（M10b）：上一格 `replace_all_document_hits_across_chunk_boundaries`
+    /// 用 `case_sensitive=true`，走的是字节档，残段留的是 `folded.len()-1` 字节——
+    /// 那条公式在字符档下**不够长**：三个 ASCII 查询字符可以命中 9 字节的
+    /// `U+212A ×3`，块边界落在窗口中间时，留少了就把一个命中切成两半。
+    /// ⇒ [`LiteralQuery::tail_reserve`] 的 4×字符数上界有看守，不是随手写的保守值。
+    ///
+    /// ⚠️ 夹具必须是**三个**字符：两字符的窗口只需要携带 1 个字符，而 carry 恒结束于
+    /// 字符边界，`snap 回边界`那一步会顺手把整个尾字符留下 ⇒ 旧公式照样全绿
+    /// （第 306 轮先用 2 字符夹具探针 PROBE-TAIL 实测过：七格全绿＝假守卫）。
+    /// ⚠️ 命中还要**密到足以撞上块边界**：块约 984 字节，一个 9 字节的窗口随机摆放
+    /// 几十个只有 ~0.9% 概率被边界切开 ⇒ 改成"每 989 字节放一个窗口"，周期与块长互质，
+    /// 60 个单元把所有相位都覆盖一遍（探针实测这才是有牙的夹具）。
+    #[test]
+    fn replace_all_document_hits_across_chunks_in_the_char_arm() {
+        let query = "kkk"; // 3 个 ASCII 字节，命中的却是 9 字节的 Kelvin 异体
+        let hay = "\u{212A}\u{212A}\u{212A}";
+        let units = 6_000usize;
+        // 10 字节一个窗口簇：块边界（约 984 字节）几乎必然落在某个窗口**中间**，
+        // 而"落在窗口后半"正是残段留少了的丢命中形状。稀疏摆放（每 989 字节一个）
+        // 实测探针全绿＝相位撞不上，夹具白写。
+        let text = format!("{hay}x").repeat(units);
+        let doc = Document::from_str(&text);
+        assert!(
+            doc.chunks().count() > 20,
+            "夹具前提：正文要真的被切成多块，否则跨块无从谈起"
+        );
+        let (out, n) = replace_all_document(&doc, query, "KKK", false);
+        assert_eq!(
+            n, units,
+            "每个 Kelvin 三元组都要被替换，块边界落在窗口里也不许丢"
+        );
+        let expected = "KKKx".repeat(units);
+        assert_eq!(out, expected, "整篇结果逐字节相同");
     }
 
     #[test]
@@ -3408,15 +3802,13 @@ mod tests {
         assert!(find_all_regex_document_limited(&doc, "(unclosed", true, 5).is_err());
     }
 
-    /// M10／定案 **R-21**：字面查找与正则查找的**大小写折叠口径不同**，这一格把分歧
-    /// 清单钉成事实而不是传说——字面＝仅 ASCII 折叠（字节快路径的前提），正则＝`(?i)`
-    /// Unicode 折叠。两侧都不许有人"顺手统一"而不重跑这条表；真要统一（M10b）时，
-    /// 这张表就是"改完之后应当全部 AGREE"的验收单。
+    /// M10b／定案 **R-21 改判**（第 306 轮）：字面与正则的折叠口径**已统一**到 Unicode
+    /// 简单折叠。这张表由第 303 轮那张"分歧清单"翻过来——R-21 当时留下的验收单写着
+    /// 「表里 16 对应当全部转成两侧都命中，而不是删掉了事」，本轮照单执行。
+    /// 后面那三族 AGREE 的格子原样保留：它们才是"统一"停在哪的边界。
     #[test]
-    fn case_folding_scope_literal_is_ascii_only_while_regex_is_unicode() {
-        // (查询那一位, 正文那一位, 期望：字面命中数, 期望：正则命中数)
-        // 期望值全部来自本轮实测（--nocapture 逐行读数），不是照抄实现推演。
-        let diverge: &[(char, char)] = &[
+    fn case_folding_scope_literal_and_regex_agree_everywhere() {
+        let unified: &[(char, char)] = &[
             ('Ä', 'ä'),
             ('É', 'é'),
             ('Ö', 'ö'),
@@ -3435,20 +3827,55 @@ mod tests {
             ('K', '\u{212A}'),
             ('S', '\u{017F}'),
         ];
-        for (upper, lower) in diverge {
-            for (q, hay) in [(*upper, *lower), (*lower, *upper)] {
+        assert_eq!(
+            unified.len(),
+            16,
+            "第 303 轮实测出来的就是 16 对，删格要连这条一起改"
+        );
+        for (a, b) in unified {
+            for (q, hay) in [(*a, *b), (*b, *a)] {
                 let text = format!("x{hay}x");
                 let query = q.to_string();
+                let doc = Document::from_str(&text);
                 let lit = find_all(&text, &query, false).len();
                 let rex = find_all_regex(&text, &query, false)
                     .unwrap_or_else(|e| panic!("{query:?}: 正则不该报错，实际 {e}"))
                     .len();
                 assert_eq!(
                     (lit, rex),
-                    (0, 1),
-                    "U+{:04X} ↔ U+{:04X}：字面只折 ASCII ⇒ 这一对应当 0 命中，而 (?i) 应当命中",
+                    (1, 1),
+                    "U+{:04X} ↔ U+{:04X}：统一口径之后两侧都必须命中",
                     q as u32,
                     hay as u32
+                );
+                // 一个判据喂五条入口 ⇒ 结构上不该再有「面板 N 处、替换 0 处」那种分叉
+                assert_eq!(
+                    find_all_document(&doc, &query, false).len(),
+                    1,
+                    "rope 流式档同样要命中：U+{:04X} ↔ U+{:04X}",
+                    q as u32,
+                    hay as u32
+                );
+                assert_eq!(
+                    replace_all(&text, &query, "Z", false).1,
+                    1,
+                    "替换侧必须与查找侧同结论"
+                );
+                assert_eq!(
+                    replace_all_document(&doc, &query, "Z", false).1,
+                    1,
+                    "流式替换侧必须同结论"
+                );
+                assert_eq!(
+                    replace_all_word(&text, &query, "Z", false).1,
+                    0,
+                    "整词档：命中夹在词字符中间，不该替换"
+                );
+                let wtext = format!("-{hay}-");
+                assert_eq!(
+                    replace_all_word(&wtext, &query, "Z", false).1,
+                    1,
+                    "整词档：两侧是标点，该替换"
                 );
             }
         }
@@ -3504,9 +3931,10 @@ mod tests {
             "开着大小写敏感，两侧都必须一个不中"
         );
 
-        // ⚠️ 另有一条**走字符比较**的字面路径：查询本身跨行时用 `scan_multiline_str`
-        // （内部经 `char_eq` → `ascii_case_eq`）。上面那些单行查询都走字节快路径，
-        // 所以这张表要同时钉住字符那一侧，否则有人改了折叠原语而表格毫无反应。
+        // ⚠️ 字面档其实有**两条扫描路**：单行查询在"查询与正文都是 ASCII"时走字节窗口，
+        // 其余一律走逐字符比较（跨行查询永远走这条）。上面那些格子的正文含非 ASCII ⇒
+        // 已经两条路都踩到了；这一格再钉一次"跨行那条也用同一个折叠判据"，
+        // 否则有人改了折叠原语而字符那一侧无人看守（第 303 轮就是这么漏的）。
         let hay_multi = "xÄ\ny".to_owned();
         let q_multi = "xä\ny".to_owned();
         assert_eq!(
@@ -3514,8 +3942,8 @@ mod tests {
                 find_all(&hay_multi, &q_multi, false).len(),
                 find_all_regex(&hay_multi, &q_multi, false).unwrap().len()
             ),
-            (0, 1),
-            "跨行查询走字符那一侧：字面仍只折 ASCII（正则折 Unicode）"
+            (1, 1),
+            "跨行查询走字符那一侧：折叠判据与字节侧同一个"
         );
     }
 }

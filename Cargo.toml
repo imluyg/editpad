@@ -28,6 +28,12 @@ iced_graphics = "0.14"
 # 相比 regex 门面额外支持环视/反向引用（主流编辑器级能力）。
 # 取舍：回溯引擎，病态模式可能慢（UI 有后台扫描+防抖兜底）。
 fancy-regex = "0.16"
+# M10b（第 306 轮，定案 R-21 改判）：字面查找的折叠判等**不自己抄一张表**，而是问
+# fancy-regex 编译 `(?i)` 时用的那一步——`hir::ClassUnicode::try_case_fold_simple`
+# （上游即 `regex_syntax::unicode_tables::case_folding_simple`，Unicode 16.0.0 简单折叠）。
+# 依赖树里本来就有它（fancy-regex → regex-syntax），这里只是提为直接依赖，
+# Cargo.lock 不新增包。features 只开 `unicode-case`＝折叠表那一项。
+regex-syntax = { version = "0.8", default-features = false, features = ["unicode-case"] }
 iced = { version = "0.14", default-features = false, features = [
     # P41 内存取舍（用户裁决「可妥协」）：tiny-skia 软渲染为唯一后端，
     # wgpu/GPU 驱动整树出局——GUI 进程内存的最大头（基线实测见 §2 P41）。

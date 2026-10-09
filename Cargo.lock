@@ -640,6 +640,7 @@ dependencies = [
  "dirs",
  "encoding_rs",
  "fancy-regex",
+ "regex-syntax",
  "ropey",
  "serde",
  "syntect",

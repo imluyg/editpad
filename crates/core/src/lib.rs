@@ -4,6 +4,7 @@
 //! 方便单独测试，将来做终端版时也能直接复用。
 
 pub mod brackets;
+pub mod case_fold;
 pub mod document;
 pub mod error;
 pub mod find_in_files;
@@ -22,6 +23,7 @@ pub(crate) mod syntaxes;
 pub mod toolkit;
 
 pub use brackets::{bracket_kind, scan_forward, BRACKET_PAIRS, MAX_BRACKET_SCAN_CHARS};
+pub use case_fold::case_fold_eq;
 pub use document::{trim_line_breaks, Document, LineEnding};
 pub use error::CoreError;
 pub use find_in_files::{
@@ -53,7 +55,7 @@ pub use saver::{
     save_atomic, save_document_atomic, save_document_encoded, EncodeNotice, SaveEncoding,
 };
 pub use search::{
-    ascii_case_eq, compile_regex, expand_regex_at, filter_whole_word, find_all, find_all_document,
+    compile_regex, expand_regex_at, filter_whole_word, find_all, find_all_document,
     find_all_document_limited, find_all_regex, find_all_regex_compiled, find_all_regex_document,
     find_all_regex_document_limited, for_each_line, is_line_break, is_word_char, line_break_units,
     next_from, prev_from, replace_all, replace_all_document, replace_all_regex, replace_all_word,
