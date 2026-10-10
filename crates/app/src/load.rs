@@ -84,7 +84,7 @@ pub(crate) async fn drive_load<L>(
                 // 因为 Box<dyn Any + Send> 自身也实现了 Any，编译器会走
                 // unsize 强制转换（把整个 Box 当作 Any 对象）而不是解引用，
                 // downcast 的 TypeId 就对不上了（实测踩坑）。
-                let message = panic_message(&*payload);
+                let message = panic_message(&*payload, lang);
                 LoadEvent::Done(Err(format!(
                     "{}{message}",
                     editpad_core::Key::StLoadThreadCrashed.text(lang)
@@ -122,12 +122,19 @@ pub(crate) async fn drive_load<L>(
 }
 
 /// 把 panic 载荷转成可读描述（P5 兜底提示用）。
-pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+///
+/// 兜底那句走键表（A8＝P377 那一族剩下的最后一格）：界面语言是英文时不许
+/// 冒出汉字。`lang` 由任务在**派发时刻**带进来，与 `CoreError::message(lang)`
+/// 同一条纪律（中途换语言不回头改已发出的那句）。
+pub(crate) fn panic_message(
+    payload: &(dyn std::any::Any + Send),
+    lang: editpad_core::Lang,
+) -> String {
     if let Some(text) = payload.downcast_ref::<&str>() {
         (*text).to_owned()
     } else if let Some(text) = payload.downcast_ref::<String>() {
         text.clone()
     } else {
-        "未知原因".to_owned()
+        editpad_core::Key::StUnknownReason.text(lang).to_owned()
     }
 }

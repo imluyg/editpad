@@ -52,9 +52,26 @@ fn fs_create_dir_all(dir: &Path) {
 
 #[test]
 fn panic_message_handles_known_payloads() {
-    assert_eq!(panic_message(&"字符串字面量"), "字符串字面量");
-    assert_eq!(panic_message(&(String::from("堆上字符串"))), "堆上字符串");
-    assert_eq!(panic_message(&42_i32), "未知原因");
+    use editpad_core::Lang;
+    assert_eq!(panic_message(&"字符串字面量", Lang::ZhCn), "字符串字面量");
+    assert_eq!(
+        panic_message(&(String::from("堆上字符串")), Lang::ZhCn),
+        "堆上字符串"
+    );
+    assert_eq!(panic_message(&42_i32, Lang::ZhCn), "未知原因");
+    // A8＝P377 那一族剩下的最后一格：兜底那句改走键表 ⇒ 英文侧另有文案
+    assert_eq!(panic_message(&42_i32, Lang::En), "unknown reason");
+    // 正面对照：认得的载荷两语言下同值——那是 panic 抛出的原文，翻译它才是假话
+    assert_eq!(panic_message(&"boom", Lang::En), "boom");
+    // 兜底之外没有汉字漏网（英文界面拼出的那句失败说明整条要干净）
+    let en = panic_message(
+        &std::collections::HashMap::<String, String>::new(),
+        Lang::En,
+    );
+    assert!(
+        !en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+        "英文侧兜底文案不许有汉字，实际 {en:?}"
+    );
 }
 
 /// 测试内派发：显式丢弃 Task（update 的返回值仅运行时消费）
