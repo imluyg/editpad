@@ -597,8 +597,10 @@ enum Message {
     /// 由 update 解包转 `Message::apply_language` 并带上完整语言信息）。
     LanguageOptionSelected(editpad_core::LangOption),
     /// P154 兼容入口：界面语言循环切换（中文简体 → English → …）。
-    /// 下拉框上线后设置页不再用它；保留给键盘/测试路径（故生产构建里
-    /// 没有构造点，dead_code 豁免）。
+    /// 下拉框（`LanguageOptionSelected`）上线后设置页不再用它，而键盘侧
+    /// **没有**给它登记热键（`hotkeys.rs` 里没有 language 条目）⇒ 现在的构造点
+    /// 只有测试，故 dead_code 豁免；哪天要恢复"按键切语言"，补的是热键登记，
+    /// 不是把这句注释改成"键盘路径在用"。
     #[allow(dead_code)]
     LanguageToggled,
     /// 字号增减（±2.0，clamp 后写回设置并即时生效）

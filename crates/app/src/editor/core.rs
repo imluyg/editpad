@@ -1181,9 +1181,9 @@ impl EditorCore {
     /// 列模型 `prefix_width × char_width`）。越界 col 取行尾（与列模型
     /// 的 min(chars.count()) 口径一致）。
     ///
-    /// P45 起生产路径改用滞后感知的 [`Self::px_of`]（update 期布局滞后
-    /// 时回退实时列模型）；本查询保留为 public API（外部兼容 + 诊断）。
-    #[allow(dead_code)]
+    /// 读者分两类：**绘制路径每帧问它**取真实字形 x（`view/mod.rs` 的正文段、
+    /// 选区带、命中底色、不可见字符标记四处）；update 期布局滞后的判定走
+    /// [`Self::px_of`]。两者不是替代关系，本函数也不是「仅供外部兼容与诊断」。
     pub fn row_x(&self, line: usize, col: usize) -> Option<f32> {
         let xs = self.row_layouts.get(&line)?;
         let last = xs.len() - 1;
