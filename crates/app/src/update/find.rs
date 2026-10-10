@@ -470,7 +470,7 @@ impl Editpad {
             // 点击命中：已开页切换并选中该命中；未开页走打开管线，
             // 装载结算（Loaded）后一次性消费 select_span（P133 同构）
             Message::FifGoto(file_idx, hit_idx) => {
-                if self.busy || self.active_load.is_some() {
+                if self.io_channel_busy() {
                     return Task::none();
                 }
                 let Some(fh) = self.fif_results.get(file_idx) else {

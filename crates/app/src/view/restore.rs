@@ -275,7 +275,7 @@ impl Editpad {
             return Task::none();
         }
         let entry = self.restore_queue.remove(0);
-        if self.busy || self.active_load.is_some() {
+        if self.io_channel_busy() {
             // 载入通道被占用（理论不可达：恢复链独占调度）：塞回队首等下轮
             self.restore_queue.insert(0, entry);
             return Task::none();

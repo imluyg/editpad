@@ -669,6 +669,51 @@ fn reload_clicked_while_a_load_is_running_keeps_the_prompt() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// 「装载在途 ⇒ `busy` 同为真」这条不变量是几处判据的地基：`menu_writable()` 与
+/// `load_channel_available()` 都只问 `busy`。本轮把八处手写的
+/// `busy || active_load.is_some()` 收成 `io_channel_busy()`（卫生项＝A6），顺手把
+/// 这条一直成立却没人钉的关系钉住——谁在别处清了 `busy` 而留着装载在途，这里就红。
+#[test]
+fn an_in_flight_load_holds_both_channel_flags() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::NewTab);
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/in-flight.txt")),
+    );
+    let job = app.active_load.clone().expect("夹具自证：应有一次装载在途");
+    assert!(
+        app.busy,
+        "装载在途时 busy 必须同为真——只问 busy 的消费者不能瞎"
+    );
+    assert!(
+        app.io_channel_busy(),
+        "收成一份的判据必须与那两个标记同起同落"
+    );
+    // 正对照：通道被占 ⇒ 两处"只问 busy"的消费者当场就判为不可用（不是空断言）
+    assert!(!app.menu_writable(), "通道被占时正文菜单不该报\"可写\"");
+    assert!(!app.load_channel_available(), "装载通道同样判为被占");
+
+    // 结算：两个标记一起落下（唯一的清算点就在 `Loaded` 臂里）
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job.id,
+            Ok((
+                editpad_core::Document::from_str("in flight\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(app.active_load.is_none(), "夹具自证：装载已结算");
+    assert!(
+        !app.io_channel_busy(),
+        "结算后两个标记必须一起落下，否则通道永远显得被占"
+    );
+    assert!(app.menu_writable(), "正对照：通道空出来后菜单回到可写");
+}
+
 #[test]
 fn autosave_write_honors_tab_save_encoding_not_always_utf8() {
     // 自动保存落盘必须按标签页的保存编码：旧实现恒 UTF-8，会把用户

@@ -331,7 +331,7 @@ impl Editpad {
                 // 凭空跳到第 N 行）。
                 // dirty 走确认条的分支照旧先写意图：确认「放弃并打开」后要让
                 // 跳行仍能兑现（取消分支由 N-07 的清账收口）。
-                if self.busy || self.active_load.is_some() {
+                if self.io_channel_busy() {
                     self.set_status(self.t(editpad_core::Key::StBusyRetry).to_owned());
                     return Task::none();
                 }
@@ -717,7 +717,7 @@ impl Editpad {
             }
             Message::ConvertEol(target) => {
                 self.eol_menu = false;
-                if self.busy || self.active_load.is_some() {
+                if self.io_channel_busy() {
                     return Task::none();
                 }
                 // 只读闸排在物化全文之前：行尾转换走 `replace_whole_document`，
@@ -852,6 +852,18 @@ impl Editpad {
         !self.busy
     }
 
+    /// 「读／写通道被占」的唯一判据：一次对话框／写盘往返在途（`busy`），或一次
+    /// 装载在途（`active_load`）。这条判据原本在各个臂里各抄一遍，P374 那轮补的
+    /// 就是「兄弟臂有、本臂漏」的那半——收进一处，分叉就结构性出局。
+    ///
+    /// ⚠️ 今天 `active_load` 与 `busy` 同起同落（`register_load_job` 置前者后紧接
+    /// `enter_busy`，唯一的清算点在 `Loaded` 臂），所以只看 `busy` 也够用；这里仍
+    /// 把两项写全不是为了当前必要，而是让「通道被占」只有一处说法。那条不变量由
+    /// 用例钉住：谁在别处清了 `busy` 却留着装载在途，用例会红。
+    pub(crate) fn io_channel_busy(&self) -> bool {
+        self.busy || self.active_load.is_some()
+    }
+
     pub(crate) fn start_loading(&mut self, path: PathBuf, tab: usize) -> Task<Message> {
         if !self.load_channel_available() {
             return Task::none();
@@ -936,7 +948,7 @@ impl Editpad {
     }
 
     pub(super) fn check_external_changes(&mut self) {
-        if self.busy || self.active_load.is_some() {
+        if self.io_channel_busy() {
             return;
         }
         let mut queue: Vec<u64> = Vec::new();
@@ -1003,7 +1015,7 @@ impl Editpad {
             self.rename_input.clear();
             return Task::none();
         };
-        if self.busy || self.active_load.is_some() {
+        if self.io_channel_busy() {
             self.set_status(self.t(editpad_core::Key::StBusyRetry).to_owned());
             return Task::none();
         }
@@ -1265,7 +1277,7 @@ impl Editpad {
     /// **调度时刻**的快照——若期间又有编辑，版本守卫会保持置脏，
     /// 本次编辑结束后由新任务覆盖最新内容（最终一致）。
     pub(super) fn maybe_schedule_autosave(&mut self) -> Task<Message> {
-        if !self.settings.autosave_enabled || self.busy || self.active_load.is_some() {
+        if !self.settings.autosave_enabled || self.io_channel_busy() {
             return Task::none();
         }
         let mut tasks = Vec::new();

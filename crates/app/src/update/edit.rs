@@ -443,7 +443,7 @@ impl Editpad {
                 // 要把它整体换掉（〔重载〕按页 id 落回同一页、不切页），此时格式化会写到
                 // 旧正文上、置脏并推进版本，而状态栏写着「已格式化 JSON」；到货之后
                 // `reset_document` 把这一切抹掉＝用户那一下什么都没留下，只留下一句假话。
-                if self.busy || self.active_load.is_some() {
+                if self.io_channel_busy() {
                     return Task::none();
                 }
                 // 仅当前语法为 JSON 时生效（P22 第二批：按当前语法判断）
