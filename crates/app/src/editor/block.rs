@@ -1091,8 +1091,12 @@ impl EditorCore {
             let extra = &lines[rows..];
             let eol_str = eol.newline();
             let bare_last = {
+                // 行尾判据引用 core 那一份（`trim_line_breaks` 认全异体行界，定案 R-11
+                // 「读按全集」）：只比 `'\n'`/`'\r'` 会把以 VT/FF/NEL/LS/PS 收尾的行
+                // 当成「没有行尾」，于是这里先补一个换行单元 ⇒ 凭空多出一整行空行。
+                // 剥掉了东西＝那一行本来就带行尾。
                 let last = self.doc.line_str(r1);
-                !(last.ends_with('\n') || last.ends_with('\r'))
+                editpad_core::trim_line_breaks(&last).len() == last.len()
             };
             let mut insert = String::new();
             if bare_last {

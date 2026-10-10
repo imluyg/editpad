@@ -1942,3 +1942,61 @@ fn extract_leading_int_handles_signs_overflow_and_words() {
         Some(i128::MIN)
     );
 }
+
+/// 列块「块扩展」的行尾判据必须引用 core 那一份（定案 R-11＝读按全集）。
+/// 改前只比 `'\n'`/`'\r'`：以 VT/FF/NEL/LS/PS 收尾的块末行被当成「没有行尾」，
+/// 于是先在它下面补一个换行单元 ⇒ **凭空多出一整行空行**（行模型那边它本来就有行尾）。
+#[test]
+fn block_extension_after_an_exotic_line_break_adds_no_phantom_line() {
+    for ch in ['\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'] {
+        let mut c = core_with(&format!("ab\ncd{ch}ef"));
+        // 夹具自证：这个字符在行模型里确实是一个行界——否则下面几格测的是空转
+        assert_eq!(c.doc.line_count(), 3, "前提：{ch:?} 必须切出第三行");
+        assert_eq!(
+            c.doc.line_str(1),
+            format!("cd{ch}"),
+            "前提：块末行以异体行界收尾"
+        );
+        c.block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 0 },
+            head: CursorPos { line: 1, col: 2 },
+        });
+        assert!(
+            c.insert_into_block("A\nB\nC"),
+            "文本 3 行填 2 行块 ⇒ 必须走扩展"
+        );
+        assert_eq!(
+            c.doc.to_text(),
+            format!("A\nB{ch}C\nef"),
+            "块末行已有行尾 ⇒ 不许再补一个换行单元"
+        );
+        assert_eq!(c.doc.line_count(), 4, "块 2 行＋新增 1 行＋原尾行＝4");
+    }
+
+    // 正面对照（判据反过来也要成立）：块末行**真的没有行尾**时仍然要补一个换行单元，
+    // 否则新增行会与块末行挤在同一行
+    let mut g = core_with("ab\ncd");
+    assert_eq!(g.doc.line_count(), 2, "前提：末行无行尾");
+    g.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 1, col: 2 },
+    });
+    assert!(g.insert_into_block("A\nB\nC"));
+    assert_eq!(
+        g.doc.to_text(),
+        "A\nB\nC\n",
+        "无行尾才补——补换行那条路没被一起关掉"
+    );
+    // 4 不是 3：文档以换行收尾时行模型多出一个幻影末行（定案 R-11／R-22 的既有口径，
+    // 本笔没动它）——这条断言钉的是"补齐末行行尾"这个后果，不是行数本身
+    assert_eq!(g.doc.line_count(), 4, "补齐行尾 ⇒ 幻影末行");
+
+    // 反面对照：主导行尾 LF 收尾的块末行照旧不补（挡住"逢扩展就补两个换行"）
+    let mut e = core_with("ab\ncd\nef");
+    e.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 1, col: 2 },
+    });
+    assert!(e.insert_into_block("A\nB\nC"));
+    assert_eq!(e.doc.to_text(), "A\nB\nC\nef", "LF 档一字不变");
+}
