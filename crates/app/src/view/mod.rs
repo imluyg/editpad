@@ -417,6 +417,7 @@ impl Editpad {
                         .size(uipx)
                         .font(uifont),
                     text_input(self.t(editpad_core::Key::GotoPlaceholder), &self.goto_input)
+                        .id(goto_input_widget_id()) // P151 同款：聚焦操作要与它同源
                         .size(uipx)
                         .font(uifont)
                         .on_input(Message::GotoInputChanged)
@@ -963,6 +964,17 @@ pub(crate) const FIND_INPUT_ID: &str = "editpad-find-input";
 /// [`iced::advanced::widget::Id`] 只能由 `&'static str` 构造）。
 pub(crate) fn find_input_widget_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new(FIND_INPUT_ID)
+}
+
+/// 「转到行」输入框的稳定 Id：与 [`FIND_INPUT_ID`] 同一把钥匙（P151）。
+/// 没有它，开栏后焦点仍在正文，打进去的数字与回车经 `listen_with` 的
+/// `Status::Ignored` 变成 `KeyPressed` → 热键表 → `InsertText`，
+/// **正文被写上「120⏎」**。
+pub(crate) const GOTO_INPUT_ID: &str = "editpad-goto-input";
+
+/// 跳转框的组件 Id（`.id(..)` 与聚焦操作同源，与 [`find_input_widget_id`] 同理）。
+pub(crate) fn goto_input_widget_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new(GOTO_INPUT_ID)
 }
 
 /// 结果面板行摘录：剥行尾 → 以命中列为窗心取最多 `max_cols` 个字符，

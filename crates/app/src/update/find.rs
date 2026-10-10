@@ -832,8 +832,16 @@ impl Editpad {
                     // P123：查找栏被跳转栏顶掉时同步清视口高亮（命中表
                     // 保留，重新开栏即恢复）
                     self.sync_find_highlights();
+                    // P151 同一把钥匙：开栏即聚焦跳转框，正文同步交出输入焦点。
+                    // 修前这个框既没有 Id 也从不被聚焦 ⇒ 浮层起来了而焦点在正文，
+                    // 打进去的数字与回车走 `KeyPressed` → `InsertText`＝**写进正文**；
+                    // 在框里打中文时上屏那一份也会被正文吃掉（同 P151 的成因）。
+                    self.focus_text_field(crate::view::goto_input_widget_id())
+                } else {
+                    // × 或再按一次收起：焦点还给正文，否则中文输入法在正文里失效
+                    self.focus_editor();
+                    Task::none()
                 }
-                Task::none()
             }
             Message::GotoInputChanged(value) => {
                 self.goto_input = value;
@@ -977,6 +985,8 @@ impl Editpad {
                         }
                     }
                     self.goto_visible = false;
+                    // 提交成功即关栏，焦点同样还给正文（与 GotoToggled 关闭分支同口径）
+                    self.focus_editor();
                     self.status.clear();
                     Task::none()
                 }

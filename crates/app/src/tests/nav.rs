@@ -103,3 +103,86 @@ fn empty_history_gives_a_status_hint_instead_of_silence() {
     assert!(!app.status.is_empty(), "空栈该有提示");
     assert_eq!(app.cur_handle.borrow().cursor, CursorPos::default());
 }
+
+/// 「转到行」框开栏后键盘输入不许落进正文＝P151 那一族（查找框／命令面板／就地
+/// 重命名都接了那把钥匙）剩下的第四个框。判据落在正文控件那一侧：开栏 ⇒ 正文交出
+/// 输入焦点，于是预编辑串与上屏文本都不再被正文消费；三条关栏出路（提交成功／
+/// 再按一次收起／Esc）各自把焦点还回正文。
+#[test]
+fn goto_bar_takes_keyboard_focus_from_the_document() {
+    use crate::editor::ImeCommit;
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("aaa\nbbb\nccc".to_owned())),
+    );
+    let doc_before = app.cur_handle.borrow().doc.to_text();
+    // 夹具自证：焦点原本在正文，否则下面那句「开栏后不 focused」是空断言
+    assert!(app.cur_handle.borrow().focused, "用例前提：焦点原本在正文");
+
+    // 开栏：正文让出焦点，IME 两半都不再被正文消费
+    dispatch(&mut app, Message::GotoToggled);
+    assert!(app.goto_visible, "用例前提：跳转栏已开");
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "跳转框接管后正文不得再持有输入焦点"
+    );
+    assert!(
+        !app.cur_handle.borrow_mut().ime_preedit("1".to_owned()),
+        "正文不得消费预编辑串（否则框与正文各画一份）"
+    );
+    assert_eq!(
+        app.cur_handle.borrow_mut().ime_commit("120"),
+        ImeCommit::Ignored,
+        "正文不得吃上屏文本"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        doc_before,
+        "「120」绝不能落进正文"
+    );
+
+    // 框里的内容归框，同样不写正文
+    dispatch(&mut app, Message::GotoInputChanged("2".to_owned()));
+    assert_eq!(app.goto_input, "2", "用例前提：输入落在框里");
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), doc_before);
+
+    // 出路①提交成功（跳完自动关栏）→ 焦点回正文
+    dispatch(&mut app, Message::GotoSubmit);
+    assert!(!app.goto_visible, "用例前提：提交后关栏");
+    assert!(
+        app.cur_handle.borrow().focused,
+        "提交关栏后正文应重新持有焦点"
+    );
+
+    // 出路②再按一次收起（× 走同一条消息）→ 焦点回正文
+    dispatch(&mut app, Message::GotoToggled);
+    assert!(!app.cur_handle.borrow().focused, "用例前提：开栏交出焦点");
+    dispatch(&mut app, Message::GotoToggled);
+    assert!(app.cur_handle.borrow().focused, "关栏后正文应重新持有焦点");
+
+    // 出路③ Esc（与查找栏共用那条收起出口，它自己就还焦点）
+    dispatch(&mut app, Message::GotoToggled);
+    assert!(!app.cur_handle.borrow().focused, "用例前提：开栏交出焦点");
+    dispatch(&mut app, Message::BarsDismissed);
+    assert!(!app.goto_visible, "用例前提：Esc 收起跳转栏");
+    assert!(
+        app.cur_handle.borrow().focused,
+        "Esc 收起后正文应重新持有焦点"
+    );
+
+    // 反面对照：无效输入既不关栏也不还焦点（框还在等用户改），也不许写正文
+    dispatch(&mut app, Message::GotoToggled);
+    dispatch(&mut app, Message::GotoInputChanged("abc".to_owned()));
+    dispatch(&mut app, Message::GotoSubmit);
+    assert!(app.goto_visible, "无效输入不该关栏");
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "栏还在场上 ⇒ 焦点不该回正文"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        doc_before,
+        "无效提交同样不写正文"
+    );
+}
