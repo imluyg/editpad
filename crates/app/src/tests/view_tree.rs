@@ -184,17 +184,37 @@ impl<'a> ViewTree<'a> {
 
     /// 注入一次事件，返回它触发的消息（`Task` 与真实运行一样在测试里丢弃）。
     pub(crate) fn send(&mut self, event: Event, at: Point) -> Vec<Message> {
+        self.send_status(event, at).0
+    }
+
+    /// 注入一次事件，并且**带出控件树的裁决**（`Captured` / `Ignored`）。
+    ///
+    /// 为什么需要：生产里按键进 `Editpad::update` 的唯一通道是
+    /// `listen_with`，而它只转发 `Status::Ignored`（`update/mod.rs:1129-1133`）。
+    /// 于是"这一键到底进没进正文"的判据就是这个状态，而 [`Self::send`] 把它丢了——
+    /// 聚焦类用例只能断 app 侧的 `focused` 字段，看不见「已聚焦的 `text_input`
+    /// 把键吃掉」这一层（`iced_widget-0.14.2/src/text_input.rs:910` 那一整支
+    /// 都被 `if let Some(focus) = &mut state.is_focused` 罩着）。
+    ///
+    /// 状态取自 `Shell::event_status()`：0.14 的 `Widget::update` **不返回**状态，
+    /// 控件调 `shell.capture_event()` 记在 shell 上，运行时遍历完整棵树后读它——
+    /// 这里做的就是运行时那一步。
+    pub(crate) fn send_status(
+        &mut self,
+        event: Event,
+        at: Point,
+    ) -> (Vec<Message>, iced::event::Status) {
         let mut messages: Vec<Message> = Vec::new();
         let mut clipboard = NullClipboard;
-        let Self {
-            element,
-            tree,
-            renderer,
-            root,
-            viewport,
-        } = self;
-        {
+        let status = {
             let mut shell = Shell::new(&mut messages);
+            let Self {
+                element,
+                tree,
+                renderer,
+                root,
+                viewport,
+            } = self;
             element.as_widget_mut().update(
                 tree,
                 &event,
@@ -205,8 +225,32 @@ impl<'a> ViewTree<'a> {
                 &mut shell,
                 viewport,
             );
-        }
-        messages
+            shell.event_status()
+        };
+        (messages, status)
+    }
+
+    /// 把「聚焦某个 widget Id」打进**当前这棵树**。
+    ///
+    /// ⚠️ 必须与 [`Self::send_status`] 用**同一个夹具实例**：[`Self::layout`] 每次都
+    /// `Tree::new(..)`（见本文件开头那条借用规矩），换一棵树重新布局＝聚焦状态归零，
+    /// 那样发键测的是"从没聚焦过的框"＝假绿。
+    ///
+    /// 应用自己走的是 `Task` 里的 `iced::widget::operation::focus`（`focus_text_field`），
+    /// 而 `dispatch` 丢 `Task` 看不见效果；这里直接把同一个操作打进树，
+    /// 于是"框真拿到了焦点"能被行为读数证明，而不只是断 app 侧那个镜像字段。
+    pub(crate) fn focus_widget(&mut self, id: iced::advanced::widget::Id) {
+        let mut op = iced::advanced::widget::operation::focusable::focus::<()>(id);
+        let Self {
+            element,
+            tree,
+            renderer,
+            root,
+            ..
+        } = self;
+        element
+            .as_widget_mut()
+            .operate(tree, Layout::new(root), renderer, &mut op);
     }
 
     /// 左键单击。

@@ -186,3 +186,186 @@ fn goto_bar_takes_keyboard_focus_from_the_document() {
         "无效提交同样不写正文"
     );
 }
+
+// ---------- 【测量轮】已聚焦输入框在**生产视图树里**的按键归属 ----------
+
+/// 一条「浮层输入框拿到焦点之后，三种键各自归谁」的探针描述。
+struct KeyRoute {
+    /// 失败信息里的名字
+    label: &'static str,
+    /// 造一个"这个浮层本来就开得起来"的应用
+    make: fn() -> Editpad,
+    /// 用**生产消息**把浮层开起来
+    open: fn(&mut Editpad),
+    /// 浮层在场判据（读各浮层自己的标记）
+    is_open: fn(&Editpad) -> bool,
+    /// 该框的组件 Id（与 view 侧 `.id(..)` 同源的那一个）
+    id: fn() -> iced::advanced::widget::Id,
+    /// 该框 `on_input` 那条消息的形状。判据统一取「载荷以 `a` 收尾」而不是
+    /// 等于 `"a"`：就地重命名那一个框**预填旧文件名**，插进去是「note.txta」——
+    /// 第一版我按 `== "a"` 写，红的是自己的期望而不是代码。
+    is_changed: fn(&Message) -> bool,
+    /// 该框 `on_submit` 那条消息的形状
+    is_submit: fn(&Message) -> bool,
+}
+
+/// 造一次"打出字符 `c`"的按键事件。`text` 是 iced 用来决定输入框要不要插入的
+/// 那一份（命名键那一路必须是 `None`），`modified_key` 与 `key` 取同值＝无修饰。
+fn pressed_char(c: &str, code: iced::keyboard::key::Code) -> iced::Event {
+    let key = iced::keyboard::Key::Character(c.into());
+    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: iced::keyboard::key::Physical::Code(code),
+        location: iced::keyboard::Location::Standard,
+        modifiers: iced::keyboard::Modifiers::empty(),
+        text: Some(c.into()),
+        repeat: false,
+    })
+}
+
+/// 造一次命名键（Enter / Escape）的按键事件：`text` 恒为 `None`。
+fn pressed_named(named: Named, code: iced::keyboard::key::Code) -> iced::Event {
+    let key = iced::keyboard::Key::Named(named);
+    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: iced::keyboard::key::Physical::Code(code),
+        location: iced::keyboard::Location::Standard,
+        modifiers: iced::keyboard::Modifiers::empty(),
+        text: None,
+        repeat: false,
+    })
+}
+
+/// 已经接了 P151 那把钥匙的三个框，在**真实视图树**里把键吃掉给谁——读数不推测。
+///
+/// 为什么单独立这一条：本族既有用例全部按 `Message::KeyPressed` 或业务消息
+/// **直接派发**（例如上面那条 `goto_bar_takes_keyboard_focus_from_the_document`
+/// 的出路③就是 `dispatch(Message::BarsDismissed)`），**绕过了控件树**。于是
+/// 「框真拿到焦点之后 iced 怎么处理键」这一层从来没有读数，而它恰恰是本族的地基：
+///
+/// * 上游 `iced_widget-0.14.2/src/text_input.rs:910`——整个 `KeyPressed` 支被
+///   `if let Some(focus) = &mut state.is_focused` 罩住＝只有**聚焦中的那个框**处理键；
+/// * `:1015-1036` 字符键插入后 `capture_event()`（＝打字进框、不落正文）；
+/// * `:1051-1055` Enter **只在设了 `on_submit` 时** publish ＋ capture；
+/// * `:1235-1243` **Escape 无条件** `is_focused = None` ＋ capture。
+///
+/// 而本应用把按键交给 `Editpad::update` 的唯一通道只收 `Status::Ignored`
+/// （`update/mod.rs:1129-1133`），Esc 关栏因此只能经 `hotkeys.rs:913` 的
+/// `Escape ⇒ BarsDismissed`。⇒ 读码推断「框聚焦时**第一下 Esc 到不了应用层**＝
+/// 要按两下才关浮层」，在这一轮之前**只是推断**，且四个已上线框全都带着它跑。
+///
+/// 读数口径＝`Shell::event_status()`（0.14 的 `Widget::update` **不返回**状态，
+/// 运行时遍历完整棵树后读的就是这个字段）——与生产同源，不是自造代理。
+#[test]
+fn focused_overlay_input_owns_its_keys_in_the_production_tree() {
+    use iced::keyboard::key::Code;
+    let cases = [
+        KeyRoute {
+            label: "查找框",
+            make: Editpad::default,
+            open: |app| dispatch(app, Message::FindToggled),
+            is_open: |app| app.find_visible,
+            id: crate::view::find_input_widget_id,
+            is_changed: |m| matches!(m, Message::FindQueryChanged(v) if v.ends_with('a')),
+            is_submit: |m| matches!(m, Message::FindNext),
+        },
+        KeyRoute {
+            label: "转到行框",
+            make: Editpad::default,
+            open: |app| dispatch(app, Message::GotoToggled),
+            is_open: |app| app.goto_visible,
+            id: crate::view::goto_input_widget_id,
+            is_changed: |m| matches!(m, Message::GotoInputChanged(v) if v.ends_with('a')),
+            is_submit: |m| matches!(m, Message::GotoSubmit),
+        },
+        KeyRoute {
+            label: "命令面板框",
+            make: Editpad::default,
+            open: |app| dispatch(app, Message::PaletteToggled(PaletteMode::Commands)),
+            is_open: |app| app.palette_visible,
+            id: crate::palette_input_id,
+            is_changed: |m| matches!(m, Message::PaletteInputChanged(v) if v.ends_with('a')),
+            is_submit: |m| matches!(m, Message::PaletteExecute),
+        },
+        KeyRoute {
+            label: "就地重命名框",
+            make: loaded_txt_app,
+            open: |app| dispatch(app, Message::RenameOrSaveAsTab(0)),
+            is_open: |app| app.renaming_tab.is_some(),
+            id: crate::rename_input_id,
+            is_changed: |m| matches!(m, Message::TabRenameInputChanged(v) if v.ends_with('a')),
+            is_submit: |m| matches!(m, Message::TabRenameCommitted),
+        },
+    ];
+    let at = iced::Point::new(640.0, 400.0);
+
+    for case in cases {
+        let mut app = (case.make)();
+        (case.open)(&mut app);
+        // 夹具自证①：浮层真的开着。否则下面跑的是"树上根本没有这个框"的树，
+        // 三条读数会一起给出"什么都没被吃"的假绿。
+        assert!(
+            (case.is_open)(&app),
+            "{}：用例前提——生产消息没能把浮层开起来",
+            case.label
+        );
+
+        let mut ui = ViewTree::layout_default(&app);
+        // 与生产同一条聚焦操作（`focus_text_field` 里那句 `operation::focus`），
+        // 打在**同一棵树**上——`layout()` 每次新建 Tree，换树＝焦点归零。
+        ui.focus_widget((case.id)());
+
+        // ①字符键：必须被框吃掉并产出该框的 on_input（＝焦点真落在这个框、
+        //   事件真走得到它）。这一条不通，后面两格一律不作数。
+        let (changed, char_status) = ui.send_status(pressed_char("a", Code::KeyA), at);
+        assert!(
+            char_status == iced::event::Status::Captured,
+            "{}：聚焦后字符键没被输入框捕获（状态 {char_status:?}）⇒ 焦点根本没落到框里",
+            case.label
+        );
+        assert!(
+            changed.iter().any(case.is_changed),
+            "{}：字符键该产出该框的 on_input 消息且载荷为「a」，实得 {changed:?}",
+            case.label
+        );
+
+        // ②Enter：四个框都设了 `.on_submit`，所以确认/执行**由控件产出**。
+        let (submitted, enter_status) =
+            ui.send_status(pressed_named(Named::Enter, Code::Enter), at);
+        assert!(
+            enter_status == iced::event::Status::Captured,
+            "{}：聚焦后 Enter 没被捕获，实得 {enter_status:?}",
+            case.label
+        );
+        assert!(
+            submitted.iter().any(case.is_submit),
+            "{}：Enter 该由控件产出 on_submit 那条消息，实得 {submitted:?}",
+            case.label
+        );
+
+        // ③Escape：本条就是那句"两下才关浮层"的**读数**。控件吃掉它（Blur）且不
+        //   产出任何消息 ⇒ 应用层永远看不见这一键 ⇒ `hotkeys.rs:913` 的
+        //   `Escape ⇒ BarsDismissed` 只能等第二下。
+        let (escaped, esc_status) = ui.send_status(pressed_named(Named::Escape, Code::Escape), at);
+        assert!(
+            esc_status == iced::event::Status::Captured,
+            "{}：Escape 没被输入框捕获，实得 {esc_status:?}",
+            case.label
+        );
+        assert!(
+            escaped.is_empty(),
+            "{}：Escape 被输入框吃掉后不该再产出任何消息，实得 {escaped:?}",
+            case.label
+        );
+        // ⚠️ 这一格断的是**当前事实**，不是"应当如此"：浮层还开着（app 侧标记未变），
+        // 因为这一键压根没进应用。它把"两下 Esc"这个后果指名道姓写出来，将来若要
+        // 让第一下就关栏（改上游捕获或换控件），这里会红得有意义。
+        assert!(
+            (case.is_open)(&app),
+            "{}：第一下 Escape 之后浮层仍该在场（这一键没进应用层）",
+            case.label
+        );
+    }
+}
