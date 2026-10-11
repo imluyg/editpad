@@ -238,7 +238,8 @@ fn pressed_named(named: Named, code: iced::keyboard::key::Code) -> iced::Event {
     })
 }
 
-/// 已经接了 P151 那把钥匙的三个框，在**真实视图树**里把键吃掉给谁——读数不推测。
+/// 接了 P151 那把钥匙的同族五个框（四个早已上线＋本笔新接的列编辑器），在**真实
+/// 视图树**里把键吃掉给谁——读数不推测。
 ///
 /// 为什么单独立这一条：本族既有用例全部按 `Message::KeyPressed` 或业务消息
 /// **直接派发**（例如上面那条 `goto_bar_takes_keyboard_focus_from_the_document`
@@ -254,7 +255,8 @@ fn pressed_named(named: Named, code: iced::keyboard::key::Code) -> iced::Event {
 /// 而本应用把按键交给 `Editpad::update` 的唯一通道只收 `Status::Ignored`
 /// （`update/mod.rs:1129-1133`），Esc 关栏因此只能经 `hotkeys.rs:913` 的
 /// `Escape ⇒ BarsDismissed`。⇒ 读码推断「框聚焦时**第一下 Esc 到不了应用层**＝
-/// 要按两下才关浮层」，在这一轮之前**只是推断**，且四个已上线框全都带着它跑。
+/// 要按两下才关浮层」，在这一轮之前**只是推断**，且四个已上线框全都带着它跑
+/// （新接的列编辑器作为第五格进这张表＝它必须与同族**逐格同判据**）。
 ///
 /// 读数口径＝`Shell::event_status()`（0.14 的 `Widget::update` **不返回**状态，
 /// 运行时遍历完整棵树后读的就是这个字段）——与生产同源，不是自造代理。
@@ -297,6 +299,29 @@ fn focused_overlay_input_owns_its_keys_in_the_production_tree() {
             id: crate::rename_input_id,
             is_changed: |m| matches!(m, Message::TabRenameInputChanged(v) if v.ends_with('a')),
             is_submit: |m| matches!(m, Message::TabRenameCommitted),
+        },
+        KeyRoute {
+            // 第五格＝本笔接上钥匙的那一个框。它进这张表的意义不是凑数：前三格
+            // 早已成立，这一格要求新框与同族**逐格同判据**（字符键进框、Enter 由
+            // 控件产出确认、第一下 Esc 被吃掉），从而证明"照同一把钥匙接"接对了。
+            label: "列编辑器内容框",
+            make: || {
+                let mut app = Editpad::default();
+                dispatch(
+                    &mut app,
+                    Message::Edit(EditOp::InsertText("aa\nbb".to_owned())),
+                );
+                app.cur_handle.borrow_mut().block_sel = Some(crate::editor::BlockSel {
+                    anchor: CursorPos { line: 0, col: 1 },
+                    head: CursorPos { line: 1, col: 2 },
+                });
+                app
+            },
+            open: |app| dispatch(app, Message::ColumnEditorToggled),
+            is_open: |app| app.column_editor_visible,
+            id: crate::view::ce_text_widget_id,
+            is_changed: |m| matches!(m, Message::ColumnEditorTextChanged(v) if v.ends_with('a')),
+            is_submit: |m| matches!(m, Message::ColumnEditorConfirmed),
         },
     ];
     let at = iced::Point::new(640.0, 400.0);
@@ -368,4 +393,162 @@ fn focused_overlay_input_owns_its_keys_in_the_production_tree() {
             case.label
         );
     }
+}
+
+/// 列编辑器对话框开栏后键盘输入不许落进正文＝P151 那一族剩下的第五个框（A1 同族）。
+///
+/// 它比前四个框多一层后果：对话框**只在列块态**打得开（`ColumnEditorToggled` 的
+/// 打开守卫），而列块态打字＝`insert_into_block` **逐行替换** ⇒ 修前 `F6` 之后
+/// 随手打的那几个字是真把正文改了，不是"看着别扭"。开栏臂原先返回的是
+/// `Task::none()`＝完全不接管焦点。
+#[test]
+fn column_editor_dialog_takes_keyboard_focus_from_the_document() {
+    use crate::editor::{BlockSel, ImeCommit};
+
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("aa\nbb".to_owned())),
+    );
+    let doc_before = app.cur_handle.borrow().doc.to_text();
+    // 夹具自证①：焦点原本在正文；②：列块在场（否则对话框根本开不起来）
+    assert!(app.cur_handle.borrow().focused, "用例前提：焦点原本在正文");
+    app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 1 },
+        head: CursorPos { line: 1, col: 2 },
+    });
+    assert!(app.cur_handle.borrow().has_block(), "用例前提：列块在场");
+
+    // 开栏：正文让出焦点，IME 两半都不再被正文消费，正文一字不改
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(app.column_editor_visible, "用例前提：对话框已开");
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "对话框接管后正文不得再持有输入焦点"
+    );
+    assert!(
+        !app.cur_handle.borrow_mut().ime_preedit("ab".to_owned()),
+        "正文不得消费预编辑串（否则框与正文各画一份）"
+    );
+    assert_eq!(
+        app.cur_handle.borrow_mut().ime_commit("X"),
+        ImeCommit::Ignored,
+        "正文不得吃上屏文本"
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        doc_before,
+        "开栏那一下不许改正文"
+    );
+
+    // Tab：列块态 `TabKey(false)` 是**逐行插制表符**（实测 `"aa\nbb"` → `"a\t\nb\t"`），
+    // 而 `text_input` 不处理 Tab ⇒ 它会漏到本层。判据取 `Task::units()`＝这一键
+    // 到底排没排出后续消息——⚠️ 不能只断"正文没变"：`dispatch` 丢 Task，修前那条
+    // `Task::done(Edit(TabKey))` 在无头里同样不执行，那是一句空断言。
+    let tab = app.update(Message::KeyPressed(key(Named::Tab), Modifiers::empty()));
+    assert_eq!(tab.units(), 0, "对话框里的 Tab 不许排出任何编辑任务");
+    // 正面对照：同一臂的 Enter 确实排出一条 ⇒ `units()` 分得开两者，不是恒 0
+    let enter = app.update(Message::KeyPressed(key(Named::Enter), Modifiers::empty()));
+    assert_eq!(
+        enter.units(),
+        1,
+        "对照：Enter 该排出 ColumnEditorConfirmed 那一步"
+    );
+
+    // 反面对照：空文本确认＝校验失败 ⇒ 对话框留在场上、焦点不回正文、正文不动
+    dispatch(&mut app, Message::ColumnEditorTextChanged(String::new()));
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert!(app.column_editor_visible, "校验失败不该关栏");
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "栏还在场上 ⇒ 焦点不该回正文"
+    );
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), doc_before);
+
+    // 每条出路都要能重开：填一次列块就没了（"操作消费掉块"是既定口径），
+    // 所以重开前按生产形状再框一块
+    let reopen = |app: &mut Editpad| {
+        app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 1 },
+            head: CursorPos { line: 1, col: 2 },
+        });
+        dispatch(app, Message::ColumnEditorToggled);
+        assert!(app.column_editor_visible, "用例前提：对话框重开起来了");
+        assert!(!app.cur_handle.borrow().focused, "用例前提：开栏交出焦点");
+    };
+
+    // 出路①确认成功 → 焦点回正文（内容真被填进块＝正面判据，与上面那条空文本对照）
+    dispatch(&mut app, Message::ColumnEditorTextChanged("Z".to_owned()));
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert!(!app.column_editor_visible, "用例前提：确认已关栏");
+    assert!(
+        app.cur_handle.borrow().focused,
+        "确认关栏后正文应重新持有焦点"
+    );
+    assert_ne!(
+        app.cur_handle.borrow().doc.to_text(),
+        doc_before,
+        "对照：确认确实把内容写进了列块（否则前面那些断言比的是空）"
+    );
+
+    // 出路②开关消息（×／Cancel／点背板走的都是这一条）
+    reopen(&mut app);
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(app.cur_handle.borrow().focused, "关栏后正文应重新持有焦点");
+
+    // 出路③按键拦截臂的 Esc（＝焦点已离开框之后的那一下；第一下被框吃掉是
+    // 上面那张路由表的第五格，两下的账在 `docs/days/` 里如实记着）
+    reopen(&mut app);
+    dispatch(
+        &mut app,
+        Message::KeyPressed(key(Named::Escape), Modifiers::empty()),
+    );
+    assert!(!app.column_editor_visible, "用例前提：Esc 关了栏");
+    assert!(
+        app.cur_handle.borrow().focused,
+        "Esc 关栏后正文应重新持有焦点"
+    );
+
+    // 出路④切页作废（P336 那条漏斗：对话框要写的列块属于旧页）。
+    // ⚠️ 这里只断"栏被作废"，**不断焦点**：探针现量＝把这一处调用退回裸赋值
+    // `self.column_editor_visible = false` 之后本用例照旧全绿——`NewTab` 换来的
+    // 那一页编辑器本来就持有焦点，那句断言比的是"真 vs 真"＝空断言。
+    // 这一处的"还焦点"按**结构性覆盖**入账（五路共用 `close_column_editor` 同一份
+    // 出口，摘掉出口本身由上面几条盯着），代码里不假装它有独立红点。
+    reopen(&mut app);
+    dispatch(&mut app, Message::NewTab);
+    assert!(
+        !app.column_editor_visible,
+        "切页应作废对话框（它要写的列块属于旧页）"
+    );
+
+    // 出路⑤进 busy（`Backdrop::ALL` 那份名单，P366）——放最后：这条会把 busy
+    // 立起来，而对话框的打开守卫见 busy 早退，后面再也重开不了。
+    // ⚠️ 同样**不断焦点**：探针现量＝把 `state.rs` 的 `Backdrop::ColumnEditor`
+    // 退回裸赋值，本用例照旧全绿。成因是 `enter_busy` 对 `ALL` 八个变体无条件各调
+    // 一次 close，而 `Backdrop::Palette` 那条臂**自带无条件的 `focus_editor()`**
+    // （`state.rs:672-676`）⇒ 这一路上焦点早就被它按回正文了，与本出口无关。
+    // "进 busy 收起对话框"这件事由 P366 那条 `Backdrop::ALL` 表驱动用例看守
+    // （`every_backdrop_in_the_production_list_yields_to_busy`），这里不重复主张；
+    // Palette 那条缺幂等判据本身已另记一笔。
+    app.set_active_tab(0);
+    reopen(&mut app);
+    dispatch(&mut app, Message::OpenRequested);
+    assert!(app.busy, "夹具自证：OpenRequested 真的走 enter_busy");
+    assert!(!app.column_editor_visible, "进 busy 应收起对话框");
+
+    // 幂等判据＝本出口在"对话框不在场"时对焦点**一字都不动**。这道闸不是摆设：
+    // `enter_busy`（`update/mod.rs:224-229`）对 `Backdrop::ALL` 八个变体无条件各调
+    // 一次 `close`，少了判据就等于每次进 busy 都替别的浮层决定焦点归谁。
+    // ⚠️ 同名单里 `Backdrop::Palette` 那一条**正是**没有这道闸（它无条件
+    // `focus_editor()`），实测能把还开着的查找栏的焦点按回正文——已另记一笔，
+    // 不在本笔范围（本笔只收列编辑器这一族）。
+    dispatch(&mut app, Message::FileChosen(None));
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.cur_handle.borrow().focused, "用例前提：查找栏接管焦点");
+    app.close_column_editor();
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "列编辑器不在场 ⇒ 这个出口不许动焦点"
+    );
 }

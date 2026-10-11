@@ -674,7 +674,7 @@ impl Backdrop {
                 // P151：面板关掉要把输入焦点还给正文，否则中文输入法失效
                 app.focus_editor();
             }
-            Backdrop::ColumnEditor => app.column_editor_visible = false,
+            Backdrop::ColumnEditor => app.close_column_editor(),
             Backdrop::Settings => app.close_settings_dialog(),
         }
     }

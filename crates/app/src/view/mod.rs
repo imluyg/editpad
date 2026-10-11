@@ -977,6 +977,33 @@ pub(crate) fn goto_input_widget_id() -> iced::advanced::widget::Id {
     iced::advanced::widget::Id::new(GOTO_INPUT_ID)
 }
 
+/// 列编辑器对话框四个输入框的稳定 Id（P151 那把钥匙剩下的第五个框）。
+///
+/// 为什么四个都要、而不是只给"开栏那一个"：`text_input` **只有拿到 Id 才能被
+/// 程序化聚焦**，而用户在框之间移动靠的是鼠标点击后继续打字——没有 Id 的那些框
+/// 一旦对话栏被别的东西夺走焦点就再也接不回来。开栏时按模式聚焦其中一个
+/// （见 `update/find.rs` 的 `ColumnEditorToggled`）。
+const CE_START_ID: &str = "editpad-ce-start";
+const CE_STEP_ID: &str = "editpad-ce-step";
+const CE_PAD_WIDTH_ID: &str = "editpad-ce-pad-width";
+const CE_TEXT_ID: &str = "editpad-ce-text";
+
+pub(crate) fn ce_start_widget_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new(CE_START_ID)
+}
+
+pub(crate) fn ce_step_widget_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new(CE_STEP_ID)
+}
+
+pub(crate) fn ce_pad_width_widget_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new(CE_PAD_WIDTH_ID)
+}
+
+pub(crate) fn ce_text_widget_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new(CE_TEXT_ID)
+}
+
 /// 结果面板行摘录：剥行尾 → 以命中列为窗心取最多 `max_cols` 个字符，
 /// 两端截断处补省略号 `…`。纯函数便于单测。
 pub(crate) fn match_excerpt(line_text: &str, col: usize, max_cols: usize) -> String {

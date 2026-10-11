@@ -399,16 +399,26 @@ impl Editpad {
                 }
                 // B9：列编辑器对话框可见时 Enter=确认 / Esc=取消（先于
                 // 列块 Esc 清块分支——对话框开着时 Esc 语义属于对话框）。
-                // 输入框字符键不到本层（订阅只转发 Ignored），不串打字。
+                // ⚠️ 这一臂**实际接得到的键**比这两行注释说的窄：四个输入框接了 P151
+                // 那把钥匙之后，字符键与 Enter 都被聚焦的框吃掉（上游 `text_input` 只在
+                // 设了 `on_submit` 时才 publish＋capture，本仓四框都设了），Escape 更是
+                // **无条件**被吃掉并让框失焦 ⇒ 落到这里的只有"焦点不在框里"那一档
+                // （刚按过第一下 Esc、或用户从头到尾没碰过输入框）。
                 if self.column_editor_visible {
                     match (&key, modifiers) {
                         (keyboard::Key::Named(Named::Escape), _) => {
-                            self.column_editor_visible = false;
+                            self.close_column_editor();
                             return Task::none();
                         }
                         (keyboard::Key::Named(Named::Enter), _) => {
                             return Task::done(Message::ColumnEditorConfirmed);
                         }
+                        // Tab 既不是 `text_input` 处理的字符键、也不在它那一份命名键
+                        // 表里 ⇒ 漏到本层。而列块态 `TabKey(false)` ＝**逐行插制表符**
+                        // （实测 `"aa\nbb"` → `"a\t\nb\t"`）：在对话框里按 Tab 的人想的是
+                        // "下一栏"，绝不是"改正文"。这里既不做栏间导航（那要新增"当前
+                        // 哪一栏"这份状态）也不写正文，就地吞掉。
+                        (keyboard::Key::Named(Named::Tab), _) => return Task::none(),
                         _ => {}
                     }
                 }
@@ -607,7 +617,7 @@ impl Editpad {
         };
         match payload {
             Ok(text) => {
-                self.column_editor_visible = false;
+                self.close_column_editor();
                 self.status.clear();
                 // 递归 update（Pasted 同款先例）：busy/只读守卫在
                 // apply_edit 总闸二次生效，这里不重复裁决

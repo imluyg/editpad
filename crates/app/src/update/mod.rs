@@ -303,7 +303,8 @@ impl Editpad {
     pub(crate) fn set_active_tab(&mut self, idx: usize) {
         self.active_tab = idx.min(self.tabs.len() - 1);
         self.cur_handle = self.tabs[self.active_tab].editor.clone();
-        self.column_editor_visible = false;
+        // 走唯一出口：对话框带走了键盘焦点，换页把它关掉的同时必须还给**新页**正文
+        self.close_column_editor();
         self.editor_context_menu = false;
         self.tab_context_menu = None;
         self.cancel_find_scan();
@@ -537,6 +538,25 @@ impl Editpad {
     /// 鼠标点在正文里的情形由控件自身的 `pointer_focus(true)` 覆盖，二者等价。
     pub(crate) fn focus_editor(&mut self) {
         self.cur_handle.borrow_mut().pointer_focus(true);
+    }
+
+    /// 关闭列编辑器对话框的**唯一出口**：连同输入焦点一起还给正文。
+    ///
+    /// 为什么收成一处：本仓反复的"清除点散在各出路"那一族（P303／P336／P345／
+    /// P354／P367／P389）。关掉这一栏的写点现量五处＝开关消息的关支、
+    /// `KeyPressed` 的 Esc 臂、确认成功、`enter_busy` 遍历 `Backdrop::ALL`、
+    /// `set_active_tab` 的浮层作废。接了键盘焦点之后"还焦点"每一条都得走——
+    /// 漏一条就是对话框已经关了而正文仍持有 `pointer_focus(false)`
+    /// ＝中文输入法在正文里失效（P151 原文那个症状）。
+    ///
+    /// ⚠️ 幂等判据不是防御性摆设：`enter_busy` 对 `ALL` 八个变体**无条件**各调一次
+    /// `close`，少了这道"本来不在场就什么都不做"的闸，等于每次进 busy 都把焦点
+    /// 按回正文——那会夺走查找栏（它**不在**这份名单里）正拿着的焦点。
+    pub(crate) fn close_column_editor(&mut self) {
+        if !std::mem::replace(&mut self.column_editor_visible, false) {
+            return;
+        }
+        self.focus_editor();
     }
 
     /// 消息总入口：按域分派到 `update_editor` / `update_tabs` / `update_file` /

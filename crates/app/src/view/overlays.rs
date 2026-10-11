@@ -811,19 +811,36 @@ impl Editpad {
         .into()
     }
     /// B9：列编辑器对话框——整窗背板（点击关闭）+ 居中卡片（设置弹窗
-    /// P40 同款结构、命令面板同款 opaque 防穿透）。文本/序号两模式；
-    /// Enter 确认 / Esc 取消在 KeyPressed 层拦截，输入框字符键不串层
-    /// （P129 同口径）。数值输入以字符串承载、确认时统一校验。
+    /// P40 同款结构、命令面板同款 opaque 防穿透）。文本/序号两模式。
+    ///
+    /// 键盘归属（接了 P151 那把钥匙之后才是下面这样，此前四框无 `Id`、开栏不
+    /// 聚焦 ⇒ 打字**全部落进正文**，而列块态打字＝逐行替换）：每个输入框都挂
+    /// 稳定 `Id` 并与开栏时的聚焦操作同源，字符键因此被聚焦的那个框吃掉；
+    /// Enter 走 `.on_submit(ColumnEditorConfirmed)`＝与已上线四个框一致。
+    /// ⚠️ Escape 由上游 `text_input` **无条件吃掉**（先让框失焦），第一下关不掉
+    /// 对话框＝四个已上线框同样的事实；`update/edit.rs` 的拦截臂只在焦点
+    /// 不在框里时（例如刚按过那一下 Esc）才接得到这一键。
+    /// 数值输入以字符串承载、确认时统一校验。
     pub(super) fn column_editor_overlay(&self) -> Element<'_, Message> {
         let uipx = editor::ui_font_px();
         let uifont = self.ui_font();
         let d = &self.column_editor;
-        let text_input_w = |placeholder: &'static str, value: &str, msg: fn(String) -> Message| {
+        let text_input_w = |placeholder: &'static str,
+                            value: &str,
+                            id: iced::advanced::widget::Id,
+                            msg: fn(String) -> Message| {
             text_input(placeholder, value)
+                // 与 `focus_text_field(..)` 同源的那把钥匙（P151 同口径）：没有
+                // `.id(..)` 的输入框既不能被程序化聚焦，也就接不住开栏后的第一次打字
+                .id(id)
                 .size(uipx)
                 .font(uifont)
                 .width(Fill)
                 .on_input(msg)
+                // Enter 由控件产出确认＝与已上线那四个框一致（它们全都带
+                // `.on_submit`）；不设这一句 Enter 不会被捕获、退到
+                // `update/edit.rs` 的拦截臂兜底
+                .on_submit(Message::ColumnEditorConfirmed)
                 .padding([3, 8])
         };
         let mode_btn = |label: &str, active: bool| {
@@ -880,6 +897,7 @@ impl Editpad {
                     text_input_w(
                         self.t(editpad_core::Key::CeStartHint),
                         &d.start,
+                        crate::view::ce_start_widget_id(),
                         Message::ColumnEditorStartChanged,
                     ),
                     uipx,
@@ -890,6 +908,7 @@ impl Editpad {
                     text_input_w(
                         self.t(editpad_core::Key::CeStepHint),
                         &d.step,
+                        crate::view::ce_step_widget_id(),
                         Message::ColumnEditorStepChanged,
                     ),
                     uipx,
@@ -918,6 +937,7 @@ impl Editpad {
                     text_input_w(
                         self.t(editpad_core::Key::CePadHint),
                         &d.pad_width,
+                        crate::view::ce_pad_width_widget_id(),
                         Message::ColumnEditorWidthChanged,
                     ),
                     uipx,
@@ -938,6 +958,7 @@ impl Editpad {
                 text_input_w(
                     self.t(editpad_core::Key::CeTextContent),
                     &d.text,
+                    crate::view::ce_text_widget_id(),
                     Message::ColumnEditorTextChanged,
                 ),
                 uipx,

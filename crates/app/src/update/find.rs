@@ -917,7 +917,7 @@ impl Editpad {
             // ---------- B9 列编辑器对话框 ----------
             Message::ColumnEditorToggled => {
                 if self.column_editor_visible {
-                    self.column_editor_visible = false;
+                    self.close_column_editor();
                     return Task::none();
                 }
                 // 打开前置守卫：busy 与软换行拒绝；无列块拒绝（块是插入
@@ -938,7 +938,17 @@ impl Editpad {
                 self.close_settings_dialog();
                 self.palette_visible = false;
                 self.column_editor_visible = true;
-                Task::none()
+                // P151 那把钥匙剩下的第五个框：开栏就把键盘焦点交给**当下这个模式
+                // 要填的那一栏**。缺这一句时 `F6` 开栏后打的字一个都不进框——它们经
+                // `listen_with` 的 `Status::Ignored` 变成 `KeyPressed` → 热键表 →
+                // `EditOp::InsertText`，而列块态打字＝`insert_into_block` **逐行替换**
+                // ⇒ 用户以为在给对话框填内容，实际在改正文。
+                let id = if self.column_editor.number_mode {
+                    crate::view::ce_start_widget_id()
+                } else {
+                    crate::view::ce_text_widget_id()
+                };
+                self.focus_text_field(id)
             }
             Message::ColumnEditorModeToggled => {
                 self.column_editor.number_mode = !self.column_editor.number_mode;
