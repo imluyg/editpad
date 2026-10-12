@@ -15,8 +15,8 @@
 //! * 行内标记**要求闭合**：找不到闭栏时按字面量输出（与 CommonMark 一致），
 //!   不再把后半行整条染色
 //!
-//! 明确不支持（保持字面量）：HTML 标签、脚注、引用式链接 `[a][ref]`、
-//! 列表内的续行段落、表格单元里的 `\|` 转义竖线。
+//! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）、脚注 `[^1]`、
+//! 表格单元里的 `\|` 转义竖线。
 
 /// 行内样式位标志。
 pub const MD_BOLD: u8 = 1 << 0;
@@ -202,13 +202,51 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         }
 
         if let Some(item) = list_item(lines[i]) {
+            // 一个列表项可能占好几行：正文写完直接回车换行（缩进够 or CommonMark 的
+            // lazy continuation 不缩进），或空一行再接第二段。改前这些续行统统掉回
+            // 段落分支——项目符号后面接的话被顶到列表外面另起一段，列表看着断了。
+            // 项首行行尾的空白是硬换行标记（见 `line_break_kind`），不是正文——与段落
+            // 分支同一口径，先摘掉再拼接
+            let mut body = String::from(item.content.trim_end());
+            let mut prev_raw = lines[i];
+            let mut blanks = 0usize;
+            let mut k = i + 1;
+            while k < lines.len() {
+                let raw = lines[k];
+                let t = raw.trim();
+                if t.is_empty() {
+                    blanks += 1;
+                    k += 1;
+                    continue;
+                }
+                // 另起一块的开头（标题/围栏/分隔线/表格/引用/下一个列表项/定义行）不吃；
+                // 空过行之后只有缩进够到正文列的那一行还归本项
+                let belongs = !starts_new_block(&lines, k, &defs, &is_def)
+                    && (blanks == 0 || indent_cols(raw) >= item.content_col);
+                if !belongs {
+                    break;
+                }
+                let (sep, drop_backslash) = line_break_kind(prev_raw);
+                if drop_backslash {
+                    // 行尾那个 `\` 是换行标记本身，不进正文文本
+                    body.pop();
+                }
+                if !body.is_empty() {
+                    // 空过行＝另起一段：用 `\n` 断在项内，比并成一行更像原来的写法
+                    body.push(if blanks > 0 { '\n' } else { sep });
+                }
+                body.push_str(t);
+                blanks = 0;
+                prev_raw = raw;
+                k += 1;
+            }
             blocks.push(MdBlock::ListItem {
                 order: item.order,
                 indent: item.indent,
                 task: item.task,
-                spans: inline_with(item.content, &defs),
+                spans: inline_with(&body, &defs),
             });
-            i += 1;
+            i = k;
             continue;
         }
 
@@ -226,15 +264,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     break;
                 }
             }
-            if next.is_empty()
-                || fence(&lines, i).is_some()
-                || heading(next).is_some()
-                || is_rule(next)
-                || is_table_start(&lines, i, &defs)
-                || quote(next).is_some()
-                || list_item(lines[i]).is_some()
-                || is_def[i]
-            {
+            if next.is_empty() || starts_new_block(&lines, i, &defs, &is_def) {
                 break;
             }
             let (sep, drop_backslash) = line_break_kind(prev_raw);
@@ -386,6 +416,21 @@ struct MdListItem<'a> {
     indent: usize,
     task: Option<bool>,
     content: &'a str,
+    /// 正文起始**列**（行首缩进 + 标记宽度 + 标记后的空白）：续行的归属判据用它。
+    content_col: usize,
+}
+
+/// 行首空白的列宽（制表符按 4 列，与 [`list_item`] 的缩进层级同一口径）。
+fn indent_cols(raw: &str) -> usize {
+    let mut cols = 0usize;
+    for c in raw.chars() {
+        match c {
+            ' ' => cols += 1,
+            '\t' => cols += 4,
+            _ => break,
+        }
+    }
+    cols
 }
 
 fn list_item(raw: &str) -> Option<MdListItem<'_>> {
@@ -400,8 +445,9 @@ fn list_item(raw: &str) -> Option<MdListItem<'_>> {
         idx += c.len_utf8();
     }
     let rest = &raw[idx..];
-    let (order, after) = if let Some(after) = rest.strip_prefix(['-', '*', '+']) {
-        (None, after)
+    // 标记本身的列宽（无序 1 列；有序＝数字位数 + `.`/`)`），续行归属判据要用
+    let (order, after, marker_cols) = if let Some(after) = rest.strip_prefix(['-', '*', '+']) {
+        (None, after, 1usize)
     } else {
         // 有序：≤9 位数字 + `.` 或 `)`
         let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
@@ -413,12 +459,13 @@ fn list_item(raw: &str) -> Option<MdListItem<'_>> {
         let tail = &rest[byte_len..];
         let order = head.parse::<usize>().ok()?;
         let after = tail.strip_prefix(['.', ')'])?;
-        (Some(order), after)
+        (Some(order), after, digits + 1)
     };
     // 标记后必须跟空白，且不能是分隔线（`---` 已在块级先判掉）
     if !after.starts_with([' ', '\t']) {
         return None;
     }
+    let ws_cols = indent_cols(after);
     let content = after.trim_start_matches([' ', '\t']);
     let mut task = None;
     let mut body = content;
@@ -436,6 +483,7 @@ fn list_item(raw: &str) -> Option<MdListItem<'_>> {
         indent: (cols / 2).min(6),
         task,
         content: body,
+        content_col: cols + marker_cols + ws_cols,
     })
 }
 
@@ -468,6 +516,19 @@ fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
 /// 表格第一行的判定（段落续行要用它断句）。
 fn is_table_start(lines: &[&str], i: usize, defs: &LinkDefs) -> bool {
     table(lines, i, defs).is_some()
+}
+
+/// 这一行是不是**另起一块**的开头：段落的续行与列表项的续行共用这一份判据
+/// （两处各写一遍就会各漏一格，比如列表项吃了 `>` 引用行）。
+fn starts_new_block(lines: &[&str], i: usize, defs: &LinkDefs, is_def: &[bool]) -> bool {
+    let t = lines[i].trim();
+    fence(lines, i).is_some()
+        || heading(t).is_some()
+        || is_rule(t)
+        || is_table_start(lines, i, defs)
+        || quote(t).is_some()
+        || list_item(lines[i]).is_some()
+        || is_def[i]
 }
 
 /// GFM 表格：表头行 + 分隔行（只含 `| : - 空格`）+ 数据行。
@@ -1315,6 +1376,98 @@ mod tests {
         // 「3.14 是圆周率」不是列表项（数字后没有空格）
         let blocks = parse_markdown("3.14 是圆周率");
         assert!(matches!(&blocks[0], MdBlock::Paragraph { .. }));
+    }
+
+    /// 列表项的**续行**留在项里：缩进接着写的、不缩进接着写的（CommonMark 的 lazy
+    /// continuation）、空一行再接的第二段，统统并回同一个项目符号；而真正另起一块的
+    /// 开头（下一个项／标题／引用／围栏／分隔线／定义行）仍把项收住。
+    /// 改前这些续行全掉回段落分支＝符号后面接的话跑出列表，看着像排版坏了。
+    #[test]
+    fn list_item_continuation_lines_stay_in_the_item() {
+        let items = |src: &str| -> Vec<(usize, String)> {
+            parse_markdown(src)
+                .iter()
+                .filter_map(|b| match b {
+                    MdBlock::ListItem { indent, spans, .. } => {
+                        Some((*indent, spans.iter().map(|s| s.text.as_str()).collect()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            items("- 第一项说明\n  接着写的续行\n- 第二项\n"),
+            vec![
+                (0, "第一项说明 接着写的续行".to_owned()),
+                (0, "第二项".to_owned())
+            ],
+            "缩进续行并回上一项"
+        );
+        assert_eq!(
+            items("- 第一项\n不缩进也接着写\n"),
+            vec![(0, "第一项 不缩进也接着写".to_owned())],
+            "lazy continuation：不缩进也归本项"
+        );
+        assert_eq!(
+            items("- 甲  \n  乙\n"),
+            vec![(0, "甲\n乙".to_owned())],
+            "行尾两个空格＝项内的硬换行，不是两段"
+        );
+        assert_eq!(
+            items("- 第一段\n\n  第二段\n\n下一段\n"),
+            vec![(0, "第一段\n第二段".to_owned())],
+            "空行后缩进的第二段仍在本项内；顶格那行才是新的一块"
+        );
+        assert_eq!(
+            items("1. 甲\n   续行\n2. 乙\n"),
+            vec![(0, "甲 续行".to_owned()), (0, "乙".to_owned())],
+            "有序项的续行判据按标记宽度（`1. `＝3 列）"
+        );
+        assert_eq!(
+            items("- 甲\n  - 乙\n"),
+            vec![(0, "甲".to_owned()), (1, "乙".to_owned())],
+            "嵌套子项是另一项，不是续行"
+        );
+        assert_eq!(
+            items("- [ ] 未完成\n  再补一句\n"),
+            vec![(0, "未完成 再补一句".to_owned())],
+            "任务项的续行不吃掉勾选框"
+        );
+
+        let kinds = |src: &str| -> Vec<&'static str> {
+            parse_markdown(src)
+                .iter()
+                .map(|b| match b {
+                    MdBlock::Heading { .. } => "heading",
+                    MdBlock::Paragraph { .. } => "paragraph",
+                    MdBlock::CodeBlock { .. } => "code",
+                    MdBlock::ListItem { .. } => "item",
+                    MdBlock::Quote { .. } => "quote",
+                    MdBlock::Table { .. } => "table",
+                    MdBlock::Rule => "rule",
+                })
+                .collect()
+        };
+        assert_eq!(
+            kinds("- 甲\n  # 标题\n"),
+            vec!["item", "heading"],
+            "缩进够到正文列的 `#` 仍是标题，不当续行"
+        );
+        assert_eq!(
+            kinds("- 甲\n  > 引用\n"),
+            vec!["item", "quote"],
+            "引用行不并进列表项"
+        );
+        assert_eq!(
+            kinds("- 甲\n  ```\n  代码\n  ```\n"),
+            vec!["item", "code"],
+            "项内的围栏自成一块"
+        );
+        assert_eq!(
+            kinds("- 甲\n\n- 乙\n"),
+            vec!["item", "item"],
+            "松散列表：空行之后的同级项仍是独立项"
+        );
     }
 
     /// 连续引用行并成一块；`>>` 记深度。

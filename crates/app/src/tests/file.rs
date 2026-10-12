@@ -3727,6 +3727,60 @@ fn markdown_preview_renders_hard_line_breaks_as_breaks() {
     );
 }
 
+/// 列表项的续行在预览里**还是同一个项目符号**：改前续行掉出列表＝符号一行、下面
+/// 多一段没有符号的正文，用户看到的是"列表断了"。
+///
+/// 这里断的是渲染层的两格——块节点**只有一个**（并回同一项 ⇒ 一个 `Rich`），
+/// 且项内那个硬换行真的折出第二行（高度 >2 倍单行）。先钉住对照组只有一行高。
+#[test]
+fn markdown_preview_keeps_a_multi_line_list_item_in_one_block() {
+    fn preview_nodes(text: &str) -> Vec<iced::Rectangle> {
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+        );
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::PreviewToggled);
+        let tree = ViewTree::layout(&app, iced::Size::new(1280.0, 800.0));
+        tree.find_all(|b| {
+            b.x > 640.0 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0
+        })
+    }
+
+    let single = preview_nodes("- 甲\n");
+    assert_eq!(single.len(), 1, "一行项只该有一个块节点：{single:?}");
+    assert!(
+        single[0].height < 30.0,
+        "对照组本身就该是一行高，否则比高度没有意义：{}",
+        single[0].height
+    );
+
+    let wrapped = preview_nodes("- 甲  \n  乙\n");
+    assert_eq!(
+        wrapped.len(),
+        1,
+        "续行跑出列表了＝多出一个没有项目符号的段落节点：{wrapped:?}"
+    );
+    assert!(
+        wrapped[0].height >= single[0].height * 2.0,
+        "项内的硬换行没折出第二行：单行 {}，续行 {}",
+        single[0].height,
+        wrapped[0].height
+    );
+}
+
 /// 开预览＝**分栏**，不是把正文整块换掉：左半正文仍在场（可继续编辑），右半是预览。
 ///
 /// 改前 `view/mod.rs` 那句 `if preview_visible && is_markdown { 预览 } else { 正文 }`
