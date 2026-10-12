@@ -196,6 +196,33 @@ impl EditorCore {
         self.insert_str(&text);
     }
 
+    /// Markdown 页的回车＝**接住列表**（编辑面）。
+    ///
+    /// 三种落点：① 列表项且已有正文 ⇒ 新行给同样的标记（有序进位、任务框给**空框**）；
+    /// ② 空的列表项 ⇒ 退出列表（删掉那截标记，再走普通回车留一个空行作段间空行）；
+    /// ③ 其余（非列表行、或光标还停在标记之前）⇒ 与 [`enter`](Self::enter) 逐字一致。
+    ///
+    /// 判据本身在 core 的 [`editpad_core::markdown::list_enter_action`]（一份表，
+    /// 与预览解析器同一模块），这里只管落到文档上。
+    pub fn enter_markdown(&mut self) {
+        let line = self.cursor.line;
+        let body = self.line_body_without_eol(line);
+        match editpad_core::markdown::list_enter_action(&body) {
+            Some(editpad_core::markdown::MdListEnter::Exit { marker_end }) => {
+                self.select_span(line, 0, marker_end);
+                self.insert_str("");
+                self.enter();
+            }
+            Some(editpad_core::markdown::MdListEnter::Next { prefix, from_col })
+                if self.cursor.col >= from_col =>
+            {
+                let text = format!("\n{prefix}");
+                self.insert_str(&text);
+            }
+            _ => self.enter(),
+        }
+    }
+
     /// P122 无选区 Ctrl+C/X 的整行取词：当前行原文（含本行行尾单元，
     /// 幻影末行返回空串）。复制/剪切共用，不改文档、不置脏。
     pub fn current_line_copy_text(&self) -> String {

@@ -487,6 +487,95 @@ fn list_item(raw: &str) -> Option<MdListItem<'_>> {
     })
 }
 
+/// 列表项**回车续写**的两种结果（编辑面，预览解析器不用它）。
+///
+/// 只判**当前这一行**（不看上下文），因为按回车时唯一确定的就是光标所在行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdListEnter {
+    /// 接着开下一项：`prefix` ＝缩进＋标记＋空格（有序已进位、任务框给空框）。
+    /// `from_col` ＝正文起始列；光标还在标记之前时不接管（那一下就是普通回车）。
+    Next { prefix: String, from_col: usize },
+    /// 本项正文是空的 ⇒ **退出列表**：删掉行首 `[0, marker_end)` 那一截标记。
+    Exit { marker_end: usize },
+}
+
+/// 列表项回车续写的判据（编辑面）。`marker_end` ＝正文起始的**字符列**，
+/// 因标记区全是 ASCII，它同时是字节偏移。
+///
+/// * `- 甲` → `Next("- ")`；`3. 甲` → `Next("4. ")`（保持零位数宽）；
+/// * `- [x] 甲` → `Next("- [ ] ")`（勾带过来就变成"新项也已完成"，是错的）；
+/// * `- `（正文空）→ `Exit{2}`：回车退出这个列表，而不是无限接空项。
+pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
+    let head_len: usize = line
+        .chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .map(char::len_utf8)
+        .sum();
+    let head = &line[..head_len];
+    let rest = &line[head_len..];
+    // 标记：无序 1 字符；有序＝数字 + `.`/`)`
+    let (marker_text, marker_bytes, unordered) = match rest.chars().next() {
+        Some(c @ ('-' | '*' | '+')) => (c.to_string(), 1usize, true),
+        Some(d) if d.is_ascii_digit() => {
+            let digits: usize = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .map(char::len_utf8)
+                .sum();
+            let sep = rest[digits..]
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '.' | ')'))?;
+            let n: usize = rest[..digits].parse().ok()?;
+            // 零位宽度保持：`08.` 的下一项是 `09.`，不是 `9.`
+            (
+                format!("{:0>width$}{sep}", n + 1, width = digits),
+                digits + 1,
+                false,
+            )
+        }
+        _ => return None,
+    };
+    // 标记后必须紧跟空白（`-abc`、`1.ab` 都不是列表）
+    let after = &rest[marker_bytes..];
+    let spaces: usize = after
+        .chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .map(char::len_utf8)
+        .sum();
+    if spaces == 0 {
+        return None;
+    }
+    let body = &after[spaces..];
+    // 任务框算标记的一部分（只有无序项有）：新项给一个**空框**
+    let (box_len, box_text, body_text) = match unordered {
+        true => match ["[ ]", "[x]", "[X]"]
+            .iter()
+            .find_map(|m| body.strip_prefix(m))
+        {
+            Some(tail) => {
+                let ws = tail.chars().take_while(|c| matches!(c, ' ' | '\t')).count();
+                (3 + ws, "[ ]", &tail[ws..])
+            }
+            None => (0, "", body),
+        },
+        false => (0, "", body),
+    };
+    let marker_end = head_len + marker_bytes + spaces + box_len;
+    if body_text.trim().is_empty() {
+        return Some(MdListEnter::Exit { marker_end });
+    }
+    let prefix = if box_text.is_empty() {
+        format!("{head}{marker_text} ")
+    } else {
+        format!("{head}{marker_text} {box_text} ")
+    };
+    Some(MdListEnter::Next {
+        prefix,
+        from_col: marker_end,
+    })
+}
+
 /// 围栏代码块：```` ``` ```` 与 `~~~`，记录 info 串首词作语言；未闭栏也成块。
 fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
     let open = lines[start].trim_start();
@@ -2127,5 +2216,45 @@ mod tests {
             vec!["paragraph", "rule"],
             "带空格的 --- 不是下划线"
         );
+    }
+
+    /// 列表项**回车续写**的判据：接下一项（有序进位、任务框给空框）、空项退出列表、
+    /// 非列表行交回普通回车。编辑面（`enter_markdown`）唯一动手的就是这张表。
+    #[test]
+    fn enter_action_continues_the_list_or_exits_it() {
+        let next = |line: &str| match list_enter_action(line) {
+            Some(MdListEnter::Next { prefix, .. }) => prefix,
+            other => panic!("期望 Next：{other:?}"),
+        };
+        let exit = |line: &str| match list_enter_action(line) {
+            Some(MdListEnter::Exit { marker_end }) => marker_end,
+            other => panic!("期望 Exit：{other:?}"),
+        };
+        assert_eq!(next("- 甲"), "- ");
+        assert_eq!(next("* 甲"), "* ");
+        assert_eq!(next("+ 甲"), "+ ");
+        assert_eq!(next("  - 甲"), "  - ", "缩进跟着走");
+        assert_eq!(next("\t- 甲"), "\t- ");
+        assert_eq!(next("3. 甲"), "4. ");
+        assert_eq!(next("3) 甲"), "4) ", "`)` 分隔符同样认");
+        assert_eq!(next("08. 甲"), "09. ", "零位宽度保持");
+        assert_eq!(next("9. 甲"), "10. ");
+        assert_eq!(next("- [x] 甲"), "- [ ] ", "已勾的项接出来是**空框**");
+        assert_eq!(next("  * [X] 甲"), "  * [ ] ");
+        assert_eq!(
+            next("1. [x] 甲"),
+            "2. ",
+            "有序项不带任务框（与预览解析器同一口径）"
+        );
+
+        assert_eq!(exit("- "), 2, "空项：删掉行首这 2 个字符");
+        assert_eq!(exit("-   "), 4, "标记后的空白一并删");
+        assert_eq!(exit("  -  "), 5, "缩进也算标记那截");
+        assert_eq!(exit("2. "), 3);
+        assert_eq!(exit("- [ ]"), 5, "只剩一个空框也算空项");
+
+        for line in ["正文", "-abc", "1.ab", "---", "*** 粗", "", "  ", "# 标题"] {
+            assert!(list_enter_action(line).is_none(), "{line:?} 不该被当列表项");
+        }
     }
 }

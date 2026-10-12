@@ -741,6 +741,11 @@ impl Editpad {
         // 维持保守置脏，避免大文档每键全量比对）
         let mut back_to_saved = false;
 
+        // 回车在 Markdown 页要接住列表（编辑面）。判据与预览同一口径＝现量语法名，
+        // 非 .md 页一律走原来的智能缩进回车。
+        let md_page =
+            self.cur_handle.borrow().highlight_syntax_name().as_deref() == Some("Markdown");
+
         let mut editor = self.cur_handle.borrow_mut();
         let changed = match op {
             E::Motion(motion, extend) => {
@@ -909,7 +914,11 @@ impl Editpad {
             // 的块分支去作用**块跨的每一行**（它自己把块收掉）；无块时按原语义
             // （无选区 Tab=插制表符、Shift+Tab=当前行反缩进，函数内兜底）
             E::Enter => {
-                editor.enter();
+                if md_page {
+                    editor.enter_markdown();
+                } else {
+                    editor.enter();
+                }
                 true
             }
             E::TabKey(outdent) => {

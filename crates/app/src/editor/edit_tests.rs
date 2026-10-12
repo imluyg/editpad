@@ -312,8 +312,51 @@ fn enter_uses_dominant_eol_and_is_undoable() {
     assert_eq!(c.doc.to_text(), "  a\r\nb");
 }
 
-// ---------- P122 删词（Ctrl+Backspace / Ctrl+Delete） ----------
+// ---------- Markdown 页回车接住列表（编辑面） ----------
 
+#[test]
+fn enter_markdown_continues_unordered_ordered_and_task_items() {
+    let mut c = core_with("- 甲");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "- 甲\n- ");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 2 });
+    // 空项上再按一次＝退出列表：标记删掉，留一个段间空行
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "- 甲\n\n");
+    assert_eq!(c.cursor, CursorPos { line: 2, col: 0 });
+
+    let mut c = core_with("3. 甲\n尾行");
+    c.cursor = CursorPos { line: 0, col: 4 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "3. 甲\n4. \n尾行", "有序号进位");
+
+    let mut c = core_with("- [x] 甲");
+    c.cursor = CursorPos { line: 0, col: 7 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "- [x] 甲\n- [ ] ", "已勾的项接出来是空框");
+
+    let mut c = core_with("  - 甲");
+    c.cursor = CursorPos { line: 0, col: 5 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "  - 甲\n  - ", "缩进跟着走");
+}
+
+#[test]
+fn enter_markdown_leaves_non_list_lines_to_smart_indent() {
+    // 非列表行＝与 enter() 逐字相同（继承行首缩进、不加标记）
+    let mut c = core_with("    foo");
+    c.cursor = CursorPos { line: 0, col: 7 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "    foo\n    ");
+    // 光标还停在标记之前＝不接管（那一下就是在行首断行，不是续写列表）
+    let mut c = core_with("- 甲");
+    c.cursor = CursorPos { line: 0, col: 0 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "\n- 甲");
+}
+
+// ---------- P122 删词（Ctrl+Backspace / Ctrl+Delete） ----------
 #[test]
 fn delete_word_left_removes_to_word_start_and_is_undoable() {
     let mut c = core_with("foo   bar");

@@ -3727,6 +3727,47 @@ fn markdown_preview_renders_hard_line_breaks_as_breaks() {
     );
 }
 
+/// Markdown 页按回车＝**接住列表**，普通文本页一个字都不变。
+///
+/// 走生产消息路（`Message::Edit(EditOp::Enter)`，与 `hotkeys.rs` 那把 Enter 同一个 op），
+/// 所以这条盯的是「语法名 ⇒ 换回车行为」那一格接线；编辑器级用例（`enter_markdown_*`）
+/// 只测判据怎么落到文档上，接不上这格线也照样绿。
+#[test]
+fn enter_on_a_markdown_page_continues_the_list() {
+    fn app_with(path: &str, text: &str) -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from(path)));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(
+            &mut app,
+            Message::Edit(EditOp::Motion(Motion::DocEnd, false)),
+        );
+        app
+    }
+    let text_of = |app: &Editpad| app.cur_handle.borrow().doc.to_text();
+
+    let mut md = app_with("C:/x/notes.md", "- 甲");
+    dispatch(&mut md, Message::Edit(EditOp::Enter));
+    assert_eq!(text_of(&md), "- 甲\n- ", ".md 页的回车该接住列表");
+    dispatch(&mut md, Message::Edit(EditOp::Enter));
+    assert_eq!(text_of(&md), "- 甲\n\n", "空项上再回车＝退出列表");
+
+    let mut txt = app_with("C:/x/notes.txt", "- 甲");
+    dispatch(&mut txt, Message::Edit(EditOp::Enter));
+    assert_eq!(text_of(&txt), "- 甲\n", "非 .md 页的回车行为一字不变");
+}
+
 /// 列表项的续行在预览里**还是同一个项目符号**：改前续行掉出列表＝符号一行、下面
 /// 多一段没有符号的正文，用户看到的是"列表断了"。
 ///
