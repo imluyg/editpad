@@ -3720,6 +3720,11 @@ fn markdown_preview_renders_hard_line_breaks_as_breaks() {
         hard > soft * 2.0,
         "行尾两个空格没在预览里折出行：软换行 {soft}，硬换行 {hard}"
     );
+    let via_br = block_height("短句一<br>短句二<br>短句三\n");
+    assert!(
+        via_br > soft * 2.0,
+        "`<br>` 没在预览里折出行：软换行 {soft}，`<br>` 那版 {via_br}"
+    );
 }
 
 /// 开预览＝**分栏**，不是把正文整块换掉：左半正文仍在场（可继续编辑），右半是预览。

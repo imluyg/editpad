@@ -779,7 +779,7 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>)
             }
         }
 
-        // 自动链接 `<https://…>`（HTML 标签按字面量，不吞）
+        // 自动链接 `<https://…>`（HTML 标签按字面量，不吞），但 `<br>` 这一个是换行
         if c == '<' {
             if let Some(end) = text[i + 1..].find('>') {
                 let inner = &text[i + 1..i + 1 + end];
@@ -790,6 +790,18 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>)
                         style: base | MD_LINK,
                         link: Some(inner.to_owned()),
                     });
+                    i += 1 + end + 1;
+                    continue;
+                }
+                // 从 Word／Confluence／各种导出工具里最常漏出来的一个标签：
+                // 它不是样式，是**换行**，按字面量显示等于把用户的意思吃掉
+                let body = inner.trim();
+                if !body.is_empty()
+                    && body
+                        .trim_end_matches(|c: char| c == '/' || c.is_whitespace())
+                        .eq_ignore_ascii_case("br")
+                {
+                    lit.push('\n');
                     i += 1 + end + 1;
                     continue;
                 }
@@ -1366,12 +1378,28 @@ mod tests {
         );
     }
 
-    /// HTML 标签不在 v2 范围内：按字面量原样，不许吞掉内容。
+    /// HTML 标签**除了 `<br>`** 都按字面量（本解析器不渲 HTML）。`<br>` 单独立出来
+    /// 是因为它是「换行」而不是一种样式，见 `br_tags_become_line_breaks`。
     #[test]
     fn html_tags_stay_literal() {
         assert_eq!(
-            inline("<br>与<div class=\"x\">"),
-            vec![MdSpan::plain("<br>与<div class=\"x\">")]
+            inline("<div class=\"x\">与</span>"),
+            vec![MdSpan::plain("<div class=\"x\">与</span>")]
+        );
+    }
+
+    /// `<br>` 的几种写法 ⇒ 换行；代码段里仍是字面量。导出工具（Word／Confluence／
+    /// 各种富文本转 Markdown）留下的 `<br>` 按字面量显示，等于把用户写下的
+    /// 「这里换行」吃掉。
+    #[test]
+    fn br_tags_become_line_breaks() {
+        for src in ["上<br>下", "上<br/>下", "上<br />下", "上<BR>下"] {
+            assert_eq!(inline(src), vec![MdSpan::plain("上\n下")], "{src:?}");
+        }
+        assert_eq!(
+            inline("`上<br>下`"),
+            vec![code("上<br>下")],
+            "代码段里 `<br>` 是内容不是标记"
         );
     }
 
