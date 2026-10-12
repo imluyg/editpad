@@ -7,7 +7,7 @@
 //! * 块级：`#`~`######` 标题（含 ATX 闭栏 `# 标题 #`）、`---`/`***`/`_ _ _`
 //!   分隔线、段落（连续非空行合并）、无序 `- * +` 与有序 `1.`/`1)` 列表
 //!   （**保留序号、缩进层级、任务勾选框**，并吃**续行**）、`>` 引用（连续行合并、`>>` 深度、
-//!   **内部按块级再解析**：`> - 甲` 里是一个列表项）、
+//!   **内部按块级再解析**：`> - 甲` 里是一个列表项，**懒续行**＝紧跟的正文行不写 `>` 也留在引用里）、
 //!   ``` ``` ``` 与 `~~~` 围栏代码（记录 info 串的语言；闭栏长度 ≥ 开栏长度）、
 //!   缩进代码块（空行后 ≥4 列或制表符）、整行 HTML 注释（隐去）、GFM 表格
 //!   （含 `:---`/`:---:`/`---:` 对齐、`\|` 转义竖线算单元格里的字符）
@@ -245,6 +245,17 @@ fn parse_lines(lines: &[&str], defs: &LinkDefs, is_def: &[bool], doc_begin: usiz
                     }
                     _ => break,
                 }
+            }
+            // 懒续行：紧跟在 `>` 行后面的普通正文行**仍属于这个引用**（GitHub 把它放进同一个
+            // `<blockquote>`），只在它不是"另起一块"的开头时收进来。改前它掉到引用外面另起一段
+            // ＝写引用时第二行忘了 `>` 就会让引用只剩一行。
+            while i < lines.len() {
+                let t = lines[i].trim();
+                if t.is_empty() || starts_new_block(lines, i, defs, is_def) {
+                    break;
+                }
+                inner.push(t);
+                i += 1;
             }
             let no_def = vec![false; inner.len()];
             blocks.push(MdBlock::Quote {
@@ -2325,6 +2336,36 @@ mod tests {
             panic!("{open:?}");
         };
         assert_eq!(spans_text(spans), "<!-- 没关");
+    }
+
+    /// 引用块的**懒续行**：紧跟 `>` 行的普通正文行仍属于这个引用——GitHub `/markdown` 对
+    /// `> 一段引用\n继续挂在引用里` 现量输出的是同一个 `<blockquote>` 里的一个 `<p>`。
+    /// 改前第二行掉到引用外面另起一段＝写引用时忘了 `>` 就"只剩一行"。
+    #[test]
+    fn lazy_lines_after_a_quote_stay_inside_it() {
+        assert_eq!(
+            quote_reading(&parse_markdown("> 一段引用\n继续挂在引用里\n")[0]),
+            (1, vec![("paragraph", "一段引用 继续挂在引用里".to_owned())]),
+            "第二行不写 `>` 也归这个引用"
+        );
+        // 空行就断（那是两块，不是一段的懒续行）
+        let two = parse_markdown("> 甲\n\n乙\n");
+        assert_eq!(two.len(), 2, "{two:?}");
+        assert!(matches!(&two[1], MdBlock::Paragraph { .. }));
+        // 另起一块的行不吞进来
+        assert_eq!(parse_markdown("> 甲\n# 标题\n").len(), 2, "标题不吞进引用");
+        assert_eq!(
+            parse_markdown("> 甲\n- 项\n").len(),
+            2,
+            "列表不吞进引用：{:#?}",
+            parse_markdown("> 甲\n- 项\n")
+        );
+        // 引用里的列表项同样吃懒续行（走的是内部那一层列表判据）
+        assert_eq!(
+            quote_reading(&parse_markdown("> - 甲\n接着写\n")[0]).1,
+            vec![("item", "甲 接着写".to_owned())],
+            "引用里的项也能接懒续行"
+        );
     }
 
     /// 表格单元里的 `\|` 是一个竖线字符，不是分列记号。改前它照样分列，多出来那一列被

@@ -3922,6 +3922,15 @@ fn markdown_preview_renders_blocks_inside_a_quote() {
         "两行列表项排在了同一行上（跨度 {:.1}，单行 {unit}）：{listed:?}",
         bottom - top
     );
+
+    // 懒续行（第二行不写 `>`）不该在引用外面另起一段：节点数与"只有一行引用"时相同
+    let plain_quote = preview_nodes("> 一段引用\n");
+    let lazy = preview_nodes("> 一段引用\n继续挂在引用里\n");
+    assert_eq!(
+        lazy.len(),
+        plain_quote.len(),
+        "引用后面的懒续行掉出引用了＝多出一段游离正文：单行 {plain_quote:?}／懒续行 {lazy:?}"
+    );
 }
 
 /// 开预览＝**分栏**，不是把正文整块换掉：左半正文仍在场（可继续编辑），右半是预览。
