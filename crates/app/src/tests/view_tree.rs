@@ -161,6 +161,26 @@ impl<'a> ViewTree<'a> {
         walk(self.root(), &pred)
     }
 
+    /// 深度优先收集**所有**满足谓词的节点 bounds（顺序＝DFS 前序）。
+    ///
+    /// 存在的理由是「数得出几个节点」这类契约：`find` 只能证"至少有一个"，
+    /// 于是形状错了（同一段文字被排成 N 个控件）它也照样绿——本仓第 312 轮
+    /// 的 Markdown 预览用例就红在这一格上（探针摘掉旧排版形状后用例照绿）。
+    pub(crate) fn find_all(&self, pred: impl Fn(Rectangle) -> bool) -> Vec<Rectangle> {
+        fn walk(layout: Layout<'_>, pred: &impl Fn(Rectangle) -> bool, out: &mut Vec<Rectangle>) {
+            let bounds = layout.bounds();
+            if pred(bounds) {
+                out.push(bounds);
+            }
+            for child in layout.children() {
+                walk(child, pred, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.root(), &pred, &mut out);
+        out
+    }
+
     /// 整棵树的 bounds 缩进打印——测试作者找节点路径/尺寸时先跑这个。
     pub(crate) fn dump(&self) -> String {
         fn walk(layout: Layout<'_>, depth: usize, out: &mut String) {

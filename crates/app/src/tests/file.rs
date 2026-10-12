@@ -3598,3 +3598,106 @@ fn own_close_chain_write_moves_the_encoding_label_to_the_disk_truth() {
         "标签应跟上磁盘上真实的编码"
     );
 }
+
+/// 预览里**一个 Markdown 块＝一个折行的富文本节点**。
+///
+/// 病在形状：改前每个块排成 `row![]`，块内**每个样式段是一个独立 text 控件**
+/// ——同一句话在树里是 5 个兄弟节点（实测 `317.6x19.5` 一行 ×3 个兄弟），后面的
+/// 段被前面的段挤掉宽度、整块恒一行高，长文直接横向跑出窗口（预览没有横向滚动）。
+///
+/// 三条断言各盯一头：① 块数＝节点数（形状）；② 有一段高 > 30（真的按词折行）；
+/// ③ 同篇在 600px 窄窗比 1280px 更高（折行由可用宽决定，不是写死的）。
+#[test]
+fn markdown_preview_lays_one_block_as_one_wrapped_paragraph() {
+    fn md_app(text: &str) -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+        );
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::PreviewToggled);
+        assert!(app.preview_visible, ".md 页应能开预览");
+        app
+    }
+    // 预览正文那一横带：滚动区的三层壳与菜单/标签条都在 y=56.6 及以上之外，
+    // 状态栏贴在窗口底部（y≈775）⇒ 65..760 之间只剩块本身
+    let blocks = |app: &Editpad, width: f32| -> Vec<iced::Rectangle> {
+        ViewTree::layout(app, iced::Size::new(width, 800.0))
+            .find_all(|b| b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0)
+    };
+
+    let doc = format!(
+        "## 小节 **粗** 收尾\n\n前文 {} **粗** 尾文 {} 结束\n\n- 列表项 `代码` 尾巴\n",
+        "字".repeat(40),
+        "字".repeat(40)
+    );
+    let app = md_app(&doc);
+    let wide = blocks(&app, 1280.0);
+    assert_eq!(
+        wide.len(),
+        3,
+        "三块文档应排成三个节点（一块一节点）；实际 {wide:?}——改前每段样式各是一个兄弟控件"
+    );
+    let tallest = wide.iter().map(|b| b.height).fold(0.0f32, f32::max);
+    let widest = wide.iter().map(|b| b.width).fold(0.0f32, f32::max);
+    assert!(
+        tallest > 30.0,
+        "最长那块没折行（各块高度 {:?}）",
+        wide.iter().map(|b| b.height).collect::<Vec<_>>()
+    );
+    assert!(
+        widest <= 1280.0,
+        "块宽 {widest} 越过视口：文本正横向跑出窗口"
+    );
+
+    let narrow = blocks(&app, 600.0);
+    let narrow_tallest = narrow.iter().map(|b| b.height).fold(0.0f32, f32::max);
+    assert!(
+        narrow_tallest > tallest,
+        "窄窗没把同一段折得更高：600px 是 {narrow_tallest}，1280px 是 {tallest}"
+    );
+}
+
+/// 预览链接的落点解析与正文链接同口径：scheme 交系统、路径须存在、锚点不链。
+#[test]
+fn markdown_link_targets_follow_the_editor_link_rules() {
+    use crate::md_preview::md_link_target;
+    let dir = std::env::temp_dir();
+    let file = dir.join("editpad_md_link_target.txt");
+    std::fs::write(&file, "x").unwrap();
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+
+    assert_eq!(
+        md_link_target("https://e.io/a", None),
+        Some(crate::editor::LinkTarget::Url("https://e.io/a".into()))
+    );
+    assert_eq!(
+        md_link_target("https://e.io/a#frag", None),
+        Some(crate::editor::LinkTarget::Url("https://e.io/a".into()))
+    );
+    // 相对路径：以文档目录为基准且必须存在
+    let hit = md_link_target(&name, Some(dir.as_path()));
+    assert!(
+        matches!(hit, Some(crate::editor::LinkTarget::File { .. })),
+        "存在的相对文件应成链：{name}"
+    );
+    assert_eq!(
+        md_link_target("不存在的文件.png", Some(dir.as_path())),
+        None
+    );
+    // 页内锚点没有滚动定位能力 ⇒ 不成链
+    assert_eq!(md_link_target("#章节", Some(dir.as_path())), None);
+    let _ = std::fs::remove_file(&file);
+}

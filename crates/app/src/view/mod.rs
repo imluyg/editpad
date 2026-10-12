@@ -296,6 +296,12 @@ impl Editpad {
                     core.doc.line_count(),
                 )
             };
+            // 相对路径链接的基准目录＝本页所在目录（未落盘的页没有基准 ⇒
+            // 相对链接只作文字、不给可点外观）。
+            let doc_dir: Option<std::path::PathBuf> = tab
+                .path
+                .as_ref()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
             let preview = {
                 let mut cache = self.md_preview_cache.borrow_mut();
                 if !cache.as_ref().is_some_and(|(k, _)| *k == key) {
@@ -306,7 +312,13 @@ impl Editpad {
                     ));
                 }
                 let (_, blocks) = cache.as_ref().expect("上一步刚确保证非空");
-                markdown_preview_element(blocks, self.display_font_size(), content_font)
+                markdown_preview_element(
+                    blocks,
+                    self.display_font_size(),
+                    content_font,
+                    self.theme(),
+                    doc_dir.as_deref(),
+                )
             };
             body = body.push(preview);
         } else {
