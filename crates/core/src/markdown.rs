@@ -108,11 +108,34 @@ pub enum MdBlock {
     Rule,
 }
 
+/// 文件头元数据块（front matter）**结尾栅栏之后那一行**的下标；不是 front matter 则 `None`。
+///
+/// 判据取各家渲染器的共同子集：起始栅栏必须顶格落在第一行，往后第一个配对的栅栏即收尾
+/// （`---` 也接受 `...` 收尾，`+++` 只与 `+++` 配对）。等不到配对就整篇按普通 Markdown 走——
+/// 以一个孤立 `---` 开头的文档里那是分隔线，不是元数据。
+///
+/// 这一区域在预览里整块隐去（不是降级成段落）：博客／静态站点生成的 `.md` 十有八九带它，
+/// 留在那儿会把第一眼的好好一段变成 `title: xxx`；要看原文有左半正文页兜着。
+fn front_matter_end(lines: &[&str]) -> Option<usize> {
+    let opener = lines.first()?.trim();
+    if opener != "---" && opener != "+++" {
+        return None;
+    }
+    for (j, line) in lines.iter().enumerate().skip(1) {
+        let closer = line.trim();
+        if closer == opener || (opener == "---" && closer == "...") {
+            return Some(j + 1);
+        }
+    }
+    None
+}
+
 /// 解析整篇 Markdown。行尾兼容 `\r\n` / `\n` / 孤立 `\r` 与异体行界。
+/// 开头若带 front matter（见 `front_matter_end`）则不渲染那一区域。
 pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let lines = split_lines(text);
     let mut blocks = Vec::new();
-    let mut i = 0usize;
+    let mut i = front_matter_end(&lines).unwrap_or(0);
 
     while i < lines.len() {
         let trimmed = lines[i].trim();
@@ -1247,6 +1270,79 @@ mod tests {
                 "rule"
             ],
             "{src:?}"
+        );
+    }
+
+    /// 带元数据头的 `.md`（博客／静态站点生成的十有八九如此）：预览里那一段必须
+    /// **整块消失**，剩下的块要与「源文件根本没有这段头」时逐格相同。
+    #[test]
+    fn front_matter_is_skipped_like_renderers_do() {
+        let body = "# 标题\n正文";
+        for src in [
+            format!("---\ntitle: 你好\ntags: [a, b]\n---\n{body}"),
+            format!("---\ntitle: 你好\n...\n{body}"),
+            format!("+++\ntitle = \"你好\"\n+++\n{body}"),
+            format!("---\n---\n{body}"),
+        ] {
+            assert_eq!(
+                parse_markdown(&src),
+                parse_markdown(body),
+                "front matter 不该留下任何块：{src:?}"
+            );
+        }
+    }
+
+    /// 判据本身：起始栅栏顶格在第一行、且等得到配对，两者缺一都不算 front matter。
+    #[test]
+    fn front_matter_needs_its_opener_on_the_first_line() {
+        assert_eq!(
+            front_matter_end(&split_lines("---\ntitle: x\n---\n正文")),
+            Some(3),
+            "栅栏行是第 0、2 行 ⇒ 从第 3 行起才是正文"
+        );
+        assert_eq!(
+            front_matter_end(&split_lines("\n---\ntitle: x\n---\n正文")),
+            None,
+            "首行是空行 ⇒ 不是文件头的元数据"
+        );
+        assert_eq!(
+            front_matter_end(&split_lines("---\ntitle: x\n+++\n正文")),
+            None,
+            "`---` 开栏只与 `---`／`...` 配对，`+++` 不算它的收尾"
+        );
+        assert_eq!(
+            front_matter_end(&split_lines("---\n正文")),
+            None,
+            "等不到配对 ⇒ 交回普通解析，那个 `---` 是分隔线"
+        );
+    }
+
+    /// 反向的下界：没有配对的开篇栅栏仍是分隔线，栅栏成对但不在首行也不许吞正文。
+    #[test]
+    fn a_lone_or_later_fence_is_still_a_rule() {
+        let kinds = |src: &str| -> Vec<&'static str> {
+            parse_markdown(src)
+                .iter()
+                .map(|b| match b {
+                    MdBlock::Heading { .. } => "heading",
+                    MdBlock::Paragraph { .. } => "paragraph",
+                    MdBlock::CodeBlock { .. } => "code",
+                    MdBlock::ListItem { .. } => "item",
+                    MdBlock::Quote { .. } => "quote",
+                    MdBlock::Table { .. } => "table",
+                    MdBlock::Rule => "rule",
+                })
+                .collect()
+        };
+        assert_eq!(
+            kinds("---\n正文"),
+            vec!["rule", "paragraph"],
+            "孤立的 --- 之后正文照旧渲染"
+        );
+        assert_eq!(
+            kinds("# H\n\n---\n\n正文"),
+            vec!["heading", "rule", "paragraph"],
+            "栅栏不在第一行 ⇒ 与 front matter 无关"
         );
     }
 }
