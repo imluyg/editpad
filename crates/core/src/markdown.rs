@@ -17,7 +17,10 @@
 //!   `\` 转义标点
 //! * 行内标记**要求闭合**：找不到闭栏时按字面量输出（与 CommonMark 一致），
 //!   不再把后半行整条染色；配对时**跳过当不了闭栏的位置**继续往后找
-//!   （`**粗 ** 与 后**` 配到最后那一对，与 CommonMark 同口径）
+//!   （`**粗 ** 与 后**` 配到最后那一对，与 CommonMark 同口径）；
+//!   开栏与闭栏都按 CommonMark 的**贴边**（flanking）判据——紧跟全角标点的 `**` 开不了栏、
+//!   词内的 `_` 不开样式。这批判据的期望值拿 GitHub `/markdown`（cmark-gfm）逐条对拍过，
+//!   并拿本仓 40 行真实日志做过整语料差分（强调数 31 比 31）
 //!
 //! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）。
 
@@ -1424,12 +1427,12 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>,
                 if run < len {
                     continue;
                 }
-                // 开栏后紧跟空白 ⇒ 不算开栏（`** **` 是字面量）
-                if text[i + len..]
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_whitespace)
-                {
+                // 贴边（flanking）判据：紧跟标点的那一串不能开栏——中文正文里
+                // 「是**“重点”**的部分」这种写法按 GitHub 的渲染就是字面量，
+                // 而我们旧的"只要后面不是空格就开栏"会把后面一大段染成粗体
+                let prev_open = text[..i].chars().next_back();
+                let next_open = text[i + len..].chars().next();
+                if !can_open_emphasis(c, prev_open, next_open) {
                     continue;
                 }
                 // 往后找**第一个能当闭栏的**同种串：改前只取第一个，于是 `**粗 ** 与 后**`
@@ -1442,12 +1445,10 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>,
                     if abs_close == i + len {
                         continue; // 空内容不成段
                     }
-                    // 闭栏前紧跟空白 ⇒ 这一串不算闭栏，继续往后找（`**粗 **`）
-                    if text[..abs_close]
-                        .chars()
-                        .next_back()
-                        .is_some_and(char::is_whitespace)
-                    {
+                    // 候选闭栏必须**自己也能当闭栏**（贴边判据），不合格就跳过去继续往后找
+                    let prev_close = text[..abs_close].chars().next_back();
+                    let next_close = text[abs_close + rl..].chars().next();
+                    if !can_close_emphasis(c, prev_close, next_close) {
                         continue;
                     }
                     flush!();
@@ -1472,6 +1473,86 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>,
         i += c_len;
     }
     flush!();
+}
+
+/// 强调记号的**贴边**（flanking）判据要用到的"标点"：ASCII 标点 + 中文里真会踩到的
+/// 全角／CJK 标点。标准库只给 `is_ascii_punctuation`（没有 Unicode 类别表），这里手写一份
+/// 子集——少列一种，那一处的 `**，` 就仍被当开栏。
+/// 对拍基准＝GitHub 自己的 `/markdown`（cmark-gfm）：`是**“重点”**的部分`、
+/// `foo_bar_baz`、`_词界_斜`、`正文收窄**，不是放开**` 在 GitHub 上**全是字面量**，
+/// 而 `定案的**收窄**，不是放开` 里那对 `**` 前后都是汉字 ⇒ GitHub 给出 `<strong>收窄</strong>`。
+fn is_emphasis_punct(c: char) -> bool {
+    c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '，' | '。'
+                | '、'
+                | '；'
+                | '：'
+                | '？'
+                | '！'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '〈'
+                | '〉'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '\u{201C}'
+                | '\u{201D}'
+                | '\u{2018}'
+                | '\u{2019}'
+                | '…'
+                | '—'
+                | '～'
+                | '·'
+                | '\u{3000}'
+        )
+}
+
+/// 行首／行尾按 CommonMark 的规定算空白。
+fn flank_ws(c: Option<char>) -> bool {
+    match c {
+        None => true,
+        Some(c) => c.is_whitespace(),
+    }
+}
+fn flank_punct(c: Option<char>) -> bool {
+    c.is_some_and(is_emphasis_punct)
+}
+
+/// 记号串能否**开栏**：`*`／`~` 只要左贴边；`_` 还要求不右贴边（词内 `_` 不开样式，
+/// 所以 `foo_bar_baz` 与 `_词界_斜` 保持字面量——这两格都拿 GitHub 的输出对拍过）。
+fn can_open_emphasis(c: char, prev: Option<char>, next: Option<char>) -> bool {
+    let left = !flank_ws(next) && (!flank_punct(next) || flank_ws(prev) || flank_punct(prev));
+    if !left {
+        return false;
+    }
+    if c == '_' {
+        let right = !flank_ws(prev) && (!flank_punct(prev) || flank_ws(next) || flank_punct(next));
+        !right
+    } else {
+        true
+    }
+}
+
+/// 记号串能否**闭栏**（镜像判据；`_` 同样禁词内）。
+fn can_close_emphasis(c: char, prev: Option<char>, next: Option<char>) -> bool {
+    let right = !flank_ws(prev) && (!flank_punct(prev) || flank_ws(next) || flank_punct(next));
+    if !right {
+        return false;
+    }
+    if c == '_' {
+        let left = !flank_ws(next) && (!flank_punct(next) || flank_ws(prev) || flank_punct(prev));
+        !left
+    } else {
+        true
+    }
 }
 
 /// 从串首数连续同字符的长度。
@@ -2504,9 +2585,9 @@ mod tests {
         assert!(links("www.x").is_empty(), "`www.` 后面没有点号不算域名");
     }
 
-    /// 闭栏位置不合格就**跳过它继续往后找**，而不是放弃整对（CommonMark 的配对规则）。
-    /// 改前只取第一个同种串：`**粗 ** 与 后**` 里那串前面跟着空格的 `**` 当不了闭栏，
-    /// 于是整段留成字面量——哪怕后面明明还有一对能配上。
+    /// 闭栏位置不合格就**跳过它继续往后找**，而不是放弃整对。GitHub `/markdown` 对同一串
+    /// `**粗 ** 与 后**` 现量出 `<strong>粗 ** 与 后</strong>`＝这个行为是参照渲染器的行为；
+    /// 改前只取第一个同种串，一看不合格就放弃整对，还会把后半截配成一个**假斜体段**。
     #[test]
     fn emphasis_skips_unusable_closers_and_keeps_looking() {
         assert_eq!(
@@ -2518,6 +2599,57 @@ mod tests {
         assert_eq!(
             inline("**只有开栏没有闭栏"),
             vec![MdSpan::plain("**只有开栏没有闭栏")]
+        );
+    }
+
+    /// 贴边（flanking）判据。**期望值不是我推的，是 GitHub `/markdown`（cmark-gfm）对同一串的输出**
+    /// （2026-10-13 现量：六串一次送审，另拿本仓 40 行真实日志做整语料对拍＝强调数 31 比 31、
+    /// 字面量残留 1 比 1、逐条文本相同）：
+    ///
+    /// * `是**“重点”**的部分` ⇒ GitHub 出**字面量**（前面是汉字、后面是全角引号 ⇒ 开不了栏）；
+    /// * `定案的**收窄**，不是放开` ⇒ GitHub 出 `<strong>收窄</strong>`；
+    /// * `foo_bar_baz`、`_词界_斜` ⇒ GitHub 出字面量（词内 `_` 不开样式）；
+    /// * `正文收窄**，不是放开**` ⇒ 字面量。
+    #[test]
+    fn emphasis_flanking_matches_the_github_reference() {
+        assert_eq!(
+            inline("是**“重点”**的部分"),
+            vec![MdSpan::plain("是**“重点”**的部分")],
+            "GitHub 也不染这处粗体：改前我们把它一路染到行尾"
+        );
+        assert_eq!(
+            inline("定案的**收窄**，不是放开"),
+            vec![
+                MdSpan::plain("定案的"),
+                styled("收窄", MD_BOLD),
+                MdSpan::plain("，不是放开"),
+            ],
+            "闭栏后面紧跟全角逗号照样成立（GitHub 出 <strong>收窄</strong>）"
+        );
+        assert_eq!(inline("foo_bar_baz"), vec![MdSpan::plain("foo_bar_baz")]);
+        assert_eq!(
+            inline("no_connect_this"),
+            vec![MdSpan::plain("no_connect_this")]
+        );
+        assert_eq!(
+            inline("_词界_斜"),
+            vec![MdSpan::plain("_词界_斜")],
+            "词内 `_` 禁，GitHub 同"
+        );
+        assert_eq!(
+            inline("_词界_ 斜"),
+            vec![styled("词界", MD_ITALIC), MdSpan::plain(" 斜")],
+            "对照：闭栏后面是空格就成斜体"
+        );
+        assert_eq!(
+            inline("正文收窄**，不是放开**"),
+            vec![MdSpan::plain("正文收窄**，不是放开**")]
+        );
+        // 行首/行尾按空白算，串首尾的一对照常成立
+        assert_eq!(inline("**粗**"), vec![styled("粗", MD_BOLD)]);
+        assert_eq!(
+            inline("*斜*体"),
+            vec![styled("斜", MD_ITALIC), MdSpan::plain("体")]
         );
     }
 
