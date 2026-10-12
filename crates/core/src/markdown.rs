@@ -611,13 +611,12 @@ fn list_item(raw: &str) -> Option<MdListItem<'_>> {
     let content = after.trim_start_matches([' ', '\t']);
     let mut task = None;
     let mut body = content;
-    if order.is_none() {
-        for (mark, done) in [("[ ] ", false), ("[x] ", true), ("[X] ", true)] {
-            if let Some(rest) = content.strip_prefix(mark) {
-                task = Some(done);
-                body = rest;
-                break;
-            }
+    // GFM 的任务勾选框两种列表都有（改前只认无序项，`1. [x]` 那格把框当正文原样画出来）
+    for (mark, done) in [("[ ] ", false), ("[x] ", true), ("[X] ", true)] {
+        if let Some(rest) = content.strip_prefix(mark) {
+            task = Some(done);
+            body = rest;
+            break;
         }
     }
     Some(MdListItem {
@@ -656,8 +655,8 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
     let head = &line[..head_len];
     let rest = &line[head_len..];
     // 标记：无序 1 字符；有序＝数字 + `.`/`)`
-    let (marker_text, marker_bytes, unordered) = match rest.chars().next() {
-        Some(c @ ('-' | '*' | '+')) => (c.to_string(), 1usize, true),
+    let (marker_text, marker_bytes) = match rest.chars().next() {
+        Some(c @ ('-' | '*' | '+')) => (c.to_string(), 1usize),
         Some(d) if d.is_ascii_digit() => {
             let digits: usize = rest
                 .chars()
@@ -673,7 +672,6 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
             (
                 format!("{:0>width$}{sep}", n + 1, width = digits),
                 digits + 1,
-                false,
             )
         }
         _ => return None,
@@ -689,19 +687,17 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
         return None;
     }
     let body = &after[spaces..];
-    // 任务框算标记的一部分（只有无序项有）：新项给一个**空框**
-    let (box_len, box_text, body_text) = match unordered {
-        true => match ["[ ]", "[x]", "[X]"]
-            .iter()
-            .find_map(|m| body.strip_prefix(m))
-        {
-            Some(tail) => {
-                let ws = tail.chars().take_while(|c| matches!(c, ' ' | '\t')).count();
-                (3 + ws, "[ ]", &tail[ws..])
-            }
-            None => (0, "", body),
-        },
-        false => (0, "", body),
+    // 任务框算标记的一部分（有序项同样有，与 `list_item` 的勾选框判据同一口径）：
+    // 新项给一个**空框**——把勾带过来就变成「新项也已完成」，那是错的
+    let (box_len, box_text, body_text) = match ["[ ]", "[x]", "[X]"]
+        .iter()
+        .find_map(|m| body.strip_prefix(m))
+    {
+        Some(tail) => {
+            let ws = tail.chars().take_while(|c| matches!(c, ' ' | '\t')).count();
+            (3 + ws, "[ ]", &tail[ws..])
+        }
+        None => (0, "", body),
     };
     let marker_end = head_len + marker_bytes + spaces + box_len;
     if body_text.trim().is_empty() {
@@ -1803,6 +1799,26 @@ mod tests {
         // 「3.14 是圆周率」不是列表项（数字后没有空格）
         let blocks = parse_markdown("3.14 是圆周率");
         assert!(matches!(&blocks[0], MdBlock::Paragraph { .. }));
+
+        // 有序任务框（GFM 两种列表都有）：改前 `[x]` 留在正文里原样画出来
+        let ordered = parse_markdown("1. [x] 做完\n2. [ ] 没做\n");
+        assert_eq!(ordered.len(), 2, "{ordered:?}");
+        for (want, idx) in [(Some(true), 0usize), (Some(false), 1usize)] {
+            match &ordered[idx] {
+                MdBlock::ListItem {
+                    order, task, spans, ..
+                } => {
+                    assert_eq!(*task, want, "第 {idx} 项的勾选框状态：{ordered:?}");
+                    assert!(order.is_some(), "序号仍在");
+                    assert_eq!(
+                        spans.iter().map(|s| s.text.as_str()).collect::<String>(),
+                        if idx == 0 { "做完" } else { "没做" },
+                        "框算标记，不留在正文里"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     /// 列表项的**续行**留在项里：缩进接着写的、不缩进接着写的（CommonMark 的 lazy
@@ -2881,8 +2897,10 @@ mod tests {
         assert_eq!(next("  * [X] 甲"), "  * [ ] ");
         assert_eq!(
             next("1. [x] 甲"),
-            "2. ",
-            "有序项不带任务框（与预览解析器同一口径）"
+            "2. [ ] ",
+            "有序任务框：这条期望在本文件里改过两次判据——先按「只有无序项有框」写成 `2. `，\n\
+             后来解析器（`list_item`）认了 GFM 的有序任务列表，这条连**输入形状**一起订正，\n\
+             两层口径不许再各走各的"
         );
 
         assert_eq!(exit("- "), 2, "空项：删掉行首这 2 个字符");
