@@ -134,6 +134,8 @@ fn front_matter_end(lines: &[&str]) -> Option<usize> {
 /// 开头若带 front matter（见 `front_matter_end`）则不渲染那一区域。
 pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let lines = split_lines(text);
+    // 引用式链接的定义先收一遍整篇：定义行可以写在用到它的那句**后面**（前向引用）
+    let (defs, is_def) = collect_link_defs(&lines);
     let mut blocks = Vec::new();
     let mut i = front_matter_end(&lines).unwrap_or(0);
 
@@ -141,6 +143,12 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         let trimmed = lines[i].trim();
 
         if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // 定义行不产生块：它的去处是查表，不是画在预览里
+        if is_def[i] {
             i += 1;
             continue;
         }
@@ -154,7 +162,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         if let Some((level, content)) = heading(trimmed) {
             blocks.push(MdBlock::Heading {
                 level,
-                spans: inline(content),
+                spans: inline_with(content, &defs),
             });
             i += 1;
             continue;
@@ -166,7 +174,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             continue;
         }
 
-        if let Some((block, next)) = table(&lines, i) {
+        if let Some((block, next)) = table(&lines, i, &defs) {
             blocks.push(block);
             i = next;
             continue;
@@ -188,7 +196,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             }
             blocks.push(MdBlock::Quote {
                 depth,
-                spans: inline(&merged),
+                spans: inline_with(&merged, &defs),
             });
             continue;
         }
@@ -198,7 +206,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 order: item.order,
                 indent: item.indent,
                 task: item.task,
-                spans: inline(item.content),
+                spans: inline_with(item.content, &defs),
             });
             i += 1;
             continue;
@@ -222,9 +230,10 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 || fence(&lines, i).is_some()
                 || heading(next).is_some()
                 || is_rule(next)
-                || is_table_start(&lines, i)
+                || is_table_start(&lines, i, &defs)
                 || quote(next).is_some()
                 || list_item(lines[i]).is_some()
+                || is_def[i]
             {
                 break;
             }
@@ -238,7 +247,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             prev_raw = lines[i];
             i += 1;
         }
-        let spans = inline(&paragraph);
+        let spans = inline_with(&paragraph, &defs);
         blocks.push(match setext {
             Some(level) => MdBlock::Heading { level, spans },
             None => MdBlock::Paragraph { spans },
@@ -457,12 +466,12 @@ fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
 }
 
 /// 表格第一行的判定（段落续行要用它断句）。
-fn is_table_start(lines: &[&str], i: usize) -> bool {
-    table(lines, i).is_some()
+fn is_table_start(lines: &[&str], i: usize, defs: &LinkDefs) -> bool {
+    table(lines, i, defs).is_some()
 }
 
 /// GFM 表格：表头行 + 分隔行（只含 `| : - 空格`）+ 数据行。
-fn table(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
+fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usize)> {
     let head = lines[start].trim();
     if !head.contains('|') {
         return None;
@@ -483,7 +492,10 @@ fn table(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
         return None;
     }
     let header = normalize_row(
-        split_row(head).into_iter().map(inline).collect(),
+        split_row(head)
+            .into_iter()
+            .map(|cell| inline_with(cell, defs))
+            .collect(),
         align.len(),
     );
     let mut rows = Vec::new();
@@ -493,7 +505,10 @@ fn table(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
         if line.is_empty() || !line.contains('|') {
             break;
         }
-        let row: Vec<Vec<MdSpan>> = split_row(line).into_iter().map(inline).collect();
+        let row: Vec<Vec<MdSpan>> = split_row(line)
+            .into_iter()
+            .map(|cell| inline_with(cell, defs))
+            .collect();
         rows.push(normalize_row(row, align.len()));
         k += 1;
     }
@@ -540,14 +555,6 @@ fn parse_align(cell: &str) -> Option<MdAlign> {
         (false, true) => MdAlign::Right,
         _ => MdAlign::Left,
     })
-}
-
-/// 行内解析入口：递归展开标记后合并相邻同样式段。
-fn inline(text: &str) -> Vec<MdSpan> {
-    let mut spans: Vec<MdSpan> = Vec::new();
-    parse_inline(text, 0, None, &mut spans);
-    merge_spans(&mut spans);
-    spans
 }
 
 /// 把相邻且样式／链接目标都相同的段并成一段。
@@ -700,8 +707,109 @@ fn decode_entities(text: &str) -> String {
     out
 }
 
+/// 引用式链接的定义表：`[标签]: 目标` 收集起来，供 `[文字][标签]`／`[标签]` 查。
+#[derive(Default)]
+struct LinkDefs(std::collections::HashMap<String, String>);
+
+impl LinkDefs {
+    fn get(&self, label: &str) -> Option<&str> {
+        self.0.get(label).map(String::as_str)
+    }
+    /// **首个定义生效**（CommonMark 同口径）：同名的后面那些只当重复，不覆盖。
+    fn insert(&mut self, label: String, dest: String) {
+        self.0.entry(label).or_insert(dest);
+    }
+}
+
+/// 标签规范化：去首尾空白、内部连续空白并成一格、大小写折叠。
+/// 引用式链接的标签匹配**只认这三条**（`[Foo  Bar]` 与 `[foo bar]` 是同一个）。
+fn normalize_label(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_ws = false;
+    for c in s.trim().chars() {
+        if c.is_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            prev_ws = false;
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
+/// `[标签]: 目标 "可选标题"` ⇒ Some((规范化标签, 目标))。只吃**一行写完**的写法：
+/// 目标可带 `<…>` 包裹，标题（引号或括号那段）直接忽略——预览没有 tooltip 这份状态。
+/// 目标为空 ⇒ 不是定义（那行仍是正文）。
+fn link_def(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix('[')?;
+    let close = find_bracket(rest)?;
+    let label = &rest[..close];
+    if label.trim().is_empty() {
+        return None;
+    }
+    let after = rest[close + 1..].trim_start().strip_prefix(':')?;
+    let after = after.trim_start();
+    let dest = if let Some(inner) = after.strip_prefix('<') {
+        let end = inner.find('>')?;
+        &inner[..end]
+    } else {
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+        &after[..end]
+    };
+    if dest.is_empty() {
+        return None;
+    }
+    Some((normalize_label(label), decode_entities(dest)))
+}
+
+/// 整篇扫一遍收定义，同时标出**该被吃掉**的行（代码围栏内、缩进 4 格以上的都不算）。
+/// 返回的表在正文解析之前就有了 ⇒ `[ref]` 写在定义行前面也能解析（前向引用）。
+fn collect_link_defs(lines: &[&str]) -> (LinkDefs, Vec<bool>) {
+    let mut defs = LinkDefs::default();
+    let mut consumed = vec![false; lines.len()];
+    let mut in_fence = false;
+    for (idx, raw) in lines.iter().enumerate() {
+        let t = raw.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // 4 格以上缩进（或制表符）＝缩进代码块，不是定义行
+        let indent = raw.len() - raw.trim_start().len();
+        if raw.starts_with('\t') || indent >= 4 {
+            continue;
+        }
+        if let Some((label, dest)) = link_def(t) {
+            defs.insert(label, dest);
+            consumed[idx] = true;
+        }
+    }
+    (defs, consumed)
+}
+
+/// 生产入口用 `inline_with`（要带定义表）；这份薄壳只给**已有的一批行内单测**用，
+/// 它们测的是标记本身、根本没有引用式链接，空表等价于「那条路不存在」。
+#[cfg(test)]
+fn inline(text: &str) -> Vec<MdSpan> {
+    inline_with(text, &LinkDefs::default())
+}
+
+/// 块级行内入口：递归展开标记后合并相邻同样式段（`defs`＝引用式链接的定义表）。
+fn inline_with(text: &str, defs: &LinkDefs) -> Vec<MdSpan> {
+    let mut spans: Vec<MdSpan> = Vec::new();
+    parse_inline(text, 0, None, &mut spans, defs);
+    merge_spans(&mut spans);
+    spans
+}
+
 /// 一层行内扫描：`base` 继承自外层标记（嵌套样式），`link` 是所在链接的目标。
-fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>) {
+fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>, defs: &LinkDefs) {
     let mut lit = String::new();
     macro_rules! flush {
         () => {
@@ -758,7 +866,8 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>)
             continue;
         }
 
-        // 链接 / 图片：`[标签](目标)`、`![替代](地址)`
+        // 链接 / 图片：`[标签](目标)`、`![替代](地址)`，以及引用式
+        // `[标签][ref]`／`[标签][]`／`[标签]`（目标查定义表）
         if c == '[' || (c == '!' && text[i + 1..].starts_with('[')) {
             let is_image = c == '!';
             let label_at = i + if is_image { 2 } else { 1 };
@@ -771,8 +880,17 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>)
                     if let Some(dest) = link_dest(raw_dest) {
                         flush!();
                         let style = base | MD_LINK | if is_image { MD_IMAGE } else { 0 };
-                        parse_inline(label, style, Some(dest.as_str()), out);
+                        parse_inline(label, style, Some(dest.as_str()), out, defs);
                         i = label_at + close + 2 + dest_end + 1;
+                        continue;
+                    }
+                }
+                if !label.trim().is_empty() {
+                    if let Some((dest, extra)) = reference_dest(after, label, defs) {
+                        flush!();
+                        let style = base | MD_LINK | if is_image { MD_IMAGE } else { 0 };
+                        parse_inline(label, style, Some(dest.as_str()), out, defs);
+                        i = label_at + close + 1 + extra;
                         continue;
                     }
                 }
@@ -849,7 +967,7 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>)
                     continue;
                 }
                 flush!();
-                parse_inline(&text[i + len..abs_close], base | style, link, out);
+                parse_inline(&text[i + len..abs_close], base | style, link, out, defs);
                 i = abs_close + len;
                 opened = true;
                 break;
@@ -944,6 +1062,27 @@ fn link_dest(raw: &str) -> Option<String> {
         return None;
     }
     Some(decode_entities(head))
+}
+
+/// 引用式链接的目标：`[标签][ref]`、`[标签][]`（省略 ref＝标签自己就是引用）、
+/// `[标签]`（shortcut）。返回（目标，**标签右括号之后**还要再吃掉多少字节）。
+/// 查不到定义 ⇒ `None`——那对括号按字面量留着，**不猜**（写了 `[x]` 但没定义，
+/// 用户看得见原样，比给个断链好）。
+fn reference_dest(after: &str, label: &str, defs: &LinkDefs) -> Option<(String, usize)> {
+    let (cited, extra) = match after.strip_prefix('[') {
+        Some(rest) => {
+            let close = find_bracket(rest)?;
+            let cited = &rest[..close];
+            // `[标签][]` 那种空 ref：拿标签去查
+            if cited.trim().is_empty() {
+                (label, close + 2)
+            } else {
+                (cited, close + 2)
+            }
+        }
+        None => (label, 0usize),
+    };
+    Some((defs.get(&normalize_label(cited))?.to_owned(), extra))
 }
 
 /// 自动链接判据：已知 scheme + 无空白。
@@ -1386,6 +1525,118 @@ mod tests {
             inline("<div class=\"x\">与</span>"),
             vec![MdSpan::plain("<div class=\"x\">与</span>")]
         );
+    }
+
+    /// 引用式链接：目标写在 `[标签]: 目标` 那行里，正文里用 `[文字][标签]`／`[标签][]`／
+    /// `[标签]` 三种写法查它。改前这三样全部原样显示，定义行还多占一段正文。
+    #[test]
+    fn reference_links_resolve_through_the_definition_table() {
+        fn links_of(src: &str) -> Vec<(String, String)> {
+            parse_markdown(src)
+                .iter()
+                .flat_map(|b| match b {
+                    MdBlock::Paragraph { spans } | MdBlock::Heading { spans, .. } => spans.clone(),
+                    _ => Vec::new(),
+                })
+                .filter(|s| s.is_link())
+                .map(|s| (s.text.clone(), s.link.unwrap_or_default()))
+                .collect()
+        }
+        let u = |s: &str| s.to_owned();
+        // 三种写法：完整 [文字][ref]、省略 [ref][]、shortcut [ref]
+        assert_eq!(
+            links_of("见 [文档][ref]。"),
+            Vec::<(String, String)>::new(),
+            "没定义就**不是**链接：宁可显示原样，不给断链"
+        );
+        assert_eq!(
+            links_of("见 [文档][ref]。\n\n[ref]: https://e.io/a"),
+            vec![(u("文档"), u("https://e.io/a"))]
+        );
+        assert_eq!(
+            links_of("[ref][]\n\n[ref]: https://e.io/b"),
+            vec![(u("ref"), u("https://e.io/b"))],
+            "`[ref][]`＝标签自己就是引用"
+        );
+        assert_eq!(
+            links_of("[ref]\n\n[ref]: https://e.io/c"),
+            vec![(u("ref"), u("https://e.io/c"))],
+            "shortcut 写法"
+        );
+        assert_eq!(
+            links_of("[Foo   Bar]\n\n[foo bar]: https://e.io/d"),
+            vec![(u("Foo   Bar"), u("https://e.io/d"))],
+            "标签匹配＝去首尾＋内部空白并一格＋大小写折叠，显示文本原样留着"
+        );
+        assert_eq!(
+            links_of("[x][r]\n\n[r]: <https://e.io/e> \"标题\""),
+            vec![(u("x"), u("https://e.io/e"))],
+            "`<…>` 包裹的目标与尾随标题都吃掉"
+        );
+        assert_eq!(
+            links_of("[x]: https://e.io/1\n[x]: https://e.io/2\n\n[x]"),
+            vec![(u("x"), u("https://e.io/1"))],
+            "同名定义**首个生效**"
+        );
+        assert_eq!(
+            links_of("[a] [b]\n\n[a]: https://e.io/1\n[b]: https://e.io/2"),
+            vec![(u("a"), u("https://e.io/1")), (u("b"), u("https://e.io/2"))],
+            "中间有空格＝两个 shortcut，不是一个 `[a][b]`"
+        );
+        assert_eq!(
+            links_of("![图][img]\n\n[img]: ./a.png"),
+            vec![(u("图"), u("./a.png"))],
+            "引用式的图片走同一张表"
+        );
+    }
+
+    /// 定义行本身：**不产生块**。它是查表用的，不是画在预览里的。
+    #[test]
+    fn definition_lines_are_not_rendered() {
+        assert_eq!(
+            parse_markdown("见 [文档][ref]。\n\n[ref]: https://e.io/a").len(),
+            1,
+            "定义行不该留下第二个块"
+        );
+        // 定义行夹在正文里：把上面那段切断，自己不出现
+        let mid = parse_markdown("甲\n[ref]: https://e.io\n\n[ref]");
+        assert_eq!(mid.len(), 2, "段落被定义行切断后各自成块：{mid:?}");
+        assert!(
+            matches!(&mid[0], MdBlock::Paragraph { spans } if spans_text(spans) == "甲"),
+            "{mid:?}"
+        );
+        // 代码围栏里的 `[x]: url` 是代码内容，不进表
+        let in_code = parse_markdown("```\n[x]: https://e.io\n```\n\n[x]");
+        assert!(
+            matches!(&in_code[0], MdBlock::CodeBlock { lines, .. } if lines == &vec!["[x]: https://e.io".to_owned()]),
+            "{in_code:?}"
+        );
+        assert!(
+            links_of_none(&in_code),
+            "围栏里那行没被收集 ⇒ 下面的 `[x]` 仍是字面量：{in_code:?}"
+        );
+        // 缩进 4 格＝缩进代码，不是定义
+        assert!(
+            links_of_none(&parse_markdown("    [x]: https://e.io\n\n[x]")),
+            "缩进行不当定义行收：{:#?}",
+            parse_markdown("    [x]: https://e.io\n\n[x]")
+        );
+        // 空目标不算定义 ⇒ 那行照旧是正文
+        assert_eq!(
+            parse_markdown("[x]: \n\n[x]").len(),
+            2,
+            "目标为空 ⇒ 那行不是定义，仍当段落"
+        );
+    }
+
+    /// 一段里没有任何链接 ⇒ true（用来断「这条根本不该进表」）。
+    fn links_of_none(blocks: &[MdBlock]) -> bool {
+        !blocks.iter().any(|b| match b {
+            MdBlock::Paragraph { spans } | MdBlock::Heading { spans, .. } => {
+                spans.iter().any(|s| s.is_link())
+            }
+            _ => false,
+        })
     }
 
     /// `<br>` 的几种写法 ⇒ 换行；代码段里仍是字面量。导出工具（Word／Confluence／
