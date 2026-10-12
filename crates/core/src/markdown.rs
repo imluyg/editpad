@@ -6,7 +6,7 @@
 //!
 //! * 块级：`#`~`######` 标题（含 ATX 闭栏 `# 标题 #`）、`---`/`***`/`_ _ _`
 //!   分隔线、段落（连续非空行合并）、无序 `- * +` 与有序 `1.`/`1)` 列表
-//!   （**保留序号、缩进层级、任务勾选框**，并吃**续行**）、`>` 引用（连续行合并、`>>` 深度、
+//!   （序号按 GitHub 口径**逐项重号**、缩进层级、任务勾选框，并吃**续行**）、`>` 引用（连续行合并、`>>` 深度、
 //!   **内部按块级再解析**：`> - 甲` 里是一个列表项，**懒续行**＝紧跟的正文行不写 `>` 也留在引用里）、
 //!   ``` ``` ``` 与 `~~~` 围栏代码（记录 info 串的语言；闭栏长度 ≥ 开栏长度）、
 //!   缩进代码块（空行后 ≥4 列或制表符）、整行 HTML 注释（隐去）、GFM 表格
@@ -167,6 +167,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let (defs, is_def) = collect_link_defs(&lines);
     let doc_begin = front_matter_end(&lines).unwrap_or(0);
     let mut blocks = parse_lines(lines.as_slice(), &defs, &is_def, doc_begin);
+    renumber_ordered_lists(&mut blocks);
     assign_footnotes(&mut blocks, &defs);
     blocks
 }
@@ -348,6 +349,48 @@ fn parse_lines(lines: &[&str], defs: &LinkDefs, is_def: &[bool], doc_begin: usiz
         });
     }
     blocks
+}
+
+/// 有序项**重号**。口径拿 GitHub `/markdown` 现量对拍过：`5. 五 / 7. 七 / 空行 / 9. 九 / 2. 二`
+/// 在 GitHub 是**一个** `<ol start="5">`（浏览器渲染 5,6,7,8），也就是——除了第一项写下的号，
+/// 后面的号一律不采信、逐项 +1，**空行也不另起一个列表**。改前我们原样回声，
+/// 于是预览里会冒出「1. 1. 9.」这种作者改完条目忘了改号的数字。
+///
+/// 层与层各起各的号；中间插入一个无序项 ⇒ 那层的连续号断掉（GitHub 也是两个列表）；
+/// 回到上一层时接着那层已发到的号继续走。
+fn renumber_ordered_lists(blocks: &mut [MdBlock]) {
+    // (缩进层, 下一个该发的号)
+    let mut levels: Vec<(usize, usize)> = Vec::new();
+    for block in blocks.iter_mut() {
+        match block {
+            MdBlock::ListItem {
+                order: Some(n),
+                indent,
+                ..
+            } => {
+                levels.retain(|(d, _)| *d <= *indent);
+                let next = match levels.iter_mut().find(|(d, _)| *d == *indent) {
+                    Some((_, next)) => {
+                        let v = *next;
+                        *next = v + 1;
+                        v
+                    }
+                    None => {
+                        levels.push((*indent, *n + 1));
+                        *n
+                    }
+                };
+                *n = next;
+            }
+            // 无序项／别的块都把这层的号断掉
+            MdBlock::ListItem { order: None, .. } => levels.clear(),
+            MdBlock::Quote { blocks: inner, .. } => {
+                renumber_ordered_lists(inner);
+                levels.clear();
+            }
+            _ => levels.clear(),
+        }
+    }
 }
 
 /// 数字 → 上标字符（`¹²³…`）：预览没有「上标」这种排版属性，用 Unicode 上标数字既不用
@@ -2366,6 +2409,64 @@ mod tests {
             vec![("item", "甲 接着写".to_owned())],
             "引用里的项也能接懒续行"
         );
+    }
+
+    /// 有序项**重号**（对拍基准＝GitHub `/markdown`：`5. 五 / 7. 七 / 空行 / 9. 九 / 2. 二`
+    /// 出一个 `<ol start="5">`＝渲染成 5,6,7,8）。改前原样回声，预览里会冒「1. 1. 9.」。
+    #[test]
+    fn ordered_items_renumber_like_github() {
+        let nums = |src: &str| -> Vec<Option<usize>> {
+            parse_markdown(src)
+                .iter()
+                .filter_map(|b| match b {
+                    MdBlock::ListItem { order, .. } => Some(*order),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            nums("1. 一\n1. 一\n9. 九\n"),
+            vec![Some(1), Some(2), Some(3)],
+            "除了第一项，后面写几都不采信"
+        );
+        assert_eq!(
+            nums("5. 五\n7. 七\n\n9. 九\n"),
+            vec![Some(5), Some(6), Some(7)],
+            "空行不另起一个列表（GitHub 的 <ol start=\"5\"> 同此）"
+        );
+        assert_eq!(
+            nums("3. 三\n4. 四\n"),
+            vec![Some(3), Some(4)],
+            "本来就对得上时不变"
+        );
+        assert_eq!(
+            nums("1. 外\n   1. 内\n   1. 内二\n"),
+            vec![Some(1), Some(1), Some(2)],
+            "嵌套层各起各的号"
+        );
+        assert_eq!(
+            nums("1. 外\n   1. 内\n2. 外二\n"),
+            vec![Some(1), Some(1), Some(2)],
+            "回到上一层接着那层已发到的号走"
+        );
+        assert_eq!(
+            nums("1. 一\n- 无序插一脚\n2. 二\n"),
+            vec![Some(1), None, Some(2)],
+            "无序项把那层的连续号断掉"
+        );
+        // 引用块内部是另一份号（自己从 1 起）
+        let inside = parse_markdown("> 1. 一\n> 1. 二\n");
+        let MdBlock::Quote { blocks: inner, .. } = &inside[0] else {
+            panic!("{inside:?}");
+        };
+        let got: Vec<Option<usize>> = inner
+            .iter()
+            .filter_map(|b| match b {
+                MdBlock::ListItem { order, .. } => Some(*order),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, vec![Some(1), Some(2)], "{inside:?}");
     }
 
     /// 表格单元里的 `\|` 是一个竖线字符，不是分列记号。改前它照样分列，多出来那一列被
