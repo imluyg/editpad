@@ -15,8 +15,7 @@
 //! * 行内标记**要求闭合**：找不到闭栏时按字面量输出（与 CommonMark 一致），
 //!   不再把后半行整条染色
 //!
-//! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）、
-//! 缩进代码块（4 格／制表符）、引用块内部的块级结构。
+//! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）、引用块内部的块级结构。
 
 /// 行内样式位标志。
 pub const MD_BOLD: u8 = 1 << 0;
@@ -153,7 +152,8 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
     // 引用式链接的定义先收一遍整篇：定义行可以写在用到它的那句**后面**（前向引用）
     let (defs, is_def) = collect_link_defs(&lines);
     let mut blocks = Vec::new();
-    let mut i = front_matter_end(&lines).unwrap_or(0);
+    let doc_begin = front_matter_end(&lines).unwrap_or(0);
+    let mut i = doc_begin;
 
     while i < lines.len() {
         let trimmed = lines[i].trim();
@@ -166,6 +166,13 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         // 定义行不产生块：它的去处是查表，不是画在预览里
         if is_def[i] {
             i += 1;
+            continue;
+        }
+
+        // 缩进代码排在围栏**之前**：4 格以上的 ``` 是代码内容，不是开栏（CommonMark 只允许 3 格）
+        if let Some((block, next)) = indented_code(&lines, i, doc_begin) {
+            blocks.push(block);
+            i = next;
             continue;
         }
 
@@ -685,6 +692,66 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
         prefix,
         from_col: marker_end,
     })
+}
+
+/// 缩进代码块（4 列／制表符）：把行首那 4 列吃掉，剩下的原样留着（含相对缩进）。
+fn strip_first_four_columns(line: &str) -> String {
+    let mut rest = line;
+    let mut cols = 0usize;
+    while cols < 4 {
+        match rest.chars().next() {
+            Some(' ') => {
+                rest = &rest[1..];
+                cols += 1;
+            }
+            Some('\t') => {
+                rest = &rest[1..];
+                cols += 4;
+            }
+            _ => break,
+        }
+    }
+    rest.to_owned()
+}
+
+/// 缩进代码块：行首空白 ≥4 列的那一行起头，一路吃到「缩进不够的正文行」为止，
+/// 中间的空行留着（那是代码里的空行），末尾连续空行丢掉。
+///
+/// 带上「上一行必须是空行（或就是文件头）」这一格判据：紧跟正文的缩进行是段落的
+/// 懒续行，紧跟列表项的缩进行是子项／续行——少了这一格就会把 `- 甲` 下面的
+/// `    - 子项` 变成代码，把上一轮刚接上的列表再拆坏。
+fn indented_code(lines: &[&str], start: usize, doc_begin: usize) -> Option<(MdBlock, usize)> {
+    let starts_clean = start == doc_begin || lines[start - 1].trim().is_empty();
+    if !starts_clean || indent_cols(lines[start]) < 4 {
+        return None;
+    }
+    let mut body = Vec::new();
+    let mut blanks = 0usize;
+    let mut k = start;
+    while k < lines.len() {
+        let line = lines[k];
+        if line.trim().is_empty() {
+            blanks += 1;
+            k += 1;
+            continue;
+        }
+        if indent_cols(line) < 4 {
+            break;
+        }
+        for _ in 0..blanks {
+            body.push(String::new());
+        }
+        blanks = 0;
+        body.push(strip_first_four_columns(line));
+        k += 1;
+    }
+    Some((
+        MdBlock::CodeBlock {
+            lang: None,
+            lines: body,
+        },
+        k,
+    ))
 }
 
 /// 围栏代码块：```` ``` ```` 与 `~~~`，记录 info 串首词作语言；未闭栏也成块。
@@ -1801,6 +1868,55 @@ mod tests {
             matches!(&blocks[0], MdBlock::Paragraph { .. }),
             "{blocks:?}"
         );
+    }
+
+    /// 缩进代码块（4 格／制表符）：空行之后的缩进行是代码。改前它被当正文走行内解析
+    /// ⇒ 里面的 `*x*` 被染色、行首缩进全丢，README 里那张命令输出看着像排版坏了。
+    #[test]
+    fn indented_blocks_after_a_blank_line_become_code() {
+        let blocks = parse_markdown("段落一句\n\n    这是缩进代码\n      多缩两格留着\n\n下一段\n");
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+        let MdBlock::CodeBlock { lang, lines } = &blocks[1] else {
+            panic!("中间那块该是缩进代码：{blocks:?}");
+        };
+        assert_eq!(lang, &None, "缩进代码没有语言标注");
+        assert_eq!(
+            lines,
+            &vec!["这是缩进代码".to_owned(), "  多缩两格留着".to_owned()],
+            "只吃掉 4 列，相对缩进留着"
+        );
+        assert!(matches!(&blocks[2], MdBlock::Paragraph { .. }));
+
+        let tabbed = parse_markdown("正文\n\n\t制表符起头\n\t第二行\n");
+        let MdBlock::CodeBlock { lines, .. } = &tabbed[1] else {
+            panic!("{tabbed:?}");
+        };
+        assert_eq!(
+            lines,
+            &vec!["制表符起头".to_owned(), "第二行".to_owned()],
+            "一个制表符＝4 列"
+        );
+
+        // 反向的那几格：上一行不是空行 ⇒ 不是缩进代码
+        assert!(
+            matches!(
+                &parse_markdown("正文\n    接着写")[0],
+                MdBlock::Paragraph { .. }
+            ),
+            "紧跟正文的缩进行是懒续行"
+        );
+        let nested = parse_markdown("- 甲\n    - 子项\n");
+        assert!(
+            nested.iter().all(|b| matches!(b, MdBlock::ListItem { .. })),
+            "紧跟列表项的缩进行还是子项：{nested:?}"
+        );
+
+        // 文件头第一件事就是缩进代码（上面没有行可依赖）
+        let head = parse_markdown("    开头就是代码\n");
+        let MdBlock::CodeBlock { lines, .. } = &head[0] else {
+            panic!("{head:?}");
+        };
+        assert_eq!(lines, &vec!["开头就是代码".to_owned()]);
     }
 
     /// 表格单元里的 `\|` 是一个竖线字符，不是分列记号。改前它照样分列，多出来那一列被
