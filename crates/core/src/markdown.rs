@@ -7,8 +7,9 @@
 //! * 块级：`#`~`######` 标题（含 ATX 闭栏 `# 标题 #`）、`---`/`***`/`_ _ _`
 //!   分隔线、段落（连续非空行合并）、无序 `- * +` 与有序 `1.`/`1)` 列表
 //!   （**保留序号、缩进层级、任务勾选框**）、`>` 引用（连续行合并、`>>` 深度）、
-//!   ``` ``` ``` 与 `~~~` 围栏代码（记录 info 串的语言）、GFM 表格
-//!   （含 `:---`/`:---:`/`---:` 对齐）
+//!   ``` ``` ``` 与 `~~~` 围栏代码（记录 info 串的语言；闭栏长度 ≥ 开栏长度）、
+//!   缩进代码块（空行后 ≥4 列或制表符）、整行 HTML 注释（隐去）、GFM 表格
+//!   （含 `:---`/`:---:`/`---:` 对齐、`\|` 转义竖线算单元格里的字符）
 //! * 行内：`**粗**`/`__粗__`、`*斜*`/`_斜_`、`` `代码` ``（任意反引号成串）、
 //!   `~~删除线~~`、`[文字](目标)` 链接、`![替代文字](地址)` 图片、
 //!   `<https://…>` 自动链接、`\` 转义标点
@@ -172,6 +173,12 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         // 缩进代码排在围栏**之前**：4 格以上的 ``` 是代码内容，不是开栏（CommonMark 只允许 3 格）
         if let Some((block, next)) = indented_code(&lines, i, doc_begin) {
             blocks.push(block);
+            i = next;
+            continue;
+        }
+
+        // HTML 注释整块隐去（与浏览器同一观感）
+        if let Some(next) = html_comment(&lines, i) {
             i = next;
             continue;
         }
@@ -791,6 +798,32 @@ fn is_table_start(lines: &[&str], i: usize, defs: &LinkDefs) -> bool {
     table(lines, i, defs).is_some()
 }
 
+/// 这一行是不是 HTML 注释的起头（段落的续行判据要用它断句）。
+fn is_comment_start(line: &str) -> bool {
+    line.trim().starts_with("<!--")
+}
+
+/// HTML 注释 ⇒ 预览里**整块隐去**（浏览器也是这么处理的）：README 里那一排徽章／锚点
+/// 注释原先一行行显示出来，看着像排版坏了。
+///
+/// 只吃**从行首起**的注释：单行闭合（`<!-- … -->`）或跨行吃到 `-->`。行中间的注释
+/// 不动——那是正文的一部分，删掉等于吃字。等不到收尾就交回普通解析（原样看得见，
+/// 比静默吞掉后半篇正文好查）。
+fn html_comment(lines: &[&str], start: usize) -> Option<usize> {
+    let body = lines[start].trim().strip_prefix("<!--")?;
+    if body.contains("-->") {
+        return Some(start + 1);
+    }
+    let mut k = start + 1;
+    while k < lines.len() {
+        if lines[k].contains("-->") {
+            return Some(k + 1);
+        }
+        k += 1;
+    }
+    None
+}
+
 /// 这一行是不是**另起一块**的开头：段落的续行与列表项的续行共用这一份判据
 /// （两处各写一遍就会各漏一格，比如列表项吃了 `>` 引用行）。
 fn starts_new_block(lines: &[&str], i: usize, defs: &LinkDefs, is_def: &[bool]) -> bool {
@@ -801,6 +834,7 @@ fn starts_new_block(lines: &[&str], i: usize, defs: &LinkDefs, is_def: &[bool]) 
         || is_table_start(lines, i, defs)
         || quote(t).is_some()
         || list_item(lines[i]).is_some()
+        || is_comment_start(lines[i])
         || is_def[i]
 }
 
@@ -1957,6 +1991,39 @@ mod tests {
             &vec!["a".to_owned(), "```b".to_owned()],
             "```b 有正文，是代码内容不是闭栏"
         );
+    }
+
+    /// HTML 注释隐去：整行 `<!-- … -->`（含跨行的那种）在预览里不占位置。改前它照旧
+    /// 是一段正文——README 顶部那一排徽章／锚点注释全裸露着。
+    #[test]
+    fn html_comments_take_no_room() {
+        assert_eq!(
+            parse_markdown("正文\n\n<!-- 说明 -->\n\n更多\n").len(),
+            2,
+            "单行注释不留块"
+        );
+        assert_eq!(
+            parse_markdown("甲\n\n<!--\n隐藏的行\n-->\n\n乙\n").len(),
+            2,
+            "跨行注释整段吞掉"
+        );
+        // 夹在两行正文中间：把那段切断，自己不出现
+        let mid = parse_markdown("上\n<!-- 注 -->\n下\n");
+        assert_eq!(mid.len(), 2, "{mid:?}");
+
+        // 行**中间**的注释不动：那是正文的一部分，删掉等于吃字
+        let inline = parse_markdown("前 <!-- 中 --> 后\n");
+        let MdBlock::Paragraph { spans } = &inline[0] else {
+            panic!("{inline:?}");
+        };
+        assert_eq!(spans_text(spans), "前 <!-- 中 --> 后");
+
+        // 等不到收尾 ⇒ 交回普通解析（原样看得见，比静默吞掉后半篇好查）
+        let open = parse_markdown("<!-- 没关\n");
+        let MdBlock::Paragraph { spans } = &open[0] else {
+            panic!("{open:?}");
+        };
+        assert_eq!(spans_text(spans), "<!-- 没关");
     }
 
     /// 表格单元里的 `\|` 是一个竖线字符，不是分列记号。改前它照样分列，多出来那一列被
