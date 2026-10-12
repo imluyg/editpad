@@ -4190,6 +4190,70 @@ fn markdown_preview_colors_fenced_code_by_language() {
     }
 }
 
+/// 预览里的**裸 URL** 也点得动：粘一行 `https://…` 就能打开，不用自己补 `<>`。
+///
+/// 这条盯的是「core 认出裸 URL ⇒ span 带 link ⇒ `md_link_target` 给可点目标 ⇒ 点击产出
+/// `LinkClicked`」整条线；core 那笔只断到 span 为止，视图树这边此前没人用裸 URL 点过一次。
+#[test]
+fn markdown_preview_bare_url_is_clickable() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("看 https://e.io/a 吧\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible);
+
+    let mut ui = ViewTree::layout_default(&app);
+    let block = ui
+        .find(|b| b.x > 600.0 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 100.0)
+        .expect("应能找到右半的预览段落");
+    let mut messages = Vec::new();
+    // 「看 」两个字符之后的那截就是 URL 本体；落点估不准就多试几个像素
+    for dx in [26.0f32, 36.0, 46.0, 56.0, 66.0, 76.0] {
+        let at = iced::Point::new(block.x + dx, block.y + block.height / 2.0);
+        ui.send(
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at }),
+            at,
+        );
+        ui.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            at,
+        );
+        messages = ui.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+            at,
+        );
+        if messages
+            .iter()
+            .any(|m| matches!(m, Message::LinkClicked(_)))
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        messages.iter().find_map(|m| match m {
+            Message::LinkClicked(t) => Some(t.clone()),
+            _ => None,
+        }),
+        Some(crate::editor::LinkTarget::Url("https://e.io/a".to_owned())),
+        "点裸 URL 应产出 LinkClicked(Url(..))；实际消息 {messages:?}，段落 {block:?}"
+    );
+}
 /// 代码块上色**不许丢字、不许重字，空行也要占一行**。
 ///
 /// run 之间可能有缝隙（不同 token 之间未覆盖的字符），所以这里是**按列对齐**取色：

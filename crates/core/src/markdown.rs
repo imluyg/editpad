@@ -13,7 +13,8 @@
 //!   （含 `:---`/`:---:`/`---:` 对齐、`\|` 转义竖线算单元格里的字符）
 //! * 行内：`**粗**`/`__粗__`、`*斜*`/`_斜_`、`` `代码` ``（任意反引号成串）、
 //!   `~~删除线~~`、`[文字](目标)` 链接、`![替代文字](地址)` 图片、
-//!   `<https://…>` 自动链接、`\` 转义标点
+//!   `<https://…>` 自动链接、**裸 URL**（`https://…` 与 `www.…`，GFM autolink literal）、
+//!   `\` 转义标点
 //! * 行内标记**要求闭合**：找不到闭栏时按字面量输出（与 CommonMark 一致），
 //!   不再把后半行整条染色
 //!
@@ -1295,6 +1296,22 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>,
             }
         }
 
+        // 裸链接（GFM 的 autolink literal）：粘贴进来的 URL 过去只是普通文字，而别的
+        // 写法都能点——同一篇里"能不能点"取决于有没有那对尖括号，这说不通。
+        // 已经在链接里（`link.is_some()`）不再套一层：链接文字里的 URL 不是嵌套链接。
+        if link.is_none() && url_boundary_ok(text[..i].chars().next_back()) {
+            if let Some((len, dest)) = bare_url(&text[i..]) {
+                flush!();
+                out.push(MdSpan {
+                    text: text[i..i + len].to_owned(),
+                    style: base | MD_LINK,
+                    link: Some(dest),
+                });
+                i += len;
+                continue;
+            }
+        }
+
         // 代码段：任意长度的反引号串成对，内容一律字面量
         if c == '`' {
             let run = run_len(&text[i..], '`');
@@ -1546,6 +1563,88 @@ fn reference_dest(after: &str, label: &str, defs: &LinkDefs) -> Option<(String, 
         None => (label, 0usize),
     };
     Some((defs.get(&normalize_label(cited))?.to_owned(), extra))
+}
+
+/// 裸 URL 的左边界：前面是字母数字或 URL 里常见的连接符 ⇒ 那是更大的一个词，不是链接起点
+/// （`mywww.example.com` 不许切出 `www.example.com`）。中文这类非 ASCII 字符算边界——
+/// 「见https://x.com/a」里那个链接该认出来，中文用户粘贴时常常不带空格。
+fn url_boundary_ok(prev: Option<char>) -> bool {
+    match prev {
+        None => true,
+        Some(c) => {
+            !(c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '.' | '_' | '-' | '/' | '+' | ':' | ';' | '?' | '&' | '%' | '#' | '@'
+                ))
+        }
+    }
+}
+
+/// 裸 URL 的字面量（GFM autolink literal 的子集）：`http(s)://…` 与 `www.….xx…`。
+/// 返回（显示文本的字节长，链接目标）。三条口径：
+///
+/// * 本体只走 **ASCII 可打印**字符——「见 https://x.com/a，谢谢」那个 `，` 必须收尾，
+///   中文正文里粘 URL 的人不会替你把标点转义；
+/// * 行尾句读（`.` `,` `;` `:` `!` `?` `'` `"`）不算进链接；右括号按**配对**算，
+///   所以「(https://x.com/a)」里最后一个 `)` 是外面的括号，而 `…/a_(b)` 的那个留着；
+/// * `www.` 没有 scheme，交出去的目标补 `https://`（点开的必须是能打开的地址），
+///   但**显示文本保持原样**。
+fn bare_url(s: &str) -> Option<(usize, String)> {
+    let has_scheme = s.starts_with("http://") || s.starts_with("https://");
+    if !has_scheme && !s.starts_with("www.") {
+        return None;
+    }
+    let mut end = 0usize;
+    let mut parens = 0usize;
+    while end < s.len() {
+        let c = s[end..].chars().next()?;
+        if !c.is_ascii()
+            || c.is_whitespace()
+            || matches!(c, '<' | '>' | '"' | '\'' | '`' | '[' | ']' | '{' | '}')
+        {
+            break;
+        }
+        match c {
+            '(' => parens += 1,
+            // 没有配对的左括号 ⇒ 这根右括号不属于链接本体
+            ')' if parens == 0 => break,
+            ')' => parens -= 1,
+            _ => {}
+        }
+        end += c.len_utf8();
+    }
+    // 本体到这里全是 ASCII（非 ASCII 已 break），按字节回退安全
+    while end > 0
+        && matches!(
+            s.as_bytes()[end - 1],
+            b'.' | b',' | b';' | b':' | b'!' | b'?' | b'\'' | b'"'
+        )
+    {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let literal = &s[..end];
+    let host = if has_scheme {
+        literal.split_once("://")?.1
+    } else {
+        &literal[4..]
+    };
+    if host.is_empty() {
+        return None;
+    }
+    if !has_scheme && !host.split('/').next().unwrap_or("").contains('.') {
+        return None; // `www.x` 不是域名
+    }
+    let dest = if has_scheme {
+        literal.to_owned()
+    } else {
+        format!("https://{literal}")
+    };
+    // 目标里的实体要解开（与 `[文字](url)` 同一口径）：`?a=1&amp;b=2` 写成 URL 时是真 `&`
+    Some((end, decode_entities(&dest)))
 }
 
 /// 自动链接判据：已知 scheme + 无空白。
@@ -2289,10 +2388,93 @@ mod tests {
                 link: Some("https://e.io".into()),
             }]
         );
+        // 未闭合的 `[文字](` 按字面量留着，而里面那串裸 URL **照旧**认成链接。
+        // 这条判据改过：原本断的是整串原样，那是「还没有裸 URL 识别」时的产物；
+        // GFM 的 autolink literal 在正文里扫 URL，不因前面有个失败的 `[` 就放过。
         assert_eq!(
             inline("[没闭括号](https://e.io"),
-            vec![MdSpan::plain("[没闭括号](https://e.io")]
+            vec![
+                MdSpan::plain("[没闭括号]("),
+                MdSpan {
+                    text: "https://e.io".into(),
+                    style: MD_LINK,
+                    link: Some("https://e.io".into()),
+                },
+            ],
+            "方括号那截仍是字面量，URL 那截是链接"
         );
+    }
+
+    /// 裸 URL 也是链接（GFM 的 autolink literal）。改前粘贴进来的 `https://…` 只是普通文字，
+    /// 同一段里 `[文字](url)` 与 `<url>` 都能点——能不能点取决于写法，这说不通。
+    #[test]
+    fn bare_urls_become_clickable_links() {
+        let links = |src: &str| -> Vec<(String, String)> {
+            inline_with(src, &LinkDefs::default())
+                .iter()
+                .filter(|s| s.is_link())
+                .map(|s| (s.text.clone(), s.link.clone().unwrap_or_default()))
+                .collect()
+        };
+        assert_eq!(
+            links("看 https://example.com/a?b=1 吧"),
+            vec![(
+                "https://example.com/a?b=1".to_owned(),
+                "https://example.com/a?b=1".to_owned()
+            )]
+        );
+        assert_eq!(
+            links("访问 www.example.com/x"),
+            vec![(
+                "www.example.com/x".to_owned(),
+                "https://www.example.com/x".to_owned()
+            )],
+            "显示文本原样，交出去的目标补 https://"
+        );
+        assert_eq!(
+            links("见https://x.com/a，谢谢"),
+            vec![("https://x.com/a".to_owned(), "https://x.com/a".to_owned())],
+            "中文标点直接收尾（非 ASCII 不进 URL 本体）"
+        );
+        assert_eq!(
+            links("见 https://x.com/a. 下一句"),
+            vec![("https://x.com/a".to_owned(), "https://x.com/a".to_owned())],
+            "行尾的英文句号不算进链接"
+        );
+        assert_eq!(
+            links("(https://x.com/a_(b))"),
+            vec![(
+                "https://x.com/a_(b)".to_owned(),
+                "https://x.com/a_(b)".to_owned()
+            ),],
+            "右括号按配对算"
+        );
+        assert_eq!(
+            links("打开 https://x.com/?q=1&amp;r=2 看"),
+            vec![(
+                "https://x.com/?q=1&amp;r=2".to_owned(),
+                "https://x.com/?q=1&r=2".to_owned()
+            )],
+            "显示留原样、目标解实体（与 `[文字](url)` 同口径）"
+        );
+        // URL 里的 `_` 不许被当成斜体记号
+        let under = inline_with("看 https://x.com/a_b_c 吧", &LinkDefs::default());
+        assert!(under.iter().all(|s| s.style & MD_ITALIC == 0), "{under:?}");
+        assert_eq!(spans_text(&under), "看 https://x.com/a_b_c 吧");
+
+        // 反向的那些
+        assert!(
+            links("mywww.example.com").is_empty(),
+            "前面是字母数字 ⇒ 不是链接起点"
+        );
+        assert!(links("`https://x.com/a`").is_empty(), "代码段里是内容");
+        assert_eq!(
+            links("[看 https://x.com](https://y.com)"),
+            vec![("看 https://x.com".to_owned(), "https://y.com".to_owned())],
+            "链接文字里的裸 URL 不许再套一层链接"
+        );
+        assert!(links("https://").is_empty(), "空 host 不是链接");
+        assert!(links("www.x").is_empty(), "`www.` 后面没有点号不算域名");
     }
 
     /// HTML 标签**除了 `<br>`** 都按字面量（本解析器不渲 HTML）。`<br>` 单独立出来
