@@ -78,6 +78,8 @@ pub(crate) fn markdown_preview_element(
 ) -> Element<'static, Message> {
     let dark = matches!(theme, Theme::Dark);
     let ink = MdInk::of(theme);
+    // 整次建树共享一份着色额度（见 `MdColorBudget`）
+    let color_budget = MdColorBudget(std::cell::Cell::new(MD_COLOR_LINE_BUDGET));
     note_build();
     // 预览各级字号相对正文默认 16px 的既有比例
     let scaled = |px: f32| px * (font_size / 16.0);
@@ -154,11 +156,17 @@ pub(crate) fn markdown_preview_element(
                 col = col.push(md_paragraph(line, prose, Alignment::Start));
             }
             MdBlock::CodeBlock { lines, lang } => {
-                let body = Rich::with_spans(code_block_spans(lines, lang.as_deref(), base, dark))
-                    .size(scaled(14.0))
-                    .width(Fill)
-                    // 代码不该把整词推到下一行：长 token 按字形断开
-                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+                let body = Rich::with_spans(code_block_spans(
+                    lines,
+                    lang.as_deref(),
+                    base,
+                    dark,
+                    &color_budget,
+                ))
+                .size(scaled(14.0))
+                .width(Fill)
+                // 代码不该把整词推到下一行：长 token 按字形断开
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
                 let bg = ink.code_bg;
                 let border = ink.box_border;
                 col = col.push(
@@ -661,6 +669,30 @@ impl widget::Widget<Message, Theme, iced::Renderer> for MdCached {
 
 // ── 代码块着色 ────────────────────────────────────────────────────────────────
 
+/// 一次建树里**还能着色多少行**的额度（1500 行 × 近似路径 ≈75 µs ⇒ 着色部分
+/// 约 110 ms 封顶）。额度在 `markdown_preview_element` 里随建树新建，不在树上共享。
+pub(crate) const MD_COLOR_LINE_BUDGET: usize = 1500;
+
+pub(crate) struct MdColorBudget(pub std::cell::Cell<usize>);
+
+/// 默认＝满额度（`Default` 不是 0：0 额度意味着"整篇不上色"，那是特例，
+/// 要显式写 `MdColorBudget(Cell::new(0))`，测试里才这么用）。
+impl Default for MdColorBudget {
+    fn default() -> Self {
+        Self(std::cell::Cell::new(MD_COLOR_LINE_BUDGET))
+    }
+}
+
+impl MdColorBudget {
+    /// 领走最多 `want` 行的着色额度，返回实际允许的行数（0＝整块素色）。
+    pub(crate) fn take(&self, want: usize) -> usize {
+        let left = self.0.get();
+        let got = want.min(left);
+        self.0.set(left - got);
+        got
+    }
+}
+
 /// 代码块＝整块一个富文本段，并试着按围栏 info 串上色。
 ///
 /// 为什么值得做：代码块是 .md 里最常要"看清楚"的内容，此前预览里它是一行行素色
@@ -671,15 +703,22 @@ impl widget::Widget<Message, Theme, iced::Renderer> for MdCached {
 /// （`` ```Python ````）；都不中 ⇒ **整块素色**（不嗅探——语言是作者写明的，
 /// 猜错比不猜更误导）。
 ///
-/// ⚠️ 成本落在**换版那一帧**（P409 已把换版节流到每窗口一次）：逐行走 syntect
-/// 解析，块越长这一帧越贵——这条没量过，登记在台账的待量项里。
+/// 成本（实测，release）：3000 行的 ```rs 块走精确 `styled_line` 建树要 **596 ms**，
+/// 同一块认不出语言（整块素色）只要 **2.4 ms** ⇒ 换版那一帧几乎全花在逐行 syntect
+/// 解析上。两道闸：① 走 `styled_line_approx`（P61 的渐进上色，**不建检查点**、
+/// 连续逐行 ≈75 µs，比精确路径快 2.7 倍；取舍＝跨 anchor 的前几行可能错色，
+/// 而正文编辑器里那份仍是精确上色）；② 一次建树一个**总行数额度**
+/// （[`MD_COLOR_LINE_BUDGET`]），额度用尽后的块整块素色 ⇒ 着色成本封顶。
 pub(crate) fn code_block_spans(
     lines: &[String],
     lang: Option<&str>,
     base: Font,
     dark: bool,
+    budget: &MdColorBudget,
 ) -> Vec<TextSpan<'static, LinkTarget>> {
     let ink = MdInk::of(if dark { Theme::Dark } else { Theme::Light });
+    // 先领额度：额度为 0 时连高亮器都不必构造
+    let colored_allowed = budget.take(lines.len());
 
     let mut hl = lang.and_then(|raw| {
         let t = raw.trim();
@@ -710,8 +749,9 @@ pub(crate) fn code_block_spans(
         // 用正文字色。**按列对齐**而不是直接铺 run——run 之间有缝隙时不丢字，
         // 也不会把同一个字重画两遍。
         let mut colored: Vec<[f32; 4]> = vec![plain; n];
-        if let Some(h) = hl.as_mut() {
-            for r in h.styled_line(idx, line, lines.len(), &mut text_of) {
+        // 只有额度内的行上色；超出的行留在 `plain` 上（整块后半素色）
+        if let Some(h) = hl.as_mut().filter(|_| idx < colored_allowed) {
+            for r in h.styled_line_approx(idx, 0, line, lines.len(), &mut text_of) {
                 if r.start_col >= n {
                     continue;
                 }
