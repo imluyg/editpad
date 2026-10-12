@@ -16,7 +16,7 @@
 //!   不再把后半行整条染色
 //!
 //! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）、
-//! 表格单元里的 `\|` 转义竖线、缩进代码块（4 格／制表符）、引用块内部的块级结构。
+//! 缩进代码块（4 格／制表符）、引用块内部的块级结构。
 
 /// 行内样式位标志。
 pub const MD_BOLD: u8 = 1 << 0;
@@ -783,11 +783,32 @@ fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usiz
     ))
 }
 
+/// 切表格一行：只切在**没被转义**的竖线上。
+///
+/// `\|` 是单元格里的一个竖线字符（GFM 口径）。改前它照样分列，多出来那一列被
+/// `normalize_row` 按列数裁掉＝用户写的字静默消失。反斜杠按**奇数串**才算转义，
+/// 所以 `\\|` 是「转义的反斜杠＋真分列」。
 fn split_row(line: &str) -> Vec<&str> {
     let t = line.trim();
-    let inner = t.strip_prefix('|').unwrap_or(t);
-    let inner = inner.strip_suffix('|').unwrap_or(inner);
-    inner.split('|').map(|c| c.trim()).collect()
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    let mut cells = Vec::new();
+    let mut start = 0usize;
+    let mut slashes = 0usize;
+    for (idx, c) in t.char_indices() {
+        match c {
+            '\\' => slashes += 1,
+            '|' if slashes % 2 == 1 => slashes = 0,
+            '|' => {
+                cells.push(t[start..idx].trim());
+                start = idx + 1;
+                slashes = 0;
+            }
+            _ => slashes = 0,
+        }
+    }
+    cells.push(t[start..].trim());
+    cells
 }
 
 /// 单元格数补齐／裁到列数。
@@ -1780,6 +1801,31 @@ mod tests {
             matches!(&blocks[0], MdBlock::Paragraph { .. }),
             "{blocks:?}"
         );
+    }
+
+    /// 表格单元里的 `\|` 是一个竖线字符，不是分列记号。改前它照样分列，多出来那一列被
+    /// `normalize_row` 按列数裁掉＝用户写的字**静默消失**。
+    /// ⚠️ 这条只有 core 作证：预览的块节点数／高度都数不出"某一格少了半句字"，
+    /// 已登记成眼验项（带 `\|` 的真实表格开一次真窗口）。
+    #[test]
+    fn escaped_pipes_stay_inside_their_cell() {
+        let blocks = parse_markdown("| a | b |\n|---|---|\n| x \\| y | 2 |\n");
+        let MdBlock::Table { header, rows, .. } = &blocks[0] else {
+            panic!("期望一张表：{blocks:?}");
+        };
+        assert_eq!(header.len(), 2);
+        assert_eq!(rows[0].len(), 2, "竖线不该多分出一列把正文裁掉：{rows:?}");
+        assert_eq!(spans_text(&rows[0][0]), "x | y", "转义的竖线留在单元格里");
+        assert_eq!(spans_text(&rows[0][1]), "2");
+
+        // 对照：`\\|`＝转义的反斜杠＋真分列（偶数串反斜杠不挡竖线）
+        let two = parse_markdown("| a | b |\n|---|---|\n| x \\\\| y |\n");
+        let MdBlock::Table { rows, .. } = &two[0] else {
+            panic!("{two:?}");
+        };
+        assert_eq!(rows[0].len(), 2, "{two:?}");
+        assert_eq!(spans_text(&rows[0][0]), "x \\");
+        assert_eq!(spans_text(&rows[0][1]), "y");
     }
 
     /// P376（池 ⑬）：行内代码段里的 `*` 是**字面量**，不参与样式开关。
