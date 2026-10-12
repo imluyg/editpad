@@ -3739,6 +3739,9 @@ fn markdown_preview_reuses_its_widget_tree_across_frames() {
     use iced::advanced::widget::Tree;
 
     let count = || MD_BUILD_COUNT.with(|c| c.get());
+    // 本用例要盯的是"依赖变了必须重建"⇒ 先把节流关掉（窗口 0 ms），
+    // 否则它测到的是下一格用例的节流行为。thread_local：用例结束要还原。
+    crate::md_preview::MD_SWAP_WINDOW_MS.with(|c| c.set(0));
     let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
     let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
     // 一帧＝建元素 → 与既有 Tree 对齐（diff）→ 布局。这里**复用同一棵 Tree**，
@@ -3793,6 +3796,80 @@ fn markdown_preview_reuses_its_widget_tree_across_frames() {
         .insert_str("\n## 新章节\n\n补一段\n");
     frame(&app, &mut tree);
     assert_eq!(count() - base, 2, "内容已变却不重建：预览会停在旧内容");
+    crate::md_preview::MD_SWAP_WINDOW_MS.with(|c| c.set(crate::md_preview::MD_PREVIEW_SWAP_MS));
+}
+
+/// 连打时预览**换版要节流**。
+///
+/// P408 的复用只管"内容没变的帧"；内容一变仍要整棵重建（353 KB 实测约 600 ms）
+/// ⇒ 左边打字右边预览就每键一卡顿。节流＝一个窗口内继续用旧树（旧树自足：每个
+/// span 的文本都已克隆成 owned Fragment，块表被换掉也照样画上一版），停手后由
+/// 空闲心跳（每秒约 5 帧）补上最后一版。
+///
+/// 窗口用 thread_local 旋钮调 0／极大，**不靠 sleep**——耗时与定时读数都会假绿假红。
+#[test]
+fn markdown_preview_throttles_rebuilds_while_typing() {
+    use crate::md_preview::{MD_BUILD_COUNT, MD_PREVIEW_SWAP_MS, MD_SWAP_WINDOW_MS};
+    use iced::advanced::layout;
+    use iced::advanced::widget::Tree;
+
+    let count = || MD_BUILD_COUNT.with(|c| c.get());
+    let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
+    let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
+    let frame = |app: &Editpad, tree: &mut Tree| {
+        let mut el = app.view();
+        el.as_widget_mut().diff(tree);
+        el.as_widget_mut().layout(tree, &renderer, &limits);
+    };
+
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("# 标题\n\n正文一段\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, ".md 页应能开预览");
+
+    let base = count();
+    let mut tree = {
+        let el = app.view();
+        Tree::new(el.as_widget())
+    };
+    frame(&app, &mut tree);
+    assert_eq!(count() - base, 1, "首帧应建一次预览树");
+
+    // 窗口＝永不到期：连打 20 次都不得重建（画的是上一版，但不再每键一卡顿）
+    MD_SWAP_WINDOW_MS.with(|c| c.set(u64::MAX));
+    for i in 0..20 {
+        let line = format!("第{i}行补充内容\n");
+        app.cur_handle.borrow_mut().insert_str(&line);
+        frame(&app, &mut tree);
+    }
+    assert_eq!(
+        count() - base,
+        1,
+        "节流窗口内仍在逐次重建：连打就每键一卡顿"
+    );
+
+    // 窗口到期＝必须补上最后一版，不许停在陈旧内容
+    MD_SWAP_WINDOW_MS.with(|c| c.set(0));
+    frame(&app, &mut tree);
+    assert_eq!(count() - base, 2, "节流结束却不换版：预览停在旧内容");
+
+    // 还原旋钮：thread_local 会被同线程的下一条用例继承
+    MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
 }
 
 /// 预览链接的落点解析与正文链接同口径：scheme 交系统、路径须存在、锚点不链。

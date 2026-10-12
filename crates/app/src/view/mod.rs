@@ -333,19 +333,12 @@ impl Editpad {
                 // P408：预览树**握在应用状态里**跨帧复用——只有依赖（块表＋字号＋主题＋
                 // 字形族＋链接基准目录）变了才重建；`Rich` 的排版缓存活在 widget 实例上，
                 // 复用实例才不再逐帧重折整篇字。
-                let tree = {
-                    let mut holder = self.md_preview_tree.0.borrow_mut();
-                    match holder.as_mut() {
-                        Some((k, slot)) if *k == key_hash => slot.clone(),
-                        _ => {
-                            let built = Rc::new(std::cell::RefCell::new(Some(
-                                markdown_preview_element(&shown, px, base, theme, dir.as_deref()),
-                            )));
-                            *holder = Some((key_hash, built.clone()));
-                            built
-                        }
-                    }
-                };
+                let tree = md_preview_tree_for(
+                    &self.md_preview_tree,
+                    &self.md_preview_swap_at,
+                    key_hash,
+                    || markdown_preview_element(&shown, px, base, theme, dir.as_deref()),
+                );
                 Element::new(MdCached::new(tree))
             };
             // P407 分栏：开预览不再把正文整块摘掉——左半继续可编辑、右半实时跟着

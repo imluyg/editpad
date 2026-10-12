@@ -389,6 +389,8 @@ pub(crate) struct Editpad {
     /// 握在这里而不是 widget 的 `Tree::state`：父层是否把 `diff` 传导到本子节点不由
     /// 本 widget 保证，实测那样会在第一帧就把树建两次。
     pub(crate) md_preview_tree: crate::md_preview::MdTreeSlot,
+    /// 上一次**换预览版**的时刻（节流判据，见 `md_preview::md_preview_can_swap`）。
+    pub(crate) md_preview_swap_at: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 /// O-6：Markdown 预览的**解析结果**缓存 `签名 → 块表`。
@@ -521,6 +523,7 @@ impl Default for Editpad {
             md_preview_cache: std::cell::RefCell::new(None),
             md_preview_seq: std::cell::Cell::new(0),
             md_preview_tree: crate::md_preview::MdTreeSlot::default(),
+            md_preview_swap_at: std::cell::Cell::new(None),
             // P25：初始页即「未命名1」，下一个新页为「未命名2」
             untitled_next: 2,
             // P30：启动会话恢复状态（boot_restore 按清单填充）

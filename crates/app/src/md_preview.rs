@@ -410,6 +410,64 @@ pub(crate) fn md_preview_key(
     h.finish()
 }
 
+/// 预览换版的节流窗口（毫秒）：距上一次换版不足这么久就**继续用旧树**。
+///
+/// 为什么还要这一道：`Rich` 的排版缓存活在 widget 实例上，P408 的复用把"没改动的帧"
+/// 降到约 1 ms，但**内容一变仍要整棵重建**（实测 353 KB 那档约 600 ms）⇒ 左边打字、
+/// 右边预览就是每键一卡顿。节流后一次连打最多每窗口换版一次。
+///
+/// ⚠️ **停手后的最后一版靠谁补**：没为它新订定时链（那要新增 Message），换版靠既有
+/// 拍子再跑一次 `view()`＝光标闪烁拍（`editor::CARET_BLINK_MS`＝530 ms，聚焦且在编辑
+/// 态时在订）或快照心跳拍（默认 10 s）⇒ 落地时延 ≈ 窗口＋一拍（约 0.3～0.8 s）。
+/// 若停手后立刻失焦（闪烁拍被撤销、心跳又关着），预览会停在上一版直到下一条消息
+/// 进来——这一条无头测不到（订阅时序），登记为眼验项。300 ms ≈ "还跟手"的上限。
+pub(crate) const MD_PREVIEW_SWAP_MS: u64 = 300;
+
+#[cfg(test)]
+thread_local! {
+    /// 测试里把窗口调 0（立刻换）或极大（永不换），让节流能被**确定性地**盯住——
+    /// 不靠 sleep（本仓口径：耗时读数在忙机器假红、温热假绿）。
+    pub(crate) static MD_SWAP_WINDOW_MS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(MD_PREVIEW_SWAP_MS) };
+}
+
+/// 现在是否允许换预览版。`last`＝上一次换版的时刻（`None`＝还没换过 ⇒ 允许）。
+pub(crate) fn md_preview_can_swap(last: Option<std::time::Instant>) -> bool {
+    #[cfg(test)]
+    let window = MD_SWAP_WINDOW_MS.with(|c| c.get());
+    #[cfg(not(test))]
+    let window = MD_PREVIEW_SWAP_MS;
+    match last {
+        None => true,
+        Some(t) => window == 0 || t.elapsed() >= std::time::Duration::from_millis(window),
+    }
+}
+
+/// 取本帧该用的预览树：键没变⇒复用；键变了但还在节流窗口里⇒**继续用旧树**；
+/// 否则整棵重建并记下换版时刻。
+///
+/// 旧树是**自足**的（`markdown_preview_element` 把每个 span 的文本克隆成 owned
+/// Fragment），所以即使旧块表已经被释放，旧树仍能把上一版内容完整画出来——
+/// 节流期间预览落后 ≤ 一个窗口，而不是画错或 panic。
+pub(crate) fn md_preview_tree_for(
+    holder: &MdTreeSlot,
+    swap_at: &std::cell::Cell<Option<std::time::Instant>>,
+    want: u64,
+    build: impl FnOnce() -> Element<'static, Message>,
+) -> MdTree {
+    let mut held = holder.0.borrow_mut();
+    match held.as_mut() {
+        Some((k, slot)) if *k == want => slot.clone(),
+        Some((_, slot)) if !md_preview_can_swap(swap_at.get()) => slot.clone(),
+        _ => {
+            let built = Rc::new(std::cell::RefCell::new(Some(build())));
+            *held = Some((want, built.clone()));
+            swap_at.set(Some(std::time::Instant::now()));
+            built
+        }
+    }
+}
+
 // 预览树真正被构建的次数——成本契约要**看得见**，不能靠量耗时断言（忙机器假红、
 // 温热假绿，本仓已两次因此把成本契约改成计数／同一性）。用 `thread_local` 而非
 // 全局原子：测试线程各跑各的，全局计数会被并发用例串味。
