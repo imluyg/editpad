@@ -205,6 +205,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         }
 
         let mut paragraph = String::from(trimmed);
+        let mut prev_raw = lines[i];
         i += 1;
         while i < lines.len() {
             let next = lines[i].trim();
@@ -218,8 +219,14 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             {
                 break;
             }
-            paragraph.push(' ');
+            let (sep, drop_backslash) = line_break_kind(prev_raw);
+            if drop_backslash {
+                // 行尾那个 `\` 是换行标记本身，不进气泡
+                paragraph.pop();
+            }
+            paragraph.push(sep);
             paragraph.push_str(next);
+            prev_raw = lines[i];
             i += 1;
         }
         blocks.push(MdBlock::Paragraph {
@@ -247,6 +254,26 @@ fn split_lines(text: &str) -> Vec<&str> {
         lines.push("");
     }
     lines
+}
+
+/// 段落里两行正文之间的分隔符 ⇒（写进文本的分隔字符，是否吃掉行尾那个反斜杠）。
+///
+/// CommonMark 的两种硬换行写法：行尾 **≥2 个空格**，或行尾一个**落单的 `\`**。
+/// 落单＝行尾反斜杠的个数是奇数——`foo\\` 里第二个 `\` 被第一个转义掉，那仍是软换行。
+/// 硬换行写成 `\n` 交给渲染层折行；其余情况写空格，与浏览器折叠软换行的观感一致。
+fn line_break_kind(line: &str) -> (char, bool) {
+    if line.ends_with('\\') {
+        let run = line.chars().rev().take_while(|&c| c == '\\').count();
+        return if run % 2 == 1 {
+            ('\n', true)
+        } else {
+            (' ', false)
+        };
+    }
+    if line.ends_with("  ") {
+        return ('\n', false);
+    }
+    (' ', false)
 }
 
 /// `# 标题` → Some((级别, 内容))；# 后必须有空格或就是整行。
@@ -1539,5 +1566,32 @@ mod tests {
             .find_map(|s| s.link.clone())
             .unwrap_or_default();
         assert_eq!(link, "https://e.io/a?x=1&y=2", "目标里的 &amp; 要解开");
+    }
+
+    /// 硬换行的两种写法都要在段落的文本里留一个 `\n`（渲染层据此折行），
+    /// 单个尾空格与被转义的双反斜杠仍算软换行——不区分这两格就会把「换行」
+    /// 变成「每个回车都断行」。
+    #[test]
+    fn hard_line_breaks_survive_into_the_span_text() {
+        let para = |src: &str| -> String {
+            match &parse_markdown(src)[0] {
+                MdBlock::Paragraph { spans } => spans_text(spans),
+                other => panic!("期望一个段落：{other:?}"),
+            }
+        };
+        assert_eq!(para("第一行  \n第二行"), "第一行\n第二行");
+        assert_eq!(para("第一行\\\n第二行"), "第一行\n第二行");
+        assert_eq!(para("甲  \n乙  \n丙"), "甲\n乙\n丙", "连着三行都硬换行");
+        assert_eq!(
+            para("第一行 \n第二行"),
+            "第一行 第二行",
+            "单个尾空格不算硬换行"
+        );
+        assert_eq!(
+            para("第一行\\\\\n第二行"),
+            "第一行\\ 第二行",
+            "双反斜杠＝转义的反斜杠＋软换行"
+        );
+        assert_eq!(para("末行  \n"), "末行", "段尾的硬换行标记不产生多余的换行");
     }
 }

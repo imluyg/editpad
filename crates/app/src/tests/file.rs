@@ -3673,6 +3673,55 @@ fn markdown_preview_lays_one_block_as_one_wrapped_paragraph() {
     );
 }
 
+/// 硬换行在预览里**真的折行**：同一份字，行尾两个空格那版比软换行那版高出两行。
+///
+/// 光断「解析出来的文本里有 `\n`」不够——`Rich` 里那个 `\n` 得真被排版层折成一行行，
+/// 用户在预览里才看得见。读数用块的高度，并先钉住对照组只有一行高，否则比高度是空的。
+#[test]
+fn markdown_preview_renders_hard_line_breaks_as_breaks() {
+    fn md_app(text: &str) -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+        );
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::PreviewToggled);
+        assert!(app.preview_visible, ".md 页应能开预览");
+        app
+    }
+    let block_height = |text: &str| -> f32 {
+        let app = md_app(text);
+        let nodes = ViewTree::layout(&app, iced::Size::new(1280.0, 800.0)).find_all(|b| {
+            b.x > 640.0 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0
+        });
+        assert_eq!(nodes.len(), 1, "一段文档只该有一个块节点：{nodes:?}");
+        nodes[0].height
+    };
+
+    let soft = block_height("短句一\n短句二\n短句三\n");
+    assert!(
+        soft < 30.0,
+        "对照组本身就该是一行高，否则比高度没有意义：{soft}"
+    );
+    let hard = block_height("短句一  \n短句二  \n短句三\n");
+    assert!(
+        hard > soft * 2.0,
+        "行尾两个空格没在预览里折出行：软换行 {soft}，硬换行 {hard}"
+    );
+}
+
 /// 开预览＝**分栏**，不是把正文整块换掉：左半正文仍在场（可继续编辑），右半是预览。
 ///
 /// 改前 `view/mod.rs` 那句 `if preview_visible && is_markdown { 预览 } else { 正文 }`
