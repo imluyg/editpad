@@ -382,6 +382,13 @@ pub(crate) struct Editpad {
     pub(crate) preview_visible: bool,
     /// O-6：Markdown 预览的解析结果缓存，键/值形状与失效判据见 [`MdPreviewCache`]。
     pub(crate) md_preview_cache: std::cell::RefCell<MdPreviewCache>,
+    /// 预览块表**每重建一次 +1**：`MdCached` 的依赖指纹要有这一维——旧 Rc 释放后
+    /// 分配器很可能把同一地址给下一份等长 Vec，光看指针会把新文档认成没变。
+    pub(crate) md_preview_seq: std::cell::Cell<u64>,
+    /// 预览的 widget 树本体＋它的依赖指纹，跨帧复用（见 `md_preview::MdCached`）。
+    /// 握在这里而不是 widget 的 `Tree::state`：父层是否把 `diff` 传导到本子节点不由
+    /// 本 widget 保证，实测那样会在第一帧就把树建两次。
+    pub(crate) md_preview_tree: crate::md_preview::MdTreeSlot,
 }
 
 /// O-6：Markdown 预览的**解析结果**缓存 `签名 → 块表`。
@@ -512,6 +519,8 @@ impl Default for Editpad {
             dark_mode: false,
             preview_visible: false,
             md_preview_cache: std::cell::RefCell::new(None),
+            md_preview_seq: std::cell::Cell::new(0),
+            md_preview_tree: crate::md_preview::MdTreeSlot::default(),
             // P25：初始页即「未命名1」，下一个新页为「未命名2」
             untitled_next: 2,
             // P30：启动会话恢复状态（boot_restore 按清单填充）

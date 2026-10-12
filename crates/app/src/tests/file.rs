@@ -3722,6 +3722,79 @@ fn markdown_preview_shares_the_window_with_the_editable_body() {
     );
 }
 
+/// 预览的 widget 树必须**跨帧复用**，不再逐帧重建。
+///
+/// 病（实测，release／1280×800／只算布局）：预览**关**态 1.1 ms/帧（正文面本来就
+/// 虚拟化，与文档大小无关），**开**态 59 → 180 → 600 ms 对应 35 KB／105 KB／353 KB。
+/// 原因＝即时模式每帧重建 widget，而 `Rich` 把排好的段落缓存**在 widget 自己身上**
+/// ⇒ 重建即丢，每一帧都把整篇重新折字；空闲心跳每秒约 5 帧 ⇒ 353 KB 文档光"开着
+/// 预览不动手"就吃掉每秒约 3 秒 CPU。复用之后同一篇的后续帧实测 **0.1～1.0 ms**。
+///
+/// 尺子用**构建次数**（`md_preview::MD_BUILD_COUNT`，thread_local）而不是毫秒——
+/// 耗时读数在忙机器假红、温热假绿，本仓已两次因此把成本契约改成计数／同一性。
+#[test]
+fn markdown_preview_reuses_its_widget_tree_across_frames() {
+    use crate::md_preview::MD_BUILD_COUNT;
+    use iced::advanced::layout;
+    use iced::advanced::widget::Tree;
+
+    let count = || MD_BUILD_COUNT.with(|c| c.get());
+    let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
+    let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
+    // 一帧＝建元素 → 与既有 Tree 对齐（diff）→ 布局。这里**复用同一棵 Tree**，
+    // 因为运行时每帧就是这么做的；`ViewTree` 每次 `Tree::new` ⇒ 照不出这一条。
+    let frame = |app: &Editpad, tree: &mut Tree| {
+        let mut el = app.view();
+        el.as_widget_mut().diff(tree);
+        el.as_widget_mut().layout(tree, &renderer, &limits);
+    };
+
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("# 标题\n\n正文一段\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, ".md 页应能开预览");
+
+    let base = count();
+    let mut tree = {
+        let el = app.view();
+        Tree::new(el.as_widget())
+    };
+    frame(&app, &mut tree);
+    assert_eq!(count() - base, 1, "首帧应建一次预览树");
+
+    // 内容未变：连画 5 帧都不许再建
+    for _ in 0..5 {
+        frame(&app, &mut tree);
+    }
+    assert_eq!(
+        count() - base,
+        1,
+        "内容没变却仍在重建：预览逐帧重新折整篇字"
+    );
+
+    // 内容变了：必须重建（停在旧内容＝用户看得见的错）
+    app.cur_handle
+        .borrow_mut()
+        .insert_str("\n## 新章节\n\n补一段\n");
+    frame(&app, &mut tree);
+    assert_eq!(count() - base, 2, "内容已变却不重建：预览会停在旧内容");
+}
+
 /// 预览链接的落点解析与正文链接同口径：scheme 交系统、路径须存在、锚点不链。
 #[test]
 fn markdown_link_targets_follow_the_editor_link_rules() {

@@ -9,6 +9,12 @@ use std::path::Path;
 use crate::editor::LinkTarget;
 
 use editpad_core::markdown::{MdAlign, MdBlock, MdSpan};
+use iced::advanced::layout::{self, Layout};
+use iced::advanced::mouse;
+use iced::advanced::renderer;
+use iced::advanced::widget::{self, Tree};
+use iced::advanced::{Clipboard, Shell};
+use iced::Event;
 
 /// 预览的配色：全部从主题 palette 派生（浅/深两套都能读，改主题不瞎）。
 ///
@@ -71,6 +77,7 @@ pub(crate) fn markdown_preview_element(
     doc_dir: Option<&Path>,
 ) -> Element<'static, Message> {
     let ink = MdInk::of(theme);
+    note_build();
     // 预览各级字号相对正文默认 16px 的既有比例
     let scaled = |px: f32| px * (font_size / 16.0);
     let prose = scaled(15.0);
@@ -377,5 +384,222 @@ pub(crate) fn md_link_target(dest: &str, doc_dir: Option<&Path>) -> Option<LinkT
         })
     } else {
         None
+    }
+}
+
+/// 预览缓存的依赖指纹（[`MdCached`] 的比对键）。
+///
+/// `seq` 是**必要**的一维，不能只靠块表指针：旧 Rc 一被释放，分配器很可能把同一
+/// 地址给下一份等长 Vec ⇒ 光看指针会把"新文档"认成"没变"，预览停在陈内容。
+pub(crate) fn md_preview_key(
+    seq: u64,
+    blocks_ptr: usize,
+    font_size: f32,
+    dark: bool,
+    family: Option<&'static str>,
+    dir: Option<&Path>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    seq.hash(&mut h);
+    blocks_ptr.hash(&mut h);
+    font_size.to_bits().hash(&mut h);
+    dark.hash(&mut h);
+    family.hash(&mut h);
+    dir.map(|p| p.display().to_string()).hash(&mut h);
+    h.finish()
+}
+
+// 预览树真正被构建的次数——成本契约要**看得见**，不能靠量耗时断言（忙机器假红、
+// 温热假绿，本仓已两次因此把成本契约改成计数／同一性）。用 `thread_local` 而非
+// 全局原子：测试线程各跑各的，全局计数会被并发用例串味。
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MD_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_build() {
+    MD_BUILD_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn note_build() {}
+
+/// 把整棵预览树**缓存**在 widget 的 Tree 状态里，依赖不变就复用上一次的实例。
+///
+/// 为什么需要：即时模式每帧重建 widget，而 `Rich` 把排好的段落缓存**在 widget
+/// 自己身上**——重建即丢失，于是预览开态的每一帧都把整篇重新折字。实测
+/// （release／1280×800／只算布局）：预览**关**态 1.1 ms/帧（与文档大小无关，
+/// 正文面本来就虚拟化），**开**态 59 ms（35 KB／143 块）→ 180 ms（105 KB／427 块）
+/// → 600 ms（353 KB／1421 块）。空闲心跳每秒约 5 帧 ⇒ 大文档光"开着预览不动手"
+/// 就吃掉每秒约 3 秒 CPU。
+///
+/// 做法抄上游 `iced_widget::lazy`（本仓没开 `lazy` 特性——它要拉 `ouroboros`，
+/// 与"Cargo.lock 不新增包"的纪律冲突，故把这套委托自带一份；上游代码 Apache-2.0）。
+/// 缓存的 `Element` 留在 `tree.state` 里 ⇒ 内部的排版缓存跨帧存活；依赖（块表
+/// 指针＋字号＋字形族＋主题＋链接基准目录）一变就整棵重建。
+///
+/// ⚠️ 没实现 `overlay`（默认 `None`）：预览树里只有 Rich／container／text／
+/// scrollable／rule，滚动条走 `draw`＋`update`，不是 overlay 组件。
+/// 跨帧存活的预览树：`Rc` 里放**同一份**已构建 Element。
+pub(crate) type MdTree = Rc<std::cell::RefCell<Option<Element<'static, Message>>>>;
+
+/// 应用状态里那一格：依赖指纹＋树。
+///
+/// 包一层是因为 `Editpad` 整块 `derive(Debug)`，而 iced 的 `Element` 没有 `Debug`。
+#[derive(Clone, Default)]
+pub(crate) struct MdTreeSlot(pub std::cell::RefCell<Option<(u64, MdTree)>>);
+
+impl std::fmt::Debug for MdTreeSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MdTreeSlot({})", self.0.borrow().is_some())
+    }
+}
+
+/// 把**已经建好**的预览树原样交给 iced，不再逐帧重建。
+///
+/// 病（实测，release／1280×800／只算布局）：预览**关**态 1.1 ms/帧（正文面本来就
+/// 虚拟化，与文档大小无关），**开**态 59 → 180 → 600 ms 对应 35 KB／105 KB／353 KB。
+/// 原因是即时模式每帧重建 widget，而 `Rich` 把排好的段落缓存**在 widget 自己身上**
+/// ⇒ 重建即丢，每一帧都把整篇重新折字；空闲心跳每秒约 5 帧 ⇒ 353 KB 文档光"开着
+/// 预览不动手"就吃掉每秒约 3 秒 CPU。
+///
+/// 做法与上游 `iced_widget::lazy` 同形（本仓没开 `lazy` 特性——它要拉 `ouroboros`，
+/// 与"Cargo.lock 不新增包"的纪律冲突，故自带一份委托；上游代码 Apache-2.0）。
+/// ⚠️ 关键差别：缓存**握在应用状态里**（`App::md_preview_tree`），不放在 widget 的
+/// `Tree::state`——本轮先按上游那样放 Tree 状态，实测第一帧就被建了两次：`Tree::new`
+/// 之前父层还会问 `children()`／`size()`，而父层是否把 `diff` 传导到本子节点并不由本
+/// widget 保证（`ViewTree` 夹具里根本复现不出来）。握在状态里 ⇒ 只有"依赖变了"才会
+/// 重建，与 iced 内部 diff 时序无关。
+///
+/// ⚠️ 没实现 `overlay`（默认 `None`）：预览树里只有 Rich／container／text／
+/// scrollable／rule，滚动条走 `draw`＋`update`，不是 overlay 组件。
+pub(crate) struct MdCached {
+    inner: MdTree,
+}
+
+impl MdCached {
+    pub(crate) fn new(inner: MdTree) -> Self {
+        Self { inner }
+    }
+
+    fn with_element<T>(&self, f: impl FnOnce(&Element<'static, Message>) -> T) -> T {
+        let held = self.inner.borrow();
+        f(held.as_ref().expect("交给本 widget 的树必须已建好"))
+    }
+
+    fn with_element_mut<T>(&self, f: impl FnOnce(&mut Element<'static, Message>) -> T) -> T {
+        let mut held = self.inner.borrow_mut();
+        f(held.as_mut().expect("交给本 widget 的树必须已建好"))
+    }
+}
+
+impl widget::Widget<Message, Theme, iced::Renderer> for MdCached {
+    fn children(&self) -> Vec<Tree> {
+        self.with_element(|element| vec![Tree::new(element.as_widget())])
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        self.with_element(|element| tree.diff_children(std::slice::from_ref(&element.as_widget())));
+    }
+
+    fn size(&self) -> iced::Size<iced::Length> {
+        self.with_element(|element| element.as_widget().size())
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.with_element_mut(|element| {
+            element
+                .as_widget_mut()
+                .layout(&mut tree.children[0], renderer, limits)
+        })
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn widget::Operation,
+    ) {
+        self.with_element_mut(|element| {
+            element
+                .as_widget_mut()
+                .operate(&mut tree.children[0], layout, renderer, operation)
+        })
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        self.with_element_mut(|element| {
+            element.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            )
+        })
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        self.with_element(|element| {
+            element.as_widget().mouse_interaction(
+                &tree.children[0],
+                layout,
+                cursor,
+                viewport,
+                renderer,
+            )
+        })
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        self.with_element(|element| {
+            element.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
+            )
+        })
     }
 }

@@ -310,15 +310,43 @@ impl Editpad {
                         key,
                         std::rc::Rc::new(editpad_core::markdown::parse_markdown(&text)),
                     ));
+                    // 每一遍重建都发一个新号：`MdCached` 的依赖指纹光看块表指针不成立
+                    // （旧 Rc 一释放，分配器很可能把同一地址给下一份等长 Vec）
+                    self.md_preview_seq.set(self.md_preview_seq.get() + 1);
                 }
                 let (_, blocks) = cache.as_ref().expect("上一步刚确保证非空");
-                markdown_preview_element(
-                    blocks,
-                    self.display_font_size(),
-                    content_font,
-                    self.theme(),
-                    doc_dir.as_deref(),
-                )
+                // P408：预览树交给 `MdCached` 缓存——依赖（块表＋字号＋主题＋字形族＋
+                // 基准目录）不变就复用上一次的 widget，`Rich` 的排版缓存因此跨帧存活。
+                let shown = blocks.clone();
+                let px = self.display_font_size();
+                let theme = self.theme();
+                let base = content_font;
+                let dir = doc_dir.clone();
+                let key_hash = md_preview_key(
+                    self.md_preview_seq.get(),
+                    Rc::as_ptr(&shown) as usize,
+                    px,
+                    self.dark_mode,
+                    self.active_font_family,
+                    dir.as_deref(),
+                );
+                // P408：预览树**握在应用状态里**跨帧复用——只有依赖（块表＋字号＋主题＋
+                // 字形族＋链接基准目录）变了才重建；`Rich` 的排版缓存活在 widget 实例上，
+                // 复用实例才不再逐帧重折整篇字。
+                let tree = {
+                    let mut holder = self.md_preview_tree.0.borrow_mut();
+                    match holder.as_mut() {
+                        Some((k, slot)) if *k == key_hash => slot.clone(),
+                        _ => {
+                            let built = Rc::new(std::cell::RefCell::new(Some(
+                                markdown_preview_element(&shown, px, base, theme, dir.as_deref()),
+                            )));
+                            *holder = Some((key_hash, built.clone()));
+                            built
+                        }
+                    }
+                };
+                Element::new(MdCached::new(tree))
             };
             // P407 分栏：开预览不再把正文整块摘掉——左半继续可编辑、右半实时跟着
             // 变（改前 `if preview_visible` 走预览、`else` 才走正文，"边写边看"这条
