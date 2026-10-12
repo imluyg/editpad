@@ -16,7 +16,8 @@
 //!   `<https://…>` 自动链接、**裸 URL**（`https://…` 与 `www.…`，GFM autolink literal）、
 //!   `\` 转义标点
 //! * 行内标记**要求闭合**：找不到闭栏时按字面量输出（与 CommonMark 一致），
-//!   不再把后半行整条染色
+//!   不再把后半行整条染色；配对时**跳过当不了闭栏的位置**继续往后找
+//!   （`**粗 ** 与 后**` 配到最后那一对，与 CommonMark 同口径）
 //!
 //! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）。
 
@@ -1431,26 +1432,33 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>,
                 {
                     continue;
                 }
-                let Some(close) = find_run(&text[i + len..], c, len) else {
-                    continue;
-                };
-                if close == 0 {
-                    continue; // 空内容不成段
+                // 往后找**第一个能当闭栏的**同种串：改前只取第一个，于是 `**粗 ** 与 后**`
+                // 里那串前面跟着空格的 `**` 当不了闭栏，就直接放弃整对——哪怕后面明明还有
+                // 一对能配上（CommonMark 的配对是跳过不合格的位置继续找）
+                let mut search = i + len;
+                while let Some((rel, rl)) = next_emphasis_run(&text[search..], c, len) {
+                    let abs_close = search + rel;
+                    search = abs_close + rl;
+                    if abs_close == i + len {
+                        continue; // 空内容不成段
+                    }
+                    // 闭栏前紧跟空白 ⇒ 这一串不算闭栏，继续往后找（`**粗 **`）
+                    if text[..abs_close]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace)
+                    {
+                        continue;
+                    }
+                    flush!();
+                    parse_inline(&text[i + len..abs_close], base | style, link, out, defs);
+                    i = abs_close + len;
+                    opened = true;
+                    break;
                 }
-                // 闭栏前紧跟空白 ⇒ 不算闭栏（`**粗 **`）
-                let abs_close = i + len + close;
-                if text[..abs_close]
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_whitespace)
-                {
-                    continue;
+                if opened {
+                    break;
                 }
-                flush!();
-                parse_inline(&text[i + len..abs_close], base | style, link, out, defs);
-                i = abs_close + len;
-                opened = true;
-                break;
             }
             if opened {
                 continue;
@@ -1469,6 +1477,25 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>,
 /// 从串首数连续同字符的长度。
 fn run_len(s: &str, c: char) -> usize {
     s.chars().take_while(|&x| x == c).count()
+}
+
+/// 强调用的"下一个候选闭栏"：返回（串内字节偏移，这一串的长度）。
+/// 与 [`find_run`] 的差别就是要**带出串长**，好让调用方跳过不合格的候选继续往后找。
+fn next_emphasis_run(s: &str, c: char, min: usize) -> Option<(usize, usize)> {
+    let mut offset = 0usize;
+    while offset < s.len() {
+        let ch = s[offset..].chars().next()?;
+        if ch == c {
+            let run = run_len(&s[offset..], c);
+            if run >= min {
+                return Some((offset, run));
+            }
+            offset += run * ch.len_utf8();
+        } else {
+            offset += ch.len_utf8();
+        }
+    }
+    None
 }
 
 /// 在 `s` 中找第一个长度 ≥ `min` 的 `c` 串，返回其**起始字节偏移**。
@@ -2475,6 +2502,23 @@ mod tests {
         );
         assert!(links("https://").is_empty(), "空 host 不是链接");
         assert!(links("www.x").is_empty(), "`www.` 后面没有点号不算域名");
+    }
+
+    /// 闭栏位置不合格就**跳过它继续往后找**，而不是放弃整对（CommonMark 的配对规则）。
+    /// 改前只取第一个同种串：`**粗 ** 与 后**` 里那串前面跟着空格的 `**` 当不了闭栏，
+    /// 于是整段留成字面量——哪怕后面明明还有一对能配上。
+    #[test]
+    fn emphasis_skips_unusable_closers_and_keeps_looking() {
+        assert_eq!(
+            inline("**粗 ** 与 后**"),
+            vec![styled("粗 ** 与 后", MD_BOLD)],
+            "中间那串闭不了栏的 `**` 留在正文里，配对配到最后那一对"
+        );
+        // 反向对照：真的没有可用闭栏 ⇒ 照旧原样（防"继续找"变成乱配）
+        assert_eq!(
+            inline("**只有开栏没有闭栏"),
+            vec![MdSpan::plain("**只有开栏没有闭栏")]
+        );
     }
 
     /// HTML 标签**除了 `<br>`** 都按字面量（本解析器不渲 HTML）。`<br>` 单独立出来
