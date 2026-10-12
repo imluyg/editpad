@@ -6,7 +6,8 @@
 //!
 //! * 块级：`#`~`######` 标题（含 ATX 闭栏 `# 标题 #`）、`---`/`***`/`_ _ _`
 //!   分隔线、段落（连续非空行合并）、无序 `- * +` 与有序 `1.`/`1)` 列表
-//!   （**保留序号、缩进层级、任务勾选框**）、`>` 引用（连续行合并、`>>` 深度）、
+//!   （**保留序号、缩进层级、任务勾选框**，并吃**续行**）、`>` 引用（连续行合并、`>>` 深度、
+//!   **内部按块级再解析**：`> - 甲` 里是一个列表项）、
 //!   ``` ``` ``` 与 `~~~` 围栏代码（记录 info 串的语言；闭栏长度 ≥ 开栏长度）、
 //!   缩进代码块（空行后 ≥4 列或制表符）、整行 HTML 注释（隐去）、GFM 表格
 //!   （含 `:---`/`:---:`/`---:` 对齐、`\|` 转义竖线算单元格里的字符）
@@ -16,7 +17,7 @@
 //! * 行内标记**要求闭合**：找不到闭栏时按字面量输出（与 CommonMark 一致），
 //!   不再把后半行整条染色
 //!
-//! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）、引用块内部的块级结构。
+//! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）。
 
 /// 行内样式位标志。
 pub const MD_BOLD: u8 = 1 << 0;
@@ -108,9 +109,12 @@ pub enum MdBlock {
         task: Option<bool>,
         spans: Vec<MdSpan>,
     },
+    /// 引用块：`depth` ＝行首连续 `>` 的层数；`blocks` ＝**去栏之后**按同一份块级解析走出来的
+    /// 内部块——`> - 甲` 里面是一个真的 ListItem，不是"- 甲"这两个字（改前整块只并成一行正文，
+    /// 引用里的列表／标题／围栏都把记号原样画出来）。
     Quote {
         depth: usize,
-        spans: Vec<MdSpan>,
+        blocks: Vec<MdBlock>,
     },
     Table {
         align: Vec<MdAlign>,
@@ -148,12 +152,24 @@ fn front_matter_end(lines: &[&str]) -> Option<usize> {
 
 /// 解析整篇 Markdown。行尾兼容 `\r\n` / `\n` / 孤立 `\r` 与异体行界。
 /// 开头若带 front matter（见 `front_matter_end`）则不渲染那一区域。
+///
+/// 三步：切行 ⇒ 收定义（引用式链接＋脚注，两者都要看整篇）⇒ [`parse_lines`] 走块级
+/// ⇒ 收尾发脚注编号。引用块内部走的是**同一份** `parse_lines`，所以 `> - 甲` 里
+/// 是一个真的列表项而不是"- 甲"这两个字。
 pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let lines = split_lines(text);
     // 引用式链接的定义先收一遍整篇：定义行可以写在用到它的那句**后面**（前向引用）
     let (defs, is_def) = collect_link_defs(&lines);
-    let mut blocks = Vec::new();
     let doc_begin = front_matter_end(&lines).unwrap_or(0);
+    let mut blocks = parse_lines(lines.as_slice(), &defs, &is_def, doc_begin);
+    assign_footnotes(&mut blocks, &defs);
+    blocks
+}
+
+/// 块级主循环。`doc_begin` ＝第一篇正文的起始行（front matter 之后），缩进代码那一支
+/// 用它判断"上面没有正文行可依赖"。
+fn parse_lines(lines: &[&str], defs: &LinkDefs, is_def: &[bool], doc_begin: usize) -> Vec<MdBlock> {
+    let mut blocks = Vec::new();
     let mut i = doc_begin;
 
     while i < lines.len() {
@@ -171,19 +187,19 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         }
 
         // 缩进代码排在围栏**之前**：4 格以上的 ``` 是代码内容，不是开栏（CommonMark 只允许 3 格）
-        if let Some((block, next)) = indented_code(&lines, i, doc_begin) {
+        if let Some((block, next)) = indented_code(lines, i, doc_begin) {
             blocks.push(block);
             i = next;
             continue;
         }
 
         // HTML 注释整块隐去（与浏览器同一观感）
-        if let Some(next) = html_comment(&lines, i) {
+        if let Some(next) = html_comment(lines, i) {
             i = next;
             continue;
         }
 
-        if let Some((block, next)) = fence(&lines, i) {
+        if let Some((block, next)) = fence(lines, i) {
             blocks.push(block);
             i = next;
             continue;
@@ -192,7 +208,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         if let Some((level, content)) = heading(trimmed) {
             blocks.push(MdBlock::Heading {
                 level,
-                spans: inline_with(content, &defs),
+                spans: inline_with(content, defs),
             });
             i += 1;
             continue;
@@ -204,29 +220,31 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             continue;
         }
 
-        if let Some((block, next)) = table(&lines, i, &defs) {
+        if let Some((block, next)) = table(lines, i, defs) {
             blocks.push(block);
             i = next;
             continue;
         }
 
         if let Some((depth, content)) = quote(trimmed) {
-            let mut merged = String::from(content);
+            // 同深度的连续引用行收在一起**去栏**后交给同一份 parse_lines：引用里的列表、
+            // 标题、代码围栏、表格都是真块。`>>` 的深度在这一格收成 depth，
+            // 去栏去掉了所有 `>` ⇒ 内部不会再套出第二层 Quote。
+            let mut inner: Vec<&str> = vec![content];
             i += 1;
-            // 同深度的连续引用行并为一段（跨行才有「引用是一整块」的观感）
             while i < lines.len() {
                 match quote(lines[i].trim()) {
                     Some((same, next_content)) if same == depth => {
-                        merged.push(' ');
-                        merged.push_str(next_content);
+                        inner.push(next_content);
                         i += 1;
                     }
                     _ => break,
                 }
             }
+            let no_def = vec![false; inner.len()];
             blocks.push(MdBlock::Quote {
                 depth,
-                spans: inline_with(&merged, &defs),
+                blocks: parse_lines(&inner, defs, &no_def, 0),
             });
             continue;
         }
@@ -251,7 +269,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 }
                 // 另起一块的开头（标题/围栏/分隔线/表格/引用/下一个列表项/定义行）不吃；
                 // 空过行之后只有缩进够到正文列的那一行还归本项
-                let belongs = !starts_new_block(&lines, k, &defs, &is_def)
+                let belongs = !starts_new_block(lines, k, defs, is_def)
                     && (blanks == 0 || indent_cols(raw) >= item.content_col);
                 if !belongs {
                     break;
@@ -274,7 +292,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 order: item.order,
                 indent: item.indent,
                 task: item.task,
-                spans: inline_with(&body, &defs),
+                spans: inline_with(&body, defs),
             });
             i = k;
             continue;
@@ -294,7 +312,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     break;
                 }
             }
-            if next.is_empty() || starts_new_block(&lines, i, &defs, &is_def) {
+            if next.is_empty() || starts_new_block(lines, i, defs, is_def) {
                 break;
             }
             let (sep, drop_backslash) = line_break_kind(prev_raw);
@@ -307,13 +325,12 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             prev_raw = lines[i];
             i += 1;
         }
-        let spans = inline_with(&paragraph, &defs);
+        let spans = inline_with(&paragraph, defs);
         blocks.push(match setext {
             Some(level) => MdBlock::Heading { level, spans },
             None => MdBlock::Paragraph { spans },
         });
     }
-    assign_footnotes(&mut blocks, &defs);
     blocks
 }
 
@@ -343,9 +360,9 @@ pub fn superscript_digits(n: usize) -> String {
 fn each_span_list(blocks: &mut [MdBlock], f: &mut impl FnMut(&mut Vec<MdSpan>)) {
     for block in blocks.iter_mut() {
         match block {
-            MdBlock::Heading { spans, .. }
-            | MdBlock::Paragraph { spans }
-            | MdBlock::Quote { spans, .. } => f(spans),
+            MdBlock::Heading { spans, .. } | MdBlock::Paragraph { spans } => f(spans),
+            // 引用块内部也是块：脚注编号要一起走进去
+            MdBlock::Quote { blocks, .. } => each_span_list(blocks, f),
             MdBlock::ListItem { spans, .. } => f(spans),
             MdBlock::Table { header, rows, .. } => {
                 for cell in header.iter_mut().chain(rows.iter_mut().flatten()) {
@@ -1599,6 +1616,29 @@ mod tests {
         spans.iter().map(|s| s.text.as_str()).collect()
     }
 
+    /// 引用块的读数＝（深度，`子块型:正文` 逐条）——测试既盯形状也盯正文。
+    fn quote_reading(block: &MdBlock) -> (usize, Vec<(&'static str, String)>) {
+        let MdBlock::Quote { depth, blocks } = block else {
+            panic!("期望引用块：{block:?}");
+        };
+        (
+            *depth,
+            blocks
+                .iter()
+                .map(|b| match b {
+                    MdBlock::Paragraph { spans } => ("paragraph", spans_text(spans)),
+                    MdBlock::Heading { spans, .. } => ("heading", spans_text(spans)),
+                    MdBlock::ListItem { spans, .. } => ("item", spans_text(spans)),
+                    MdBlock::Quote { .. } => ("quote", String::new()),
+                    MdBlock::CodeBlock { .. } => ("code", String::new()),
+                    MdBlock::Table { .. } => ("table", String::new()),
+                    MdBlock::Rule => ("rule", String::new()),
+                    MdBlock::Footnotes { .. } => ("notes", String::new()),
+                })
+                .collect(),
+        )
+    }
+
     fn code(text: &str) -> MdSpan {
         MdSpan {
             text: text.into(),
@@ -1715,13 +1755,11 @@ mod tests {
             MdBlock::ListItem { order, .. } => assert_eq!(*order, Some(1)),
             other => panic!("{other:?}"),
         }
-        match &blocks[3] {
-            MdBlock::Quote { depth, spans } => {
-                assert_eq!(*depth, 1);
-                assert_eq!(spans_text(spans), "引用一句");
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            quote_reading(&blocks[3]),
+            (1, vec![("paragraph", "引用一句".to_owned())]),
+            "{blocks:?}"
+        );
         assert_eq!(blocks[4], MdBlock::Rule);
     }
 
@@ -1865,20 +1903,60 @@ mod tests {
     fn quotes_merge_consecutive_lines_and_track_depth() {
         let blocks = parse_markdown("> 第一句\n> 第二句\n>> 更深的一句");
         assert_eq!(blocks.len(), 2, "{blocks:?}");
-        match &blocks[0] {
-            MdBlock::Quote { depth, spans } => {
-                assert_eq!(*depth, 1);
-                assert_eq!(spans_text(spans), "第一句 第二句");
-            }
-            other => panic!("{other:?}"),
-        }
-        match &blocks[1] {
-            MdBlock::Quote { depth, spans } => {
-                assert_eq!(*depth, 2);
-                assert_eq!(spans_text(spans), "更深的一句");
-            }
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            quote_reading(&blocks[0]),
+            (1, vec![("paragraph", "第一句 第二句".to_owned())]),
+            "同深度连续行仍并成一段"
+        );
+        assert_eq!(
+            quote_reading(&blocks[1]),
+            (2, vec![("paragraph", "更深的一句".to_owned())]),
+            "`>>` 的深度记在一格上，内部不再套第二层"
+        );
+    }
+
+    /// 引用块内部**按块级解析**：`> - 甲` 里是一个真的列表项，`> ## 小节` 里是一个标题。
+    /// 改前整块只并成一行正文，`- ` 与 `##` 原样画在预览里＝引用里的列表和标题全走样。
+    #[test]
+    fn quote_bodies_parse_as_blocks() {
+        assert_eq!(
+            quote_reading(&parse_markdown("> - 甲\n> - 乙\n")[0]),
+            (
+                1,
+                vec![("item", "甲".to_owned()), ("item", "乙".to_owned())]
+            ),
+            "引用里的两行列表＝两个 ListItem"
+        );
+        assert_eq!(
+            quote_reading(&parse_markdown("> ## 小节\n> 正文\n")[0]),
+            (
+                1,
+                vec![
+                    ("heading", "小节".to_owned()),
+                    ("paragraph", "正文".to_owned())
+                ]
+            ),
+            "标题升成标题，正文另起一段"
+        );
+        // 任务框／有序号在引用里也认
+        assert_eq!(
+            quote_reading(&parse_markdown("> 1. 头一项\n")[0]).1[0].0,
+            "item",
+            "引用里的有序项"
+        );
+        // 引用里的围栏是代码，不是带 ``` 的正文
+        assert_eq!(
+            quote_reading(&parse_markdown("> ```\n> 代码\n> ```\n")[0]).1,
+            vec![("code", String::new())],
+            "引用里的围栏自成代码块"
+        );
+        // 行内标记照旧在内部块里解
+        let bold = parse_markdown("> 这是 **粗** 的一句\n");
+        assert_eq!(
+            quote_reading(&bold[0]),
+            (1, vec![("paragraph", "这是 粗 的一句".to_owned())]),
+            "{bold:?}"
+        );
     }
 
     #[test]

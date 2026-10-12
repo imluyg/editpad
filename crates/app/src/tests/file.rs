@@ -3875,6 +3875,55 @@ fn markdown_preview_keeps_a_multi_line_list_item_in_one_block() {
     );
 }
 
+/// 引用块内部现在是**块**：`> - 甲`／`> - 乙` 在预览里各占一行、各带自己的引用条＋列表项，
+/// 不再是一行 `▌ - 甲 - 乙` 的记号原文。
+///
+/// 读数用两个相对量（不钉死节点数，免得套容器的层数骗人）：①列表那份的节点数**多于**
+/// 纯引用那份；②两行列表项的纵向跨度 ≥ 一行高（并成一行就没有这个跨度）。
+/// ⚠️ 「画出来的是 • 还是 - 」这一格矩形读数数不出＝已登记眼验项。
+#[test]
+fn markdown_preview_renders_blocks_inside_a_quote() {
+    fn preview_nodes(text: &str) -> Vec<iced::Rectangle> {
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+        );
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::PreviewToggled);
+        let tree = ViewTree::layout(&app, iced::Size::new(1280.0, 800.0));
+        tree.find_all(|b| {
+            b.x > 640.0 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0
+        })
+    }
+
+    let plain = preview_nodes("> 一句话\n");
+    let listed = preview_nodes("> - 甲\n> - 乙\n");
+    assert!(
+        listed.len() > plain.len(),
+        "引用里的两个列表项没各自成块：纯引用 {plain:?}／列表 {listed:?}"
+    );
+    let top = listed.iter().map(|r| r.y).fold(f32::INFINITY, f32::min);
+    let bottom = listed.iter().map(|r| r.y).fold(0.0f32, f32::max);
+    let unit = plain[0].height;
+    assert!(
+        bottom - top >= unit,
+        "两行列表项排在了同一行上（跨度 {:.1}，单行 {unit}）：{listed:?}",
+        bottom - top
+    );
+}
+
 /// 开预览＝**分栏**，不是把正文整块换掉：左半正文仍在场（可继续编辑），右半是预览。
 ///
 /// 改前 `view/mod.rs` 那句 `if preview_visible && is_markdown { 预览 } else { 正文 }`

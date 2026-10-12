@@ -119,6 +119,7 @@ pub(crate) fn markdown_preview_element(
                 dark,
                 doc_dir,
                 &color_budget,
+                None,
             ))));
             next.push((fps[i], tree));
         }
@@ -135,6 +136,12 @@ pub(crate) fn markdown_preview_element(
 
 /// 一个块 → 一棵独立的 widget 树（按块缓存的最小单位，见
 /// [`markdown_preview_element`] 里的复用说明）。
+///
+/// `tint` ＝这一块的正文着色（引用块内部传 `ink.quote`，其余 `None`＝主题墨色）。
+/// 递归用：引用块内部现在是**块**，每块都要带着引用的颜色再走一遍这里。
+// 参数就是这份渲染上下文（字号／字体／配色／文档目录／着色额度／引用色），与
+// `editor::view` 里那几个绘制函数同形——本仓已有 `#[allow(clippy::too_many_arguments)]` 的先例。
+#[allow(clippy::too_many_arguments)]
 fn build_block(
     block: &MdBlock,
     scaled: &dyn Fn(f32) -> f32,
@@ -143,6 +150,7 @@ fn build_block(
     dark: bool,
     doc_dir: Option<&Path>,
     color_budget: &MdColorBudget,
+    tint: Option<Color>,
 ) -> Element<'static, Message> {
     note_block_build();
     let prose = scaled(15.0);
@@ -157,14 +165,14 @@ fn build_block(
                 _ => scaled(16.0),
             };
             md_paragraph(
-                to_text_spans(spans, base, ink, true, None, doc_dir),
+                to_text_spans(spans, base, ink, true, tint, doc_dir),
                 px,
                 Alignment::Start,
             )
             .into()
         }
         MdBlock::Paragraph { spans } => md_paragraph(
-            to_text_spans(spans, base, ink, false, None, doc_dir),
+            to_text_spans(spans, base, ink, false, tint, doc_dir),
             prose,
             Alignment::Start,
         )
@@ -182,7 +190,7 @@ fn build_block(
                 _ => "• ",
             };
             let mut line = vec![plain_span(Fragment::Owned(marker.to_owned()), base, None)];
-            line.extend(to_text_spans(spans, base, ink, false, None, doc_dir));
+            line.extend(to_text_spans(spans, base, ink, false, tint, doc_dir));
             let indent_px = (*indent as f32).min(6.0) * scaled(16.0);
             let para = md_paragraph(line, prose, Alignment::Start);
             // 顶层列表项**不套容器**：一个块＝一个布局节点，用例才数得清
@@ -196,22 +204,46 @@ fn build_block(
                     .into()
             }
         }
-        MdBlock::Quote { depth, spans } => {
-            // 深度条挨着排（"▌▌ 文本"），中间不空格——空一格读起来像两段引用
-            let mut line = vec![plain_span(
-                Fragment::Owned(format!("{} ", "▌".repeat(*depth))),
-                base,
-                Some(ink.quote),
-            )];
-            line.extend(to_text_spans(
-                spans,
-                base,
-                ink,
-                false,
-                Some(ink.quote),
-                doc_dir,
-            ));
-            md_paragraph(line, prose, Alignment::Start).into()
+        MdBlock::Quote { depth, blocks } => {
+            // 深度条挨着排（"▌▌ "），中间不空格——空一格读起来像两段引用。
+            // 内部现在是**块**：每一块前面各挂自己的那根条，并且都带着引用的墨色
+            // （`tint`），所以引用里的列表项／标题既不再是记号原文，也不会掉回正文颜色。
+            let bar = format!("{} ", "▌".repeat(*depth));
+            let inner_tint = tint.or(Some(ink.quote));
+            let mut col = column![].spacing(2);
+            for inner in blocks {
+                let lead = md_paragraph(
+                    vec![plain_span(
+                        Fragment::Owned(bar.clone()),
+                        base,
+                        Some(ink.quote),
+                    )],
+                    prose,
+                    Alignment::Start,
+                )
+                .width(iced::Length::Shrink);
+                col = col.push(
+                    row![
+                        lead,
+                        // 内部块吃掉剩余宽度（`Element` 自己没有 `.width`，套一层容器）
+                        Element::from(
+                            container(build_block(
+                                inner,
+                                scaled,
+                                base,
+                                ink,
+                                dark,
+                                doc_dir,
+                                color_budget,
+                                inner_tint,
+                            ))
+                            .width(Fill),
+                        )
+                    ]
+                    .spacing(2),
+                );
+            }
+            col.into()
         }
         MdBlock::CodeBlock { lines, lang } => {
             let body = Rich::with_spans(code_block_spans(
