@@ -27,7 +27,7 @@ pub const MD_LINK: u8 = 1 << 4;
 pub const MD_IMAGE: u8 = 1 << 5;
 
 /// 一段同样式文本。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MdSpan {
     pub text: String,
     /// [`MD_BOLD`] 等按位或
@@ -66,7 +66,7 @@ impl MdSpan {
 }
 
 /// 表格列的水平对齐。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MdAlign {
     Left,
     Center,
@@ -74,7 +74,7 @@ pub enum MdAlign {
 }
 
 /// 块级元素。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MdBlock {
     Heading {
         level: usize,

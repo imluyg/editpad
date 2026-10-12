@@ -4025,6 +4025,81 @@ fn markdown_preview_color_budget_bounds_the_work() {
     assert_eq!(joined_plain, joined, "素色档必须与上色档逐字相同");
 }
 
+/// 换版时**只重建变了的那些块**（P412）。
+///
+/// 尺子是 `MD_BLOCK_BUILDS`（按块建树的次数）。外层整树缓存只管"内容没变的帧"，
+/// 换版那一帧以前总是整棵重建——实测成本随块数走（README×10＝1421 块 133 ms、
+/// 1500 个小代码块 347 ms）。现在按内容指纹复用：12 块的文档改一个字，
+/// 重建的块数必须是**个位数**，不是 12。
+#[test]
+fn markdown_preview_rebuilds_only_the_changed_blocks() {
+    use crate::md_preview::{MD_BLOCK_BUILDS, MD_SWAP_WINDOW_MS};
+    use iced::advanced::layout;
+    use iced::advanced::widget::Tree;
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(0)); // 关掉节流：改动当帧就换版
+    let builds = || MD_BLOCK_BUILDS.with(|c| c.get());
+    let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
+    let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
+    let frame = |app: &Editpad, tree: &mut Tree| {
+        let mut el = app.view();
+        el.as_widget_mut().diff(tree);
+        el.as_widget_mut().layout(tree, &renderer, &limits);
+    };
+
+    let src: String = (0..12).map(|i| format!("第{i}段正文内容\n\n")).collect();
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str(&src),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible);
+
+    // 计数起点要在**任何 view() 之前**取：`Tree::new` 那一句的 view() 就已经把
+    // 首帧的块建完了（起点取晚了会数到 0）。
+    let base = builds();
+    let mut tree = {
+        let el = app.view();
+        Tree::new(el.as_widget())
+    };
+    frame(&app, &mut tree);
+    let first = builds() - base;
+    assert!(
+        (10..=14).contains(&first),
+        "首帧应把 12 个块各建一次，实际 {first} 次"
+    );
+
+    // 内容没变：再画 5 帧一块都不该重建
+    for _ in 0..5 {
+        frame(&app, &mut tree);
+    }
+    assert_eq!(builds() - base, first, "内容未变却在重建块：按块缓存没生效");
+
+    // 改一个字（落进一个块）⇒ 只重建那一个块，不是整篇 12 块
+    app.cur_handle.borrow_mut().insert_str("补");
+    frame(&app, &mut tree);
+    let grew = builds() - base - first;
+    assert!(grew >= 1, "改了内容却一个块都没重建：预览会停在旧内容");
+    assert!(
+        grew <= 3,
+        "改一个字重建了 {grew} 个块（整篇 12 块）——按块复用没起作用"
+    );
+    MD_SWAP_WINDOW_MS.with(|c| c.set(crate::md_preview::MD_PREVIEW_SWAP_MS));
+}
+
 /// 预览链接的落点解析与正文链接同口径：scheme 交系统、路径须存在、锚点不链。
 #[test]
 fn markdown_link_targets_follow_the_editor_link_rules() {

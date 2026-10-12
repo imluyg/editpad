@@ -69,12 +69,14 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 /// `base` = 正文字形族（P34）；**代码段与代码块恒用等宽族**——比例字体的
 /// 代码块失去对齐，这不是「随设置切换」该覆盖的范围。
 /// `doc_dir` = 当前页所在目录，用于解析相对路径链接（`[图](./a.png)`）。
+/// `block_cache` = **按块**复用的上一帧树（见下面的复用说明）。
 pub(crate) fn markdown_preview_element(
     blocks: &[MdBlock],
     font_size: f32,
     base: Font,
     theme: Theme,
     doc_dir: Option<&Path>,
+    block_cache: &MdBlockCacheSlot,
 ) -> Element<'static, Message> {
     let dark = matches!(theme, Theme::Dark);
     let ink = MdInk::of(theme);
@@ -83,141 +85,200 @@ pub(crate) fn markdown_preview_element(
     note_build();
     // 预览各级字号相对正文默认 16px 的既有比例
     let scaled = |px: f32| px * (font_size / 16.0);
-    let prose = scaled(15.0);
+
+    // ── 按块复用（P412）────────────────────────────────────────────────────
+    // 外层整棵树的缓存（`App::md_preview_tree`）只管"内容没变的帧"；换版那一帧
+    // 以前总是整棵重建，实测成本随**块数**走（README×10＝1421 块 133 ms；
+    // 1500 个小代码块 347 ms）。这里再叠一层按块缓存：块的内容指纹没变就直接
+    // 复用上一帧那一棵（`MdCached` 包住，widget 实例跨帧存活 ⇒ 里面的 `Rich`
+    // 排版缓存也活着），只有指纹变了的区间才重建。
+    // 前后各裁一段公共区：在文末敲一个字 ⇒ 只有那一个块重建；插入一个新块会让
+    // 下标整体右移，但**从尾部数过来的公共后缀**仍然对得上，所以也不会全重建。
+    let fps: Vec<u64> = blocks.iter().map(md_block_fingerprint).collect();
+    let mut next: Vec<(u64, MdTree)> = Vec::with_capacity(blocks.len());
+    {
+        let old = block_cache.0.borrow();
+        let mut lo = 0usize;
+        while lo < fps.len() && lo < old.len() && old[lo].0 == fps[lo] {
+            lo += 1;
+        }
+        let mut hi = 0usize;
+        while hi + lo < fps.len()
+            && hi + lo < old.len()
+            && old[old.len() - 1 - hi].0 == fps[fps.len() - 1 - hi]
+        {
+            hi += 1;
+        }
+        next.extend(old[..lo].iter().map(|(f, t)| (*f, t.clone())));
+        for i in lo..fps.len() - hi {
+            let tree: MdTree = Rc::new(std::cell::RefCell::new(Some(build_block(
+                &blocks[i],
+                &scaled,
+                base,
+                &ink,
+                dark,
+                doc_dir,
+                &color_budget,
+            ))));
+            next.push((fps[i], tree));
+        }
+        next.extend(old[old.len() - hi..].iter().map(|(f, t)| (*f, t.clone())));
+    }
+    *block_cache.0.borrow_mut() = next.clone();
 
     let mut col = column![].spacing(10).padding(14);
-    for block in blocks {
-        match block {
-            MdBlock::Heading { level, spans } => {
-                let px = match level {
-                    1 => scaled(26.0),
-                    2 => scaled(23.0),
-                    3 => scaled(20.0),
-                    4 => scaled(18.0),
-                    5 => scaled(17.0),
-                    _ => scaled(16.0),
-                };
-                col = col.push(md_paragraph(
-                    to_text_spans(spans, base, &ink, true, None, doc_dir),
-                    px,
-                    Alignment::Start,
-                ));
-            }
-            MdBlock::Paragraph { spans } => {
-                col = col.push(md_paragraph(
-                    to_text_spans(spans, base, &ink, false, None, doc_dir),
-                    prose,
-                    Alignment::Start,
-                ));
-            }
-            MdBlock::ListItem {
-                order,
-                indent,
-                task,
-                spans,
-            } => {
-                let marker = match (task, order) {
-                    (Some(true), _) => "☑ ",
-                    (Some(false), _) => "☐ ",
-                    (_, Some(n)) => &format!("{n}. "),
-                    _ => "• ",
-                };
-                let mut line = vec![plain_span(Fragment::Owned(marker.to_owned()), base, None)];
-                line.extend(to_text_spans(spans, base, &ink, false, None, doc_dir));
-                let indent_px = (*indent as f32).min(6.0) * scaled(16.0);
-                let para = md_paragraph(line, prose, Alignment::Start);
-                // 顶层列表项**不套容器**：一个块＝一个布局节点，用例才数得清
-                // 「一块一节点」这条契约（嵌套层级才需要内缩）。
-                let child: Element<'static, Message> = if indent_px == 0.0 {
-                    para.into()
-                } else {
-                    // 嵌套层级＝左右一起内缩（`Padding` 只吃 f32/[f32;2]）
-                    container(para)
-                        .padding(Padding::from([0.0, indent_px]))
-                        .into()
-                };
-                col = col.push(child);
-            }
-            MdBlock::Quote { depth, spans } => {
-                // 深度条挨着排（"▌▌ 文本"），中间不空格——空一格读起来像两段引用
-                let mut line = vec![plain_span(
-                    Fragment::Owned(format!("{} ", "▌".repeat(*depth))),
-                    base,
-                    Some(ink.quote),
-                )];
-                line.extend(to_text_spans(
-                    spans,
-                    base,
-                    &ink,
-                    false,
-                    Some(ink.quote),
-                    doc_dir,
-                ));
-                col = col.push(md_paragraph(line, prose, Alignment::Start));
-            }
-            MdBlock::CodeBlock { lines, lang } => {
-                let body = Rich::with_spans(code_block_spans(
-                    lines,
-                    lang.as_deref(),
-                    base,
-                    dark,
-                    &color_budget,
-                ))
-                .size(scaled(14.0))
-                .width(Fill)
-                // 代码不该把整词推到下一行：长 token 按字形断开
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
-                let bg = ink.code_bg;
-                let border = ink.box_border;
-                col = col.push(
-                    container(body)
-                        .padding([6, 10])
-                        .width(Fill)
-                        .style(move |_| container::Style {
-                            background: Some(Background::Color(bg)),
-                            border: Border {
-                                color: border,
-                                width: 1.0,
-                                radius: Radius::from(4.0),
-                            },
-                            ..container::Style::default()
-                        }),
-                );
-            }
-            MdBlock::Table {
-                align,
-                header,
-                rows,
-            } => {
-                let mut table = column![].spacing(2);
-                table = table.push(md_table_row(
-                    header,
-                    align,
-                    base,
-                    &ink,
-                    doc_dir,
-                    scaled(15.0),
-                    true,
-                ));
-                for row_cells in rows {
-                    table = table.push(md_table_row(
-                        row_cells,
-                        align,
-                        base,
-                        &ink,
-                        doc_dir,
-                        scaled(15.0),
-                        false,
-                    ));
-                }
-                col = col.push(table);
-            }
-            MdBlock::Rule => {
-                col = col.push(rule::horizontal(2));
-            }
-        }
+    for (_, tree) in next {
+        col = col.push(Element::new(MdCached::new(tree)));
     }
     scrollable(container(col).width(Fill)).height(Fill).into()
+}
+
+/// 一个块 → 一棵独立的 widget 树（按块缓存的最小单位，见
+/// [`markdown_preview_element`] 里的复用说明）。
+fn build_block(
+    block: &MdBlock,
+    scaled: &dyn Fn(f32) -> f32,
+    base: Font,
+    ink: &MdInk,
+    dark: bool,
+    doc_dir: Option<&Path>,
+    color_budget: &MdColorBudget,
+) -> Element<'static, Message> {
+    note_block_build();
+    let prose = scaled(15.0);
+    match block {
+        MdBlock::Heading { level, spans } => {
+            let px = match level {
+                1 => scaled(26.0),
+                2 => scaled(23.0),
+                3 => scaled(20.0),
+                4 => scaled(18.0),
+                5 => scaled(17.0),
+                _ => scaled(16.0),
+            };
+            md_paragraph(
+                to_text_spans(spans, base, ink, true, None, doc_dir),
+                px,
+                Alignment::Start,
+            )
+            .into()
+        }
+        MdBlock::Paragraph { spans } => md_paragraph(
+            to_text_spans(spans, base, ink, false, None, doc_dir),
+            prose,
+            Alignment::Start,
+        )
+        .into(),
+        MdBlock::ListItem {
+            order,
+            indent,
+            task,
+            spans,
+        } => {
+            let marker = match (task, order) {
+                (Some(true), _) => "☑ ",
+                (Some(false), _) => "☐ ",
+                (_, Some(n)) => &format!("{n}. "),
+                _ => "• ",
+            };
+            let mut line = vec![plain_span(Fragment::Owned(marker.to_owned()), base, None)];
+            line.extend(to_text_spans(spans, base, ink, false, None, doc_dir));
+            let indent_px = (*indent as f32).min(6.0) * scaled(16.0);
+            let para = md_paragraph(line, prose, Alignment::Start);
+            // 顶层列表项**不套容器**：一个块＝一个布局节点，用例才数得清
+            // 「一块一节点」这条契约（嵌套层级才需要内缩）。
+            if indent_px == 0.0 {
+                para.into()
+            } else {
+                // 嵌套层级＝左右一起内缩（`Padding` 只吃 f32/[f32;2]）
+                container(para)
+                    .padding(Padding::from([0.0, indent_px]))
+                    .into()
+            }
+        }
+        MdBlock::Quote { depth, spans } => {
+            // 深度条挨着排（"▌▌ 文本"），中间不空格——空一格读起来像两段引用
+            let mut line = vec![plain_span(
+                Fragment::Owned(format!("{} ", "▌".repeat(*depth))),
+                base,
+                Some(ink.quote),
+            )];
+            line.extend(to_text_spans(
+                spans,
+                base,
+                ink,
+                false,
+                Some(ink.quote),
+                doc_dir,
+            ));
+            md_paragraph(line, prose, Alignment::Start).into()
+        }
+        MdBlock::CodeBlock { lines, lang } => {
+            let body = Rich::with_spans(code_block_spans(
+                lines,
+                lang.as_deref(),
+                base,
+                dark,
+                color_budget,
+            ))
+            .size(scaled(14.0))
+            .width(Fill)
+            // 代码不该把整词推到下一行：长 token 按字形断开
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+            let bg = ink.code_bg;
+            let border = ink.box_border;
+            container(body)
+                .padding([6, 10])
+                .width(Fill)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(bg)),
+                    border: Border {
+                        color: border,
+                        width: 1.0,
+                        radius: Radius::from(4.0),
+                    },
+                    ..container::Style::default()
+                })
+                .into()
+        }
+        MdBlock::Table {
+            align,
+            header,
+            rows,
+        } => {
+            let mut table = column![].spacing(2);
+            table = table.push(md_table_row(
+                header,
+                align,
+                base,
+                ink,
+                doc_dir,
+                scaled(15.0),
+                true,
+            ));
+            for row_cells in rows {
+                table = table.push(md_table_row(
+                    row_cells,
+                    align,
+                    base,
+                    ink,
+                    doc_dir,
+                    scaled(15.0),
+                    false,
+                ));
+            }
+            table.into()
+        }
+        MdBlock::Rule => rule::horizontal(2).into(),
+    }
+}
+
+/// 块的**内容指纹**：同一篇里内容没变的块复用上一帧那棵树。
+fn md_block_fingerprint(block: &MdBlock) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    block.hash(&mut h);
+    h.finish()
 }
 
 /// 一行表格：每格等宽，按分隔行的 `:---:` 对齐，表头整行带底色。
@@ -479,6 +540,8 @@ pub(crate) fn md_preview_tree_for(
 #[cfg(test)]
 thread_local! {
     pub(crate) static MD_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// **按块**建树的次数（P412 的尺子：改了尾部一个块，就不该把整篇都重建）。
+    pub(crate) static MD_BLOCK_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -486,9 +549,36 @@ fn note_build() {
     MD_BUILD_COUNT.with(|c| c.set(c.get() + 1));
 }
 
+#[cfg(test)]
+fn note_block_build() {
+    MD_BLOCK_BUILDS.with(|c| c.set(c.get() + 1));
+}
+
 #[cfg(not(test))]
 #[inline]
 fn note_build() {}
+
+#[cfg(not(test))]
+#[inline]
+fn note_block_build() {}
+
+/// 按块缓存的那一排树：`(内容指纹, 树)`，下标＝块序。
+///
+/// 包一层同样是为了 `Debug`（`Editpad` derive(Debug)，而 `Element` 没有）。
+#[derive(Clone)]
+pub(crate) struct MdBlockCacheSlot(pub std::cell::RefCell<Vec<(u64, MdTree)>>);
+
+impl Default for MdBlockCacheSlot {
+    fn default() -> Self {
+        Self(std::cell::RefCell::new(Vec::new()))
+    }
+}
+
+impl std::fmt::Debug for MdBlockCacheSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MdBlockCacheSlot({} 块)", self.0.borrow().len())
+    }
+}
 
 /// 把整棵预览树**缓存**在 widget 的 Tree 状态里，依赖不变就复用上一次的实例。
 ///

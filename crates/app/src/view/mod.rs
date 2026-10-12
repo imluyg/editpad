@@ -337,7 +337,16 @@ impl Editpad {
                     &self.md_preview_tree,
                     &self.md_preview_swap_at,
                     key_hash,
-                    || markdown_preview_element(&shown, px, base, theme, dir.as_deref()),
+                    || {
+                        markdown_preview_element(
+                            &shown,
+                            px,
+                            base,
+                            theme,
+                            dir.as_deref(),
+                            &self.md_block_cache,
+                        )
+                    },
                 );
                 Element::new(MdCached::new(tree))
             };
