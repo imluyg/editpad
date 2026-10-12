@@ -320,7 +320,21 @@ impl Editpad {
                     doc_dir.as_deref(),
                 )
             };
-            body = body.push(preview);
+            // P407 分栏：开预览不再把正文整块摘掉——左半继续可编辑、右半实时跟着
+            // 变（改前 `if preview_visible` 走预览、`else` 才走正文，"边写边看"这条
+            // 最常用手势根本做不到）。两个容器都 width/height Fill ⇒ 等分，
+            // 1px 竖线是两块的分界（不是可拖的分隔条，那要新增"栏宽"这份状态）。
+            body = body.push(
+                row![
+                    container(self.cur_handle.view(content_font))
+                        .width(Fill)
+                        .height(Fill),
+                    rule::vertical(1),
+                    container(preview).width(Fill).height(Fill),
+                ]
+                .spacing(0)
+                .width(Fill),
+            );
         } else {
             body = body.push(self.cur_handle.view(content_font));
         }

@@ -3631,11 +3631,13 @@ fn markdown_preview_lays_one_block_as_one_wrapped_paragraph() {
         assert!(app.preview_visible, ".md 页应能开预览");
         app
     }
-    // 预览正文那一横带：滚动区的三层壳与菜单/标签条都在 y=56.6 及以上之外，
-    // 状态栏贴在窗口底部（y≈775）⇒ 65..760 之间只剩块本身
+    // 预览正文那一横带：只数**右半**（预览栏）——分栏后左半的正文面节点也在这条
+    // 横带里；滚动区的三层壳与菜单/标签条都在 y=56.6 之上，状态栏贴在窗口底部
+    // （y≈775）⇒ 65..760 之间只剩块本身
     let blocks = |app: &Editpad, width: f32| -> Vec<iced::Rectangle> {
-        ViewTree::layout(app, iced::Size::new(width, 800.0))
-            .find_all(|b| b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0)
+        ViewTree::layout(app, iced::Size::new(width, 800.0)).find_all(|b| {
+            b.x > width * 0.5 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0
+        })
     };
 
     let doc = format!(
@@ -3648,7 +3650,8 @@ fn markdown_preview_lays_one_block_as_one_wrapped_paragraph() {
     assert_eq!(
         wide.len(),
         3,
-        "三块文档应排成三个节点（一块一节点）；实际 {wide:?}——改前每段样式各是一个兄弟控件"
+        "右半预览里三块文档应排成三个节点（一块一节点）；实际 {wide:?}——\
+         空＝预览不在右半（分栏形状变了），多于 3＝每段样式各是一个兄弟控件（改前形状）"
     );
     let tallest = wide.iter().map(|b| b.height).fold(0.0f32, f32::max);
     let widest = wide.iter().map(|b| b.width).fold(0.0f32, f32::max);
@@ -3667,6 +3670,55 @@ fn markdown_preview_lays_one_block_as_one_wrapped_paragraph() {
     assert!(
         narrow_tallest > tallest,
         "窄窗没把同一段折得更高：600px 是 {narrow_tallest}，1280px 是 {tallest}"
+    );
+}
+
+/// 开预览＝**分栏**，不是把正文整块换掉：左半正文仍在场（可继续编辑），右半是预览。
+///
+/// 改前 `view/mod.rs` 那句 `if preview_visible && is_markdown { 预览 } else { 正文 }`
+/// 让预览一开，编辑面就从树里消失——"边写边看"这条最常用的手势根本不存在。
+#[test]
+fn markdown_preview_shares_the_window_with_the_editable_body() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/x/a.md")));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("# 标题\n\n正文一段\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, ".md 页应能开预览");
+
+    let (editor, preview) = {
+        let ui = ViewTree::layout(&app, iced::Size::new(1280.0, 800.0));
+        let editor = ui
+            .find(|b| {
+                b.x < 10.0 && b.y > 40.0 && b.height > 200.0 && (300.0..700.0).contains(&b.width)
+            })
+            .unwrap_or_else(|| panic!("预览开态下左半应仍有正文面；\n{}", ui.dump()));
+        let preview = ui
+            .find(|b| b.x > 600.0 && b.y > 40.0 && b.height > 200.0 && b.width > 300.0)
+            .unwrap_or_else(|| panic!("右半应是预览栏；\n{}", ui.dump()));
+        (editor, preview)
+    };
+    assert!(editor.x < preview.x, "正文应在左半、预览在右半");
+    assert!(
+        preview.x + preview.width <= 1281.0,
+        "预览栏越出窗口：{preview:?}"
+    );
+
+    // 分栏之后打字仍落进正文（预览只是旁证，不吃编辑面）
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("追加".into())));
+    assert!(
+        app.cur_handle.borrow().doc.to_text().contains("追加"),
+        "预览开态下编辑必须仍落在正文"
     );
 }
 
