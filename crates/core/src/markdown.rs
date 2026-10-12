@@ -207,8 +207,17 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
         let mut paragraph = String::from(trimmed);
         let mut prev_raw = lines[i];
         i += 1;
+        let mut setext: Option<usize> = None;
         while i < lines.len() {
             let next = lines[i].trim();
+            // 下划线优先于分隔线：`正文\n---` 是二级标题，不是「段落＋横线」
+            if let Some(level) = setext_level(next) {
+                if !paragraph.contains('\n') {
+                    setext = Some(level);
+                    i += 1;
+                    break;
+                }
+            }
             if next.is_empty()
                 || fence(&lines, i).is_some()
                 || heading(next).is_some()
@@ -221,7 +230,7 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             }
             let (sep, drop_backslash) = line_break_kind(prev_raw);
             if drop_backslash {
-                // 行尾那个 `\` 是换行标记本身，不进气泡
+                // 行尾那个 `\` 是换行标记本身，不进正文文本
                 paragraph.pop();
             }
             paragraph.push(sep);
@@ -229,8 +238,10 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             prev_raw = lines[i];
             i += 1;
         }
-        blocks.push(MdBlock::Paragraph {
-            spans: inline(&paragraph),
+        let spans = inline(&paragraph);
+        blocks.push(match setext {
+            Some(level) => MdBlock::Heading { level, spans },
+            None => MdBlock::Paragraph { spans },
         });
     }
     blocks
@@ -274,6 +285,24 @@ fn line_break_kind(line: &str) -> (char, bool) {
         return ('\n', false);
     }
     (' ', false)
+}
+
+/// 段落下划线式的标题（setext）：整行都是 `=` ⇒ 一级，整行都是 `-` ⇒ 二级。
+///
+/// 只在**正在攒的那段正文没被硬换行打断**时才成立（CommonMark 明确排除含硬换行的
+/// setext 标题），也只在上面真有一段正文时才查——空行之后的 `---` 仍是分隔线。
+fn setext_level(line: &str) -> Option<usize> {
+    let t = line.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.chars().all(|c| c == '=') {
+        Some(1)
+    } else if t.chars().all(|c| c == '-') {
+        Some(2)
+    } else {
+        None
+    }
 }
 
 /// `# 标题` → Some((级别, 内容))；# 后必须有空格或就是整行。
@@ -1593,5 +1622,78 @@ mod tests {
             "双反斜杠＝转义的反斜杠＋软换行"
         );
         assert_eq!(para("末行  \n"), "末行", "段尾的硬换行标记不产生多余的换行");
+    }
+
+    /// 下划线式标题（setext）：`标题` 下面压一行 `=` 或 `-` 就是标题，不是
+    /// 「一段正文加一条横线」——后者是改前的读法，看上去像排版坏了。
+    #[test]
+    fn setext_underlines_upgrade_the_paragraph_to_a_heading() {
+        assert_eq!(
+            parse_markdown("标题\n==="),
+            vec![MdBlock::Heading {
+                level: 1,
+                spans: vec![MdSpan::plain("标题")],
+            }],
+            "下划线本身不该留在文本里"
+        );
+        assert_eq!(
+            parse_markdown("甲\n乙\n====="),
+            vec![MdBlock::Heading {
+                level: 1,
+                spans: vec![MdSpan::plain("甲 乙")],
+            }],
+            "整段正文一起升上去"
+        );
+        let two = parse_markdown("小节\n---\n正文");
+        assert!(
+            matches!(two[0], MdBlock::Heading { level: 2, .. }),
+            "一行 `-` 是二级标题下划线：{two:?}"
+        );
+        assert_eq!(two.len(), 2, "下划线被吃掉，不该多出块：{two:?}");
+    }
+
+    /// 反向的那些：上面没有正文、上面那段被硬换行打断、带空格的 `- - -`——
+    /// 都不许升成标题。（CommonMark 明确排除含硬换行的 setext 标题。）
+    #[test]
+    fn setext_needs_a_clean_paragraph_above_it() {
+        let shapes = |src: &str| -> Vec<String> {
+            parse_markdown(src)
+                .iter()
+                .map(|b| match b {
+                    MdBlock::Heading { level, .. } => format!("heading{level}"),
+                    MdBlock::Paragraph { .. } => "paragraph".to_owned(),
+                    MdBlock::CodeBlock { .. } => "code".to_owned(),
+                    MdBlock::ListItem { .. } => "item".to_owned(),
+                    MdBlock::Quote { .. } => "quote".to_owned(),
+                    MdBlock::Table { .. } => "table".to_owned(),
+                    MdBlock::Rule => "rule".to_owned(),
+                })
+                .collect()
+        };
+        assert_eq!(
+            shapes("===\n正文"),
+            vec!["paragraph"],
+            "上面没正文 ⇒ `===` 只是文字"
+        );
+        assert_eq!(
+            shapes("# H\n==="),
+            vec!["heading1", "paragraph"],
+            "`#` 标题不是段落，下划线跟它无关"
+        );
+        assert_eq!(
+            shapes("甲  \n乙\n---"),
+            vec!["paragraph", "rule"],
+            "段里有硬换行就不算 setext"
+        );
+        assert_eq!(
+            shapes("- 项\n---"),
+            vec!["item", "rule"],
+            "列表项后面的 --- 仍是分隔线"
+        );
+        assert_eq!(
+            shapes("正文\n- - -"),
+            vec!["paragraph", "rule"],
+            "带空格的 --- 不是下划线"
+        );
     }
 }
