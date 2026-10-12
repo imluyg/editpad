@@ -3872,6 +3872,87 @@ fn markdown_preview_throttles_rebuilds_while_typing() {
     MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
 }
 
+/// 预览里的代码块**按围栏语言上色**（认不出就走素色），并且整块仍是等宽族。
+#[test]
+fn markdown_preview_colors_fenced_code_by_language() {
+    use crate::editor::LinkTarget;
+    use crate::md_preview::code_block_spans;
+    use iced::widget::text::Span as TextSpan;
+
+    let lines: Vec<String> = vec![
+        "fn main() {".into(),
+        "    let x: u32 = 42;".into(),
+        "}".into(),
+    ];
+    let colors = |spans: &[TextSpan<'static, LinkTarget>]| -> usize {
+        let mut seen: Vec<iced::Color> = Vec::new();
+        for s in spans {
+            if let Some(c) = s.color {
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+            }
+        }
+        seen.len()
+    };
+
+    let rust = code_block_spans(&lines, Some("rs"), iced::Font::MONOSPACE, false);
+    assert!(!rust.is_empty(), "代码块不该排成空段");
+    assert!(
+        colors(&rust) >= 2,
+        "```rs 的代码块没上色（{} 种颜色）——预览里代码与正文无异",
+        colors(&rust)
+    );
+    // 认不出的语言 ⇒ 整块素色，而不是猜一门语言来误导
+    let unknown = code_block_spans(&lines, Some("not-a-language"), iced::Font::MONOSPACE, false);
+    assert_eq!(colors(&unknown), 1, "认不出的语言应该只有一个颜色");
+    // 深浅两档都要给得出颜色（写死浅色字面量那一族的旧病）
+    let dark = code_block_spans(&lines, Some("rs"), iced::Font::MONOSPACE, true);
+    assert!(colors(&dark) >= 2, "深色档没上色");
+    assert_ne!(colors(&dark), 0);
+    // 代码恒等宽族（P406 口径：正文族随设置，代码不跟着变成比例字体）
+    for s in &rust {
+        let f = s.font.expect("代码段必须显式带字体");
+        assert_eq!(
+            f.family,
+            iced::Font::MONOSPACE.family,
+            "代码块里混进了非等宽族"
+        );
+    }
+}
+
+/// 代码块上色**不许丢字、不许重字，空行也要占一行**。
+///
+/// run 之间可能有缝隙（不同 token 之间未覆盖的字符），所以这里是**按列对齐**取色：
+/// 每个字符恰好看一次，颜色来自覆盖它的 run，没有 run 就用正文字色。
+#[test]
+fn markdown_preview_code_spans_keep_every_character() {
+    use crate::md_preview::code_block_spans;
+
+    let joined =
+        |spans: &[iced::widget::text::Span<'static, crate::editor::LinkTarget>]| -> String {
+            spans.iter().map(|s| s.text.as_ref()).collect()
+        };
+    let lines: Vec<String> = vec![
+        "let s = \"a b\";".into(),
+        String::new(),
+        "  // 注释 → arrow".into(),
+    ];
+    let expect: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    for lang in [Some("rs"), Some("not-a-language"), None] {
+        let got = joined(&code_block_spans(
+            &lines,
+            lang,
+            iced::Font::MONOSPACE,
+            false,
+        ));
+        assert_eq!(
+            got, expect,
+            "语言 {lang:?} 档的文本必须逐字一致（含空行的那个换行）"
+        );
+    }
+}
+
 /// 预览链接的落点解析与正文链接同口径：scheme 交系统、路径须存在、锚点不链。
 #[test]
 fn markdown_link_targets_follow_the_editor_link_rules() {

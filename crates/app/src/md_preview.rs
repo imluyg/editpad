@@ -76,6 +76,7 @@ pub(crate) fn markdown_preview_element(
     theme: Theme,
     doc_dir: Option<&Path>,
 ) -> Element<'static, Message> {
+    let dark = matches!(theme, Theme::Dark);
     let ink = MdInk::of(theme);
     note_build();
     // 预览各级字号相对正文默认 16px 的既有比例
@@ -151,17 +152,12 @@ pub(crate) fn markdown_preview_element(
                 ));
                 col = col.push(md_paragraph(line, prose, Alignment::Start));
             }
-            MdBlock::CodeBlock { lines, .. } => {
-                let mut body = column![].spacing(0);
-                for line in lines {
-                    body = body.push(
-                        text(line.clone())
-                            .size(scaled(14.0))
-                            .font(Font::MONOSPACE)
-                            .color(ink.text)
-                            .width(Fill),
-                    );
-                }
+            MdBlock::CodeBlock { lines, lang } => {
+                let body = Rich::with_spans(code_block_spans(lines, lang.as_deref(), base, dark))
+                    .size(scaled(14.0))
+                    .width(Fill)
+                    // 代码不该把整词推到下一行：长 token 按字形断开
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
                 let bg = ink.code_bg;
                 let border = ink.box_border;
                 col = col.push(
@@ -660,4 +656,109 @@ impl widget::Widget<Message, Theme, iced::Renderer> for MdCached {
             )
         })
     }
+}
+
+// ── 代码块着色 ────────────────────────────────────────────────────────────────
+
+/// 代码块＝整块一个富文本段，并试着按围栏 info 串上色。
+///
+/// 为什么值得做：代码块是 .md 里最常要"看清楚"的内容，此前预览里它是一行行素色
+/// 文本，与正文无异。`core::highlight::Highlighter` 早就给正文编辑器产出逐行
+/// `StyledRun`（颜色已按主题解算），预览复用零新依赖。
+///
+/// 认法：先按扩展名（`` ```py ````／`` ```rs ````），再按语法名首字母大写
+/// （`` ```Python ````）；都不中 ⇒ **整块素色**（不嗅探——语言是作者写明的，
+/// 猜错比不猜更误导）。
+///
+/// ⚠️ 成本落在**换版那一帧**（P409 已把换版节流到每窗口一次）：逐行走 syntect
+/// 解析，块越长这一帧越贵——这条没量过，登记在台账的待量项里。
+pub(crate) fn code_block_spans(
+    lines: &[String],
+    lang: Option<&str>,
+    base: Font,
+    dark: bool,
+) -> Vec<TextSpan<'static, LinkTarget>> {
+    let ink = MdInk::of(if dark { Theme::Dark } else { Theme::Light });
+
+    let mut hl = lang.and_then(|raw| {
+        let t = raw.trim();
+        if t.is_empty() {
+            return None;
+        }
+        let named = {
+            let mut n = t.to_owned();
+            if let Some(head) = n.get_mut(0..1) {
+                head.make_ascii_uppercase();
+            }
+            n
+        };
+        editpad_core::LazyHighlighter::new(t)
+            .or_else(|| editpad_core::LazyHighlighter::new_by_name(&named))
+    });
+    if let Some(h) = hl.as_mut() {
+        h.set_dark_mode(dark);
+    }
+    let plain = [ink.text.r, ink.text.g, ink.text.b, 1.0];
+    let mut text_of = |idx: usize| lines.get(idx).cloned().unwrap_or_default();
+
+    let mut spans: Vec<TextSpan<'static, LinkTarget>> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let n = chars.len();
+        // 逐字上色：run 覆盖到的字用 run 的颜色，没覆盖到的（含整块认不出语法时）
+        // 用正文字色。**按列对齐**而不是直接铺 run——run 之间有缝隙时不丢字，
+        // 也不会把同一个字重画两遍。
+        let mut colored: Vec<[f32; 4]> = vec![plain; n];
+        if let Some(h) = hl.as_mut() {
+            for r in h.styled_line(idx, line, lines.len(), &mut text_of) {
+                if r.start_col >= n {
+                    continue;
+                }
+                let to = r.end_col.min(n);
+                for c in colored.iter_mut().take(to).skip(r.start_col) {
+                    *c = r.color;
+                }
+            }
+        }
+        // 连续同色合并成一段（少几个 span，样式不变）
+        let mut pieces: Vec<(String, [f32; 4])> = Vec::new();
+        for (i, ch) in chars.iter().enumerate() {
+            let c = colored[i];
+            match pieces.last_mut() {
+                Some((buf, last)) if *last == c => buf.push(*ch),
+                _ => pieces.push((ch.to_string(), c)),
+            }
+        }
+        let last_idx = pieces.len().saturating_sub(1);
+        for (pi, (piece, c)) in pieces.into_iter().enumerate() {
+            let content = if pi == last_idx {
+                format!("{piece}\n") // 行尾换行：整块仍是一个段落节点
+            } else {
+                piece
+            };
+            let mut ts = TextSpan::new(Fragment::Owned(content));
+            ts.font = Some(Font {
+                family: Font::MONOSPACE.family,
+                ..base
+            });
+            ts.color = Some(Color {
+                r: c[0],
+                g: c[1],
+                b: c[2],
+                a: c[3],
+            });
+            spans.push(ts);
+        }
+        if n == 0 {
+            // 空行没有字符就没有段，但它必须占一行高
+            let mut ts = TextSpan::new(Fragment::Owned("\n".to_owned()));
+            ts.font = Some(Font {
+                family: Font::MONOSPACE.family,
+                ..base
+            });
+            ts.color = Some(ink.text);
+            spans.push(ts);
+        }
+    }
+    spans
 }

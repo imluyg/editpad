@@ -246,7 +246,7 @@ The same copy runs **only one instance at a time** (the mutex name derives from 
 - Common code languages are colored automatically by extension (built into syntect plus a maintained alias table: `log` / `md` / `markdown` / `toml` / `ini` / `cfg` / `conf` / `mk` / `yml`, etc.);
 - Embedded mini-syntaxes: **Log** (ERROR/WARN/INFO/DEBUG levels colored + timestamps) and **TOML** (section names / keys / strings / comments), shipped with the single binary;
 - Extensionless files are sniffed by content: shebang, `<?xml`, JSON/YAML heuristics, plus the conventional filenames `Dockerfile` / `Makefile`;
-- Markdown files offer a "Markdown preview" ("MD 预览") panel (headings / paragraphs / ordered and unordered lists with numbers, nesting and task boxes / quotes / fenced code / tables / horizontal rules, plus inline bold, italic, strikethrough, code spans and links & images; text wraps to the panel width, links are clickable, colors follow the theme, rendered read-only);
+- Markdown files offer a "Markdown preview" ("MD 预览") panel (headings / paragraphs / ordered and unordered lists with numbers, nesting and task boxes / quotes / fenced code colored by the fence language / tables / horizontal rules, plus inline bold, italic, strikethrough, code spans and links & images; text wraps to the panel width, links are clickable, colors follow the theme; the preview sits side by side with the editable text and its widget tree is cached across frames with throttled swaps, rendered read-only);
 - JSON files support `Ctrl+Shift+F` to validate and format in one click;
 - Switching between light and dark themes rebuilds the highlight colors wholesale, so no light-theme residual colors remain in dark mode.
 
