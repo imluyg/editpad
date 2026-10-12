@@ -137,8 +137,9 @@ pub(crate) fn markdown_preview_element(
                 col = col.push(child);
             }
             MdBlock::Quote { depth, spans } => {
+                // 深度条挨着排（"▌▌ 文本"），中间不空格——空一格读起来像两段引用
                 let mut line = vec![plain_span(
-                    Fragment::Owned("▌ ".repeat(*depth)),
+                    Fragment::Owned(format!("{} ", "▌".repeat(*depth))),
                     base,
                     Some(ink.quote),
                 )];
