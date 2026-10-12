@@ -270,6 +270,23 @@ fn build_block(
             table.into()
         }
         MdBlock::Rule => rule::horizontal(2).into(),
+        MdBlock::Footnotes { items } => {
+            // 注脚区一条一行，行首的上标编号与正文里那个标记同源（`superscript_digits`）
+            let mut col = column![].spacing(2);
+            for note in items {
+                let mut line = vec![plain_span(
+                    Fragment::Owned(format!(
+                        "{} ",
+                        editpad_core::markdown::superscript_digits(note.number)
+                    )),
+                    base,
+                    Some(ink.quote),
+                )];
+                line.extend(to_text_spans(&note.spans, base, ink, false, None, doc_dir));
+                col = col.push(md_paragraph(line, prose, Alignment::Start));
+            }
+            col.into()
+        }
     }
 }
 

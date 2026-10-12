@@ -15,8 +15,8 @@
 //! * 行内标记**要求闭合**：找不到闭栏时按字面量输出（与 CommonMark 一致），
 //!   不再把后半行整条染色
 //!
-//! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）、脚注 `[^1]`、
-//! 表格单元里的 `\|` 转义竖线。
+//! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）、
+//! 表格单元里的 `\|` 转义竖线、缩进代码块（4 格／制表符）、引用块内部的块级结构。
 
 /// 行内样式位标志。
 pub const MD_BOLD: u8 = 1 << 0;
@@ -25,6 +25,8 @@ pub const MD_CODE: u8 = 1 << 2;
 pub const MD_STRIKE: u8 = 1 << 3;
 pub const MD_LINK: u8 = 1 << 4;
 pub const MD_IMAGE: u8 = 1 << 5;
+/// 脚注引用：`text` 先放标签，编号在块级收尾时统一换算成上标数字。
+pub const MD_FOOTNOTE: u8 = 1 << 6;
 
 /// 一段同样式文本。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -63,6 +65,16 @@ impl MdSpan {
     pub fn is_image(&self) -> bool {
         self.style & MD_IMAGE != 0
     }
+    pub fn is_footnote(&self) -> bool {
+        self.style & MD_FOOTNOTE != 0
+    }
+}
+
+/// 一条脚注：编号＋正文（正文已走行内解析）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MdFootnote {
+    pub number: usize,
+    pub spans: Vec<MdSpan>,
 }
 
 /// 表格列的水平对齐。
@@ -106,6 +118,10 @@ pub enum MdBlock {
         rows: Vec<Vec<Vec<MdSpan>>>,
     },
     Rule,
+    /// 文末注脚区：整篇**最多一块**，永远排在最后（脚注定义行本身不出正文）。
+    Footnotes {
+        items: Vec<MdFootnote>,
+    },
 }
 
 /// 文件头元数据块（front matter）**结尾栅栏之后那一行**的下标；不是 front matter 则 `None`。
@@ -283,7 +299,102 @@ pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
             None => MdBlock::Paragraph { spans },
         });
     }
+    assign_footnotes(&mut blocks, &defs);
     blocks
+}
+
+/// 数字 → 上标字符（`¹²³…`）：预览没有「上标」这种排版属性，用 Unicode 上标数字既不用
+/// 多带一份状态，也不会把行距拉开。认不到的字符原样留着。
+/// 渲染层注脚区的行首编号共用这一份（正文标记与注脚行的字形必须同一个来源）。
+pub fn superscript_digits(n: usize) -> String {
+    n.to_string()
+        .chars()
+        .map(|d| match d {
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            other => other,
+        })
+        .collect()
+}
+
+/// 逐块过一遍**所有**行内段（脚注收尾要按全篇顺序看，一处漏了就少一个编号）。
+fn each_span_list(blocks: &mut [MdBlock], f: &mut impl FnMut(&mut Vec<MdSpan>)) {
+    for block in blocks.iter_mut() {
+        match block {
+            MdBlock::Heading { spans, .. }
+            | MdBlock::Paragraph { spans }
+            | MdBlock::Quote { spans, .. } => f(spans),
+            MdBlock::ListItem { spans, .. } => f(spans),
+            MdBlock::Table { header, rows, .. } => {
+                for cell in header.iter_mut().chain(rows.iter_mut().flatten()) {
+                    f(cell);
+                }
+            }
+            MdBlock::Footnotes { items } => {
+                for item in items.iter_mut() {
+                    f(&mut item.spans);
+                }
+            }
+            // 代码块与分隔线里没有行内标记
+            MdBlock::CodeBlock { .. } | MdBlock::Rule => {}
+        }
+    }
+}
+
+/// 脚注收尾：①按**首次引用**的出现顺序发号，把正文里那截标签换成上标数字；②注脚区挂在
+/// 最后一块——被引用的按编号排，**从没被引用的定义也排在后面**（用户写下的正文不该消失）。
+/// 一张定义表都没有 ⇒ 不产生块。
+fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
+    if defs.notes.is_empty() {
+        return;
+    }
+    let mut order: Vec<String> = Vec::new();
+    each_span_list(blocks, &mut |spans: &mut Vec<MdSpan>| {
+        for span in spans.iter_mut() {
+            if span.style & MD_FOOTNOTE == 0 {
+                continue;
+            }
+            let label = normalize_label(&span.text);
+            let idx = match order.iter().position(|l| *l == label) {
+                Some(idx) => idx,
+                None => {
+                    order.push(label);
+                    order.len() - 1
+                }
+            };
+            span.text = superscript_digits(idx + 1);
+        }
+    });
+    let mut items: Vec<MdFootnote> = Vec::new();
+    let mut emitted = vec![false; defs.notes.len()];
+    for label in order.iter() {
+        if let Some(at) = defs.notes.iter().position(|(l, _)| l == label) {
+            emitted[at] = true;
+            items.push(MdFootnote {
+                number: items.len() + 1,
+                spans: inline_with(&defs.notes[at].1, defs),
+            });
+        }
+    }
+    for (at, (_, body)) in defs.notes.iter().enumerate() {
+        if !emitted[at] {
+            items.push(MdFootnote {
+                number: items.len() + 1,
+                spans: inline_with(body, defs),
+            });
+        }
+    }
+    if !items.is_empty() {
+        blocks.push(MdBlock::Footnotes { items });
+    }
 }
 
 /// 切行：判据与 [`crate::document::split_lines_keep_ending`] **同一份**（读侧按全集，定案
@@ -857,17 +968,29 @@ fn decode_entities(text: &str) -> String {
     out
 }
 
-/// 引用式链接的定义表：`[标签]: 目标` 收集起来，供 `[文字][标签]`／`[标签]` 查。
+/// 引用式链接的定义表＋脚注定义表：`[标签]: 目标` 与 `[^标签]: 正文`。
 #[derive(Default)]
-struct LinkDefs(std::collections::HashMap<String, String>);
+struct LinkDefs {
+    links: std::collections::HashMap<String, String>,
+    /// `[^标签]: 正文`，按**定义出现顺序**存；同名只首个生效。
+    notes: Vec<(String, String)>,
+}
 
 impl LinkDefs {
     fn get(&self, label: &str) -> Option<&str> {
-        self.0.get(label).map(String::as_str)
+        self.links.get(label).map(String::as_str)
     }
     /// **首个定义生效**（CommonMark 同口径）：同名的后面那些只当重复，不覆盖。
     fn insert(&mut self, label: String, dest: String) {
-        self.0.entry(label).or_insert(dest);
+        self.links.entry(label).or_insert(dest);
+    }
+    fn note(&mut self, label: String, body: String) {
+        if !self.notes.iter().any(|(l, _)| *l == label) {
+            self.notes.push((label, body));
+        }
+    }
+    fn has_note(&self, label: &str) -> bool {
+        self.notes.iter().any(|(l, _)| l == label)
     }
 }
 
@@ -900,6 +1023,14 @@ fn link_def(line: &str) -> Option<(String, String)> {
     if label.trim().is_empty() {
         return None;
     }
+    // `[^标签]` 是脚注不是引用式链接：让它进链接表的话，注脚正文会被当成 URL，
+    // 正文里那个 `[^1]` 就渲成一个下划线断链、注脚整篇消失
+    // 护栏：`[^标签]` 是脚注不是引用式链接。**收集顺序已经保证**脚注定义先被
+    // `footnote_def` 收走（变异探针现量：摘掉这一格 39 条 core 用例全绿），这里再挡一次
+    // 是因为哪天两次判定调了个位，注脚正文就会变成一条 URL、`[^1]` 变成断链。
+    if label.starts_with('^') {
+        return None;
+    }
     let after = rest[close + 1..].trim_start().strip_prefix(':')?;
     let after = after.trim_start();
     let dest = if let Some(inner) = after.strip_prefix('<') {
@@ -913,6 +1044,26 @@ fn link_def(line: &str) -> Option<(String, String)> {
         return None;
     }
     Some((normalize_label(label), decode_entities(dest)))
+}
+
+/// `[^标签]: 正文` ⇒ Some((规范化标签, 正文))。正文一律**一行写完**（缩进续行的多段注脚
+/// 先不做）；正文为空 ⇒ 不是定义（那行仍是正文）。标签与引用同一套规范化（空白并一格＋
+/// 大小写折叠），所以 `[^Note]` 与 `[^note]: …` 配得上。
+fn footnote_def(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("[^")?;
+    let close = find_bracket(rest)?;
+    let label = &rest[..close];
+    if label.trim().is_empty() {
+        return None;
+    }
+    let body = rest[close + 1..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    if body.is_empty() {
+        return None;
+    }
+    Some((normalize_label(label), body.to_owned()))
 }
 
 /// 整篇扫一遍收定义，同时标出**该被吃掉**的行（代码围栏内、缩进 4 格以上的都不算）。
@@ -933,6 +1084,11 @@ fn collect_link_defs(lines: &[&str]) -> (LinkDefs, Vec<bool>) {
         // 4 格以上缩进（或制表符）＝缩进代码块，不是定义行
         let indent = raw.len() - raw.trim_start().len();
         if raw.starts_with('\t') || indent >= 4 {
+            continue;
+        }
+        if let Some((label, body)) = footnote_def(t) {
+            defs.note(label, body);
+            consumed[idx] = true;
             continue;
         }
         if let Some((label, dest)) = link_def(t) {
@@ -1023,6 +1179,22 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>,
             let label_at = i + if is_image { 2 } else { 1 };
             if let Some(close) = find_bracket(&text[label_at..]) {
                 let label = &text[label_at..label_at + close];
+                // 脚注引用 `[^标签]`：查到定义才接管，查不到就原样留着（与"不给断链"同口径）
+                if !is_image {
+                    if let Some(raw) = label.strip_prefix('^') {
+                        if defs.has_note(&normalize_label(raw)) {
+                            flush!();
+                            out.push(MdSpan {
+                                // 先放标签：编号要按全篇**首次引用**顺序发，收尾时统一换算
+                                text: raw.trim().to_owned(),
+                                style: base | MD_FOOTNOTE,
+                                link: None,
+                            });
+                            i = label_at + close + 1;
+                            continue;
+                        }
+                    }
+                }
                 let after = &text[label_at + close + 1..];
                 if let Some(dest_end) = after.strip_prefix('(').and_then(find_paren) {
                     // dest_end 是**剥掉 `(` 之后**串内的偏移
@@ -1534,6 +1706,7 @@ mod tests {
                     MdBlock::Quote { .. } => "quote",
                     MdBlock::Table { .. } => "table",
                     MdBlock::Rule => "rule",
+                    MdBlock::Footnotes { .. } => "notes",
                 })
                 .collect()
         };
@@ -1881,6 +2054,121 @@ mod tests {
         })
     }
 
+    /// 脚注：正文里 `[^标签]` 落一个上标编号，定义行**不进正文**，注脚区挂在最后一块。
+    /// 改前那条定义行被**引用式链接的收集器**吃掉（标签＝`^1`），于是 `[^1]` 渲成一条
+    /// 下划线断链、注脚正文整篇消失——比"不支持"更糟。
+    #[test]
+    fn footnotes_become_superscripts_and_a_notes_block() {
+        let blocks = parse_markdown("看这句[^1]收尾。\n\n[^1]: 这是注脚正文。\n");
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        let MdBlock::Paragraph { spans } = &blocks[0] else {
+            panic!("第一块该是段落：{blocks:?}");
+        };
+        assert!(
+            spans.iter().any(|s| s.is_footnote()),
+            "该有一个脚注标记：{spans:?}"
+        );
+        assert_eq!(spans_text(spans), "看这句¹收尾。", "编号用上标数字");
+        let MdBlock::Footnotes { items } = &blocks[1] else {
+            panic!("最后一块该是注脚区：{blocks:?}");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].number, 1);
+        assert_eq!(spans_text(&items[0].spans), "这是注脚正文。");
+
+        // 注脚正文自己走行内解析（链接那套照用）
+        let linked = parse_markdown("[^1]\n\n[^1]: 见 [文档](https://e.io)\n");
+        let MdBlock::Footnotes { items } = &linked[linked.len() - 1] else {
+            panic!("{linked:?}");
+        };
+        assert!(
+            items[0]
+                .spans
+                .iter()
+                .any(|s| s.is_link() && s.link.as_deref() == Some("https://e.io")),
+            "注脚正文里的链接该照解：{:?}",
+            items[0].spans
+        );
+    }
+
+    /// 编号按**首次引用**的顺序发（不是定义顺序），而从没被引用的定义排在注脚区末尾——
+    /// 用户写下的注脚正文不该因为忘了引用就消失。
+    #[test]
+    fn footnote_numbers_follow_first_reference_and_keep_orphans() {
+        let blocks = parse_markdown("乙[^b] 甲[^a]\n\n[^a]: 注 A\n[^b]: 注 B\n[^c]: 没人引用\n");
+        let MdBlock::Paragraph { spans } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(spans_text(spans), "乙¹ 甲²", "先引用的拿到 1");
+        let MdBlock::Footnotes { items } = &blocks[blocks.len() - 1] else {
+            panic!("{blocks:?}");
+        };
+        let notes: Vec<(usize, String)> = items
+            .iter()
+            .map(|i| (i.number, spans_text(&i.spans)))
+            .collect();
+        assert_eq!(
+            notes,
+            vec![
+                (1, "注 B".to_owned()),
+                (2, "注 A".to_owned()),
+                (3, "没人引用".to_owned())
+            ],
+            "{blocks:?}"
+        );
+        assert_eq!(blocks.len(), 2, "三条定义行都不该留下正文块：{blocks:?}");
+    }
+
+    /// `link_def` 自己的契约：`[^标签]: 目标` **不进**链接定义表。变异探针现量过＝
+    /// 收集顺序已经保证这一点，所以这格护栏平时够不着——它是给"哪天把两次判定调个位"
+    /// 那一天买的保险，测试把它钉住，不许静默退化成"注脚正文当 URL、`[^1]` 当断链"。
+    #[test]
+    fn caret_labels_never_enter_the_link_definition_table() {
+        assert!(link_def("[^1]: https://e.io").is_none());
+        assert!(
+            link_def("[ref]: https://e.io").is_some(),
+            "对照：普通标签照收"
+        );
+        let blocks = parse_markdown("[^1]: https://e.io\n\n[^1]\n");
+        let MdBlock::Paragraph { spans } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert!(spans.iter().any(|s| s.is_footnote()), "{spans:?}");
+        assert!(
+            !spans.iter().any(|s| s.is_link()),
+            "脚注标记不许长成一条链接：{spans:?}"
+        );
+    }
+
+    /// 反向的那些：查不到定义就原样留着（不给假引用）；围栏里的定义行是代码内容；
+    /// 空正文不算定义。这一格与引用式链接「查不到定义⇒不断链」是同一条口径。
+    #[test]
+    fn unknown_footnote_markers_stay_literal() {
+        let blocks = parse_markdown("这里[^x]没定义\n");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        let MdBlock::Paragraph { spans } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(spans_text(spans), "这里[^x]没定义");
+        assert!(!spans.iter().any(|s| s.is_footnote()));
+
+        let coded = parse_markdown("```\n[^1]: 在代码里\n```\n\n[^1]\n");
+        assert!(
+            matches!(&coded[0], MdBlock::CodeBlock { lines, .. } if lines == &vec!["[^1]: 在代码里".to_owned()]),
+            "{coded:?}"
+        );
+        assert!(
+            !coded.iter().any(|b| matches!(b, MdBlock::Footnotes { .. })),
+            "围栏里那行没进定义表 ⇒ 不产生注脚区：{coded:?}"
+        );
+
+        let empty = parse_markdown("[^1]: \n\n正文\n");
+        assert!(
+            !empty.iter().any(|b| matches!(b, MdBlock::Footnotes { .. })),
+            "正文为空不算定义：{empty:?}"
+        );
+    }
+
     /// `<br>` 的几种写法 ⇒ 换行；代码段里仍是字面量。导出工具（Word／Confluence／
     /// 各种富文本转 Markdown）留下的 `<br>` 按字面量显示，等于把用户写下的
     /// 「这里换行」吃掉。
@@ -1975,6 +2263,7 @@ mod tests {
                 MdBlock::Quote { .. } => "quote",
                 MdBlock::Table { .. } => "table",
                 MdBlock::Rule => "rule",
+                MdBlock::Footnotes { .. } => "notes",
             })
             .collect();
         assert_eq!(
@@ -2052,6 +2341,7 @@ mod tests {
                     MdBlock::Quote { .. } => "quote",
                     MdBlock::Table { .. } => "table",
                     MdBlock::Rule => "rule",
+                    MdBlock::Footnotes { .. } => "notes",
                 })
                 .collect()
         };
@@ -2188,6 +2478,7 @@ mod tests {
                     MdBlock::Quote { .. } => "quote".to_owned(),
                     MdBlock::Table { .. } => "table".to_owned(),
                     MdBlock::Rule => "rule".to_owned(),
+                    MdBlock::Footnotes { .. } => "notes".to_owned(),
                 })
                 .collect()
         };

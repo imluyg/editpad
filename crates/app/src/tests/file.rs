@@ -3768,6 +3768,59 @@ fn enter_on_a_markdown_page_continues_the_list() {
     assert_eq!(text_of(&txt), "- 甲\n", "非 .md 页的回车行为一字不变");
 }
 
+/// 脚注在预览里落两格——正文里一个上标标记、文末一块注脚区，定义行本身不留正文。
+///
+/// 读数（现量的形状）＝右栏矩形：一段＋注脚区那列＋每条注脚一行 ⇒ 一条注脚 3 个、
+/// 三条注脚 5 个，且注脚那列的高度随条数长（单行高的 3 倍）。改前那条定义行被
+/// **引用式链接的收集器**吃掉：注脚正文整篇不见，剩下的高度读数根本没有第二行。
+#[test]
+fn markdown_preview_renders_footnote_markers_and_the_notes_block() {
+    fn preview_nodes(text: &str) -> Vec<iced::Rectangle> {
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+        );
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::PreviewToggled);
+        let tree = ViewTree::layout(&app, iced::Size::new(1280.0, 800.0));
+        tree.find_all(|b| {
+            b.x > 640.0 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0
+        })
+    }
+
+    let control = preview_nodes("正文一句\n");
+    assert_eq!(control.len(), 1, "一段正文一个节点：{control:?}");
+    let unit = control[0].height;
+
+    let one = preview_nodes("正文一句[^1]\n\n[^1]: 注脚正文\n");
+    assert_eq!(
+        one.len(),
+        3,
+        "段落＋注脚区那列＋一条注脚行＝三个节点（定义行不该再多留一个）：{one:?}"
+    );
+    assert!(one[1].y > one[0].y, "注脚区排在正文之后：{one:?}");
+
+    let three = preview_nodes("甲[^a] 乙[^b]\n\n[^a]: 注 A\n[^b]: 注 B\n[^c]: 没人引用\n");
+    assert_eq!(three.len(), 5, "三条注脚都该画出来：{three:?}");
+    let tallest = three.iter().map(|r| r.height).fold(0.0f32, f32::max);
+    assert!(
+        tallest >= unit * 3.0,
+        "注脚那列没随条数长高（单行 {unit}，最高块 {tallest}）：{three:?}"
+    );
+}
+
 /// 列表项的续行在预览里**还是同一个项目符号**：改前续行掉出列表＝符号一行、下面
 /// 多一段没有符号的正文，用户看到的是"列表断了"。
 ///
