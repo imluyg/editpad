@@ -511,6 +511,139 @@ fn merge_spans(spans: &mut Vec<MdSpan>) {
     *spans = merged;
 }
 
+/// HTML 实体名表：只收实际会掉进 Markdown 里的那些。CommonMark 的 full 表有两千多条，
+/// 为编辑器装那份不值当——剩下的码位由数值型 `&#..;` 兜住。
+fn named_entity(name: &str) -> Option<char> {
+    Some(match name {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{00A0}',
+        "thinsp" => '\u{2009}',
+        "hellip" => '…',
+        "mdash" => '—',
+        "ndash" => '–',
+        "minus" => '−',
+        "copy" => '©',
+        "reg" => '®',
+        "trade" => '™',
+        "laquo" => '«',
+        "raquo" => '»',
+        "lsquo" => '‘',
+        "rsquo" => '’',
+        "ldquo" => '“',
+        "rdquo" => '”',
+        "middot" => '·',
+        "bull" => '•',
+        "dagger" => '†',
+        "deg" => '°',
+        "plusmn" => '±',
+        "times" => '×',
+        "divide" => '÷',
+        "rarr" => '→',
+        "larr" => '←',
+        "harr" => '↔',
+        "uarr" => '↑',
+        "darr" => '↓',
+        "infin" => '∞',
+        "ne" => '≠',
+        "le" => '≤',
+        "ge" => '≥',
+        "sect" => '§',
+        "para" => '¶',
+        "euro" => '€',
+        "pound" => '£',
+        "yen" => '¥',
+        "cent" => '¢',
+        "alpha" => 'α',
+        "beta" => 'β',
+        "gamma" => 'γ',
+        "delta" => 'δ',
+        "lambda" => 'λ',
+        "theta" => 'θ',
+        "mu" => 'μ',
+        "pi" => 'π',
+        "sigma" => 'σ',
+        "omega" => 'ω',
+        "Delta" => 'Δ',
+        "Omega" => 'Ω',
+        "sup1" => '¹',
+        "sup2" => '²',
+        "sup3" => '³',
+        "frac12" => '½',
+        "frac14" => '¼',
+        "frac34" => '¾',
+        _ => return None,
+    })
+}
+
+/// 串首若是一个合法实体引用 ⇒（解码后的文本，吃掉的字节数）。
+///
+/// 只认带 `;` 收尾的写法（CommonMark 早就不认无分号的老式），名字限 ASCII 且 ≤ 10 字符；
+/// 数值型挡掉 0、代理区与超出 `char` 上界的码位。**解不动就原样留着**——坏数据被译成
+/// 一个怪字符，比留着 `&#xD800;` 这种可见的原文更难查。
+fn parse_entity(text: &str) -> Option<(String, usize)> {
+    let body = text.strip_prefix('&')?;
+    let semicolon = body.find(';')?;
+    let name = &body[..semicolon];
+    if name.is_empty() || name.len() > 10 || !name.is_ascii() {
+        return None;
+    }
+    let decoded = match name.strip_prefix('#') {
+        Some(rest) => {
+            let (radix, digits) = match rest.as_bytes().first() {
+                Some(b'x') | Some(b'X') => (16, &rest[1..]),
+                _ => (10, rest),
+            };
+            if digits.is_empty()
+                || !digits.bytes().all(|b| {
+                    if radix == 16 {
+                        (b as char).is_ascii_hexdigit()
+                    } else {
+                        b.is_ascii_digit()
+                    }
+                })
+            {
+                return None;
+            }
+            let cp = u32::from_str_radix(digits, radix).ok()?;
+            // `char::from_u32(0)` 在 Rust 里是**合法**的 `\0`（它只挡代理区与超界码位），
+            // 而预览一段文字中间冒出一个 NUL／控制字符比留着 `&#0;` 原文糟得多。
+            // 制表符放行——表格里用它对齐是真需求。
+            if cp < 0x20 && cp != 0x09 {
+                return None;
+            }
+            char::from_u32(cp)?
+        }
+        None => named_entity(name)?,
+    };
+    Some((decoded.to_string(), 1 + semicolon + 1))
+}
+
+/// 把串里每个合法实体换成对应字符，其余原样保留（链接目标走这条）。
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        match parse_entity(tail) {
+            Some((decoded, consumed)) => {
+                out.push_str(&decoded);
+                rest = &tail[consumed..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// 一层行内扫描：`base` 继承自外层标记（嵌套样式），`link` 是所在链接的目标。
 fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>) {
     let mut lit = String::new();
@@ -539,6 +672,15 @@ fn parse_inline(text: &str, base: u8, link: Option<&str>, out: &mut Vec<MdSpan>)
                     i += c_len + next.len_utf8();
                     continue;
                 }
+            }
+        }
+
+        // HTML 实体：代码段分支自己切原文、不经过这里，所以 `` `&amp;` `` 仍是字面量
+        if c == '&' {
+            if let Some((decoded, consumed)) = parse_entity(&text[i..]) {
+                lit.push_str(&decoded);
+                i += consumed;
+                continue;
             }
         }
 
@@ -721,6 +863,8 @@ fn find_paren(s: &str) -> Option<usize> {
 }
 
 /// `(https://a "标题")` → `Some("https://a")`；空目标 ⇒ `None`（按字面量）。
+///
+/// 目标里的实体要解开：`?a=1&amp;b=2` 写成 URL 时是真 `&`，不解开点出去的是错地址。
 fn link_dest(raw: &str) -> Option<String> {
     let t = raw.trim();
     let t = t
@@ -731,7 +875,7 @@ fn link_dest(raw: &str) -> Option<String> {
     if head.is_empty() {
         return None;
     }
-    Some(head.to_owned())
+    Some(decode_entities(head))
 }
 
 /// 自动链接判据：已知 scheme + 无空白。
@@ -1344,5 +1488,56 @@ mod tests {
             vec!["heading", "rule", "paragraph"],
             "栅栏不在第一行 ⇒ 与 front matter 无关"
         );
+    }
+
+    /// 实体解码：`&amp;` 这类导出工具留下的转义，预览里该显示成它本来的字符。
+    #[test]
+    fn named_and_numeric_entities_are_decoded() {
+        let blocks = parse_markdown("A &amp; B &lt;x&gt; 空格&nbsp;末 &#65;&#x4e2d;&#9;");
+        let MdBlock::Paragraph { spans } = &blocks[0] else {
+            panic!("期望一个段落：{blocks:?}");
+        };
+        assert_eq!(spans_text(spans), "A & B <x> 空格\u{00A0}末 A中\u{0009}");
+    }
+
+    /// 不解的那一半：不认识的名字、没分号、坏码位、被转义压住的 `&` —— 判据是
+    /// **原样留着**，把 `&#xD800;` 译成一个怪字符比留着原文难查得多。
+    #[test]
+    fn undecodable_entities_stay_literal() {
+        for src in [
+            "&notreal;",
+            "&amp",
+            "&#;",
+            "&#xZZ;",
+            "&#0;",
+            "&#xD800;",
+            "&#x110000;",
+            "\\&amp;",
+        ] {
+            let blocks = parse_markdown(src);
+            let MdBlock::Paragraph { spans } = &blocks[0] else {
+                panic!("期望一个段落：{src:?}");
+            };
+            assert_eq!(
+                spans_text(spans),
+                src.replace("\\&", "&"),
+                "{src:?} 该原样显示"
+            );
+        }
+    }
+
+    /// 代码段里不译（CommonMark：代码内容原样），链接目标要译——不解开点出去的是错 URL。
+    #[test]
+    fn code_keeps_entities_but_link_targets_decode() {
+        let blocks = parse_markdown("`&amp;` 与 [&amp;](https://e.io/a?x=1&amp;y=2)");
+        let MdBlock::Paragraph { spans } = &blocks[0] else {
+            panic!("期望一个段落：{blocks:?}");
+        };
+        assert_eq!(spans_text(spans), "&amp; 与 &");
+        let link = spans
+            .iter()
+            .find_map(|s| s.link.clone())
+            .unwrap_or_default();
+        assert_eq!(link, "https://e.io/a?x=1&y=2", "目标里的 &amp; 要解开");
     }
 }
