@@ -755,23 +755,29 @@ fn indented_code(lines: &[&str], start: usize, doc_begin: usize) -> Option<(MdBl
 }
 
 /// 围栏代码块：```` ``` ```` 与 `~~~`，记录 info 串首词作语言；未闭栏也成块。
+///
+/// 闭栏要**不短于开栏**且整行除空白外只有同种标记——` ```` ` 里放 ` ``` ` 是教
+/// Markdown 的文档最常见的写法，改前内层那三根就收了栏，剩下的当成正文染色。
 fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
     let open = lines[start].trim_start();
     // ``` 与 ~~~ 都是围栏（两种 marker 都是三字节 ASCII，切片落在字符边界上）
     let backtick = open.strip_prefix("```");
     let tilde = open.strip_prefix("~~~");
-    let (marker, info) = match (backtick, tilde) {
-        (Some(info), _) => ('`', info),
-        (None, Some(info)) => ('~', info),
+    let marker = match (backtick, tilde) {
+        (Some(_), _) => '`',
+        (None, Some(_)) => '~',
         (None, None) => return None,
     };
+    let open_len = open.chars().take_while(|c| *c == marker).count();
+    let info = &open[open_len..];
     let lang = info.split_whitespace().next().map(str::to_owned);
     let mut body = Vec::new();
     let mut k = start + 1;
     while k < lines.len() {
-        let candidate = lines[k].trim_start();
-        // 闭栏：整行只有同种标记（带 info 的那行不算闭栏）
-        if candidate.len() >= 3 && candidate.chars().all(|c| c == marker) {
+        let candidate = lines[k].trim();
+        let run = candidate.chars().take_while(|c| *c == marker).count();
+        // 闭栏：长度 ≥ 开栏，且这一行除空白外没有别的字符（带 info 的那行是内容）
+        if run >= open_len && candidate.chars().all(|c| c == marker) {
             return Some((MdBlock::CodeBlock { lang, lines: body }, k + 1));
         }
         body.push(lines[k].to_owned());
@@ -1917,6 +1923,40 @@ mod tests {
             panic!("{head:?}");
         };
         assert_eq!(lines, &vec!["开头就是代码".to_owned()]);
+    }
+
+    /// 闭栏长度要 ≥ 开栏长度：` ```` ` 里放 ` ``` ` 是教 Markdown 的文档最常见的写法，
+    /// 改前内层那三根就收了栏 ⇒ 一块裂成两块，剩下的一半当正文染色。
+    #[test]
+    fn longer_fence_keeps_shorter_fences_inside() {
+        let blocks = parse_markdown("````markdown\n```rust\nfn a() {}\n```\n````\n");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        let MdBlock::CodeBlock { lang, lines } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(lang.as_deref(), Some("markdown"));
+        assert_eq!(
+            lines,
+            &vec![
+                "```rust".to_owned(),
+                "fn a() {}".to_owned(),
+                "```".to_owned()
+            ],
+            "内层的 ``` 是内容"
+        );
+        // 同长的三反引号照常收栏
+        let plain = parse_markdown("```\na\n```\n");
+        assert_eq!(plain.len(), 1, "{plain:?}");
+        // 带 info 的那行不是闭栏
+        let with_info = parse_markdown("```\na\n```b\n```\n");
+        let MdBlock::CodeBlock { lines, .. } = &with_info[0] else {
+            panic!("{with_info:?}");
+        };
+        assert_eq!(
+            lines,
+            &vec!["a".to_owned(), "```b".to_owned()],
+            "```b 有正文，是代码内容不是闭栏"
+        );
     }
 
     /// 表格单元里的 `\|` 是一个竖线字符，不是分列记号。改前它照样分列，多出来那一列被
