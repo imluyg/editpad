@@ -4100,6 +4100,78 @@ fn markdown_preview_rebuilds_only_the_changed_blocks() {
     MD_SWAP_WINDOW_MS.with(|c| c.set(crate::md_preview::MD_PREVIEW_SWAP_MS));
 }
 
+/// 预览里的链接**点下去要成消息**：`Rich` 的 `on_link_click` 接的是
+/// `Message::LinkClicked`（与正文链接同一套落点），这条线此前只到"span 上有
+/// link 字段"为止，没人从生产视图树点过一次。
+#[test]
+fn markdown_preview_link_click_publishes_link_clicked() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("看 [文档](https://e.io/a) 吧\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible);
+
+    let mut ui = ViewTree::layout_default(&app);
+    // 预览在右半；那一块就是唯一的段落节点
+    let block = ui
+        .find(|b| b.x > 600.0 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 100.0)
+        .expect("应能找到右半的预览段落");
+    // 链接命中要先有 CursorMoved：`Rich` 的 `hovered_link` 只在移动事件里算，
+    // 按下/抬起在非移动事件里会被清成 `None`（rich.rs 的 update 就是这么写的）。
+    // 真机上鼠标必然先移动过，所以这一步是补事件序列，不是绕产品缺陷。
+    // 落点按 CJK 字宽估（每字约 15px，"看 " 之后就是链接本体），估不准就挪一两个
+    // 像素再试——这条用例要盯的是"点链接产出消息"这条线，不是字形宽度量。
+    let mut messages = Vec::new();
+    for dx in [22.0f32, 30.0, 38.0, 46.0, 54.0] {
+        let at = iced::Point::new(block.x + dx, block.y + block.height / 2.0);
+        ui.send(
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at }),
+            at,
+        );
+        // 按下与抬起**分开发**：`Rich` 在抬起那一帧才 publish，夹具的 `click()`
+        // 只回按下那一帧的消息 ⇒ 拿不到就以为线没接上。
+        ui.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            at,
+        );
+        messages = ui.send(
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+            at,
+        );
+        if messages
+            .iter()
+            .any(|m| matches!(m, Message::LinkClicked(_)))
+        {
+            break;
+        }
+    }
+    let hit = messages.iter().find_map(|m| match m {
+        Message::LinkClicked(t) => Some(t.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        hit,
+        Some(crate::editor::LinkTarget::Url("https://e.io/a".to_owned())),
+        "点预览里的链接应产出 LinkClicked(Url(..))；实际消息 {messages:?}，段落 {block:?}"
+    );
+}
+
 /// 预览链接的落点解析与正文链接同口径：scheme 交系统、路径须存在、锚点不链。
 #[test]
 fn markdown_link_targets_follow_the_editor_link_rules() {

@@ -274,6 +274,9 @@ impl<'a> ViewTree<'a> {
     }
 
     /// 左键单击。
+    /// ⚠️ 只回**按下那一帧**的消息：靠"抬起才 publish"的控件（如 `Rich` 的链接
+    /// `on_link_click`）用它测不到，得把 `ButtonPressed` 与 `ButtonReleased` 分两次
+    /// `send` 并取后一次的返回值（第 312 轮测预览链接时就这样误判过一次"线没接上"）。
     pub(crate) fn click(&mut self, at: Point) -> Vec<Message> {
         self.send(
             Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
