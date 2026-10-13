@@ -304,7 +304,19 @@ impl Editpad {
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()));
             let preview = {
                 let mut cache = self.md_preview_cache.borrow_mut();
-                if !cache.as_ref().is_some_and(|(k, _)| *k == key) {
+                let stale = !cache.as_ref().is_some_and(|(k, _)| *k == key);
+                // 第 316 轮：换版还不许的这一帧**不必付全篇重解析**。改前只有 widget
+                // 树的换版被 300 ms 节流管住，`to_text()`＋`parse_markdown` 一直在窗口
+                // 外面——连打 30 键现量＝整篇重解析 31 次（353 KB 那档一次 4.05 ms）。
+                // 跳过时继续用旧块表：旧树自足（每个 span 的文本都已克隆成 owned
+                // Fragment），画的是上一版而不是错内容，停手后同一道节流放行时补上。
+                // 例外＝**换页**（键里的页 id 变了）：那不许等窗口，别页的块表一张也不能
+                // 借，借了就是把另一篇文档渲在这一页预览里。
+                if stale
+                    && (!cache.as_ref().is_some_and(|(k, _)| k.0 == key.0)
+                        || md_preview_can_swap(self.md_preview_swap_at.get()))
+                {
+                    note_parse();
                     let text = tab.editor.borrow().doc.to_text();
                     *cache = Some((
                         key,

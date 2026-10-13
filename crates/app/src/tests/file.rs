@@ -129,6 +129,10 @@ fn markdown_preview_cache_is_reused_until_content_changes() {
 
     let src = "# 标题\n\n正文 alpha\n";
     let app = md_app(src);
+    // 本用例钉的是**解析缓存的失效判据**（内容变了要换新块表），不是节流：第 316 轮把
+    // 全篇重解析也挪进节流窗口后，窗口内"内容变了"是**允许**不重解析的，所以这里先把
+    // 窗口设 0（thread_local，用例结尾还原），钉的仍是"键一变就换表"这一件事。
+    crate::md_preview::MD_SWAP_WINDOW_MS.with(|c| c.set(0));
     let _ = app.view();
     let first = cached(&app);
     assert_eq!(
@@ -168,6 +172,7 @@ fn markdown_preview_cache_is_reused_until_content_changes() {
             .any(|b| matches!(b, editpad_core::markdown::MdBlock::Heading { level: 2, .. })),
         "追加的二级标题应出现在新块表里"
     );
+    crate::md_preview::MD_SWAP_WINDOW_MS.with(|c| c.set(crate::md_preview::MD_PREVIEW_SWAP_MS));
 }
 
 // ---------- P22 第二批：格式化 JSON ----------
@@ -4231,6 +4236,203 @@ fn markdown_preview_throttles_rebuilds_while_typing() {
     MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
 }
 
+/// 连打时**全篇重解析也要跟着节流走**——不许每键拷一遍全文再重解一遍。
+///
+/// 上一条用例（`markdown_preview_throttles_rebuilds_while_typing`）只管 widget 树的
+/// 换版；解析那一半一直在节流**外面**：缓存键（页 id＋版本＋字节数＋行数）一变就
+/// `doc.to_text()` 拷全文 ＋ `parse_markdown` 全量重解（`view/mod.rs` 的预览分支）。
+/// 现量＝353 KB 那档每次重解 4.05 ms、410 KB 带重行内标记 6.56 ms
+/// （`docs/days/2026-10-12.md:250`），而预览关态一帧才 1.1～2.0 ms ⇒ 左边打字
+/// 右边就是每键多付 4～6.6 ms，掉帧正落在这一格。
+///
+/// 尺子用**次数**（`MD_PARSE_COUNT`，thread_local）不用毫秒——本仓口径：耗时读数
+/// 在忙机器假红、温热假绿。窗口旋钮调极大／0，全程不 sleep。
+#[test]
+fn markdown_preview_reparses_at_most_once_per_typing_burst() {
+    use crate::md_preview::{MD_PARSE_COUNT, MD_PREVIEW_SWAP_MS, MD_SWAP_WINDOW_MS};
+    use iced::advanced::layout;
+    use iced::advanced::widget::Tree;
+
+    let count = || MD_PARSE_COUNT.with(|c| c.get());
+    let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
+    let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
+    let frame = |app: &Editpad, tree: &mut Tree| {
+        let mut el = app.view();
+        el.as_widget_mut().diff(tree);
+        el.as_widget_mut().layout(tree, &renderer, &limits);
+    };
+    let cached = |app: &Editpad| -> std::rc::Rc<Vec<editpad_core::markdown::MdBlock>> {
+        app.md_preview_cache
+            .borrow()
+            .as_ref()
+            .expect("预览开态走过一次 view() 后应建立解析缓存")
+            .1
+            .clone()
+    };
+
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("# 标题\n\n正文一段\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, ".md 页应能开预览");
+
+    // 首帧：建立块表，这一次解析是必须的
+    MD_SWAP_WINDOW_MS.with(|c| c.set(u64::MAX));
+    let base = count();
+    let mut tree = {
+        let el = app.view();
+        Tree::new(el.as_widget())
+    };
+    frame(&app, &mut tree);
+    assert_eq!(count() - base, 1, "首帧应解析一次");
+
+    // 窗口＝永不到期：连打 30 次都不许再全篇重解析
+    for i in 0..30 {
+        let line = format!("第{i}行补充内容\n");
+        app.cur_handle.borrow_mut().insert_str(&line);
+        frame(&app, &mut tree);
+    }
+    assert_eq!(
+        count() - base,
+        1,
+        "节流窗口内仍在逐键全篇重解析：大文档打字每键多付一遍全文拷贝＋整篇解析"
+    );
+
+    // 窗口到期：必须补上**最新一版**——省成本不能以预览陈旧为代价
+    MD_SWAP_WINDOW_MS.with(|c| c.set(0));
+    frame(&app, &mut tree);
+    assert_eq!(count() - base, 2, "节流结束却不重解析：预览会停在旧内容");
+    let now = app.cur_handle.borrow().doc.to_text();
+    assert_eq!(
+        &cached(&app)[..],
+        &editpad_core::markdown::parse_markdown(&now)[..],
+        "换版后的块表必须对应改动后的正文"
+    );
+    assert!(
+        now.contains("第29行补充内容"),
+        "夹具本身没把最后一行打进文档（这条用例就盯不到东西）"
+    );
+
+    // 还原旋钮：thread_local 会被同线程的下一条用例继承
+    MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
+}
+
+/// 节流窗口内**换页**例外：必须立刻重解析，不许把别页的块表画在这一页的预览里。
+///
+/// 上一条用例省掉的是"同一页还在打字"的重解析——那一格画的是本页的上一版，落后
+/// 一个窗口可以接受。换页不是同一回事：键里的页 id 一变，继续用旧块表就是把
+/// **另一篇文档**的内容渲在这一页的预览里（内容错，不是延迟）。
+#[test]
+fn markdown_preview_reparses_immediately_when_switching_tabs() {
+    use crate::md_preview::{MD_PARSE_COUNT, MD_PREVIEW_SWAP_MS, MD_SWAP_WINDOW_MS};
+    use iced::advanced::layout;
+    use iced::advanced::widget::Tree;
+
+    let count = || MD_PARSE_COUNT.with(|c| c.get());
+    let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
+    let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
+    let frame = |app: &Editpad, tree: &mut Tree| {
+        let mut el = app.view();
+        el.as_widget_mut().diff(tree);
+        el.as_widget_mut().layout(tree, &renderer, &limits);
+    };
+    let cached = |app: &Editpad| -> Vec<editpad_core::markdown::MdBlock> {
+        app.md_preview_cache
+            .borrow()
+            .as_ref()
+            .expect("预览开态走过一次 view() 后应建立解析缓存")
+            .1
+            .as_ref()
+            .clone()
+    };
+    let text_of = |app: &Editpad, i: usize| app.tabs[i].editor.borrow().doc.to_text();
+
+    let mut app = Editpad::default();
+    // 两页 .md：内容一眼能分辨，且都短到不会自己触发别的分支
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/x/a.md")));
+    let s1 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s1,
+            Ok((
+                editpad_core::Document::from_str("# 甲页\n\n只有甲页有的句子。\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/x/b.md")));
+    let s2 = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            s2,
+            Ok((
+                editpad_core::Document::from_str("# 乙页\n\n只有乙页有的句子。\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, ".md 页应能开预览");
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(u64::MAX));
+    let base = count();
+    let mut tree = {
+        let el = app.view();
+        Tree::new(el.as_widget())
+    };
+    // 乙页（当前页）首帧：解一次
+    frame(&app, &mut tree);
+    assert_eq!(count() - base, 1, "首帧应解析一次");
+    assert_eq!(
+        cached(&app),
+        editpad_core::markdown::parse_markdown(&app.cur_handle.borrow().doc.to_text()),
+        "缓存的块表必须就是当前页（乙页）的解析结果"
+    );
+
+    // 切回甲页：窗口还没到期，但**换页了** ⇒ 必须重解析，不许拿乙页的块表画
+    dispatch(&mut app, Message::SwitchTab(0));
+    frame(&app, &mut tree);
+    assert_eq!(
+        count() - base,
+        2,
+        "换页后仍沿用别页的块表：这一格画的是另一篇文档，不是延迟一版"
+    );
+    assert_eq!(
+        cached(&app),
+        editpad_core::markdown::parse_markdown(&text_of(&app, 0)),
+        "切页后的块表必须对应切过来的那一页"
+    );
+
+    // 同页再打字：窗口内照旧不重解析（证明这一笔不是"每次都解"的托辞）
+    app.cur_handle.borrow_mut().insert_str("甲页新敲的一行\n");
+    frame(&app, &mut tree);
+    assert_eq!(
+        count() - base,
+        2,
+        "同页节流窗口内仍逐键重解析：省成本那一格白做了"
+    );
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
+}
 /// 预览里的代码块**按围栏语言上色**（认不出就走素色），并且整块仍是等宽族。
 #[test]
 fn markdown_preview_colors_fenced_code_by_language() {

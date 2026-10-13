@@ -28,6 +28,51 @@
 //!
 //! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）。
 
+// ── 成本尺子（只在测试里存在）─────────────────────────────────────────────
+// 盯的是**为答一个是非题而做的实解析**：块级判据（`starts_new_block`）会拿产出块的
+// 那一份解析当布尔问，这类浪费不改变块表输出，因此**没有任何用例能红出来**。
+// 本仓口径＝成本契约用计数盯，不用毫秒断言（忙机器假红、温热假绿，见
+// `crates/app/src/md_preview.rs` 里 `MD_BUILD_COUNT` 的同族说明）。
+#[cfg(test)]
+thread_local! {
+    /// 表格**单元格**被走行内解析的次数。判据（`is_table_start`）本不该解析内容。
+    pub(crate) static MD_TABLE_CELL_PARSES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// 围栏代码块正文被逐行抄进 `Vec<String>` 的次数。未闭栏时这一份是整篇长度。
+    pub(crate) static MD_FENCE_BODY_PUSHES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// 脚注标签的**逐条比对**次数（查定义表、查首次引用顺序，每比一对标签记一笔）。
+    /// 这一把尺子量的就是工作量本身：标签表是 `Vec` 时它随「引用数 × 定义数」涨。
+    pub(crate) static MD_NOTE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_cell_parse() {
+    MD_TABLE_CELL_PARSES.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+fn note_fence_body() {
+    MD_FENCE_BODY_PUSHES.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+fn note_scan() {
+    MD_NOTE_SCANS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline]
+fn note_cell_parse() {}
+
+#[cfg(not(test))]
+#[inline]
+fn note_fence_body() {}
+
+#[cfg(not(test))]
+#[inline]
+fn note_scan() {}
+
 /// 行内样式位标志。
 pub const MD_BOLD: u8 = 1 << 0;
 pub const MD_ITALIC: u8 = 1 << 1;
@@ -162,7 +207,7 @@ fn front_matter_end(lines: &[&str]) -> Option<usize> {
 /// 解析整篇 Markdown。行尾兼容 `\r\n` / `\n` / 孤立 `\r` 与异体行界。
 /// 开头若带 front matter（见 `front_matter_end`）则不渲染那一区域。
 ///
-/// 三步：切行 ⇒ 收定义（引用式链接＋脚注，两者都要看整篇）⇒ [`parse_lines`] 走块级
+/// 三步：切行 ⇒ 收定义（引用式链接＋脚注，两者都要看整篇）⇒ `parse_lines` 走块级
 /// ⇒ 收尾发脚注编号。引用块内部走的是**同一份** `parse_lines`，所以 `> - 甲` 里
 /// 是一个真的列表项而不是"- 甲"这两个字。
 pub fn parse_markdown(text: &str) -> Vec<MdBlock> {
@@ -457,7 +502,10 @@ fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
                 continue;
             }
             let label = normalize_label(&span.text);
-            let idx = match order.iter().position(|l| *l == label) {
+            let idx = match order.iter().position(|l| {
+                note_scan();
+                *l == label
+            }) {
                 Some(idx) => idx,
                 None => {
                     order.push(label);
@@ -470,7 +518,10 @@ fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
     let mut items: Vec<MdFootnote> = Vec::new();
     let mut emitted = vec![false; defs.notes.len()];
     for label in order.iter() {
-        if let Some(at) = defs.notes.iter().position(|(l, _)| l == label) {
+        if let Some(at) = defs.notes.iter().position(|(l, _)| {
+            note_scan();
+            l == label
+        }) {
             emitted[at] = true;
             items.push(MdFootnote {
                 number: items.len() + 1,
@@ -787,7 +838,7 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
 
 /// 引用块里的回车续写（编辑面）：行首那几道 `>` 栏跟着接下去，栏里的列表一起接。
 ///
-/// 引用判据与预览解析器**共用一份**（[`quote`]）——`>甲` 这种栏后不带空格的写法
+/// 引用判据与预览解析器**共用一份**（`quote`）——`>甲` 这种栏后不带空格的写法
 /// 解析器认，编辑面若不认，同一行就在两处各有一个答案。
 ///
 /// * `> 甲` → `Next("> ")`；`> - 甲` → `Next("> - ")`（`d77caa1` 之后引用块内部
@@ -1094,7 +1145,10 @@ fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
         if run >= open_len && candidate.chars().all(|c| c == marker) {
             return Some((MdBlock::CodeBlock { lang, lines: body }, k + 1));
         }
-        body.push(lines[k].to_owned());
+        body.push({
+            note_fence_body();
+            lines[k].to_owned()
+        });
         k += 1;
     }
     Some((MdBlock::CodeBlock { lang, lines: body }, k))
@@ -1169,7 +1223,10 @@ fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usiz
     let header = normalize_row(
         split_row(head)
             .into_iter()
-            .map(|cell| inline_with(cell, defs))
+            .map(|cell| {
+                note_cell_parse();
+                inline_with(cell, defs)
+            })
             .collect(),
         align.len(),
     );
@@ -1182,7 +1239,10 @@ fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usiz
         }
         let row: Vec<Vec<MdSpan>> = split_row(line)
             .into_iter()
-            .map(|cell| inline_with(cell, defs))
+            .map(|cell| {
+                note_cell_parse();
+                inline_with(cell, defs)
+            })
             .collect();
         rows.push(normalize_row(row, align.len()));
         k += 1;
@@ -1420,12 +1480,18 @@ impl LinkDefs {
         self.links.entry(label).or_insert(dest);
     }
     fn note(&mut self, label: String, body: String) {
-        if !self.notes.iter().any(|(l, _)| *l == label) {
+        if !self.notes.iter().any(|(l, _)| {
+            note_scan();
+            *l == label
+        }) {
             self.notes.push((label, body));
         }
     }
     fn has_note(&self, label: &str) -> bool {
-        self.notes.iter().any(|(l, _)| l == label)
+        self.notes.iter().any(|(l, _)| {
+            note_scan();
+            l == label
+        })
     }
 }
 

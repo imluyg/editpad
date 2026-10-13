@@ -591,6 +591,10 @@ thread_local! {
     pub(crate) static MD_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// **按块**建树的次数（P412 的尺子：改了尾部一个块，就不该把整篇都重建）。
     pub(crate) static MD_BLOCK_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// **整篇重解析**的次数（第 316 轮的尺子：缓存键一变就 `to_text()` 拷全文＋
+    /// `parse_markdown` 全量重跑，这份成本落在**每一个打字帧**上，而换版节流只管
+    /// widget 树，管不到它）。
+    pub(crate) static MD_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -603,6 +607,12 @@ fn note_block_build() {
     MD_BLOCK_BUILDS.with(|c| c.set(c.get() + 1));
 }
 
+/// 记一笔「这一帧付了一次全篇重解析」。调用点在 `view` 的预览分支里。
+#[cfg(test)]
+pub(crate) fn note_parse() {
+    MD_PARSE_COUNT.with(|c| c.set(c.get() + 1));
+}
+
 #[cfg(not(test))]
 #[inline]
 fn note_build() {}
@@ -610,6 +620,10 @@ fn note_build() {}
 #[cfg(not(test))]
 #[inline]
 fn note_block_build() {}
+
+#[cfg(not(test))]
+#[inline]
+pub(crate) fn note_parse() {}
 
 /// 按块缓存的那一排树：`(内容指纹, 树)`，下标＝块序。
 ///
