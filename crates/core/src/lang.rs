@@ -234,6 +234,12 @@ key_table! {
     { MenuTabFontReset => "本页字号重置（跟随全局）", "Reset This Tab's Font Size (Follow Global)" },
     { MenuPreview => "MD 预览", "Markdown Preview" },
     { MenuPreviewClose => "关闭 MD 预览", "Close Markdown Preview" },
+    // 预览**字节额度**用尽时挂在末尾那一行（第 318 轮：布局一份 `Rich` 约花
+    // 0.2 MB／KB 正文，691 KB 的台账开一次预览＝161 MB＋约 1.4 s，所以截断要**说出来**）。
+    // `{A}`＝已排多少 KB，`{B}`＝本档共多少 KB；两份文案都必须带这两个占位符。
+    // 宏表里只能放 `//` 注释：`///` 会变成属性 token，`key_table!` 的匹配规则不收。
+    { MdPreviewTruncated => "⋯ 预览到此为止：已排 {A}／本档 {B}（左半仍是全文）⋯",
+      "⋯ preview ends here: {A} of {B} laid out (the left pane still shows everything) ⋯" },
     { MenuOpenSettings => "打开设置…", "Open Settings…" },
     { MenuBackupMode => "保存时备份", "Backup On Save" },
     { Settings => "设置", "Settings" },

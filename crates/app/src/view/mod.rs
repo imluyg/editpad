@@ -341,6 +341,8 @@ impl Editpad {
                 let theme = self.theme();
                 let base = content_font;
                 let dir = doc_dir.clone();
+                // 截断提示是界面文案（随语言切换）⇒ 它同时是**建树入参**与**复用键的一维**
+                let trunc_note = self.t(editpad_core::Key::MdPreviewTruncated);
                 let key_hash = md_preview_key(
                     self.md_preview_seq.get(),
                     Rc::as_ptr(&shown) as usize,
@@ -348,6 +350,7 @@ impl Editpad {
                     self.dark_mode,
                     self.active_font_family,
                     dir.as_deref(),
+                    trunc_note,
                 );
                 // P408：预览树**握在应用状态里**跨帧复用——只有依赖（块表＋字号＋主题＋
                 // 字形族＋链接基准目录）变了才重建；`Rich` 的排版缓存活在 widget 实例上，
@@ -364,6 +367,7 @@ impl Editpad {
                             theme,
                             dir.as_deref(),
                             &self.md_block_cache,
+                            trunc_note,
                         )
                     },
                 );

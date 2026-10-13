@@ -4557,6 +4557,132 @@ fn list_marker_keeps_both_the_number_and_the_box() {
     assert_eq!(list_marker(Some(false), Some(2)), "2. ☐ ");
 }
 
+/// 预览额度的算术：`md_preview_fit` 报的是「排得下前几块／已排多少字节／全文多少字节」。
+///
+/// 第 318 轮现量＝布局约花 0.2 MB／KB 正文（691 KB 的台账开一次预览＝161 MB），
+/// 所以"整篇都排"这件事要有一道额度。这一条钉额度的三条边界。
+#[test]
+fn md_preview_fit_cuts_at_the_budget() {
+    use crate::md_preview::md_preview_fit;
+
+    let src: String = (0..40)
+        .map(|i| format!("第{i}段是四十来个字的正文用来把块数堆起来而已\n\n"))
+        .collect();
+    let blocks = editpad_core::markdown::parse_markdown(&src);
+    assert_eq!(blocks.len(), 40, "夹具没切成 40 个块：下面的判据就是空转");
+
+    // 额度大到什么都装得下 ⇒ 全排，且"已排"＝"全文"
+    let (fit_all, used_all, total) = md_preview_fit(&blocks, usize::MAX);
+    assert_eq!(fit_all, 40);
+    assert_eq!(used_all, total, "没截断时已排字节该等于全文字节");
+
+    // 全文字节要**过完所有块**才算得出来（提前 break 就会随额度变小）
+    let (fit_small, _, total_small) = md_preview_fit(&blocks, 100);
+    assert_eq!(
+        total_small, total,
+        "全文字节随额度变了＝算 total 那一趟提前断了：提示行会报错数"
+    );
+    assert!(fit_small < fit_all);
+
+    // 额度为 0 也要排**一个**块：整页空白比截断更糟（用户会以为预览坏了）
+    let (fit_zero, _, _) = md_preview_fit(&blocks, 0);
+    assert_eq!(fit_zero, 1, "额度为 0 时该至少排一块");
+
+    // 正常那一格：**使累计到达额度的那一块也照排** ⇒ 已排字节到达甚至越过额度，
+    // 但后面的块不再排。这条正是"巨块不至于把整页顶空"那一条规则（HANDOFF.md 的
+    // 第二块自己就 246 KB：不照排到达额度那块，96 KB 额度下预览只剩一个标题）。
+    let (fit_mid, used_mid, _) = md_preview_fit(&blocks, 400);
+    assert!(
+        fit_mid > 1 && fit_mid < 40,
+        "额度 400 该切掉一部分：实际排了 {fit_mid} 块"
+    );
+    assert!(
+        used_mid >= 400,
+        "到达额度的那一块该照排（已排 {used_mid} 却没到达额度 400＝规则退回成'超额度就丢块'）"
+    );
+}
+
+/// 额度**落在建树那一圈**：额度小的时候不该把每个块都折一遍，
+/// 而且末尾要多出一行"预览到此为止"。
+///
+/// 两把尺子：`MD_BLOCK_BUILDS`（真正建了几个块）与预览列的节点数（块＋那一行提示）。
+/// 额度用 `MD_PREVIEW_BUDGET_BYTES` 旋钮调小，不造 100 KB 夹具（同 `MD_SWAP_WINDOW_MS` 的口径）。
+#[test]
+fn markdown_preview_stops_at_its_text_budget() {
+    use crate::md_preview::{
+        MD_BLOCK_BUILDS, MD_PREVIEW_BUDGET_BYTES, MD_PREVIEW_SWAP_MS, MD_PREVIEW_TEXT_BUDGET,
+        MD_SWAP_WINDOW_MS,
+    };
+    use iced::advanced::layout;
+    use iced::advanced::widget::Tree;
+
+    let src: String = (0..12)
+        .map(|i| format!("第{i}段是四十来个字的正文用来把块数堆起来而已\n\n"))
+        .collect();
+    let blocks = editpad_core::markdown::parse_markdown(&src);
+    assert_eq!(blocks.len(), 12, "夹具该切成 12 块");
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(0));
+    let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
+    let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
+
+    // 一个额度一档：新建一个 app（缓存与树都是每页自己的，不共用）
+    let one = |budget: usize| -> (usize, usize) {
+        MD_PREVIEW_BUDGET_BYTES.with(|c| c.set(budget));
+        let base = MD_BLOCK_BUILDS.with(|c| c.get());
+        let mut app = Editpad::default();
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from("C:/x/budget.md")),
+        );
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(&src),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(&mut app, Message::PreviewToggled);
+        let mut tree = {
+            let el = app.view();
+            Tree::new(el.as_widget())
+        };
+        let mut el = app.view();
+        el.as_widget_mut().diff(&mut tree);
+        el.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let builds = MD_BLOCK_BUILDS.with(|c| c.get()) - base;
+        let vt = ViewTree::layout(&app, iced::Size::new(1280.0, 800.0));
+        let nodes = vt.find_all(|b| {
+            b.x > 640.0 && b.y > 65.0 && b.y < 760.0 && b.height > 8.0 && b.width > 1.0
+        });
+        MD_PREVIEW_BUDGET_BYTES.with(|c| c.set(MD_PREVIEW_TEXT_BUDGET));
+        (builds, nodes.len())
+    };
+
+    // 对照档：额度比这份文档大得多 ⇒ 全排、也没有提示行
+    let (builds_all, nodes_all) = one(usize::MAX);
+    assert_eq!(builds_all, 12, "额度够就该把 12 块全建出来");
+    assert_eq!(nodes_all, 12, "没截断就不该多出行提示：{nodes_all}");
+
+    // 截断档：300 字节只够几块 ⇒ 建的块少于 12，且末尾多一行提示
+    let (builds_cut, nodes_cut) = one(300);
+    assert!(
+        builds_cut > 0 && builds_cut < 12,
+        "额度 300 该切掉一部分块：实际建了 {builds_cut} 个"
+    );
+    assert_eq!(
+        nodes_cut,
+        builds_cut + 1,
+        "预览里该是「{builds_cut} 个块 ＋ 一行截断提示」：实际 {nodes_cut} 个节点"
+    );
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
+}
 /// 预览里的代码块**按围栏语言上色**（认不出就走素色），并且整块仍是等宽族。
 #[test]
 fn markdown_preview_colors_fenced_code_by_language() {

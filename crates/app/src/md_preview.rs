@@ -77,14 +77,22 @@ pub(crate) fn markdown_preview_element(
     theme: Theme,
     doc_dir: Option<&Path>,
     block_cache: &MdBlockCacheSlot,
+    trunc_template: &'static str,
 ) -> Element<'static, Message> {
     let dark = matches!(theme, Theme::Dark);
     let ink = MdInk::of(theme);
     // 整次建树共享一份着色额度（见 `MdColorBudget`）
     let color_budget = MdColorBudget(std::cell::Cell::new(MD_COLOR_LINE_BUDGET));
     note_build();
-    // 预览各级字号相对正文默认 16px 的既有比例
+    // 预览字号相对正文默认 16px 的既有比例
     let scaled = |px: f32| px * (font_size / 16.0);
+
+    // 第 318 轮：**整篇都排**这件事的价钱量出来了——布局一份 `Rich` 约花 0.2 MB／KB
+    // 正文（691 KB 的台账＝161 MB、首帧约 1.4 s），且约 95% 落在 `layout` 里。
+    // 所以先按**正文字节额度**裁一刀：额度外的块根本不建树，末尾挂一行提示
+    // （先例＝同文件的 `MD_COLOR_LINE_BUDGET`，那份按行给额度，这份按字节给）。
+    let (fit, used, total) = md_preview_fit(blocks, md_preview_budget());
+    let shown = &blocks[..fit];
 
     // ── 按块复用（P412）────────────────────────────────────────────────────
     // 外层整棵树的缓存（`App::md_preview_tree`）只管"内容没变的帧"；换版那一帧
@@ -94,7 +102,7 @@ pub(crate) fn markdown_preview_element(
     // 排版缓存也活着），只有指纹变了的区间才重建。
     // 前后各裁一段公共区：在文末敲一个字 ⇒ 只有那一个块重建；插入一个新块会让
     // 下标整体右移，但**从尾部数过来的公共后缀**仍然对得上，所以也不会全重建。
-    let fps: Vec<u64> = blocks.iter().map(md_block_fingerprint).collect();
+    let fps: Vec<u64> = shown.iter().map(md_block_fingerprint).collect();
     let mut next: Vec<(u64, MdTree)> = Vec::with_capacity(blocks.len());
     {
         let old = block_cache.0.borrow();
@@ -112,7 +120,7 @@ pub(crate) fn markdown_preview_element(
         next.extend(old[..lo].iter().map(|(f, t)| (*f, t.clone())));
         for i in lo..fps.len() - hi {
             let tree: MdTree = Rc::new(std::cell::RefCell::new(Some(build_block(
-                &blocks[i],
+                &shown[i],
                 &scaled,
                 base,
                 &ink,
@@ -130,6 +138,20 @@ pub(crate) fn markdown_preview_element(
     let mut col = column![].spacing(10).padding(14);
     for (_, tree) in next {
         col = col.push(Element::new(MdCached::new(tree)));
+    }
+    // 额度用尽：把"没画完"这件事**说出来**——静默截断会被当成预览坏了。
+    if fit < blocks.len() {
+        let kb = |n: usize| format!("{} KB", n.div_ceil(1024));
+        let note = trunc_template
+            .replace("{A}", &kb(used))
+            .replace("{B}", &kb(total));
+        let note_el: Element<'static, Message> = md_paragraph(
+            vec![plain_span(Fragment::Owned(note), base, Some(ink.quote))],
+            scaled(15.0),
+            Alignment::Center,
+        )
+        .into();
+        col = col.push(note_el);
     }
     scrollable(container(col).width(Fill)).height(Fill).into()
 }
@@ -344,6 +366,79 @@ fn md_block_fingerprint(block: &MdBlock) -> u64 {
     h.finish()
 }
 
+/// 预览一次最多排多少**正文字节**（第 318 轮现量：布局成本约 0.2 MB／KB 正文，
+/// 691 KB 的台账开一次预览＝161 MB、首帧约 1.4 s）。额度外的块**不建树**，
+/// 末尾挂一行 `Key::MdPreviewTruncated` 提示。与 `MD_COLOR_LINE_BUDGET` 同一族。
+pub(crate) const MD_PREVIEW_TEXT_BUDGET: usize = 96 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// 测试里把额度调小／调大，让"截断发生了没有"能被**确定性地**盯住——
+    /// 不靠造 100 KB 的夹具（同 `MD_SWAP_WINDOW_MS` 的口径）。用例结束要还原。
+    pub(crate) static MD_PREVIEW_BUDGET_BYTES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(MD_PREVIEW_TEXT_BUDGET) };
+}
+
+/// 当前生效的预览额度（测试可拧）。
+fn md_preview_budget() -> usize {
+    #[cfg(test)]
+    let budget = MD_PREVIEW_BUDGET_BYTES.with(|c| c.get());
+    #[cfg(not(test))]
+    let budget = MD_PREVIEW_TEXT_BUDGET;
+    budget
+}
+
+/// 一个块落着的**正文字节**（引用块与表格要往里走；代码块算每一行）。
+fn md_block_text_len(block: &MdBlock) -> usize {
+    let spans = |list: &Vec<editpad_core::markdown::MdSpan>| -> usize {
+        list.iter().map(|s| s.text.len()).sum()
+    };
+    match block {
+        MdBlock::Heading { spans: s, .. } | MdBlock::Paragraph { spans: s } => spans(s),
+        MdBlock::ListItem { spans: s, .. } => spans(s),
+        MdBlock::Quote { blocks, .. } => blocks.iter().map(md_block_text_len).sum(),
+        MdBlock::CodeBlock { lang, lines } => {
+            lang.as_ref().map(String::len).unwrap_or(0)
+                + lines.iter().map(String::len).sum::<usize>()
+        }
+        MdBlock::Table { header, rows, .. } => {
+            header.iter().map(spans).sum::<usize>()
+                + rows
+                    .iter()
+                    .map(|r| r.iter().map(spans).sum::<usize>())
+                    .sum::<usize>()
+        }
+        MdBlock::Footnotes { items } => items.iter().map(|i| spans(&i.spans)).sum(),
+        MdBlock::Rule => 0,
+    }
+}
+
+/// 额度内排得下**前几个块**：`(块数, 已排字节, 全文字节)`。
+///
+/// 两条边界都是现量逼出来的：
+/// * **至少排一个块**——整页空白比截断更糟（用户会以为预览坏了）；
+/// * **使累计到达额度的那一块也照排**——HANDOFF.md 的第二块（§0 那一行 82K 字符）自己
+///   就有约 246 KB，若"一超就不排"，96 KB 的额度下预览只剩一个标题＝等于没有。
+///   ⇒ 代价上界是「额度 ＋ 一块」，不是「额度」。
+///
+/// 全文字节要过完所有块才算得出（提示行里要报"本档多大"，中途 break 就会报错数）。
+pub(crate) fn md_preview_fit(blocks: &[MdBlock], budget: usize) -> (usize, usize, usize) {
+    let lens: Vec<usize> = blocks.iter().map(md_block_text_len).collect();
+    let total: usize = lens.iter().sum();
+    let mut used = 0usize;
+    let mut fit = 0usize;
+    for len in &lens {
+        used += len;
+        fit += 1;
+        // 累计**首次到达**额度就收手，而到达的那一块已经算在里面
+        // ⇒ 额度为 0 时也只排一块；额度大到装得下全文则一路排完
+        if used >= budget {
+            break;
+        }
+    }
+    (fit, used, total)
+}
+
 /// 一行表格：每格等宽，按分隔行的 `:---:` 对齐，表头整行带底色。
 fn md_table_row(
     cells: &[Vec<MdSpan>],
@@ -527,6 +622,7 @@ pub(crate) fn md_preview_key(
     dark: bool,
     family: Option<&'static str>,
     dir: Option<&Path>,
+    trunc_note: &'static str,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -536,6 +632,9 @@ pub(crate) fn md_preview_key(
     dark.hash(&mut h);
     family.hash(&mut h);
     dir.map(|p| p.display().to_string()).hash(&mut h);
+    // 末尾那行截断提示是**界面文案**（随语言切换）⇒ 文案本身进键，换语言就换树。
+    // 记文案而不是记 `Lang` 枚举：措辞改了也一样要重画。
+    trunc_note.hash(&mut h);
     h.finish()
 }
 
