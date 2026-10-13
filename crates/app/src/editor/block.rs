@@ -1149,7 +1149,7 @@ impl EditorCore {
     /// - 行数不变 → 恒等映射书签原位；无变化 no-op 不产快照；
     /// - 前缀只认「缩进后紧跟」——字符串里出现的 `//` 不受影响（不做
     ///   语法感知是既有取舍，与括号匹配同口径）；
-    /// - 语法没有行注释前缀（[`comment_prefix_for`] 给 `None`，即 Markdown）⇒
+    /// - 语法没有行注释前缀（`comment_prefix_for` 给 `None`，即 Markdown）⇒
     ///   一个字都不动、返回 false，消息层给一句状态栏。
     pub fn toggle_line_comment(&mut self) -> bool {
         let Some(prefix) = self.comment_prefix_for() else {
