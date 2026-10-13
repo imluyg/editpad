@@ -1189,11 +1189,23 @@ fn html_comment(lines: &[&str], start: usize) -> Option<usize> {
     None
 }
 
+/// 这一行**看起来**是不是围栏开栏（`starts_new_block` 的判据专用）。
+///
+/// 改前那一问答的是 `fence(lines, i).is_some()`，而 `fence()` 无论闭没闭栏都返回
+/// `Some`——于是为了知道"是不是新块"，它把从这一行到收尾（未闭栏＝到文档末尾）的
+/// **整段正文逐行抄进一个新的 `Vec<String>` 再丢掉**。段落紧贴一段没闭栏的代码那种
+/// 写法（贴日志、贴报错最常见）现量＝抄行 720 vs 360，正好整篇两遍。
+/// 布尔判据只需要行首，这一份就只看行首。
+fn looks_like_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
 /// 这一行是不是**另起一块**的开头：段落的续行与列表项的续行共用这一份判据
 /// （两处各写一遍就会各漏一格，比如列表项吃了 `>` 引用行）。
 fn starts_new_block(lines: &[&str], i: usize, is_def: &[bool]) -> bool {
     let t = lines[i].trim();
-    fence(lines, i).is_some()
+    looks_like_fence(lines[i])
         || heading(t).is_some()
         || is_rule(t)
         || is_table_start(lines, i)
@@ -3957,6 +3969,44 @@ mod tests {
         assert_eq!(
             cells, parsed,
             "格被行内解析了 {parsed} 次，而表里只有 {cells} 格＝判据那一问把整表又解了一遍"
+        );
+    }
+
+    /// 围栏正文**只抄一遍**：续行判据那一问不该把整段代码再抄一份然后丢掉。
+    ///
+    /// `fence()` 未闭栏时会一路吃到文档末尾，改前 `starts_new_block` 就靠它答布尔，
+    /// 所以段落紧贴未闭栏的写法（贴日志／贴报错最常见）整篇被抄两遍。
+    #[test]
+    fn fence_bodies_are_copied_exactly_once() {
+        let mut src = String::from("# 未闭栏\n\n正文第一段最后一行\n```text\n");
+        // 末行**不带**换行：带了就多一个幻影末行，块里行数就不是 30 了（夹具自证那格
+        // 会先把这件事报出来，而不是让下面的等式糊里糊涂成立）
+        for i in 0..30 {
+            if i > 0 {
+                src.push('\n');
+            }
+            src.push_str(&format!("第{i}行被围栏包着的正文"));
+        }
+
+        MD_FENCE_BODY_PUSHES.with(|c| c.set(0));
+        let blocks = parse_markdown(&src);
+        let copied = MD_FENCE_BODY_PUSHES.with(|c| c.get());
+
+        // 夹具自证：未闭栏确实成了一整块代码（不成块，这条断言就是空断言）
+        let lines_in_blocks: usize = blocks
+            .iter()
+            .map(|b| match b {
+                MdBlock::CodeBlock { lines, .. } => lines.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            lines_in_blocks, 30,
+            "夹具里的未闭栏没吃下 30 行正文：这条断言就成了空断言"
+        );
+        assert_eq!(
+            lines_in_blocks, copied,
+            "围栏正文被抄了 {copied} 行，块里只有 {lines_in_blocks} 行＝判据那一问抄了一遍丢掉"
         );
     }
 }
