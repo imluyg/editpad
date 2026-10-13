@@ -325,7 +325,10 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     },
     HotkeyAction {
         id: "markdown_preview",
-        default_combos: &[],
+        // 第 315 轮 C7：给它一个默认键。裸 F4 是「面板里给命令赋键」（update/edit.rs
+        // 的 palette 分支），F1/F10 各有系统约定；纯 Ctrl 里 H 是唯一没被强约定
+        // 占用的（N＝新建、B/I/J/K 已给行内标记）
+        default_combos: &["Ctrl+H"],
         desc: MenuPreview,
     },
     HotkeyAction {

@@ -76,7 +76,7 @@ Then open the generated log sample — the UI stays draggable during loading and
 ## Keyboard Shortcuts
 
 The following are the default combos, all remappable on the **Settings → Keyboard Shortcuts ("设置 → 快捷键")** page (click "Modify" ("修改") and press the new combo; Esc cancels; conflicts are rejected; "Restore All Defaults" ("全部恢复默认") resets everything in one click). `Enter` / `Tab` / `Insert` / `Esc` have fixed semantics and are not in the registry. If you forget a key, press `Ctrl+E` to open the command palette and fuzzy-search any command to run directly.
-Commands that used to be mouse-only on the menus are registered too — they simply carry no default combo (they steal no key), and the palette lists them like any other action: Save As, recent files, open settings, word wrap, whitespace / line-ending marks, theme, Markdown preview, backup-on-save, the per-tab wrap three-state and per-tab font-size reset, and the two find-hit commands (mark hits as bookmarks / copy hit lines), plus splitting a selection into one cursor per line. Assign them a key on the same page if you use one often.
+Commands that used to be mouse-only on the menus are registered too — most carry no default combo (they steal no key) and the palette lists them like any other action (Markdown preview got `Ctrl+H` in round 315): Save As, recent files, open settings, word wrap, whitespace / line-ending marks, theme, backup-on-save, the per-tab wrap three-state and per-tab font-size reset, and the two find-hit commands (mark hits as bookmarks / copy hit lines), plus splitting a selection into one cursor per line. Assign them a key on the same page if you use one often.
 
 <details>
 <summary><strong>Files &amp; Tabs</strong></summary>
@@ -173,6 +173,7 @@ With a selection only the touched lines are processed; without one the operation
 | Ctrl+= / Ctrl+- / Ctrl+Shift+0 | Grow / shrink / reset the **global default** font size — keyboard twins of the View menu's three zoom items (`Ctrl+Plus` and `Ctrl+Shift+Plus` also grow; `Ctrl+scroll` above still overrides the current tab only) |
 | F11 / F9 | Toggle fullscreen / always-on-top |
 | Ctrl+Shift+F | Format JSON (JSON files only; errors point to line:col) |
+| Ctrl+H | Show / hide the Markdown preview pane (the same message as the View menu and the palette; other syntaxes just get a status message) |
 
 The View menu also offers a per-tab word-wrap three-state switch (follow global / on / off)
 and "reset tab font size"; both overrides are saved with the session snapshot.
