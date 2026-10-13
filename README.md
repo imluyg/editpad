@@ -230,6 +230,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
 | Ctrl+Shift+M | 跳到配对括号的另一侧（光标邻接 `()` `[]` `{}` 时生效，两侧同步显示下划线） |
 | Ctrl+F2 / F2 / Shift+F2 | 切换当前行书签 / 下一个 / 上一个（到边缘自动回绕，行号栏左缘琥珀圆点） |
 | Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | 清除全部书签 / 复制全部标记行 / 删除全部标记行 |
+| Ctrl+B / Ctrl+I / Ctrl+\` / Ctrl+J | Markdown 页：把选区包成粗体／斜体／行内代码／删除线，**再按一次解回原样**（无选区时落一对空记号、光标停在中间；斜体用 `*` 而不是 `_`——中文句子里词内的 `_` 在 GitHub 上开不了栏） |
+| Ctrl+K | Markdown 页：把选区变成 `[正文](目标)`，光标自动落进目标槽等着贴 URL |
 
 </details>
 

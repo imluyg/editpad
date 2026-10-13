@@ -176,6 +176,9 @@ fn parse_combo_for_test(combo: &str) -> (keyboard::Modifiers, keyboard::Key) {
         "Plus" => keyboard::Key::Character("+".into()),
         "Minus" => keyboard::Key::Character("-".into()),
         "Equal" => keyboard::Key::Character("=".into()),
+        // 第 315 轮 C0：反引号（Markdown 行内代码）——注册表写名字，
+        // combo_string 报的是按下实际得到的字符，两边必须对得上
+        "Backquote" => keyboard::Key::Character("`".into()),
         // 第 60 轮：书签导航引入裸/Shift 功能键组合
         name if name.len() >= 2 && name.starts_with('F') => {
             let n: u8 = name[1..]

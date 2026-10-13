@@ -356,6 +356,86 @@ fn enter_markdown_leaves_non_list_lines_to_smart_indent() {
     assert_eq!(c.doc.to_text(), "\n- 甲");
 }
 
+// ---------- 第 315 轮 C2：Markdown 行内标记包／解（编辑面） ----------
+
+use editpad_core::markdown::MdInlineMarker as M;
+
+#[test]
+fn wrap_bold_marks_the_selection_then_unties_it() {
+    let mut c = core_with("是重点的");
+    c.select_span(0, 1, 2); // 选中「重点」
+    assert!(c.wrap_selection(M::Bold));
+    assert_eq!(c.doc.to_text(), "是**重点**的");
+    assert_eq!(c.anchor, Some(CursorPos { line: 0, col: 3 }));
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 0, col: 5 },
+        "包完选区还罩住正文"
+    );
+    // 第二下的选区里只剩正文，记号长在**外面** ⇒ 解包判的是邻接上下文
+    assert!(c.wrap_selection(M::Bold));
+    assert_eq!(c.doc.to_text(), "是重点的", "再按一次剥回原样");
+    assert_eq!(c.anchor, Some(CursorPos { line: 0, col: 1 }));
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 3 });
+    // 两下各一个快照：撤销一次退掉解，再撤一次退掉包
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), "是**重点**的");
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), "是重点的");
+}
+
+#[test]
+fn wrap_without_selection_lands_an_empty_pair_and_the_next_press_eats_it() {
+    let mut c = core_with("正文");
+    c.cursor = CursorPos { line: 0, col: 1 };
+    c.anchor = None;
+    assert!(c.wrap_selection(M::Code));
+    assert_eq!(c.doc.to_text(), "正``文");
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 0, col: 2 },
+        "光标落在两记号中间"
+    );
+    assert_eq!(c.anchor, None, "零宽不当选区用");
+    assert!(c.wrap_selection(M::Code));
+    assert_eq!(c.doc.to_text(), "正文", "空对上的再按一次＝整对删掉");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 1 });
+}
+
+#[test]
+fn wrap_link_hands_the_caret_to_the_target_slot() {
+    let mut c = core_with("官网");
+    c.select_span(0, 0, 2);
+    assert!(c.wrap_selection(M::Link));
+    assert_eq!(c.doc.to_text(), "[官网]()");
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 0, col: 5 },
+        "光标在括号中间，等着贴 URL"
+    );
+    assert_eq!(c.anchor, None);
+}
+
+#[test]
+fn wrap_keeps_cjk_columns_and_multiline_selections() {
+    // 汉字列宽：选区起点在 CJK 之后，记号与光标都得落在**字符**列上
+    let mut c = core_with("甲乙丙丁");
+    c.select_span(0, 2, 2);
+    assert!(c.wrap_selection(M::Italic));
+    assert_eq!(c.doc.to_text(), "甲乙*丙丁*");
+    assert_eq!(c.cursor, CursorPos { line: 0, col: 5 });
+    // 跨行选区照包（粗体跨行在预览里确实成立）
+    let mut c = core_with("甲\n乙");
+    c.select_span(0, 0, 4);
+    assert!(c.wrap_selection(M::Bold));
+    assert_eq!(c.doc.to_text(), "**甲\n乙**");
+    assert_eq!(
+        c.doc.line_count(),
+        2,
+        "包一层不改行数＝书签映射本来就不必动"
+    );
+}
+
 // ---------- P122 删词（Ctrl+Backspace / Ctrl+Delete） ----------
 #[test]
 fn delete_word_left_removes_to_word_start_and_is_undoable() {

@@ -266,6 +266,13 @@ pub enum EditOp {
     /// 随后打字／退格逐点同步。不改文档、不置脏、不产快照；拒绝原因（无选区／
     /// 超封顶）由 `EditorCore::split_selection_by_lines` 以 Err 带出给状态栏。
     SplitSelectionByLines,
+    // ---------- 第 315 轮 C2：Markdown 行内标记包／解 ----------
+    /// 包／解选区的行内标记（粗体／斜体／行内代码／删除线／链接一台机器）。
+    /// 判据在 core 的 `editpad_core::markdown::wrap_action`，执行体
+    /// `EditorCore::wrap_selection`。**列块态与多光标都不保路**：两道闸先收块／
+    /// 先折叠光标集，那是刻意决定（一次包裹要在每行各插一对记号，等于另写一套
+    /// 逐行编辑机器，收益却和「逐行手动包」没差别）。
+    MarkdownWrap(editpad_core::markdown::MdInlineMarker),
 }
 
 /// P128：选区文本工具种类。

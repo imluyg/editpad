@@ -159,6 +159,8 @@ With a selection only the touched lines are processed; without one the operation
 | Ctrl+Shift+M | Jump to the other side of a matching bracket (works when the cursor is adjacent to `()` `[]` `{}`; both sides show an underline simultaneously) |
 | Ctrl+F2 / F2 / Shift+F2 | Toggle bookmark on current line / Next / Previous (wraps around at the edges; amber dot on the left of the line-number gutter) |
 | Ctrl+Shift+F2 / Ctrl+Shift+C / Ctrl+Shift+X | Clear all bookmarks / Copy all marked lines / Delete all marked lines |
+| Ctrl+B / Ctrl+I / Ctrl+\` / Ctrl+J | Markdown pages: wrap the selection in bold / italic / inline code / strikethrough, **press again to unwrap it** (with no selection an empty pair lands with the caret between the markers; italic uses `*` rather than `_` because `_` inside a word opens nothing on GitHub) |
+| Ctrl+K | Markdown page: turn the selection into `[label](target)` — the caret lands inside the parentheses, ready for the URL |
 
 </details>
 

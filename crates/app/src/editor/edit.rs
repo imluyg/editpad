@@ -223,6 +223,67 @@ impl EditorCore {
         }
     }
 
+    /// Markdown 页的包／解行内标记（编辑面）：粗体／斜体／行内代码／删除线／链接
+    /// 共用这一台机器，判据在 core 的 [`editpad_core::markdown::wrap_action`]
+    /// （与预览解析器同一模块），这里只管把它的产出落到文档上。
+    ///
+    /// 替换范围＝选区再向前吃 `head_cut` 个字符、向后吃 `tail_cut` 个字符——解包时
+    /// 那两截记号本来就长在选区外面（`**甲**` 里第二次按粗体，选区只剩 `甲`）。
+    ///
+    /// 走 [`apply_tool`](Self::apply_tool) 那套手工替换而不是 `insert_str`：记号只增
+    /// 不减行（替换文本与选区的换行数相同），于是行号与书签的映射本来就不必动，
+    /// 而 `insert_str` 会把选区吃掉后清掉锚点——这里要的恰恰是「换完仍然选中正文」。
+    pub fn wrap_selection(&mut self, m: editpad_core::markdown::MdInlineMarker) -> bool {
+        use editpad_core::markdown::wrap_action;
+        let (sel_start, sel_end) = match self.selection_offsets() {
+            Some((s, e)) if s < e => (s, e),
+            // 没有选区＝在光标处落一对空记号（零宽的 anchor 不当选区用）
+            _ => {
+                let off = self.cursor_offset();
+                (off, off)
+            }
+        };
+        // 邻接窗只取记号串那么长的一截，直接从绳上切——不物化整行（单行 50 MB 的
+        // 日志取整行串是本仓禁项，P298 立下的口径）。
+        let win = editpad_core::markdown::WRAP_CONTEXT_CHARS;
+        let before = self
+            .doc
+            .slice_text(sel_start.saturating_sub(win), sel_start)
+            .to_string();
+        let after = self
+            .doc
+            .slice_text(sel_end, (sel_end + win).min(self.doc.text_len()))
+            .to_string();
+        let body =
+            (sel_start < sel_end).then(|| self.doc.slice_text(sel_start, sel_end).to_string());
+        let edit = wrap_action(body.as_deref(), &before, &after, m);
+        let start = sel_start.saturating_sub(edit.head_cut);
+        let end = (sel_end + edit.tail_cut).min(self.doc.text_len());
+        self.snapshot();
+        self.doc.remove_range(start, end);
+        self.doc.insert(start, &edit.text);
+        self.invalidate_highlight_from(start);
+        match edit.select {
+            Some((off, len)) => {
+                let at = start + off;
+                let line = self.doc.char_to_line(at);
+                self.select_span(line, at - self.doc.line_to_char(line), len);
+            }
+            None => {
+                // 只落光标：零宽不算选区（`anchor = None` 与 apply_tool 同口径）
+                let at = (start + edit.caret).min(self.doc.text_len());
+                let line = self.doc.char_to_line(at);
+                self.anchor = None;
+                self.cursor = CursorPos {
+                    line,
+                    col: at - self.doc.line_to_char(line),
+                };
+            }
+        }
+        self.ensure_visible();
+        true
+    }
+
     /// P122 无选区 Ctrl+C/X 的整行取词：当前行原文（含本行行尾单元，
     /// 幻影末行返回空串）。复制/剪切共用，不改文档、不置脏。
     pub fn current_line_copy_text(&self) -> String {

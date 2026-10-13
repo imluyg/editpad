@@ -437,6 +437,7 @@ key_table! {
     { StJsonFailed => "JSON 格式化失败：", "JSON formatting failed: " },
     { StSyntaxAnalyzing => "语法分析中…", "Analysing syntax…" },
     { StPreviewMarkdownOnly => "预览仅支持 Markdown 文件", "Preview is only available for Markdown files" },
+    { StMdMarkupMarkdownOnly => "粗体／斜体／行内代码等标记仅支持 Markdown 文件", "Bold, italic, inline code and similar markup are only available for Markdown files" },
     { StRevealedInExplorer => "已在资源管理器中定位文件", "Revealed in File Explorer" },
     { StRevealFailed => "打开所在文件夹失败：", "Failed to open the containing folder: " },
     { StRevealNeedsSave => "未命名页需先保存才能定位所在文件夹", "Save this untitled tab first to locate it in its folder" },
@@ -727,6 +728,11 @@ key_table! {
     { HkAddNextMatch => "多光标：添加下一匹配（环形搜索）", "Multi-cursor: add the next match (wraps around)" },
     { HkSplitSelectionByLines => "多光标：选区按行拆分（每行一个光标）", "Multi-cursor: split the selection into one cursor per line" },
     { HkFindInFiles => "在文件中查找（当前页所在目录，可换目录）", "Find in files (folder of the current tab; can be changed)" },
+    { HkMdBold => "Markdown：加粗／取消加粗（包选区）", "Markdown: bold / unbold (wrap the selection)" },
+    { HkMdItalic => "Markdown：斜体／取消斜体（包选区）", "Markdown: italic / un-italic (wrap the selection)" },
+    { HkMdCode => "Markdown：行内代码／取消（包选区）", "Markdown: inline code / remove it (wrap the selection)" },
+    { HkMdStrike => "Markdown：删除线／取消（包选区）", "Markdown: strikethrough / remove it (wrap the selection)" },
+    { HkMdLink => "Markdown：把选区变成链接（光标落进目标槽）", "Markdown: turn the selection into a link (caret lands in the target slot)" },
 }
 
 // ---------- 带参数的文案组装 ----------

@@ -570,6 +570,37 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &["F12"],
         desc: HkFindInFiles,
     },
+    // 第 315 轮 C3：Markdown 行内标记包／解。键位预算是现量的——26 个
+    // `Ctrl+Shift+字母` 全被占（B=去首尾空白、I=行首 Tab 转换、K=去重行、
+    // M=跳配对括号……），纯 Ctrl 单字母只剩 B/H/I/J/K/N 空闲，裸功能键里
+    // F4 已被「面板里给命令赋键」占用、F1/F10 各有系统约定。于是取通用的
+    // B=粗体、I=斜体、反引号=行内代码（C0 才让它可登记）、K=链接，
+    // J 给删除线（H 留给「替换」、N 留给「新建」这两条强约定，不烧）。
+    HotkeyAction {
+        id: "md_bold",
+        default_combos: &["Ctrl+B"],
+        desc: HkMdBold,
+    },
+    HotkeyAction {
+        id: "md_italic",
+        default_combos: &["Ctrl+I"],
+        desc: HkMdItalic,
+    },
+    HotkeyAction {
+        id: "md_code",
+        default_combos: &["Ctrl+Backquote"],
+        desc: HkMdCode,
+    },
+    HotkeyAction {
+        id: "md_strike",
+        default_combos: &["Ctrl+J"],
+        desc: HkMdStrike,
+    },
+    HotkeyAction {
+        id: "md_link",
+        default_combos: &["Ctrl+K"],
+        desc: HkMdLink,
+    },
 ];
 
 // P323 删掉了这里的 `default_combo_of(id)`（"动作 id → 首个默认组合"）：
@@ -589,8 +620,9 @@ pub(crate) fn sanitize_hotkeys(settings: &mut editpad_core::Settings) {
 ///
 /// 契约（与 core `normalize_combo` 同步）：不得含 Alt（AltGr 保护，P8
 /// 同口径——AltGr 在 Windows 上报为 Ctrl+Alt）；
-/// - 含 Ctrl：键名 = 单个字母/数字（大写化）、`+ - =` 三个符号（P313 规范化为
-///   `Plus`/`Minus`/`Equal`）或白名单命名键，形如 `Ctrl+F2`；
+/// - 含 Ctrl：键名 = 单个字母/数字（大写化）、四个符号键（`+`／`-`／`=`／反引号，
+///   P313 规范化为 `Plus`/`Minus`/`Equal`，第 315 轮 C0 增 `Backquote`）
+///   或白名单命名键，形如 `Ctrl+F2`；
 /// - 无 Ctrl：仅放行功能键 F1~F12（修饰键至多 Shift），形如 `F2` /
 ///   `Shift+F2`——书签导航的主流默认键位所需；其余无 Ctrl 按键返回
 ///   None（该按键不参与热键系统，交回普通编辑路径）。
@@ -616,6 +648,10 @@ pub(crate) fn combo_string(mods: keyboard::Modifiers, key: &keyboard::Key) -> Op
                 (Some('+'), None) => "Plus".to_string(),
                 (Some('-'), None) => "Minus".to_string(),
                 (Some('='), None) => "Equal".to_string(),
+                // 第 315 轮 C0：反引号（Markdown 行内代码的默认键）。Windows 上
+                // 这键报到 `Key::Character('`')`（不是命名键），规范形仍用名字
+                // `Backquote`——与 core `COMBO_SYMBOL_KEYS` 一一对应
+                (Some('`'), None) => "Backquote".to_string(),
                 _ => return None,
             }
         }
@@ -845,6 +881,22 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "split_selection_by_lines" => edit(EditOp::SplitSelectionByLines),
         // A8：在文件中查找
         "find_in_files" => Some(Message::FindInFilesToggled),
+        // 第 315 轮 C3：Markdown 行内标记包／解（闸门在 apply_edit 按语法名收）
+        "md_bold" => edit(EditOp::MarkdownWrap(
+            editpad_core::markdown::MdInlineMarker::Bold,
+        )),
+        "md_italic" => edit(EditOp::MarkdownWrap(
+            editpad_core::markdown::MdInlineMarker::Italic,
+        )),
+        "md_code" => edit(EditOp::MarkdownWrap(
+            editpad_core::markdown::MdInlineMarker::Code,
+        )),
+        "md_strike" => edit(EditOp::MarkdownWrap(
+            editpad_core::markdown::MdInlineMarker::Strike,
+        )),
+        "md_link" => edit(EditOp::MarkdownWrap(
+            editpad_core::markdown::MdInlineMarker::Link,
+        )),
         _ => None,
     }
 }

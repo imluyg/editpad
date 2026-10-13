@@ -1812,6 +1812,24 @@ fn combo_string_contract_includes_bare_function_keys() {
     assert_eq!(combo_string(Modifiers::SHIFT, &letter), None);
 }
 
+/// 第 315 轮 C0：反引号进了热键系统（Markdown 行内代码的默认键）。
+/// 三处口径必须一致——`combo_string` 报的串、注册表里写的串、core
+/// `normalize_combo` 认的串：漏任何一侧，要么按下无响应，要么设置页赋不上键。
+#[test]
+fn backquote_joins_the_combo_whitelist() {
+    use iced::keyboard::{self, Modifiers};
+    let grave = keyboard::Key::Character("`".into());
+    assert_eq!(
+        combo_string(Modifiers::CTRL, &grave),
+        Some("Ctrl+Backquote".to_owned())
+    );
+    // 裸反引号还是打字正文，无 Ctrl 一律不参与热键
+    assert_eq!(combo_string(Modifiers::empty(), &grave), None);
+    // 注册表写法能被测试解析器还原成同一个按键，再报回同一个规范串
+    let (mods, key) = parse_combo_for_test("Ctrl+Backquote");
+    assert_eq!(combo_string(mods, &key), Some("Ctrl+Backquote".to_owned()));
+}
+
 // ---------- P12 高亮后台分批补建 ----------
 
 /// 构造一个启用了 Rust 语法高亮的 N 行文档应用，返回 (状态, 当时代次)。

@@ -3768,6 +3768,64 @@ fn enter_on_a_markdown_page_continues_the_list() {
     assert_eq!(text_of(&txt), "- 甲\n", "非 .md 页的回车行为一字不变");
 }
 
+/// 包／解行内标记的**接线**：`.md` 页落进文档，`.txt` 页一个字都不改、只给一句状态栏
+/// （与回车接列表、开预览同口径＝现量语法名）。
+///
+/// 走生产消息路（`Message::Edit(EditOp::MarkdownWrap(..))`，与 `hotkeys.rs` 里那把
+/// Ctrl+B 同一个 op），所以这条盯的是 `apply_edit` 那格闸门＋分发；编辑器级用例
+/// （`wrap_bold_marks_the_selection_then_unties_it`）直接调 `wrap_selection`，
+/// 把这格线摘掉也照样绿。
+#[test]
+fn markdown_wrap_reaches_the_document_only_on_markdown_pages() {
+    fn app_with(path: &str, text: &str) -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from(path)));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        dispatch(
+            &mut app,
+            Message::Edit(EditOp::Motion(Motion::DocEnd, false)),
+        );
+        app
+    }
+    let text_of = |app: &Editpad| app.cur_handle.borrow().doc.to_text();
+
+    let mut md = app_with("C:/x/notes.md", "是重点的");
+    dispatch(&mut md, Message::Edit(EditOp::SelectAll));
+    dispatch(
+        &mut md,
+        Message::Edit(EditOp::MarkdownWrap(
+            editpad_core::markdown::MdInlineMarker::Bold,
+        )),
+    );
+    assert_eq!(text_of(&md), "**是重点的**", ".md 页的包裹该落进文档");
+
+    let mut txt = app_with("C:/x/notes.txt", "是重点的");
+    dispatch(&mut txt, Message::Edit(EditOp::SelectAll));
+    dispatch(
+        &mut txt,
+        Message::Edit(EditOp::MarkdownWrap(
+            editpad_core::markdown::MdInlineMarker::Bold,
+        )),
+    );
+    assert_eq!(text_of(&txt), "是重点的", "非 .md 页不往纯文本里塞字面记号");
+    assert!(
+        txt.status.contains("仅支持 Markdown"),
+        "被闸门挡下要有话可看：{:?}",
+        txt.status
+    );
+}
+
 /// 脚注在预览里落两格——正文里一个上标标记、文末一块注脚区，定义行本身不留正文。
 ///
 /// 读数（现量的形状）＝右栏矩形：一段＋注脚区那列＋每条注脚一行 ⇒ 一条注脚 3 个、

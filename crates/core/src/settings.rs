@@ -319,7 +319,9 @@ pub fn normalize_backup_mode(value: &str) -> &'static str {
 /// `Ctrl++`）：这三个符号在键盘上不是"一个字符键"那么整齐（`+` 多数布局要按
 /// Shift，小键盘又自带 `+`/`-`），故规范形一律用**名字**；`-` `=` 额外接受
 /// 符号字面写法（见 [`COMBO_SYMBOL_KEYS`]），`+` 因为本身就是分隔符而只能写名字。
-const COMBO_NAMED_KEYS: [&str; 27] = [
+/// 第 315 轮 C0 增补 `Backquote`（Markdown 行内代码的 `Ctrl+\``）：同样两个写法
+/// 都收——符号 `` ` `` 与规范名 `Backquote` 归一到同一串。
+const COMBO_NAMED_KEYS: [&str; 28] = [
     "Home",
     "End",
     "PageUp",
@@ -335,6 +337,7 @@ const COMBO_NAMED_KEYS: [&str; 27] = [
     "Plus",
     "Minus",
     "Equal",
+    "Backquote",
     "F1",
     "F2",
     "F3",
@@ -355,7 +358,7 @@ const COMBO_NAMED_KEYS: [&str; 27] = [
 /// ⚠️ 表里**没有** `+`：组合串以 `+` 为分隔符，`Ctrl++` 切出来是
 /// `["Ctrl", "", ""]`——那个加号永远成不了"键名"那一段，故字面写法在这套
 /// 语法里不可表达，只能写规范名 `Ctrl+Plus`（`combo_string` 上报的也正是它）。
-const COMBO_SYMBOL_KEYS: [(&str, &str); 2] = [("-", "Minus"), ("=", "Equal")];
+const COMBO_SYMBOL_KEYS: [(&str, &str); 3] = [("-", "Minus"), ("=", "Equal"), ("`", "Backquote")];
 
 /// 组合键串归一（纯函数可单测）：`ctrl+shift+f` → `Ctrl+Shift+F`。
 ///
@@ -2047,6 +2050,13 @@ mod tests {
         assert_eq!(
             normalize_combo("ctrl+shift+minus"),
             Some("Ctrl+Shift+Minus".to_owned())
+        );
+        // 第 315 轮 C0：`Ctrl+``（Markdown 行内代码的默认键）——符号字面写法与
+        // 规范名必须归一到同一串，否则同一个组合能登记两次而两边都失效
+        assert_eq!(normalize_combo("ctrl+`"), Some("Ctrl+Backquote".to_owned()));
+        assert_eq!(
+            normalize_combo("Ctrl+Backquote"),
+            Some("Ctrl+Backquote".to_owned())
         );
         // 其余符号仍一律拒绝（放行一个就多吞一次输入）
         assert_eq!(normalize_combo("Ctrl+%"), None);

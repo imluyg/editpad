@@ -955,6 +955,13 @@ impl Editpad {
                     false
                 }
             },
+            // 第 315 轮 C2：包／解行内标记。与回车接列表、开预览同一口径＝现量语法名，
+            // 非 .md 页不认（那等于往纯文本里塞字面记号）。
+            E::MarkdownWrap(m) if md_page => editor.wrap_selection(m),
+            E::MarkdownWrap(_) => {
+                hint = Some(self.t(editpad_core::Key::StMdMarkupMarkdownOnly).to_owned());
+                false
+            }
         };
         drop(editor);
 
