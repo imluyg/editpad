@@ -134,6 +134,25 @@ pub(crate) fn markdown_preview_element(
     scrollable(container(col).width(Fill)).height(Fill).into()
 }
 
+/// 列表项行首那个**记号**：勾选框与序号**都要**。
+///
+/// 改前这是一份 `match (task, order)`，把 `task` 排在 `order` 前面 ⇒
+/// `1. [x] 第一项` 在预览里只剩 `☑ 第一项`，一列没有号的框（真窗口眼验抓到的）。
+/// GFM 的口径是「有序列表项里带任务框」，两件事各占一格：GitHub 画成 `1. ☑ 第一项`。
+/// 无序项仍是 `• `／`☐ `，任务框顶掉圆点而不顶掉序号。
+pub(crate) fn list_marker(task: Option<bool>, order: Option<usize>) -> String {
+    let check = match task {
+        Some(true) => "☑ ",
+        Some(false) => "☐ ",
+        None => "",
+    };
+    match order {
+        Some(n) => format!("{n}. {check}"),
+        None if !check.is_empty() => check.to_owned(),
+        None => "• ".to_owned(),
+    }
+}
+
 /// 一个块 → 一棵独立的 widget 树（按块缓存的最小单位，见
 /// [`markdown_preview_element`] 里的复用说明）。
 ///
@@ -183,13 +202,8 @@ fn build_block(
             task,
             spans,
         } => {
-            let marker = match (task, order) {
-                (Some(true), _) => "☑ ",
-                (Some(false), _) => "☐ ",
-                (_, Some(n)) => &format!("{n}. "),
-                _ => "• ",
-            };
-            let mut line = vec![plain_span(Fragment::Owned(marker.to_owned()), base, None)];
+            let marker = list_marker(*task, *order);
+            let mut line = vec![plain_span(Fragment::Owned(marker), base, None)];
             line.extend(to_text_spans(spans, base, ink, false, tint, doc_dir));
             let indent_px = (*indent as f32).min(6.0) * scaled(16.0);
             let para = md_paragraph(line, prose, Alignment::Start);

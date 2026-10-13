@@ -4534,6 +4534,29 @@ fn markdown_preview_parse_cache_evicts_beyond_its_slots() {
 
     MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
 }
+/// 列表记号那两件事**不互相顶掉**：`1. [x] 甲` 在预览里应当是 `1. ☑ 甲`。
+///
+/// 真窗口眼验抓到改前只剩框、序号没了（`md_preview.rs` 那份 `match (task, order)`
+/// 把 `task` 排在了 `order` 前面）。看守落在纯函数这一层（同
+/// `markdown_preview_colors_fenced_code_by_language` 直取 `code_block_spans` 的先例）；
+/// ⚠️ `build_block` 那一句调用**没有**无头读数——记号活在 `Rich` 的 fragment 里，
+/// `ViewTree` 只读得到几何，而块节点的宽度恒等于栏宽（实测 611.5），字少了也不见变窄。
+/// ⇒ 这一格改完要开真窗口看（眼验项），别拿宽度造假守卫。
+#[test]
+fn list_marker_keeps_both_the_number_and_the_box() {
+    use crate::md_preview::list_marker;
+    assert_eq!(list_marker(None, None), "• ", "无序项＝圆点");
+    assert_eq!(
+        list_marker(Some(false), None),
+        "☐ ",
+        "无序任务项＝框顶掉圆点"
+    );
+    assert_eq!(list_marker(None, Some(3)), "3. ", "有序项＝序号");
+    // 本轮修的那两格：序号与框同时在场
+    assert_eq!(list_marker(Some(true), Some(1)), "1. ☑ ");
+    assert_eq!(list_marker(Some(false), Some(2)), "2. ☐ ");
+}
+
 /// 预览里的代码块**按围栏语言上色**（认不出就走素色），并且整块仍是等宽族。
 #[test]
 fn markdown_preview_colors_fenced_code_by_language() {
