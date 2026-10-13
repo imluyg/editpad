@@ -41,8 +41,9 @@ thread_local! {
     /// 围栏代码块正文被逐行抄进 `Vec<String>` 的次数。未闭栏时这一份是整篇长度。
     pub(crate) static MD_FENCE_BODY_PUSHES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-    /// 脚注标签的**逐条比对**次数（查定义表、查首次引用顺序，每比一对标签记一笔）。
-    /// 这一把尺子量的就是工作量本身：标签表是 `Vec` 时它随「引用数 × 定义数」涨。
+    /// 注脚标签被**逐条比对／过目**的次数。查表走哈希时它＝定义条数（每条过目一次）；
+    /// 谁把查表退回逐条扫 `Vec`，它会立刻涨到「引用数 × 定义数」（现量：300 条脚注
+    /// 那样是 18 万、600 条是 72 万）。
     pub(crate) static MD_NOTE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -496,19 +497,18 @@ fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
         return;
     }
     let mut order: Vec<String> = Vec::new();
+    let mut order_at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     each_span_list(blocks, &mut |spans: &mut Vec<MdSpan>| {
         for span in spans.iter_mut() {
             if span.style & MD_FOOTNOTE == 0 {
                 continue;
             }
             let label = normalize_label(&span.text);
-            let idx = match order.iter().position(|l| {
-                note_scan();
-                *l == label
-            }) {
-                Some(idx) => idx,
+            let idx = match order_at.get(&label) {
+                Some(idx) => *idx,
                 None => {
-                    order.push(label);
+                    order.push(label.clone());
+                    order_at.insert(label, order.len() - 1);
                     order.len() - 1
                 }
             };
@@ -518,10 +518,7 @@ fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
     let mut items: Vec<MdFootnote> = Vec::new();
     let mut emitted = vec![false; defs.notes.len()];
     for label in order.iter() {
-        if let Some(at) = defs.notes.iter().position(|(l, _)| {
-            note_scan();
-            l == label
-        }) {
+        if let Some(at) = defs.note_index(label) {
             emitted[at] = true;
             items.push(MdFootnote {
                 number: items.len() + 1,
@@ -529,7 +526,12 @@ fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
             });
         }
     }
+    // 从没被引用的定义也排在末尾（用户写下的正文不该因为忘了引用就消失）。
+    // `note_scan` 这把尺子如今只挂在这一趟上：定义表**过一次**，每条记一笔。
+    // 改前查表那两处（`has_note` 与首次引用顺序）各自都要逐条比字符串，
+    // 现量＝300 条脚注 18 万次比对、600 条 72 万次（文档翻倍工作量四倍）。
     for (at, (_, body)) in defs.notes.iter().enumerate() {
+        note_scan();
         if !emitted[at] {
             items.push(MdFootnote {
                 number: items.len() + 1,
@@ -1499,6 +1501,13 @@ struct LinkDefs {
     links: std::collections::HashMap<String, String>,
     /// `[^标签]: 正文`，按**定义出现顺序**存；同名只首个生效。
     notes: Vec<(String, String)>,
+    /// `notes` 的下标索引（标签 → 第一个定义的位置）。
+    ///
+    /// 顺序那份不能换成 map（"没被引用的定义也排在注脚区末尾"靠的就是定义顺序），
+    /// 但「这标签有定义吗」原先要对整张表逐条比字符串：一个引用比一遍，
+    /// 现量＝300 条脚注 18 万次比对、600 条 72 万次（文档翻倍、工作量四倍）。
+    /// 有了这一份，查表变成一次哈希。
+    note_at: std::collections::HashMap<String, usize>,
 }
 
 impl LinkDefs {
@@ -1510,18 +1519,18 @@ impl LinkDefs {
         self.links.entry(label).or_insert(dest);
     }
     fn note(&mut self, label: String, body: String) {
-        if !self.notes.iter().any(|(l, _)| {
-            note_scan();
-            *l == label
-        }) {
-            self.notes.push((label, body));
+        if self.note_at.contains_key(&label) {
+            return;
         }
+        self.note_at.insert(label.clone(), self.notes.len());
+        self.notes.push((label, body));
     }
     fn has_note(&self, label: &str) -> bool {
-        self.notes.iter().any(|(l, _)| {
-            note_scan();
-            l == label
-        })
+        self.note_at.contains_key(label)
+    }
+    /// 标签对应的定义位置（`notes` 的下标）。
+    fn note_index(&self, label: &str) -> Option<usize> {
+        self.note_at.get(label).copied()
     }
 }
 
@@ -4007,6 +4016,42 @@ mod tests {
         assert_eq!(
             lines_in_blocks, copied,
             "围栏正文被抄了 {copied} 行，块里只有 {lines_in_blocks} 行＝判据那一问抄了一遍丢掉"
+        );
+    }
+
+    /// 脚注查表的账：**过目次数与「引用数 × 定义数」脱钩**。
+    ///
+    /// 病＝标签表是 `Vec`，「这标签有定义吗」每问一次就把整张表逐条比一遍。
+    /// 现量：300 条脚注 18 万次比对、600 条 72 万次——文档翻倍、工作量四倍，
+    /// 而这一份以前落在**每次按键**的重解析里。
+    #[test]
+    fn footnote_lookups_do_not_scale_with_refs_times_defs() {
+        let n = 120usize;
+        let mut src = String::from("# 脚注\n\n正文：");
+        for i in 0..n {
+            src.push_str(&format!("第一{i}处引用[^{i}]，"));
+        }
+        src.push_str("收尾。\n\n");
+        for i in 0..n {
+            src.push_str(&format!("[^{i}]: 第{i}条注脚正文。\n"));
+        }
+
+        MD_NOTE_SCANS.with(|c| c.set(0));
+        let blocks = parse_markdown(&src);
+        let scans = MD_NOTE_SCANS.with(|c| c.get());
+
+        // 夹具自证：n 条定义确实都进了注脚区（不然下面的比值是空比值）
+        let defs = blocks
+            .iter()
+            .find_map(|b| match b {
+                MdBlock::Footnotes { items } => Some(items.len()),
+                _ => None,
+            })
+            .expect("夹具的脚注定义应产生注脚区块");
+        assert_eq!(defs, n, "注脚区收条数与夹具定义数不符：夹具没被解析成脚注");
+        assert!(
+            scans <= defs,
+            "脚注表被过了 {scans} 次而定义只有 {defs} 条＝查标签还在逐条比对"
         );
     }
 }
