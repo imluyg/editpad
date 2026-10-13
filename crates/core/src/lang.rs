@@ -438,6 +438,7 @@ key_table! {
     { StSyntaxAnalyzing => "语法分析中…", "Analysing syntax…" },
     { StPreviewMarkdownOnly => "预览仅支持 Markdown 文件", "Preview is only available for Markdown files" },
     { StMdMarkupMarkdownOnly => "粗体／斜体／行内代码等标记仅支持 Markdown 文件", "Bold, italic, inline code and similar markup are only available for Markdown files" },
+    { StNoLineCommentForSyntax => "这门语法没有行注释前缀（Markdown 用 `<!-- -->` 成对注释，Ctrl+Q 不适用）", "This syntax has no line-comment prefix (Markdown pairs `<!-- -->`, so Ctrl+Q does not apply)" },
     { StRevealedInExplorer => "已在资源管理器中定位文件", "Revealed in File Explorer" },
     { StRevealFailed => "打开所在文件夹失败：", "Failed to open the containing folder: " },
     { StRevealNeedsSave => "未命名页需先保存才能定位所在文件夹", "Save this untitled tab first to locate it in its folder" },

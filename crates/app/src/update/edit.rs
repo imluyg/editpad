@@ -906,7 +906,19 @@ impl Editpad {
             E::SplitLine => editor.split_line(),
             E::DeleteEmptyLines(kind) => editor.delete_empty_lines(kind),
             // ---------- 行注释切换（第 64 轮） ----------
-            E::ToggleLineComment => editor.toggle_line_comment(),
+            // 第 64 轮：行注释切换。第 315 轮 C6：语法没有行注释前缀（Markdown）时
+            // 一个字都不该动——改前 .md 页落进 `_ => "//"`，Ctrl+Q 往正文里插斜杠
+            E::ToggleLineComment => {
+                if editor.comment_prefix_for().is_none() {
+                    hint = Some(
+                        self.t(editpad_core::Key::StNoLineCommentForSyntax)
+                            .to_owned(),
+                    );
+                    false
+                } else {
+                    editor.toggle_line_comment()
+                }
+            }
             // ---------- P121：智能缩进与选区块缩进 ----------
             // 回车不入列块白名单：列块态按回车先收块再智能缩进（原「向块
             // 内插换行」无实用语义）；Tab 两向都在白名单里——加缩进仍是块内插

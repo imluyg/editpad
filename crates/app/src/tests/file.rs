@@ -3826,6 +3826,47 @@ fn markdown_wrap_reaches_the_document_only_on_markdown_pages() {
     );
 }
 
+/// `.md` 页按 Ctrl+Q＝一个字都不动＋一句状态栏（第 315 轮 C6：改前它落进前缀表的
+/// `_ => "//"`，Markdown 根本没有行注释）。有前缀的语法（Python）同一条消息照样加 `# `。
+///
+/// 走生产消息路（`Message::Edit(EditOp::ToggleLineComment)`，与 `hotkeys.rs` 里那把
+/// Ctrl+Q 同一个 op）：编辑器级用例直接调 `toggle_line_comment`，把消息层那句提示
+/// 摘掉也照样绿，这条盯的就是「拒收要有话可看」那一格。
+#[test]
+fn line_comment_on_a_markdown_page_is_refused_with_a_message() {
+    fn app_with(path: &str, text: &str) -> Editpad {
+        let mut app = Editpad::default();
+        dispatch(&mut app, Message::FileDropped(PathBuf::from(path)));
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+        app
+    }
+    let text_of = |app: &Editpad| app.cur_handle.borrow().doc.to_text();
+
+    let mut md = app_with("C:/x/notes.md", "正文");
+    dispatch(&mut md, Message::Edit(EditOp::ToggleLineComment));
+    assert_eq!(text_of(&md), "正文", "Markdown 没有行注释前缀");
+    assert!(
+        md.status.contains("没有行注释"),
+        "拒收要看得见：{:?}",
+        md.status
+    );
+
+    let mut py = app_with("C:/x/tool.py", "x = 1");
+    dispatch(&mut py, Message::Edit(EditOp::ToggleLineComment));
+    assert_eq!(text_of(&py), "# x = 1", "有前缀的语法行为一字不变");
+}
+
 /// 脚注在预览里落两格——正文里一个上标标记、文末一块注脚区，定义行本身不留正文。
 ///
 /// 读数（现量的形状）＝右栏矩形：一段＋注脚区那列＋每条注脚一行 ⇒ 一条注脚 3 个、

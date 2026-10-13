@@ -1123,15 +1123,20 @@ impl EditorCore {
     /// 行注释前缀查表（第 64 轮）：按当前语法名（syntect 名，大小写
     /// 不敏感匹配）取行注释前缀。未知语法默认 `//`。块注释不入表
     /// （`/* */` 需要成对处理，超出本动作的「整行」范畴）。
-    pub(crate) fn comment_prefix_for(&self) -> &'static str {
+    ///
+    /// `None` ＝这门语法**没有**行注释。目前只有 Markdown：它没有 `//` 这类整行
+    /// 前缀，硬套只会往正文里塞垃圾（`# ` 是标题、`> ` 是引用，都不是注释）。
+    /// 第 315 轮 C6 现量的就是这个坏格：改前 .md 页按 Ctrl+Q 落进 `_ => "//"`。
+    pub(crate) fn comment_prefix_for(&self) -> Option<&'static str> {
         let lang = self.highlight_syntax_name().unwrap_or_default();
         let lang = lang.to_ascii_lowercase();
         match lang.as_str() {
+            "markdown" => None,
             "python" | "ruby" | "shellscript" | "bash" | "yaml" | "toml" | "ini" | "properties"
-            | "r" | "perl" => "#",
-            "sql" | "lua" => "--",
-            "batch file" | "bat" | "dosbatch" => "::",
-            _ => "//", // rust/c/cpp/java/js/ts/go/json/css/php/未知……
+            | "r" | "perl" => Some("#"),
+            "sql" | "lua" => Some("--"),
+            "batch file" | "bat" | "dosbatch" => Some("::"),
+            _ => Some("//"), // rust/c/cpp/java/js/ts/go/json/css/php/未知……
         }
     }
 
@@ -1143,9 +1148,13 @@ impl EditorCore {
     ///   前插 `前缀 + 空格`；纯空行跳过不参与）；
     /// - 行数不变 → 恒等映射书签原位；无变化 no-op 不产快照；
     /// - 前缀只认「缩进后紧跟」——字符串里出现的 `//` 不受影响（不做
-    ///   语法感知是既有取舍，与括号匹配同口径）。
+    ///   语法感知是既有取舍，与括号匹配同口径）；
+    /// - 语法没有行注释前缀（[`comment_prefix_for`] 给 `None`，即 Markdown）⇒
+    ///   一个字都不动、返回 false，消息层给一句状态栏。
     pub fn toggle_line_comment(&mut self) -> bool {
-        let prefix = self.comment_prefix_for();
+        let Some(prefix) = self.comment_prefix_for() else {
+            return false;
+        };
         let blk = self.collect_line_block();
         let is_commented = |s: &str| -> bool {
             let t = s.trim_start();

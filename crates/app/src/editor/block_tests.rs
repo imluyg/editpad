@@ -1350,6 +1350,20 @@ fn toggle_line_comment_wrap_unwrap_roundtrip() {
 }
 
 #[test]
+fn toggle_line_comment_refuses_syntaxes_without_a_line_prefix() {
+    // 第 315 轮 C6：Markdown 没有行注释前缀。改前它落进前缀表的 `_ => "//"`，
+    // 按一次 Ctrl+Q 就往正文里插两个斜杠
+    let mut c = core_with("正文\n");
+    c.set_language_by_name(Some("Markdown"));
+    assert!(!c.toggle_line_comment(), "该报 no-op");
+    assert_eq!(c.doc.to_text(), "正文\n", "一个字都不动");
+    // 对照：同一行在 Python 页照常加 `# `——前缀表本身没坏
+    c.set_language_by_name(Some("Python"));
+    assert!(c.toggle_line_comment());
+    assert_eq!(c.doc.to_text(), "# 正文\n");
+}
+
+#[test]
 fn toggle_line_comment_prefix_follows_syntax() {
     // Python → #；行数不变 → 书签原位
     let mut c = core_with("x = 1\ny = 2\n");
