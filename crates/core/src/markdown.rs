@@ -21,6 +21,10 @@
 //!   开栏与闭栏都按 CommonMark 的**贴边**（flanking）判据——紧跟全角标点的 `**` 开不了栏、
 //!   词内的 `_` 不开样式。这批判据的期望值拿 GitHub `/markdown`（cmark-gfm）逐条对拍过，
 //!   并拿本仓 40 行真实日志做过整语料差分（强调数 31 比 31）
+//! * **编辑面**判据（预览不碰，由应用层落进文档）：[`list_enter_action`] 接住列表项回车、
+//!   [`wrap_action`] 包／解行内标记（粗体／斜体／行内代码／删除线／链接一台机器）。
+//!   两者的期望值同样拿 GitHub `/markdown` 对拍过——斜体取 `*…*` 而不是 `_…_`，
+//!   因为词内的 `_` 开不了栏，中文句子里 `是_重点_的` 在 GitHub 上就是字面量。
 //!
 //! 明确不支持（保持字面量）：HTML 标签（`<br>` 除外）。
 
@@ -771,6 +775,161 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
         prefix,
         from_col: marker_end,
     })
+}
+
+/// 行内标记的种类（**编辑面**：包选区与解包共用一台机器，预览解析器不用它）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MdInlineMarker {
+    /// `**正文**`
+    Bold,
+    /// `*正文*`。**不是** `_正文_`：本仓与 GitHub 对拍过的贴边判据里词内的 `_`
+    /// 开不了栏（见 `emphasis_flanking_matches_the_github_reference` 钉的 `_词界_斜`），
+    /// 而中文句子里被选中的词两侧恰恰紧邻汉字——用 `_` 会让「按了键却没变斜」成常态。
+    Italic,
+    /// `` `正文` ``
+    Code,
+    /// `~~正文~~`
+    Strike,
+    /// `[正文](目标)`——非对称的一对，包完把光标放进目标槽等着填 URL。
+    Link,
+}
+
+impl MdInlineMarker {
+    /// 这一对的开栏串与闭栏串（替换文本直接拿它拼）。
+    pub fn pair(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Bold => ("**", "**"),
+            Self::Italic => ("*", "*"),
+            Self::Code => ("`", "`"),
+            Self::Strike => ("~~", "~~"),
+            Self::Link => ("[", "]()"),
+        }
+    }
+}
+
+/// [`wrap_action`] 的产出＝要落下的那一处替换。
+///
+/// 替换的**范围**＝「选区再向前吃 [`MdWrapEdit::head_cut`] 个字符、向后吃
+/// [`MdWrapEdit::tail_cut`] 个字符」——解包时那两截记号本来就长在选区外面。
+/// **偏移一律按字符计**，且相对 [`MdWrapEdit::text`] 的起点：判据只吃字符串本身，
+/// 字符↔列↔字节的换算留在编辑面，CJK 宽度这类坑就不至于两边各踩一次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdWrapEdit {
+    /// 换进上面那个范围的文本。
+    pub text: String,
+    /// 范围向选区**前**多吃的字符数（＝连选区外的开栏记号一起删）。
+    pub head_cut: usize,
+    /// 范围向选区**后**多吃的字符数。
+    pub tail_cut: usize,
+    /// 替换后的新选区（起点，长度）；`None` ⇒ 不保留选区，只落光标。
+    pub select: Option<(usize, usize)>,
+    /// 替换后的光标位置（字符偏移）。
+    pub caret: usize,
+}
+
+/// [`wrap_action`] 的 `before`／`after` 至少给多少个字符才判得出解包。
+///
+/// 最长的记号串是链接闭栏 `]()`（3 字符），给 4 留一格余量。编辑面按这个数取窗，
+/// **不物化整行**——单行 50 MB 的日志取整行串是本仓禁项（P298 立下的口径）。
+pub const WRAP_CONTEXT_CHARS: usize = 4;
+
+/// 包／解行内标记的判据（编辑面）。`sel` ＝当前选中的文本，`None` ＝没有选区；
+/// `before`／`after` ＝选区紧邻的前／后文本，各给 [`WRAP_CONTEXT_CHARS`] 个字符就够
+/// （给长了也无妨——判据只看两端各记号串那么长的一截）。四条落点，按判据顺序：
+///
+/// ① 选区**整尾**就是这一对（连记号一起选中了 `**甲**`）⇒ 剥掉选区首尾那两截；
+/// ② 记号长在选区**外面**（`**甲**` 里只选中 `甲`，或光标停在 `****` 中间）⇒ 把替换
+///    范围扩到那两截记号上删掉，正文照常选中。**这一条才是「再按一次就取消」的开关**：
+///    第一次包完，选区里剩的是正文，只判选区自身永远解不掉；
+/// ③ 没有正文（无选区或空选区）⇒ 插一对空记号，光标落在该写正文的那一格；
+/// ④ 其余 ⇒ 首尾各加一截记号，选区两端的空格／制表符提到**标记外**——连选常把行首
+///    缩进或词后空白一起带上，那些空白不该被关进粗体里。
+///
+/// 选区里本来就含同一记号（`*甲*` 再按一次斜体）⇒ 照样再加一层，**不做智能升降级**：
+/// 要分清「这一层是不是已有的一半」得把整行重解析，代价与错判面都不划算。跨行的选区
+/// 照包，因此**不带**「多行不生效」的提醒分支——段落里连续行本来就并成一份文本，
+/// `**甲\n乙**` 确实是一段粗体（钉在 `bold_span_may_cross_lines_in_a_paragraph`）。
+pub fn wrap_action(sel: Option<&str>, before: &str, after: &str, m: MdInlineMarker) -> MdWrapEdit {
+    let (open, close) = m.pair();
+    let open_chars = open.chars().count();
+    let close_chars = close.chars().count();
+    let body = sel.unwrap_or("");
+    let body_chars = body.chars().count();
+    // ① 选区自己就是包好的一对。先剥头再剥尾，所以 `**`（只有一截开栏）不会把头尾
+    // 算成同一串字符；剥完正文可以为空 ⇒ 选中的本来就是 `****` 那对空标记，整对删掉。
+    if let Some(inner) = sel
+        .and_then(|s| s.strip_prefix(open))
+        .and_then(|rest| rest.strip_suffix(close))
+    {
+        let n = inner.chars().count();
+        return MdWrapEdit {
+            text: inner.to_owned(),
+            head_cut: 0,
+            tail_cut: 0,
+            select: (n > 0).then_some((0, n)),
+            caret: n,
+        };
+    }
+    // ② 记号紧贴选区两侧 ⇒ 把它们吃进替换范围删掉，正文原样留着并继续选中。
+    if before.ends_with(open) && after.starts_with(close) {
+        return MdWrapEdit {
+            text: body.to_owned(),
+            head_cut: open_chars,
+            tail_cut: close_chars,
+            select: (body_chars > 0).then_some((0, body_chars)),
+            caret: body_chars,
+        };
+    }
+    // ③ 空正文 ⇒ 只放一对空记号，光标停在中间那一格。
+    if body_chars == 0 {
+        return MdWrapEdit {
+            text: format!("{open}{close}"),
+            head_cut: 0,
+            tail_cut: 0,
+            select: None,
+            caret: open_chars,
+        };
+    }
+    // ④ 两端空白提到标记外。还是先摘头再摘尾（同 ① 的道理），于是纯空白的选区
+    // 只会得到空正文；那时不提了——把 `   ` 拆成标记外的空白与标记内的空正文
+    // 没有意义，原样包起来反倒看得出发生了什么。
+    let lead_len: usize = body
+        .chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .map(char::len_utf8)
+        .sum();
+    let after_lead = &body[lead_len..];
+    let trail_len: usize = after_lead
+        .chars()
+        .rev()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .map(char::len_utf8)
+        .sum();
+    let (lead, inner, trail) = if after_lead.len() == trail_len {
+        ("", body, "")
+    } else {
+        (
+            &body[..lead_len],
+            &after_lead[..after_lead.len() - trail_len],
+            &body[body.len() - trail_len..],
+        )
+    };
+    let body_off = lead.chars().count() + open_chars;
+    let inner_chars = inner.chars().count();
+    let text = format!("{lead}{open}{inner}{close}{trail}");
+    let (select, caret) = if m == MdInlineMarker::Link {
+        // 正文已经就位 ⇒ 光标进 `]()` 的两括号中间等着填目标，不再保留选区
+        (None, body_off + inner_chars + close_chars - 1)
+    } else {
+        (Some((body_off, inner_chars)), body_off + inner_chars)
+    };
+    MdWrapEdit {
+        text,
+        head_cut: 0,
+        tail_cut: 0,
+        select,
+        caret,
+    }
 }
 
 /// 缩进代码块（4 列／制表符）：把行首那 4 列吃掉，剩下的原样留着（含相对缩进）。
@@ -3412,5 +3571,120 @@ mod tests {
         for line in ["正文", "-abc", "1.ab", "---", "*** 粗", "", "  ", "# 标题"] {
             assert!(list_enter_action(line).is_none(), "{line:?} 不该被当列表项");
         }
+    }
+
+    // ---------- 第 315 轮 C1：包／解行内标记（编辑面判据） ----------
+
+    /// 按 [`MdWrapEdit`] 的偏移取回新选区罩住的那截正文。
+    fn selected_body(e: &MdWrapEdit) -> String {
+        let (off, len) = e.select.expect("这一格应当保留选区");
+        e.text.chars().skip(off).take(len).collect()
+    }
+
+    #[test]
+    fn wrap_without_selection_inserts_an_empty_pair() {
+        for (m, want, caret) in [
+            (MdInlineMarker::Bold, "****", 2),
+            (MdInlineMarker::Italic, "**", 1),
+            (MdInlineMarker::Code, "``", 1),
+            (MdInlineMarker::Strike, "~~~~", 2),
+            (MdInlineMarker::Link, "[]()", 1),
+        ] {
+            let e = wrap_action(None, "正文 ", " 结尾", m);
+            assert_eq!(e.text, want, "{m:?} 按下去先落一对空记号");
+            assert_eq!(e.select, None, "没有正文可选");
+            assert_eq!((e.head_cut, e.tail_cut), (0, 0), "没邻接记号可删");
+            assert_eq!(e.caret, caret, "{m:?} 光标要落在两记号中间");
+        }
+    }
+
+    #[test]
+    fn wrapping_then_pressing_again_unwraps_it() {
+        for (m, open, close) in [
+            (MdInlineMarker::Bold, "**", "**"),
+            (MdInlineMarker::Italic, "*", "*"),
+            (MdInlineMarker::Code, "`", "`"),
+            (MdInlineMarker::Strike, "~~", "~~"),
+        ] {
+            // 第一下：包起来，选区收缩到正文（记号落在选区外）
+            let wrapped = wrap_action(Some("重点"), "", "", m);
+            assert_eq!(wrapped.text, format!("{open}重点{close}"));
+            assert_eq!(selected_body(&wrapped), "重点", "包完选区要还罩住正文");
+            // 第二下：记号紧贴选区两侧 ⇒ 判的是邻接上下文，只看选区自身永远解不掉
+            let off = wrap_action(Some("重点"), &format!("是{open}"), &format!("{close}的"), m);
+            assert_eq!(off.text, "重点", "{m:?} 再按一次要剥回原样");
+            assert_eq!(
+                (off.head_cut, off.tail_cut),
+                (open.chars().count(), close.chars().count()),
+                "{m:?} 那两截记号在选区外面，得靠邻接删"
+            );
+            assert_eq!(selected_body(&off), "重点", "解完仍罩住正文");
+        }
+    }
+
+    #[test]
+    fn a_pair_selected_whole_is_stripped_and_an_empty_one_deleted() {
+        let e = wrap_action(Some("**甲**"), "", "", MdInlineMarker::Bold);
+        assert_eq!(e.text, "甲");
+        assert_eq!((e.head_cut, e.tail_cut), (0, 0), "剥的是选区自身，不动邻接");
+        assert_eq!(selected_body(&e), "甲");
+
+        let empty = wrap_action(Some("****"), "", "", MdInlineMarker::Bold);
+        assert_eq!(empty.text, "", "选中一对空记号 ⇒ 整对删掉");
+        assert_eq!(empty.select, None);
+
+        // 只有一截开栏：先剥头再剥尾，不会把头尾算成同一串字符 ⇒ 照常再加一层
+        let half = wrap_action(Some("**甲"), "", "", MdInlineMarker::Bold);
+        assert_eq!(half.text, "****甲**");
+    }
+
+    #[test]
+    fn edge_whitespace_stays_outside_the_markers() {
+        let e = wrap_action(Some("  甲  "), "", "", MdInlineMarker::Bold);
+        assert_eq!(e.text, "  **甲**  ", "连选带上的空白不该被关进粗体里");
+        assert_eq!(selected_body(&e), "甲");
+        assert_eq!(e.caret, "  **甲".chars().count());
+
+        // 纯空白的选区：不提空白（一提就只剩空正文），原样包起来反倒看得出发生了什么
+        let ws = wrap_action(Some("   "), "", "", MdInlineMarker::Bold);
+        assert_eq!(ws.text, "**   **");
+        assert_eq!(selected_body(&ws), "   ");
+    }
+
+    #[test]
+    fn link_wrap_puts_the_caret_where_the_target_goes() {
+        let bare = wrap_action(None, "", "", MdInlineMarker::Link);
+        assert_eq!(bare.text, "[]()");
+        assert_eq!(bare.caret, 1, "先让光标落在括号中间写正文");
+
+        let e = wrap_action(Some("官网"), "", "", MdInlineMarker::Link);
+        assert_eq!(e.text, "[官网]()");
+        assert_eq!(e.select, None, "正文已就位，不再留着选区");
+        assert_eq!(e.caret, "[官网](".chars().count(), "光标进目标槽等着填 URL");
+
+        let off = wrap_action(Some("官网"), "[", "]()", MdInlineMarker::Link);
+        assert_eq!(off.text, "官网");
+        assert_eq!(
+            (off.head_cut, off.tail_cut),
+            (1, 3),
+            "解包吃掉 `[` 与 `]()`"
+        );
+    }
+
+    /// 跨行的一段粗体在预览里确实成立 ⇒ 包裹判据**不需要**「多行不生效」的提醒分支。
+    /// 对拍基准＝GitHub：同一份文本出 `<strong>甲<br>乙</strong>`。
+    #[test]
+    fn bold_span_may_cross_lines_in_a_paragraph() {
+        assert_eq!(
+            parse_markdown("正文 **甲\n乙** 结尾"),
+            vec![MdBlock::Paragraph {
+                spans: vec![
+                    MdSpan::plain("正文 "),
+                    styled("甲 乙", MD_BOLD),
+                    MdSpan::plain(" 结尾"),
+                ]
+            }],
+            "段落把连续行并成一份文本，粗体跨得过去"
+        );
     }
 }
