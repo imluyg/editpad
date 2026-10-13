@@ -121,7 +121,7 @@ fn markdown_preview_cache_is_reused_until_content_changes() {
     let cached = |app: &Editpad| -> std::rc::Rc<Vec<editpad_core::markdown::MdBlock>> {
         app.md_preview_cache
             .borrow()
-            .as_ref()
+            .first()
             .expect("预览开态走过一次 view() 后应建立解析缓存")
             .1
             .clone()
@@ -4264,7 +4264,7 @@ fn markdown_preview_reparses_at_most_once_per_typing_burst() {
     let cached = |app: &Editpad| -> std::rc::Rc<Vec<editpad_core::markdown::MdBlock>> {
         app.md_preview_cache
             .borrow()
-            .as_ref()
+            .first()
             .expect("预览开态走过一次 view() 后应建立解析缓存")
             .1
             .clone()
@@ -4353,7 +4353,7 @@ fn markdown_preview_reparses_immediately_when_switching_tabs() {
     let cached = |app: &Editpad| -> Vec<editpad_core::markdown::MdBlock> {
         app.md_preview_cache
             .borrow()
-            .as_ref()
+            .first()
             .expect("预览开态走过一次 view() 后应建立解析缓存")
             .1
             .as_ref()
@@ -4429,6 +4429,107 @@ fn markdown_preview_reparses_immediately_when_switching_tabs() {
         count() - base,
         2,
         "同页节流窗口内仍逐键重解析：省成本那一格白做了"
+    );
+
+    // 切回乙页：它的块表还在槽里 ⇒ 不该再全篇重解析（改前只有一槽，切一次解一次，
+    // 来回对照两篇大 .md 就是每切一刀付一遍全文拷贝＋整篇重解）
+    dispatch(&mut app, Message::SwitchTab(1));
+    frame(&app, &mut tree);
+    assert_eq!(
+        count() - base,
+        2,
+        "切回刚看过的页仍重解析：解析缓存只留一槽"
+    );
+    let back = app.cur_handle.borrow().doc.to_text();
+    assert!(
+        back.contains("乙页"),
+        "夹具自证：这一帧的活动页确实还是乙页"
+    );
+    assert_eq!(
+        cached(&app),
+        editpad_core::markdown::parse_markdown(&back),
+        "命中缓存给的却不是这一页的块表"
+    );
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
+}
+
+/// 解析缓存的槽数是**上限**不是建议：开第五篇页时最久没用的那一槽要被丢掉，
+/// 否则页开多少就存多少份整篇块表（一块表约等于正文那么大）。
+#[test]
+fn markdown_preview_parse_cache_evicts_beyond_its_slots() {
+    use crate::md_preview::{
+        MD_PARSE_COUNT, MD_PREVIEW_CACHE_SLOTS, MD_PREVIEW_SWAP_MS, MD_SWAP_WINDOW_MS,
+    };
+    use iced::advanced::layout;
+    use iced::advanced::widget::Tree;
+
+    let count = || MD_PARSE_COUNT.with(|c| c.get());
+    let renderer = iced::Renderer::new(iced::Font::MONOSPACE, iced::Pixels(16.0));
+    let limits = layout::Limits::new(iced::Size::new(0.0, 0.0), iced::Size::new(1280.0, 800.0));
+    let frame = |app: &Editpad, tree: &mut Tree| {
+        let mut el = app.view();
+        el.as_widget_mut().diff(tree);
+        el.as_widget_mut().layout(tree, &renderer, &limits);
+    };
+
+    let mut app = Editpad::default();
+    // 比槽数多开一页：最久没用那一槽必须被挤出去
+    let pages = MD_PREVIEW_CACHE_SLOTS + 1;
+    for i in 0..pages {
+        if i > 0 {
+            dispatch(&mut app, Message::NewTab);
+        }
+        dispatch(
+            &mut app,
+            Message::FileDropped(PathBuf::from(format!("C:/x/p{i}.md"))),
+        );
+        let seq = app.job_seq;
+        dispatch(
+            &mut app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(&format!("# 第{i}页\n\n正文{i}\n")),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+    }
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, ".md 页应能开预览");
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(u64::MAX));
+    let mut tree = {
+        let el = app.view();
+        Tree::new(el.as_widget())
+    };
+    // 从第 0 页往后逐个切过去：最后一页进来时，最早那一页正好被挤出 4 槽
+    for i in 0..pages {
+        dispatch(&mut app, Message::SwitchTab(i));
+        frame(&app, &mut tree);
+    }
+    let held = app.md_preview_cache.borrow().len();
+    // 两条各盯一个方向：只留一槽＝这一笔没做；超过槽数＝淘汰没截住（页开多少存多少）
+    assert!(
+        held > 1,
+        "解析缓存仍只留一槽：切一次标签页就重解整篇（实际留着 {held} 份）"
+    );
+    assert_eq!(
+        held, MD_PREVIEW_CACHE_SLOTS,
+        "开了 {pages} 页却存着 {held} 份整篇块表：淘汰没截住"
+    );
+    // 第 0 页是最早用的那一个 ⇒ 它已经被挤出去了 ⇒ 回头必须重解一次
+    // （这里量的是**增量**：建 Tree 那一帧也已经解过一次，把绝对次数写死会把
+    // 夹具的帧序当成判据）
+    let before_back = count();
+    dispatch(&mut app, Message::SwitchTab(0));
+    frame(&app, &mut tree);
+    assert_eq!(
+        count() - before_back,
+        1,
+        "被挤掉的那一页回头却不重解析＝缓存把不认识的键当成了命中"
     );
 
     MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));

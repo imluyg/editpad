@@ -410,7 +410,11 @@ pub(crate) struct Editpad {
 /// 块表套 `Rc` 是为了让「签名未变 → 确实没有重解析」在测试里**可观测**
 /// （`Rc::ptr_eq` 判同一性），否则缓存是否生效只能靠耗时断言去猜。
 /// 收成本名是为躲过 clippy `type_complexity`（字段内联写会直接阻断 `-D warnings`）。
-type MdPreviewCache = Option<(
+///
+/// 第 316 轮起它是**一排槽**而不是一个槽：单槽时切一次标签页就把整篇重解析一遍
+/// （两篇大 .md 来回对照＝每切一次付一次全文拷贝＋全量重解）。槽数与淘汰口径见
+/// [`crate::md_preview::MD_PREVIEW_CACHE_SLOTS`] 与 `view` 里的预览分支。
+type MdPreviewCache = Vec<(
     (u64, u64, usize, usize),
     std::rc::Rc<Vec<editpad_core::markdown::MdBlock>>,
 )>;
@@ -522,7 +526,7 @@ impl Default for Editpad {
             menubar_anchor: (12.0, 8.0),
             dark_mode: false,
             preview_visible: false,
-            md_preview_cache: std::cell::RefCell::new(None),
+            md_preview_cache: std::cell::RefCell::new(Vec::new()),
             md_preview_seq: std::cell::Cell::new(0),
             md_preview_tree: crate::md_preview::MdTreeSlot::default(),
             md_block_cache: crate::md_preview::MdBlockCacheSlot::default(),

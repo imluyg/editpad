@@ -66,6 +66,85 @@ fn main() {
         "\n参照：预览关态一帧 1.1～2.0 ms，预览开态的空闲复用帧 0.1～1.0 ms\
          \n（`docs/days/2026-10-12.md:246-251` 现量）。上面任何一个数落在**每次按键**上都是掉帧。"
     );
+
+    // 另一把尺子：**换版帧**还要把整篇块表过一次内容指纹
+    // （`crates/app/src/md_preview.rs` 的 `md_block_fingerprint`＝`block.hash()`）。
+    // 这一份落在换版那一帧，与上面那份同阶；用它判断"指纹增量化"值不值得做。
+    use std::hash::{Hash, Hasher};
+    println!("\n== 换版帧的整篇指纹（`block.hash()` 全过一遍）==");
+    println!("{:<14}{:>10}", "夹具", "指纹 ms");
+    for case in &cases {
+        let blocks = editpad_core::markdown::parse_markdown(&case.text);
+        let mut best = Duration::MAX;
+        for _ in 0..repeats {
+            let t = Instant::now();
+            for b in &blocks {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                b.hash(&mut h);
+                std::hint::black_box(h.finish());
+            }
+            let el = t.elapsed();
+            if el < best {
+                best = el;
+            }
+        }
+        println!("{:<14}{:>10.2}", case.name, best.as_secs_f64() * 1000.0);
+    }
+
+    // 第三把尺子：**一块解析缓存的槽**大约装着多少字节——按页多槽那份的内存代价
+    // （`crates/app/src/state.rs` 的 `MdPreviewCache`，槽数＝`MD_PREVIEW_CACHE_SLOTS`）。
+    // 量的是块表里所有文本的字节和（正文拷贝一份＋块结构，真实占用比这个再大一截）。
+    println!("\n== 一块槽里装着多少正文文本（多槽缓存的内存代价）==");
+    println!(
+        "{:<14}{:>10}{:>10}{:>9}",
+        "夹具", "正文字节", "块表字节", "倍率"
+    );
+    for case in &cases {
+        let mut held = 0usize;
+        for b in &editpad_core::markdown::parse_markdown(&case.text) {
+            count_text(b, &mut held);
+        }
+        println!(
+            "{:<14}{:>10}{:>10}{:>8.2}x",
+            case.name,
+            case.text.len(),
+            held,
+            held as f64 / case.text.len() as f64
+        );
+    }
+}
+
+/// 块表里落着的**文本字节**和（结构与 Vec 的容量不算在里面）。
+fn count_text(block: &editpad_core::markdown::MdBlock, out: &mut usize) {
+    use editpad_core::markdown::MdBlock as B;
+    let spans_len = |spans: &[editpad_core::markdown::MdSpan]| -> usize {
+        spans.iter().map(|s| s.text.len()).sum()
+    };
+    *out += match block {
+        B::Heading { spans, .. } | B::Paragraph { spans } => spans_len(spans),
+        B::ListItem { spans, .. } => spans_len(spans),
+        B::CodeBlock { lang, lines } => {
+            lang.as_ref().map_or(0, |l| l.len()) + lines.iter().map(String::len).sum::<usize>()
+        }
+        B::Quote { blocks, .. } => {
+            let mut inner = 0usize;
+            for b in blocks {
+                count_text(b, &mut inner);
+            }
+            inner
+        }
+        B::Table { header, rows, .. } => {
+            header.iter().flatten().map(|s| s.text.len()).sum::<usize>()
+                + rows
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .map(|s| s.text.len())
+                    .sum::<usize>()
+        }
+        B::Footnotes { items } => items.iter().map(|i| spans_len(&i.spans)).sum(),
+        B::Rule => 0,
+    };
 }
 
 fn cases() -> Vec<Case> {

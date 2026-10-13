@@ -304,32 +304,39 @@ impl Editpad {
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()));
             let preview = {
                 let mut cache = self.md_preview_cache.borrow_mut();
-                let stale = !cache.as_ref().is_some_and(|(k, _)| *k == key);
-                // 第 316 轮：换版还不许的这一帧**不必付全篇重解析**。改前只有 widget
-                // 树的换版被 300 ms 节流管住，`to_text()`＋`parse_markdown` 一直在窗口
-                // 外面——连打 30 键现量＝整篇重解析 31 次（353 KB 那档一次 4.05 ms）。
-                // 跳过时继续用旧块表：旧树自足（每个 span 的文本都已克隆成 owned
-                // Fragment），画的是上一版而不是错内容，停手后同一道节流放行时补上。
-                // 例外＝**换页**（键里的页 id 变了）：那不许等窗口，别页的块表一张也不能
-                // 借，借了就是把另一篇文档渲在这一页预览里。
-                if stale
-                    && (!cache.as_ref().is_some_and(|(k, _)| k.0 == key.0)
-                        || md_preview_can_swap(self.md_preview_swap_at.get()))
-                {
-                    note_parse();
-                    let text = tab.editor.borrow().doc.to_text();
-                    *cache = Some((
-                        key,
-                        std::rc::Rc::new(editpad_core::markdown::parse_markdown(&text)),
-                    ));
-                    // 每一遍重建都发一个新号：`MdCached` 的依赖指纹光看块表指针不成立
-                    // （旧 Rc 一释放，分配器很可能把同一地址给下一份等长 Vec）
-                    self.md_preview_seq.set(self.md_preview_seq.get() + 1);
+                // 第 316 轮：解析缓存**按页留几槽**（单槽时切一次标签页＝整篇重解一遍），
+                // 命中就把那一槽提到最前 ⇒ `cache[0]` 始终是屏幕上这一版的块表。
+                if let Some(at) = cache.iter().position(|(k, _)| *k == key) {
+                    if at > 0 {
+                        let slot = cache.remove(at);
+                        cache.insert(0, slot);
+                    }
+                } else {
+                    // 换版还不许的这一帧**不必付全篇重解析**：改前只有 widget 树的换版
+                    // 被 300 ms 节流管住，`to_text()`＋`parse_markdown` 一直在窗口外面——
+                    // 连打 30 键现量＝整篇重解析 31 次（353 KB 那档一次 4.05 ms）。
+                    // 跳过时继续用 `cache[0]`：旧树自足（每个 span 的文本都已克隆成 owned
+                    // Fragment），画的是本页上一版而不是错内容。
+                    // 例外＝屏幕上不是这一页（含首帧没槽）：那不许等窗口，别页的块表一张
+                    // 也不许借，借了就是把另一篇文档渲在这一页的预览里。
+                    let on_screen = cache.first().map(|(k, _)| k.0);
+                    if !on_screen.is_some_and(|id| id == key.0)
+                        || md_preview_can_swap(self.md_preview_swap_at.get())
+                    {
+                        note_parse();
+                        let text = tab.editor.borrow().doc.to_text();
+                        let blocks =
+                            std::rc::Rc::new(editpad_core::markdown::parse_markdown(&text));
+                        cache.insert(0, (key, blocks));
+                        cache.truncate(MD_PREVIEW_CACHE_SLOTS);
+                        // 每一遍重建都发一个新号：`MdCached` 的依赖指纹光看块表指针不成立
+                        // （旧 Rc 一释放，分配器很可能把同一地址给下一份等长 Vec）
+                        self.md_preview_seq.set(self.md_preview_seq.get() + 1);
+                    }
                 }
-                let (_, blocks) = cache.as_ref().expect("上一步刚确保证非空");
                 // P408：预览树交给 `MdCached` 缓存——依赖（块表＋字号＋主题＋字形族＋
                 // 基准目录）不变就复用上一次的 widget，`Rich` 的排版缓存因此跨帧存活。
-                let shown = blocks.clone();
+                let shown = cache.first().expect("上一步刚确保证非空").1.clone();
                 let px = self.display_font_size();
                 let theme = self.theme();
                 let base = content_font;
