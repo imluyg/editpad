@@ -301,7 +301,7 @@ fn parse_lines(lines: &[&str], defs: &LinkDefs, is_def: &[bool], doc_begin: usiz
             // ＝写引用时第二行忘了 `>` 就会让引用只剩一行。
             while i < lines.len() {
                 let t = lines[i].trim();
-                if t.is_empty() || starts_new_block(lines, i, defs, is_def) {
+                if t.is_empty() || starts_new_block(lines, i, is_def) {
                     break;
                 }
                 inner.push(t);
@@ -335,7 +335,7 @@ fn parse_lines(lines: &[&str], defs: &LinkDefs, is_def: &[bool], doc_begin: usiz
                 }
                 // 另起一块的开头（标题/围栏/分隔线/表格/引用/下一个列表项/定义行）不吃；
                 // 空过行之后只有缩进够到正文列的那一行还归本项
-                let belongs = !starts_new_block(lines, k, defs, is_def)
+                let belongs = !starts_new_block(lines, k, is_def)
                     && (blanks == 0 || indent_cols(raw) >= item.content_col);
                 if !belongs {
                     break;
@@ -378,7 +378,7 @@ fn parse_lines(lines: &[&str], defs: &LinkDefs, is_def: &[bool], doc_begin: usiz
                     break;
                 }
             }
-            if next.is_empty() || starts_new_block(lines, i, defs, is_def) {
+            if next.is_empty() || starts_new_block(lines, i, is_def) {
                 break;
             }
             let (sep, drop_backslash) = line_break_kind(prev_raw);
@@ -1155,8 +1155,12 @@ fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
 }
 
 /// 表格第一行的判定（段落续行要用它断句）。
-fn is_table_start(lines: &[&str], i: usize, defs: &LinkDefs) -> bool {
-    table(lines, i, defs).is_some()
+///
+/// 判据只看**形状**（[`table_shape`]）。改前它写成 `table(lines, i, defs).is_some()`，
+/// 为了回答「这一行是不是新块」把整张表**每一格都做了行内解析**再丢掉：段落紧贴表格
+/// 的文档里，一张 1204 格的表因此被解析两遍（现量＝格解析 2408 次 vs 1204 次）。
+fn is_table_start(lines: &[&str], i: usize) -> bool {
+    table_shape(lines, i).is_some()
 }
 
 /// 这一行是不是 HTML 注释的起头（段落的续行判据要用它断句）。
@@ -1187,20 +1191,23 @@ fn html_comment(lines: &[&str], start: usize) -> Option<usize> {
 
 /// 这一行是不是**另起一块**的开头：段落的续行与列表项的续行共用这一份判据
 /// （两处各写一遍就会各漏一格，比如列表项吃了 `>` 引用行）。
-fn starts_new_block(lines: &[&str], i: usize, defs: &LinkDefs, is_def: &[bool]) -> bool {
+fn starts_new_block(lines: &[&str], i: usize, is_def: &[bool]) -> bool {
     let t = lines[i].trim();
     fence(lines, i).is_some()
         || heading(t).is_some()
         || is_rule(t)
-        || is_table_start(lines, i, defs)
+        || is_table_start(lines, i)
         || quote(t).is_some()
         || list_item(lines[i]).is_some()
         || is_comment_start(lines[i])
         || is_def[i]
 }
 
-/// GFM 表格：表头行 + 分隔行（只含 `| : - 空格`）+ 数据行。
-fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usize)> {
+/// 表格的**形状**：`(各列对齐方式, 表格之后下一行的下标)`。不成表 ⇒ `None`。
+///
+/// 一份两用：[`table`] 用它定位要填内容的区间，[`is_table_start`] 用它答布尔。
+/// 这一份**不做行内解析**，所以"这一行是不是新块"那一问的代价与表的格数无关。
+fn table_shape(lines: &[&str], start: usize) -> Option<(Vec<MdAlign>, usize)> {
     let head = lines[start].trim();
     if !head.contains('|') {
         return None;
@@ -1220,32 +1227,43 @@ fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usiz
     if align.is_empty() {
         return None;
     }
-    let header = normalize_row(
-        split_row(head)
-            .into_iter()
-            .map(|cell| {
-                note_cell_parse();
-                inline_with(cell, defs)
-            })
-            .collect(),
-        align.len(),
-    );
-    let mut rows = Vec::new();
     let mut k = start + 2;
     while k < lines.len() {
         let line = lines[k].trim();
         if line.is_empty() || !line.contains('|') {
             break;
         }
-        let row: Vec<Vec<MdSpan>> = split_row(line)
+        k += 1;
+    }
+    Some((align, k))
+}
+
+/// GFM 表格：表头行 + 分隔行（只含 `| : - 空格`）+ 数据行。
+///
+/// 形状判据在 [`table_shape`]，这里只把区间内的格子填上内容。
+fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usize)> {
+    let (align, end) = table_shape(lines, start)?;
+    let cols = align.len();
+    let header = normalize_row(
+        split_row(lines[start].trim())
+            .into_iter()
+            .map(|cell| {
+                note_cell_parse();
+                inline_with(cell, defs)
+            })
+            .collect(),
+        cols,
+    );
+    let mut rows = Vec::new();
+    for line in &lines[start + 2..end] {
+        let row: Vec<Vec<MdSpan>> = split_row(line.trim())
             .into_iter()
             .map(|cell| {
                 note_cell_parse();
                 inline_with(cell, defs)
             })
             .collect();
-        rows.push(normalize_row(row, align.len()));
-        k += 1;
+        rows.push(normalize_row(row, cols));
     }
     Some((
         MdBlock::Table {
@@ -1253,7 +1271,7 @@ fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usiz
             header,
             rows,
         },
-        k,
+        end,
     ))
 }
 
@@ -3888,6 +3906,57 @@ mod tests {
                 ]
             }],
             "段落把连续行并成一份文本，粗体跨得过去"
+        );
+    }
+
+    /// 表格的成本契约：**每一格最多被行内解析一次**。
+    ///
+    /// 病在判据那一侧——段落续行要用 `is_table_start` 断句，改前它就是
+    /// `table(...).is_some()`，于是表格紧贴段落的那一种写法（中间不空行）会把
+    /// 整张表解析两遍：一遍为答布尔，一遍为产出。大文档里这一份落在**每次按键**上。
+    #[test]
+    fn table_cells_are_parsed_exactly_once() {
+        let (rows, cols) = (40usize, 4usize);
+        fn row(cols: usize, cell: impl Fn(usize) -> String) -> String {
+            let mut s = String::new();
+            for c in 0..cols {
+                s.push_str("| ");
+                s.push_str(&cell(c));
+                s.push(' ');
+            }
+            s.push_str("|\n");
+            s
+        }
+        // 段落**紧贴**表格（没有空行）⇒ 段落续行判据会为表格首行问一次 is_table_start
+        let mut src = String::from("# 表格\n\n正文第一段最后一行\n");
+        src.push_str(&row(cols, |c| format!("列{c}")));
+        src.push_str(&row(cols, |_| "-".repeat(8)));
+        for r in 0..rows {
+            src.push_str(&row(cols, |c| format!("第{r}行第{c}格")));
+        }
+
+        MD_TABLE_CELL_PARSES.with(|c| c.set(0));
+        let blocks = parse_markdown(&src);
+        let parsed = MD_TABLE_CELL_PARSES.with(|c| c.get());
+
+        // 夹具自证：那张表真的成了表（表头＋数据行的每一格都在块里）
+        let cells: usize = blocks
+            .iter()
+            .map(|b| match b {
+                MdBlock::Table { header, rows, .. } => {
+                    header.len() + rows.iter().map(|r| r.len()).sum::<usize>()
+                }
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            cells,
+            (rows + 1) * cols,
+            "夹具里的表格没被解析成表格：这条断言就成了空断言"
+        );
+        assert_eq!(
+            cells, parsed,
+            "格被行内解析了 {parsed} 次，而表里只有 {cells} 格＝判据那一问把整表又解了一遍"
         );
     }
 }
