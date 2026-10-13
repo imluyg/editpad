@@ -356,6 +356,43 @@ fn enter_markdown_leaves_non_list_lines_to_smart_indent() {
     assert_eq!(c.doc.to_text(), "\n- 甲");
 }
 
+// ---------- 第 315 轮 C5：Markdown 页回车接住引用块（编辑面） ----------
+
+#[test]
+fn enter_markdown_continues_the_quote_bar_and_exits_it() {
+    let mut c = core_with("> 甲");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "> 甲\n> ", "栏跟着接下去");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 2 });
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "> 甲\n\n", "空栏上再按一次＝退出引用");
+
+    let mut c = core_with("> - 甲");
+    c.cursor = CursorPos { line: 0, col: 5 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "> - 甲\n> - ", "栏里的列表一起接");
+
+    let mut c = core_with(">> 甲");
+    c.cursor = CursorPos { line: 0, col: 4 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), ">> 甲\n>> ", "两层栏各带一份");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 3 });
+
+    // 栏里剩一个空列表项：只摘列表那截、栏留着（一层一层退，按一下跳两层太陡）
+    let mut c = core_with("> - ");
+    c.cursor = CursorPos { line: 0, col: 4 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), "> \n", "摘掉 `- `，栏不跟着一起消失");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 0 });
+
+    // 光标还停在栏之内＝不接管（那一下就是在引用里断行，不是另起一段引用）
+    let mut c = core_with("> 甲");
+    c.cursor = CursorPos { line: 0, col: 1 };
+    c.enter_markdown();
+    assert_eq!(c.doc.to_text(), ">\n 甲", "行内断行，续的是普通缩进回车");
+}
+
 // ---------- 第 315 轮 C2：Markdown 行内标记包／解（编辑面） ----------
 
 use editpad_core::markdown::MdInlineMarker as M;

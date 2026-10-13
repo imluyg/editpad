@@ -196,20 +196,24 @@ impl EditorCore {
         self.insert_str(&text);
     }
 
-    /// Markdown 页的回车＝**接住列表**（编辑面）。
+    /// Markdown 页的回车＝**接住列表与引用**（编辑面）。
     ///
-    /// 三种落点：① 列表项且已有正文 ⇒ 新行给同样的标记（有序进位、任务框给**空框**）；
-    /// ② 空的列表项 ⇒ 退出列表（删掉那截标记，再走普通回车留一个空行作段间空行）；
-    /// ③ 其余（非列表行、或光标还停在标记之前）⇒ 与 [`enter`](Self::enter) 逐字一致。
+    /// 三种落点：① 列表项且已有正文 ⇒ 新行给同样的标记（有序进位、任务框给**空框**；
+    /// 在引用块里就连栏一起接，`> - 甲` → `> - `）；② 空的列表项／空的引用栏 ⇒
+    /// 退出**那一层**（引用里的空列表项只摘列表那截、留着栏，再按一次才退栏）；
+    /// ③ 其余（普通行、或光标还停在标记之前）⇒ 与 [`enter`](Self::enter) 逐字一致。
     ///
-    /// 判据本身在 core 的 [`editpad_core::markdown::list_enter_action`]（一份表，
-    /// 与预览解析器同一模块），这里只管落到文档上。
+    /// 判据本身在 core 的 [`editpad_core::markdown::quote_list_enter_action`]
+    /// （非引用行原样交回 `list_enter_action`，与预览解析器同一模块），这里只管落到文档上。
     pub fn enter_markdown(&mut self) {
         let line = self.cursor.line;
         let body = self.line_body_without_eol(line);
-        match editpad_core::markdown::list_enter_action(&body) {
-            Some(editpad_core::markdown::MdListEnter::Exit { marker_end }) => {
-                self.select_span(line, 0, marker_end);
+        match editpad_core::markdown::quote_list_enter_action(&body) {
+            Some(editpad_core::markdown::MdListEnter::Exit {
+                marker_start,
+                marker_end,
+            }) => {
+                self.select_span(line, marker_start, marker_end - marker_start);
                 self.insert_str("");
                 self.enter();
             }

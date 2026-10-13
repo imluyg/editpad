@@ -691,7 +691,7 @@ fn list_item(raw: &str) -> Option<MdListItem<'_>> {
     })
 }
 
-/// 列表项**回车续写**的两种结果（编辑面，预览解析器不用它）。
+/// 列表／引用**回车续写**的两种结果（编辑面，预览解析器不用它）。
 ///
 /// 只判**当前这一行**（不看上下文），因为按回车时唯一确定的就是光标所在行。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -699,8 +699,13 @@ pub enum MdListEnter {
     /// 接着开下一项：`prefix` ＝缩进＋标记＋空格（有序已进位、任务框给空框）。
     /// `from_col` ＝正文起始列；光标还在标记之前时不接管（那一下就是普通回车）。
     Next { prefix: String, from_col: usize },
-    /// 本项正文是空的 ⇒ **退出列表**：删掉行首 `[0, marker_end)` 那一截标记。
-    Exit { marker_end: usize },
+    /// 正文是空的 ⇒ **退出这一层**：删掉行内 `[marker_start, marker_end)` 那截标记。
+    /// 起点不是恒 0——引用块里的空列表项只该摘掉列表那截、留着栏
+    /// （见 [`quote_list_enter_action`]），一层一层退才按得下手。
+    Exit {
+        marker_start: usize,
+        marker_end: usize,
+    },
 }
 
 /// 列表项回车续写的判据（编辑面）。`marker_end` ＝正文起始的**字符列**，
@@ -764,7 +769,10 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
     };
     let marker_end = head_len + marker_bytes + spaces + box_len;
     if body_text.trim().is_empty() {
-        return Some(MdListEnter::Exit { marker_end });
+        return Some(MdListEnter::Exit {
+            marker_start: 0,
+            marker_end,
+        });
     }
     let prefix = if box_text.is_empty() {
         format!("{head}{marker_text} ")
@@ -775,6 +783,74 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
         prefix,
         from_col: marker_end,
     })
+}
+
+/// 引用块里的回车续写（编辑面）：行首那几道 `>` 栏跟着接下去，栏里的列表一起接。
+///
+/// 引用判据与预览解析器**共用一份**（[`quote`]）——`>甲` 这种栏后不带空格的写法
+/// 解析器认，编辑面若不认，同一行就在两处各有一个答案。
+///
+/// * `> 甲` → `Next("> ")`；`> - 甲` → `Next("> - ")`（`d77caa1` 之后引用块内部
+///   本来就按块级解析，栏里的列表是真列表项）；`>> 甲` → `Next(">> ")`；
+/// * 栏后没有正文（`>`／`> `）⇒ `Exit` 摘掉那截栏 ⇒ 回车退出引用；
+/// * 栏里剩一个空列表项（`> - `）⇒ `Exit` **只删列表那截、留着栏**：一层一层退，
+///   按一下键跳掉两层太陡；
+/// * 栏后是别的块级开头（`> # 标题`）⇒ 照样续栏——续的是「引用」这一层，与栏里
+///   装的是什么块无关（标题本身不续行，那是这一行之外的事）；
+/// * 非引用行原样交回 [`list_enter_action`]，普通列表的行为一字不变。
+///
+/// 续出去的栏一律本仓的正规形（每层一道 `>`、末尾一个空格，行首缩进原样带过来）；
+/// 而 `marker_start`／`marker_end`／`from_col` 说的是**当前这一行**的字符列，
+/// 所以按原样写的那截（`>甲`、`>  `）用它自己的长度。
+pub fn quote_list_enter_action(line: &str) -> Option<MdListEnter> {
+    // 不是引用行 ⇒ 原样交回普通列表判据（应用层只调这一个函数，这条退路
+    // 就是「普通列表的行为一字不变」的落点）
+    let Some((depth, _)) = quote(line) else {
+        return list_enter_action(line);
+    };
+    // 行首缩进（与 list_enter_action 同一口径：`  > 甲` 也是引用）
+    let head_len: usize = line
+        .chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .map(char::len_utf8)
+        .sum();
+    // 栏那截按**原样**数到头：`>  ` 后面那两个空格也属于标记，摘栏时要一起摘掉
+    let mut bar_end = head_len;
+    for _ in 0..depth {
+        bar_end += 1; // `>` 本身（quote() 已确认它在这儿，且恒为 ASCII）
+        bar_end += line[bar_end..]
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .map(char::len_utf8)
+            .sum::<usize>();
+    }
+    let written = line[..bar_end].chars().count();
+    // 续出去的栏＝每层一道 `>` ＋一个空格（`>>` 而不是 `> >`：与用户自己写的那形一致）
+    let bars = format!("{}{} ", &line[..head_len], ">".repeat(depth));
+    let body = &line[bar_end..];
+    match list_enter_action(body) {
+        Some(MdListEnter::Next { prefix, from_col }) => Some(MdListEnter::Next {
+            prefix: format!("{bars}{prefix}"),
+            from_col: written + from_col,
+        }),
+        Some(MdListEnter::Exit { marker_end, .. }) => Some(MdListEnter::Exit {
+            marker_start: written,
+            marker_end: written + marker_end,
+        }),
+        None => {
+            if body.trim().is_empty() {
+                Some(MdListEnter::Exit {
+                    marker_start: 0,
+                    marker_end: written,
+                })
+            } else {
+                Some(MdListEnter::Next {
+                    prefix: bars,
+                    from_col: written,
+                })
+            }
+        }
+    }
 }
 
 /// 行内标记的种类（**编辑面**：包选区与解包共用一台机器，预览解析器不用它）。
@@ -3540,7 +3616,13 @@ mod tests {
             other => panic!("期望 Next：{other:?}"),
         };
         let exit = |line: &str| match list_enter_action(line) {
-            Some(MdListEnter::Exit { marker_end }) => marker_end,
+            Some(MdListEnter::Exit {
+                marker_start,
+                marker_end,
+            }) => {
+                assert_eq!(marker_start, 0, "普通列表的标记就是从行首起");
+                marker_end
+            }
             other => panic!("期望 Exit：{other:?}"),
         };
         assert_eq!(next("- 甲"), "- ");
@@ -3571,6 +3653,61 @@ mod tests {
         for line in ["正文", "-abc", "1.ab", "---", "*** 粗", "", "  ", "# 标题"] {
             assert!(list_enter_action(line).is_none(), "{line:?} 不该被当列表项");
         }
+    }
+
+    /// 引用块里的回车：栏跟着续、栏里的列表一起续；空栏退引用，空列表项只摘列表那截。
+    /// 引用判据拿的是解析器那一份（`quote`），所以 `>甲` 这种不带空格的也算引用。
+    #[test]
+    fn quote_enter_continues_the_bar_and_the_list_inside_it() {
+        let next = |line: &str| match quote_list_enter_action(line) {
+            Some(MdListEnter::Next { prefix, .. }) => prefix,
+            other => panic!("期望 Next：{other:?}"),
+        };
+        let exit = |line: &str| match quote_list_enter_action(line) {
+            Some(MdListEnter::Exit {
+                marker_start,
+                marker_end,
+            }) => (marker_start, marker_end),
+            other => panic!("期望 Exit：{other:?}"),
+        };
+
+        assert_eq!(next("> 甲"), "> ");
+        assert_eq!(next(">> 甲"), ">> ", "两道栏各带一份");
+        assert_eq!(
+            next("> - 甲"),
+            "> - ",
+            "引用里的列表项一起接（d77caa1 之后栏内本来就按块级解析）"
+        );
+        assert_eq!(next("> 3. 甲"), "> 4. ", "有序号照样进位");
+        assert_eq!(next("> - [x] 甲"), "> - [ ] ", "任务框接出来是空框");
+        assert_eq!(next("  > 甲"), "  > ", "行首缩进带过来");
+        assert_eq!(next(">甲"), "> ", "栏后不带空格也算引用，与解析器同一判据");
+        assert_eq!(
+            next("> # 标题"),
+            "> ",
+            "续的是「引用」这一层，与栏里装的是什么块无关"
+        );
+        assert_eq!(
+            next(">[x] 甲"),
+            "> ",
+            "脱离列表标记的任务框不算列表项，只续栏"
+        );
+
+        // 空栏 ⇒ 摘掉原样那截，回车退出引用
+        assert_eq!(exit(">"), (0, 1));
+        assert_eq!(exit("> "), (0, 2));
+        assert_eq!(exit(">   "), (0, 4), "栏后多余空白也算标记那截");
+        assert_eq!(exit(">> "), (0, 3));
+        assert_eq!(exit("  > "), (0, 4), "行首缩进一起摘");
+        // 栏里剩一个空列表项 ⇒ 只摘列表那截、栏留着（一层一层退）
+        assert_eq!(exit("> - "), (2, 4));
+        assert_eq!(exit(">  3. "), (3, 6));
+
+        // 非引用行＝原样交回普通列表判据（应用层只调这一个函数，退路在这钉住）
+        assert_eq!(next("- 甲"), "- ");
+        assert_eq!(exit("- "), (0, 2));
+        assert!(quote_list_enter_action("正文").is_none());
+        assert!(quote_list_enter_action("").is_none());
     }
 
     // ---------- 第 315 轮 C1：包／解行内标记（编辑面判据） ----------
