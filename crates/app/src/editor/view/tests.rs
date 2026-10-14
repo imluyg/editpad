@@ -1929,13 +1929,14 @@ fn render_frame_cost_is_bounded_on_large_document() {
 /// 实际取串次数。视口固定在文档中部，`select_all` 后选区向两端各伸出
 /// 半个文档——改前即每帧「全文档行数 × 整行取串」。
 fn draw_once_and_count_line_text(lines: usize, select_all: bool, hits: usize) -> usize {
-    draw_frame_and_count_line_text(lines, 0, select_all, hits, false, false)
+    draw_frame_and_count_line_text(lines, 0, select_all, hits, false, false, false)
 }
 
 /// 同款管线，多三个旋钮：`line_len` 把每行正文补到至少这么长（0 = 不补，
 /// 即原夹具），`indent` 决定夹具是否带行首缩进，`guides` 决定缩进参考线开关。
 /// 给「某个绘制块不许整行取串」这类次数契约用——同一份夹具只切一个开关，
 /// 两帧的取串次数必须相同（该块一旦自己取串就会多出来）。
+/// `wrap`（P442）决定软换行开关：开态的可见区反解多走一条 `locate_visual` 路径。
 /// `line_len` 这一档是给**长行**夹具开的：整行物化 memo 按字节封顶，可见行
 /// 总字节超过封顶就缓存不住，代价只在长行上显形（短行夹具看不见它）。
 #[allow(clippy::too_many_arguments)]
@@ -1946,6 +1947,7 @@ fn draw_frame_and_count_line_text(
     hits: usize,
     indent: bool,
     guides: bool,
+    wrap: bool,
 ) -> usize {
     let core = EditorHandle::default();
     {
@@ -1963,6 +1965,7 @@ fn draw_frame_and_count_line_text(
         c.set_viewport_width(600.0);
         c.set_viewport_height(300.0);
         c.indent_guides = guides;
+        c.set_word_wrap(wrap);
         if select_all {
             c.select_all();
         }
@@ -2270,8 +2273,8 @@ fn p299_scanned_hit_table_engages_the_window_and_the_mark_skip() {
 /// 守它的成本：换成 rope 行首字符流之后，开态相对关态应当一颗不多取。
 #[test]
 fn o3_indent_guides_add_no_whole_line_fetch() {
-    let off = draw_frame_and_count_line_text(2_000, 0, false, 0, true, false);
-    let on = draw_frame_and_count_line_text(2_000, 0, false, 0, true, true);
+    let off = draw_frame_and_count_line_text(2_000, 0, false, 0, true, false, false);
+    let on = draw_frame_and_count_line_text(2_000, 0, false, 0, true, true, false);
     eprintln!("[P278] 参考线开/关的单帧取串次数：关 {off} / 开 {on}");
     assert_eq!(
         on, off,
@@ -2288,7 +2291,7 @@ fn o3_indent_guides_add_no_whole_line_fetch() {
 /// 都取过（不是"什么都没画"的假绿），上界证明同一行不再被反复物化。
 #[test]
 fn p283_one_frame_materializes_each_visible_line_once() {
-    let calls = draw_frame_and_count_line_text(2_000, 0, true, 0, false, false);
+    let calls = draw_frame_and_count_line_text(2_000, 0, true, 0, false, false, false);
     eprintln!("[P283] 单帧整行物化次数：{calls}（改前 47）");
     // 视口 300px / 行高 ≈22px ⇒ 14 个可见行；每行至少取一次是"这帧画了正文"的证据。
     assert!(
@@ -2314,9 +2317,9 @@ fn p283_one_frame_materializes_each_visible_line_once() {
 /// 越过新额度的形状（约 34 行 × 60000 字符）仍会退回拒绝入表，那一档留在 §2 L-13。
 #[test]
 fn p292_long_visible_lines_keep_the_one_fetch_per_line_contract() {
-    let base = draw_frame_and_count_line_text(80, 40, true, 0, false, false);
-    let long = draw_frame_and_count_line_text(80, 20_000, true, 0, false, false);
-    let vlong = draw_frame_and_count_line_text(80, 60_000, true, 0, false, false);
+    let base = draw_frame_and_count_line_text(80, 40, true, 0, false, false, false);
+    let long = draw_frame_and_count_line_text(80, 20_000, true, 0, false, false, false);
+    let vlong = draw_frame_and_count_line_text(80, 60_000, true, 0, false, false, false);
     eprintln!("[P292] 单帧整行物化次数：短行 {base} / 2 万 {long} / 6 万 {vlong}");
     assert!(
         base >= 14,
@@ -2329,6 +2332,34 @@ fn p292_long_visible_lines_keep_the_one_fetch_per_line_contract() {
     assert_eq!(
         vlong, base,
         "6 万字符长行单帧物化 {vlong} 次，高于短行基准 {base}（旧额度下是 39 次）"
+    );
+}
+
+/// P442 护栏：**开态（软换行）的一帧不许自己抄整行**。
+///
+/// P283 把"同一行一帧只物化一次"钉成契约时，结算的是正文／选区带／行布局三个
+/// 消费者。开态还有第四条路没接上：`visible_range()` 每次要 `locate_visual`
+/// 反解两端，而它自己走 `line_text()` 取串。一帧里 `visible_range()` 被问
+/// 5~6 次 ⇒ 本夹具实测多取 **24** 次整行（同一夹具：关态 17 / 开态改前 41、
+/// 改后 17）。短行只是白拿一点分配，长行文档（单行日志／压缩文件／长 CSV，
+/// 本仓主用例）里那是每帧把可见行再抄二十几遍——另一档滚动夹具（600×400 视口、
+/// 每帧滚一屏）量到的是 52 → 21，长行开态 15 → 1。
+///
+/// 判据取**次数**（与机器负载无关，同 O-1／P283）：下界证明这帧真把可见行取过
+/// （不是"没画东西"的假绿），上界证明开态相对关态一颗不许多取。
+#[test]
+fn p442_wrap_visible_range_shares_the_whole_line_memo() {
+    let off = draw_frame_and_count_line_text(2_000, 0, false, 0, false, false, false);
+    let on = draw_frame_and_count_line_text(2_000, 0, false, 0, false, false, true);
+    eprintln!("[P442] 单帧整行物化次数：关态 {off} / 开态 {on}（改前开态 41）");
+    assert!(
+        on >= 14,
+        "夹具自检：开态这帧只物化 {on} 行，少于可见行数 14 ⇒ 上界断言是空断言"
+    );
+    assert_eq!(
+        on, off,
+        "开态单帧物化 {on} 次、关态 {off} 次：visible_range→locate_visual 仍在自行取串\
+         （改前同一夹具是 41 vs 17）"
     );
 }
 

@@ -1135,7 +1135,10 @@ impl EditorCore {
             }
         }
         let line = lo.saturating_sub(1);
-        let body = self.line_text(line);
+        // P283 的整行 memo：本函数原先自己 `line_text()` 取串，而一帧里
+        // `visible_range()` 要问它十几次（每次两问），长行文档就是每帧多抄
+        // 十几遍整行。这里与正文／选区带／行布局共用同一份 `Rc<str>` 把手。
+        let body = self.line_text_ref(line);
         let lens = body.chars().count();
         let real_xs = self.trusted_xs(line, &body);
         let breaks = w.segments_of(line, &body, real_xs);
