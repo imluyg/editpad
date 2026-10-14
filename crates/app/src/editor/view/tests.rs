@@ -2369,10 +2369,10 @@ fn p442_wrap_visible_range_shares_the_whole_line_memo() {
 /// 两帧之间的时钟层按 P280／P281 的规矩钉死（`sb_activity`／`last_activity`）。
 ///
 /// ⚠️ 字体一律**显式具名族**，不用 `BODY_FONT`（＝`Font::MONOSPACE`）：
-/// `shape_row_xs` 进门先调 `ensure_mono_face()`＝进程级一次性钉字（P329），
-/// 它把 generic monospace 从本机那档（Cascadia，9.375px）挪到 NSimSun（8.0px）。
-/// 两档对照之间如果恰好跨过这一次钉字，像素自然对不上——第 323 轮在全量池里
-/// 就是这个形状红的（单跑绿、并发红）。同 P285 的既定解法。
+/// `shape_row_xs` 进门先调 `ensure_mono_face()`＝进程级一次性钉字（P329），它把
+/// generic monospace 从本机那档（Cascadia，9.375px）挪到 NSimSun（8.0px）——两档
+/// 对照之间如果恰好跨过这一次钉字，像素自然对不上，故显式具名族（同 P285 的解法）。
+/// 淡出时钟另有一处更隐蔽的坑，见下面滚动那一段的注释。
 fn p443_new_core(len: usize, cap_off: bool, scroll_cols: f32) -> EditorHandle {
     let doc: String = (0..200)
         .map(|i| format!("{i:05}{}\n", "x".repeat(len.saturating_sub(5))))
@@ -2383,8 +2383,6 @@ fn p443_new_core(len: usize, cap_off: bool, scroll_cols: f32) -> EditorHandle {
         c.reset_document(editpad_core::Document::from_str(&doc));
         c.set_viewport_width(600.0);
         c.set_viewport_height(300.0);
-        c.sb_activity = None;
-        c.last_activity = None;
         c.line_shape_cap_off = cap_off;
     }
     if scroll_cols != 0.0 {
@@ -2397,6 +2395,15 @@ fn p443_new_core(len: usize, cap_off: bool, scroll_cols: f32) -> EditorHandle {
     }
     {
         let _ = core.borrow().take_layout_shape_chars();
+        // ⚠️ 时钟层必须钉在**所有会重新点亮它的动作之后**：`scroll_by_lines` /
+        // `scroll_by_columns` 各自调 `touch_scrollbar_activity()`（`motion.rs:1630`
+        // 把 `sb_activity` 写成 `Some(Instant::now())`），而 `scrollbar_visibility()`
+        // 按当下时刻算淡出 alpha。第一版把这两颗钉在滚动之前 ⇒ 横滚那一档的两臂
+        // alpha 不同 ⇒ 整幅像素对拍约 1/3 跑红、差全在两条滚动条带上（第 323 轮
+        // 把它记成"成因未勘"，本轮勘出＝夹具钉早了，不是产品的）。
+        let mut c = core.borrow_mut();
+        c.sb_activity = None;
+        c.last_activity = None;
     }
     core
 }
@@ -2501,16 +2508,16 @@ fn p443_layout_shaping_stops_growing_with_line_length() {
     );
 }
 
-/// P443 护栏②（几何与窗口同一性）：前缀档在**覆盖到的每一列**上必须与整行档
-/// 逐列同解，且绘制侧剔出的字符窗口逐格相同。
+/// P443 护栏②（像素＋几何＋窗口三重同一性）：前缀档必须与整行档**画得一模一样**，
+/// 且覆盖到的每一列字形 x 逐列同解、绘制侧剔出的字符窗口逐格相同。
 ///
-/// 判这两样而不是整幅像素，是因为整幅像素比对在这一档**跨测试并发不稳**：同一份
-/// 代码在全量池里约 1/3 跑出 6008 px 差（另一些跑 diff=0），差全部落在底部与右缘
-/// 那两条滚动条带＋一竖条（逐行计数＝每行 10 px 一致、末 6 行整幅），而文字几何
-/// 逐列相同（`row_x` 读数一致）——成因未勘，登记在 §2 那一行，别当成已排除。
-/// 本条与③合起来盯的是「截了不许改变任何可见字符的位置与取舍」这件事。
+/// 三条一起留着各有分工：像素那条是"用户看得见的一切都没变"的总账，逐列几何与窗口
+/// 那两条在它因环境抖动时还能指出**差在哪一层**（第 323 轮正是靠这两条把一处
+/// 夹具坑定位出来的——当时像素差 6008 px 全落在两条滚动条带上、而逐列 `row_x`
+/// 与窗口都相同 ⇒ 不是文字，是滚动条淡出时钟被夹具钉早了：`scroll_by_*` 会调
+/// `touch_scrollbar_activity()` 重新点亮 `sb_activity`，故本文件把它挪到所有滚动之后）。
 #[test]
-fn p443_prefix_and_whole_line_agree_on_geometry_and_window() {
+fn p443_prefix_and_whole_line_agree_on_pixels_geometry_and_window() {
     for (label, scroll) in [("行首", 0.0f32), ("横滚 300 列", 300.0)] {
         let (ca, pa, shaped_a) = p443_long_line_frame(4_000, false, scroll);
         let (cb, pb, _shaped_b) = p443_long_line_frame(4_000, true, scroll);
@@ -2569,6 +2576,14 @@ fn p443_prefix_and_whole_line_agree_on_geometry_and_window() {
             cols_compared > 500,
             "{label}：只比对了 {cols_compared} 列，样本太小＝前缀几乎没被覆盖到"
         );
+        // ③ 总账：整幅像素逐颗相同（淡出时钟已在 `p443_new_core` 末尾钉死）
+        let diff = pa
+            .pixels()
+            .iter()
+            .zip(pb.pixels().iter())
+            .filter(|(x, y)| x != y)
+            .count();
+        assert_eq!(diff, 0, "{label}：前缀档与整行档有 {diff} 颗像素不同");
     }
 }
 
