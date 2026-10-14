@@ -1270,6 +1270,18 @@ impl EditorCore {
         Some((line, col))
     }
 
+    /// 在一张字形起点表里按**字符中点**反解列号：返回第一个「中点越过 `rel`」的
+    /// 字符下标；都不越过则表尾。整行表与前缀表共用这一份算式——中点口径
+    /// 只许有一份（P45 定「字符边界 = 真实 x 中点」，与列模型的左半/右半一致）。
+    fn col_at_midpoint(xs: &[f32], rel: f32) -> usize {
+        for (k, pair) in xs.windows(2).enumerate() {
+            if rel < (pair[0] + pair[1]) * 0.5 {
+                return k;
+            }
+        }
+        xs.len().saturating_sub(1)
+    }
+
     /// 命中测试：控件内坐标 -> 光标位置（CJK 双宽感知）。
     /// P13：x 需先减去水平滚动偏移——点击坐标在视口系，字符列在文档系。
     pub fn hit_test(&self, x: f32, y: f32) -> CursorPos {
@@ -1308,22 +1320,23 @@ impl EditorCore {
         if let Some(xs) = self.row_layouts.get(&line) {
             let lens = text.chars().count();
             if xs.len().saturating_sub(1) >= lens {
-                let mut col = xs.len() - 1;
-                for (k, pair) in xs.windows(2).enumerate() {
-                    let mid = (pair[0] + pair[1]) * 0.5;
-                    if rel < mid {
-                        col = k;
-                        break;
-                    }
-                    col = k + 1;
-                }
                 // 反向守卫：布局比**当前**文本长（行刚被改短、本帧还没重注入）
-                // 时，上面的循环可以把 col 推到旧行长度上去——钳回当前行长，
+                // 时，中点反解可以把 col 推到旧行长度上去——钳回当前行长，
                 // 越界列喂给 insert_str/backspace 就是 ropey 越界
                 return CursorPos {
                     line,
-                    col: col.min(lens),
+                    col: Self::col_at_midpoint(xs, rel).min(lens),
                 };
+            } else if self.row_layouts_epoch == self.content_epoch
+                && rel < xs.last().copied().unwrap_or(f32::MIN)
+            {
+                // P443：这张表是**本帧真注入的前缀**（超长行只 shape 覆盖视口
+                // 那一段），而点击落在覆盖范围内 ⇒ 仍按真实字形中点判位，与上面
+                // 整行表共用同一份算式。覆盖不到的列本来就在视口外。
+                // 纪元不符＝刚打过字、这张表还是上一帧那版的头一段——那种帧
+                // 一律走下面的列模型，与改前逐字同口径。
+                let col = Self::col_at_midpoint(xs, rel);
+                return CursorPos { line, col };
             }
         }
 

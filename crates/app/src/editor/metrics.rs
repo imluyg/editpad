@@ -167,6 +167,45 @@ pub(crate) fn visible_window_of_xs(
     (lo, hi)
 }
 
+/// P443：`text` 的前 `n` 个字符的**字节**终点（`n ≥` 字符数 ⇒ `text.len()`）。
+/// 前缀 shaping 要按字符数取一片，但不能在字符中间切开 UTF-8 序列。
+pub(crate) fn char_prefix_end(text: &str, n: usize) -> usize {
+    text.char_indices()
+        .nth(n)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
+}
+
+/// P443：一行只 shape「够本帧用」的那段前缀——超长行（压缩文件／单行日志／长 CSV）
+/// 整行进 cosmic-text 是滚动帧里最大的一颗（现量：20 000 字/行时**每滚一屏
+/// 256 ms**，而前缀 124 字恒 ~0.5 ms，release 档）。
+///
+/// 先按列模型估一个前缀长度 `want`，再用**现量**判据确认它真的盖到了本帧视口右缘
+/// `band_right`（`xs.last()`），盖不住就按倍扩展、直到盖住或扩成整行——所以
+/// 不依赖「一个字符有几个像素」这类字体假设，比例字体／全宽字符／连字都照样成立。
+///
+/// 返回的表就是 [`shape_row_xs`] 对该前缀的输出：`xs.len() - 1` = 表能定位到第几
+/// 个字符（调用方按这个数判"够不够"）。扩到整行时与改前逐字节同一条路径。
+pub(crate) fn shape_row_xs_covering(
+    font: Font,
+    size: f32,
+    text: &str,
+    want: usize,
+    band_right: f32,
+    lens: usize,
+) -> Option<Vec<f32>> {
+    let mut n = want;
+    loop {
+        let table = shape_row_xs(font, size, &text[..char_prefix_end(text, n)])?;
+        let covered = table.len().saturating_sub(1);
+        // 三条收口：盖住了右缘／已经数到行尾／已经扩成整行（= 既有口径）
+        if table.last().copied().unwrap_or(0.0) >= band_right || covered >= lens || n >= lens {
+            return Some(table);
+        }
+        n = (n.saturating_mul(2).max(n + 1)).min(lens);
+    }
+}
+
 /// 统计待插入文本的「换行单元数」与末行列数（P9）：行界按**读侧全集**数
 /// （[`editpad_core::line_break_units`] 同一条判据，R-22），切行复用
 /// [`editpad_core::for_each_line`] 那一份实现。

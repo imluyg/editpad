@@ -753,7 +753,8 @@ fn h_clip_window_falls_back_to_full_line_unless_layout_matches() {
         c.h_clip_window(0, &text, 2000, 5000.0, x_to),
         (0, 2000, 0.0)
     );
-    // ② 表长与行字符数不吻合（行刚变短/变长）→ 整行
+    // ② 表没盖住本帧右缘（P443 之前写的是「表长与行字符数不吻合」——行刚变短/
+    //    变长是同一件事的一种，前缀表盖不住右缘也算）→ 整行
     c.set_row_layout(0, (0..=5).map(|i| i as f32 * 10.0).collect::<Vec<f32>>());
     assert_eq!(
         c.h_clip_window(0, &text, 2000, 5000.0, x_to),
@@ -776,4 +777,67 @@ fn h_clip_window_falls_back_to_full_line_unless_layout_matches() {
     c.row_layouts_font_size = c.font_size;
     // ④ 可视区盖住整行 → 走整行退路（常见短行路径零行为变更）
     assert_eq!(c.h_clip_window(0, &text, 2000, 0.0, 1e9), (0, 2000, 0.0));
+}
+
+// ---------- P443 超长行的前缀排版（一行只 shape 够本帧用的那一段） ----------
+
+#[test]
+fn p443_char_prefix_end_splits_on_char_boundaries() {
+    use crate::editor::metrics::char_prefix_end;
+    let t = "中a文b";
+    assert_eq!(char_prefix_end(t, 0), 0);
+    assert_eq!(char_prefix_end(t, 1), 3, "第 1 个字符是三字节的中文字");
+    assert_eq!(char_prefix_end(t, 2), 4);
+    assert_eq!(char_prefix_end(t, 99), t.len(), "n 超过字符数时交整条");
+}
+
+#[test]
+fn p443_shape_row_xs_covering_extends_until_the_band_is_covered() {
+    let line = "x".repeat(4000);
+    let font = iced::Font::MONOSPACE;
+    // 故意只给 4 个字符的起始前缀：算式必须自己按倍扩展，直到盖住 band_right
+    let t = shape_row_xs_covering(font, 16.0, &line, 4, 1200.0, 4000).expect("该有字形");
+    let covered = t.len() - 1;
+    assert!(covered > 4, "只给 4 个字符时应当扩展，实得 {covered}");
+    assert!(
+        t[covered] >= 1200.0,
+        "扩展后必须盖到右缘，实得 {}",
+        t[covered]
+    );
+    assert!(
+        covered < 4000,
+        "盖得住右缘就不必 shape 整行，实得 {covered}（额度没生效）"
+    );
+    // want == lens 那一档＝与改前逐字同一条路径（不扩展、也不截）
+    let full = shape_row_xs_covering(font, 16.0, &line, 4000, 1e9, 4000).expect("该有字形");
+    assert_eq!(
+        full.len().saturating_sub(1),
+        4000,
+        "want == lens 必须交整行表"
+    );
+}
+
+#[test]
+fn p443_h_clip_window_accepts_a_prefix_table_that_reaches_the_band() {
+    let long = "z".repeat(2000);
+    let mut c = core_with(&long);
+    let text = c.line_text(0);
+    assert_eq!(text.chars().count(), 2000, "夹具自检");
+    // 前缀表：0..=200 字符、每字符 10px（表尾 2000px，比行长短得多）
+    let prefix: Vec<f32> = (0..=200).map(|i| i as f32 * 10.0).collect();
+    c.set_row_layout(0, prefix);
+    // 右缘 800px 在覆盖内 ⇒ 敢剔，且剔到「视口右缘 + 两侧余量」而不是整行
+    let (lo, hi, _) = c.h_clip_window(0, &text, 2000, 0.0, 800.0);
+    assert_eq!(
+        (lo, hi),
+        (0, 144),
+        "前缀盖得住右缘时必须按视口剔（800px = 第 80 列 + 64 余量）"
+    );
+    assert!(hi < 2000, "剔完还剩 {hi}／2000，等于没剔");
+    // 右缘 5000px 超出表的覆盖 ⇒ 宁可不剔（整行＝既有口径，绝不因剔除漏画）
+    assert_eq!(
+        c.h_clip_window(0, &text, 2000, 0.0, 5000.0),
+        (0, 2000, 0.0),
+        "前缀盖不住右缘时不许剔"
+    );
 }

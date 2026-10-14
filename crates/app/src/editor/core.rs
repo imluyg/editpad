@@ -15,7 +15,7 @@ pub(crate) use editpad_core::{
 
 pub(crate) use super::change_strip::ChangeMemo;
 pub(crate) use super::metrics::{
-    char_cols, display_cols_chars, measure_insertion, prefix_width, shape_row_xs,
+    char_cols, display_cols_chars, measure_insertion, prefix_width, shape_row_xs_covering,
     validate_measured_char_width, visible_window_of_xs, H_CLIP_MARGIN_CHARS,
     RECOMPUTE_MAX_COLS_COOLDOWN, TAB_STOP_COLS, WRAP_RECONCILE_STEP,
 };
@@ -713,6 +713,10 @@ pub struct EditorCore {
     /// 此前每帧对 ~50 个可见行全量重做段落 shaping（闪烁/滚动帧白付），
     /// memo 后仅编辑行与滚入行现算。容量超限整体清空（有界内存）。
     pub(crate) row_layout_memo: RowLayoutMemo,
+    /// P443：`row_layouts` 里那批表是**哪一版正文**注入的（`content_epoch` 同底座）。
+    /// 前缀表只在"本帧真注入过"时才敢用于命中测试——打字后纪元一变，上一帧的
+    /// 前缀对插入点之后的字符已经失配，那种帧一律退回列模型（＝改前口径）。
+    pub(crate) row_layouts_epoch: u64,
     /// P116 字号戳：row_layouts 注入时的字号——缩放下旧字号布局会
     /// 「长度对齐但字宽过期」（旧 xs 在缩放帧被 px_of/断行误用 →
     /// 缩小留白/放大超右缘，用户复报；trusted_xs/px_of 必须按字号
@@ -822,6 +826,12 @@ pub struct EditorCore {
     /// 字符进 shaping），故另设本计数。生产构建整字段不参与编译。
     #[cfg(test)]
     pub(crate) shaped_chars: std::cell::Cell<usize>,
+    /// 测试钩子（P443 前缀额度契约）：本帧交给**排版**（行级字形起点表）的字符数
+    /// 合计，按 memo 未命中时真正进 `shape_row_xs` 的那一段结算。
+    /// 与 `shaped_chars` 分家：那一根量的是绘制侧递交的字符数（第 160 轮已按视口
+    /// 截住），这一根量的是排版侧——超长行滚动帧的主项就在这里。
+    #[cfg(test)]
+    pub(crate) layout_shape_chars: std::cell::Cell<usize>,
     /// 测试钩子（不可见字符标记的横向剔除契约，第 183 轮）：整帧交给绘制闭包的
     /// **标记个数**。标记是纯 A 层 quad，屏外那几百个照样进层栈、照样栅格化，
     /// 所以这一项直接就是软渲染的像素工作量。生产构建整字段不参与编译。
@@ -836,6 +846,12 @@ pub struct EditorCore {
     /// 同一份文档、同一次滚动，只切这一个开关，两帧必须逐像素相同。
     #[cfg(test)]
     pub(crate) h_clip_off: bool,
+    /// 测试开关（P443 **超长行前缀 shaping** 的老口径对照）：置 true 时可见行一律
+    /// 整行进排版，即第 323 轮之前。给像素/命中对拍当同一帧 oracle 用——
+    /// 同一份长行文档、同一次滚动，只切这个开关，两帧必须逐像素相同、点击落点
+    /// 必须逐列相同。生产构建恒 false。
+    #[cfg(test)]
+    pub(crate) line_shape_cap_off: bool,
     /// 测试开关（关态预编辑下划线摘除，供像素守卫当**改前/改后 oracle**）：
     /// 置 true 时 C 层只画组字串本身、不画那 2px 下划线。生产构建里
     /// [`Self::preedit_ul_off`] 恒 false，本字段不参与任何逻辑。
@@ -982,6 +998,7 @@ impl Default for EditorCore {
             row_layouts: HashMap::new(),
             row_layout_memo: HashMap::new(),
             row_layouts_font_size: 0.0,
+            row_layouts_epoch: 0,
             max_row_width_px: 0.0,
             max_cols_stale: false,
             max_cols_checked: None,
@@ -1015,9 +1032,13 @@ impl Default for EditorCore {
             #[cfg(test)]
             shaped_chars: std::cell::Cell::new(0),
             #[cfg(test)]
+            layout_shape_chars: std::cell::Cell::new(0),
+            #[cfg(test)]
             ws_marks: std::cell::Cell::new(0),
             #[cfg(test)]
             h_clip_off: false,
+            #[cfg(test)]
+            line_shape_cap_off: false,
             #[cfg(test)]
             ws_clip_off: false,
             #[cfg(test)]
@@ -1131,6 +1152,7 @@ impl EditorCore {
             self.max_row_width_px = self.max_row_width_px.max(w);
         }
         self.row_layouts_font_size = self.font_size;
+        self.row_layouts_epoch = self.content_epoch;
         self.row_layouts.insert(line, xs);
     }
 
@@ -1149,6 +1171,11 @@ impl EditorCore {
     /// 行字符数 × 4 字节，极端超宽行也仅 KB 级。
     pub(crate) fn refresh_visible_row_layouts(&mut self, font: Font) {
         const ROW_LAYOUT_MEMO_CAP: usize = 2048;
+        // P443：行长超过这个数就只 shape「覆盖本帧横向视口 + 余量」的那段前缀。
+        // 额度取值只决定"哪些行算超长行"，不影响正确性（前缀不够会被扩展），
+        // 定在 512 是因为现量到那一档整行 shape 已经开始压过一帧预算
+        // （400 字/行＝每屏 1.37 ms release，4000 字＝23.7 ms）。
+        const SHAPE_LINE_CAP_CHARS: usize = 512;
         let size = self.font_size;
         let epoch = self.content_epoch;
         let (first, last) = self.visible_range();
@@ -1156,10 +1183,43 @@ impl EditorCore {
         self.memo_window = (first, last);
         self.row_layouts.clear();
         self.row_layouts_font_size = 0.0;
+        self.row_layouts_epoch = 0;
         self.max_row_width_px = 0.0;
+        // P443：本帧横向视口在「行首基准」下的右缘像素——前缀必须盖到它，绘制侧
+        // `h_clip_window` 才剔得出窗口（盖不住就退回整行递交，即既有口径）。
+        let band_right = self.scroll_left + self.text_viewport_w();
+        let char_w = self.char_width();
+        // ⚠️ 开态一律不截：折行断点要**整行**逐字符对齐（`trusted_xs_len` 的判据
+        // 就是表长 == 字符数+1），前缀表会静默退回列模型断行＝P96 治过的那个观感。
+        let wrap_on = self.wrap.borrow().enabled;
         for line in first..=last {
+            let lens = self.line_display_len(line);
+            // 老口径对照开关（仅测试构建存在，同 `h_clip_off` 的手法）：置真时
+            // 超长行照旧整行进排版，给像素/命中对拍当同一帧 oracle。
+            #[cfg(test)]
+            let cap_off = self.line_shape_cap_off;
+            #[cfg(not(test))]
+            let cap_off = false;
+            let want = if wrap_on || cap_off || lens <= SHAPE_LINE_CAP_CHARS {
+                lens
+            } else if char_w > 0.0 {
+                // 先按列宽估（比例字体下可能偏小，扩展那一手会把右缘真正盖住）
+                let est = (band_right / char_w).ceil() as usize + H_CLIP_MARGIN_CHARS;
+                est.min(lens)
+            } else {
+                lens
+            };
             let cached = match self.row_layout_memo.get(&line) {
-                Some((f, s, e, xs)) if *f == font && *s == size && *e == epoch => Some(xs.clone()),
+                // P443：命中条件多一条——存着的那张表得够本帧要的长度，
+                // 否则（向右滚进没 shape 过的那截）重 shape 一段更长的前缀。
+                Some((f, s, e, xs))
+                    if *f == font
+                        && *s == size
+                        && *e == epoch
+                        && xs.len().saturating_sub(1) >= want =>
+                {
+                    Some(xs.clone())
+                }
                 _ => None,
             };
             let xs = match cached {
@@ -1168,10 +1228,15 @@ impl EditorCore {
                     // P283：走整行 memo——正文那一圈本来就把同一行取了一遍，
                     // 两边各取一次就是每帧多抄一份长行。
                     let text = self.line_text_ref(line);
-                    let Some(xs) = shape_row_xs(font, size, &text) else {
+                    let Some(xs) = shape_row_xs_covering(font, size, &text, want, band_right, lens)
+                    else {
                         continue;
                     };
                     let xs: Rc<[f32]> = Rc::from(xs);
+                    // P443 计数：这一行真的进了一次排版，结算它吃掉的字符数
+                    #[cfg(test)]
+                    self.layout_shape_chars
+                        .set(self.layout_shape_chars.get() + xs.len().saturating_sub(1));
                     if self.row_layout_memo.len() >= ROW_LAYOUT_MEMO_CAP {
                         self.row_layout_memo.clear();
                     }
@@ -1281,7 +1346,13 @@ impl EditorCore {
         let Some(xs) = self.row_layouts.get(&line) else {
             return full;
         };
-        if xs.len() != lens + 1 {
+        // P443：整行表照旧。**前缀表**（超长行只 shape 到覆盖视口那一段）只有在
+        // 盖住本帧右缘时才够剔——覆盖范围内每个字符的起点与整行 shaping 逐字
+        // 相同（前缀不改变已排字符的推进），范围外的字符本来就在视口外。
+        // 盖不住右缘 ⇒ 退回整行递交，即既有口径（宁可不剔，绝不因剔除漏画）。
+        let complete = xs.len() == lens + 1;
+        let reaches_band = xs.len() >= 2 && xs[xs.len() - 1] >= x_to;
+        if !complete && !reaches_band {
             return full;
         }
         let (lo, hi) = visible_window_of_xs(xs, x_from, x_to, H_CLIP_MARGIN_CHARS);
@@ -1295,6 +1366,12 @@ impl EditorCore {
     #[cfg(test)]
     pub(crate) fn take_shaped_chars(&self) -> usize {
         self.shaped_chars.take()
+    }
+
+    /// 测试钩子（P443）：读取并清零本帧**排版侧**进 shaping 的字符数合计。
+    #[cfg(test)]
+    pub(crate) fn take_layout_shape_chars(&self) -> usize {
+        self.layout_shape_chars.take()
     }
 
     /// 关态（非重排）预编辑下划线的摘除开关：测试构建读字段，
@@ -1438,6 +1515,7 @@ impl EditorCore {
         if old > 0.0 && self.font_size != old {
             self.row_layouts.clear();
             self.row_layouts_font_size = 0.0;
+            self.row_layouts_epoch = 0;
             self.wrap.borrow_mut().after_edit(self.doc.line_count());
             if let Some(w) = self.measured_char_w {
                 let scaled = w * self.font_size / old;

@@ -2363,6 +2363,260 @@ fn p442_wrap_visible_range_shares_the_whole_line_memo() {
     );
 }
 
+/// P443 三条护栏共用的长行无头一帧：走真实管线（layout 注入排版 + draw + 合成），
+/// 返回 `(那份 core, 像素, 本帧交进排版的字符数)`。`cap_off` 是**改前 oracle**
+/// 开关（true＝超长行照旧整行进排版）；`scroll_cols` 是横向滚动列数。
+/// 两帧之间的时钟层按 P280／P281 的规矩钉死（`sb_activity`／`last_activity`）。
+///
+/// ⚠️ 字体一律**显式具名族**，不用 `BODY_FONT`（＝`Font::MONOSPACE`）：
+/// `shape_row_xs` 进门先调 `ensure_mono_face()`＝进程级一次性钉字（P329），
+/// 它把 generic monospace 从本机那档（Cascadia，9.375px）挪到 NSimSun（8.0px）。
+/// 两档对照之间如果恰好跨过这一次钉字，像素自然对不上——第 323 轮在全量池里
+/// 就是这个形状红的（单跑绿、并发红）。同 P285 的既定解法。
+fn p443_new_core(len: usize, cap_off: bool, scroll_cols: f32) -> EditorHandle {
+    let doc: String = (0..200)
+        .map(|i| format!("{i:05}{}\n", "x".repeat(len.saturating_sub(5))))
+        .collect();
+    let core = EditorHandle::default();
+    {
+        let mut c = core.borrow_mut();
+        c.reset_document(editpad_core::Document::from_str(&doc));
+        c.set_viewport_width(600.0);
+        c.set_viewport_height(300.0);
+        c.sb_activity = None;
+        c.last_activity = None;
+        c.line_shape_cap_off = cap_off;
+    }
+    if scroll_cols != 0.0 {
+        // ⚠️ 先跑一帧把**实测列宽**注回 core，再横向滚动：`scroll_by_columns`
+        // 的位移是 `cols × char_width()`，而没量过的 core 读到的是固定假设值
+        // （P154 同一条规矩）。顺序反了两档对照的 `scroll_left` 就不相等，
+        // 比的是"不同位置的两帧"——第 323 轮这条自己红过一次。
+        let _ = p443_layout_only(&core);
+        core.borrow_mut().scroll_by_columns(scroll_cols);
+    }
+    {
+        let _ = core.borrow().take_layout_shape_chars();
+    }
+    core
+}
+
+/// 只跑一次 `layout`（＝本帧的行级排版注入在这里发生），返回那一次交进排版的字符数。
+fn p443_layout_only(core: &EditorHandle) -> usize {
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let _ = view.layout(&mut tree, &renderer, &limits);
+    core.borrow().take_layout_shape_chars()
+}
+
+/// P443 三条护栏共用的长行无头一帧：走真实管线（layout 注入排版 + draw + 合成），
+/// 返回 `(那份 core, 像素, 本帧交进排版的字符数)`。`cap_off` 是**改前 oracle**
+/// 开关（true＝超长行照旧整行进排版）；`scroll_cols` 是横向滚动列数。
+/// 两帧之间的时钟层按 P280／P281 的规矩钉死（`sb_activity`／`last_activity`）。
+///
+/// ⚠️ 字体一律**显式具名族**，不用 `BODY_FONT`（＝`Font::MONOSPACE`）：
+/// `shape_row_xs` 进门先调 `ensure_mono_face()`＝进程级一次性钉字（P329），
+/// 它把 generic monospace 从本机那档（Cascadia，9.375px）挪到 NSimSun（8.0px）。
+/// 两档对照之间如果恰好跨过这一次钉字，像素自然对不上——第 323 轮在全量池里
+/// 就是这个形状红的（单跑绿、并发红）。同 P285 的既定解法。
+fn p443_long_line_frame(
+    len: usize,
+    cap_off: bool,
+    scroll_cols: f32,
+) -> (EditorHandle, tiny_skia::Pixmap, usize) {
+    let font = Font {
+        family: iced::font::Family::Name("NSimSun"),
+        ..iced::Font::MONOSPACE
+    };
+    let core = p443_new_core(len, cap_off, scroll_cols);
+    let mut view = EditorView {
+        core: core.clone(),
+        font,
+        zoom_accum: 0.0,
+    };
+    let mut renderer = iced::Renderer::new(font, Pixels(16.0));
+    let mut tree = Tree::empty();
+    let limits = layout::Limits::new(Size::new(600.0, 300.0), Size::new(600.0, 300.0));
+    let node = view.layout(&mut tree, &renderer, &limits);
+    let lyt = Layout::new(&node);
+    let (w, h) = (600u32, 300u32);
+    let rect = Rectangle::with_size(Size::new(w as f32, h as f32));
+    let vp = iced_graphics::Viewport::with_physical_size(Size::new(w, h), 1.0);
+    let mut pixels = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+    pixels.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+    view.draw(
+        &tree,
+        &mut renderer,
+        &Theme::Light,
+        &iced::advanced::renderer::Style::default(),
+        lyt,
+        mouse::Cursor::Unavailable,
+        &rect,
+    );
+    renderer.draw(&mut pixels.as_mut(), &mut mask, &vp, &[rect], Color::WHITE);
+    let shaped = core.borrow().take_layout_shape_chars();
+    (core, pixels, shaped)
+}
+
+/// 暗像素计数（底色是白的，落笔处即暗像素）——用来自证「这帧真画了正文」。
+fn p443_ink_px(pixels: &tiny_skia::Pixmap) -> usize {
+    pixels
+        .pixels()
+        .iter()
+        .filter(|p| (p.red() as u16 + p.green() as u16 + p.blue() as u16) < 600)
+        .count()
+}
+
+/// P443 护栏①（成本契约，判**次数**）：超长行交进排版的字符数不再随行长相加。
+///
+/// 这是「快速滑动」那一档的主项——现量：20 000 字/行时**每滚一屏 256 ms**
+/// （release），而只 shape 覆盖视口的那段前缀恒 ~0.5 ms。
+#[test]
+fn p443_layout_shaping_stops_growing_with_line_length() {
+    let just_over = p443_long_line_frame(600, false, 0.0).2;
+    let huge = p443_long_line_frame(12_000, false, 0.0).2;
+    let old = p443_long_line_frame(12_000, true, 0.0).2;
+    eprintln!(
+        "[P443] 一帧交进排版的字符数：600 字/行 {just_over} / 12 000 字/行 {huge} / 同文档改前 {old}"
+    );
+    assert!(just_over > 0, "夹具失效：这帧一次排版都没走");
+    assert!(
+        old > huge * 8,
+        "改前读数 {old} 没显著高于改后 {huge}＝这两档没走出差别（新路径没被走到）"
+    );
+    assert!(
+        huge <= just_over * 2 + 64,
+        "12 000 字/行交进排版 {huge}，没与 600 字档（{just_over}）同量级＝额度失效"
+    );
+}
+
+/// P443 护栏②（几何与窗口同一性）：前缀档在**覆盖到的每一列**上必须与整行档
+/// 逐列同解，且绘制侧剔出的字符窗口逐格相同。
+///
+/// 判这两样而不是整幅像素，是因为整幅像素比对在这一档**跨测试并发不稳**：同一份
+/// 代码在全量池里约 1/3 跑出 6008 px 差（另一些跑 diff=0），差全部落在底部与右缘
+/// 那两条滚动条带＋一竖条（逐行计数＝每行 10 px 一致、末 6 行整幅），而文字几何
+/// 逐列相同（`row_x` 读数一致）——成因未勘，登记在 §2 那一行，别当成已排除。
+/// 本条与③合起来盯的是「截了不许改变任何可见字符的位置与取舍」这件事。
+#[test]
+fn p443_prefix_and_whole_line_agree_on_geometry_and_window() {
+    for (label, scroll) in [("行首", 0.0f32), ("横滚 300 列", 300.0)] {
+        let (ca, pa, shaped_a) = p443_long_line_frame(4_000, false, scroll);
+        let (cb, pb, _shaped_b) = p443_long_line_frame(4_000, true, scroll);
+        if scroll > 0.0 {
+            assert!(
+                ca.borrow().scroll_left > 1.0 && cb.borrow().scroll_left > 1.0,
+                "{label}：夹具自检——横滚没生效（scroll_left = {} / {}），这一档只量到行首那一支",
+                ca.borrow().scroll_left,
+                cb.borrow().scroll_left
+            );
+        }
+        let (ink_a, ink_b) = (p443_ink_px(&pa), p443_ink_px(&pb));
+        assert!(
+            ink_a > 200 && ink_b > 200,
+            "{label}：夹具自检——两档墨迹 {ink_a} / {ink_b} px，这帧没画正文"
+        );
+        let (a, b) = (ca.borrow(), cb.borrow());
+        // 前缀档这一帧确实排过版（整行档在暖身后的第二帧可能是 memo 全命中，
+        // 排版量为 0 是正常的——两档的**量级**对照在护栏①那一档做）
+        assert!(shaped_a > 0, "{label}：前缀档这帧一次排版都没走");
+        let range = a.visible_range();
+        assert_eq!(
+            range,
+            b.visible_range(),
+            "{label}：两档可见区就不同，下面的对拍比的是别的帧"
+        );
+        let x_from = a.scroll_left - a.gutter_width();
+        let x_to = a.scroll_left + a.text_viewport_w();
+        let mut cols_compared = 0usize;
+        for line in range.0..=range.1 {
+            let text = a.line_text_ref(line);
+            let lens = a.line_display_len(line);
+            // ① 窗口：绘制侧剔出的字符区间与起点必须逐格相同
+            assert_eq!(
+                a.h_clip_window(line, &text, lens, x_from, x_to),
+                b.h_clip_window(line, &text, lens, x_from, x_to),
+                "{label}：第 {line} 行剔出的绘制窗口不同"
+            );
+            // ② 逐列几何：前缀覆盖到的每一列，真实字形 x 与整行档相同
+            let cov = a
+                .row_layouts
+                .get(&line)
+                .map(|v| v.len().saturating_sub(1))
+                .unwrap_or(0);
+            assert!(cov >= 1, "{label}：第 {line} 行没有可用布局表，对拍是空的");
+            for k in 0..=cov.min(lens) {
+                assert_eq!(
+                    a.row_x(line, k),
+                    b.row_x(line, k),
+                    "{label}：第 {line} 行第 {k} 列的像素起点不同＝前缀 shaping 改了位置"
+                );
+                cols_compared += 1;
+            }
+        }
+        assert!(
+            cols_compared > 500,
+            "{label}：只比对了 {cols_compared} 列，样本太小＝前缀几乎没被覆盖到"
+        );
+    }
+}
+
+/// P443 护栏③（命中同一性）：视口内任意一列的点击，前缀档必须解出与整行档
+/// 相同的光标位置——这张表短了一截不许把点击算错（台账里点名的那半条风险）。
+#[test]
+fn p443_click_columns_on_long_lines_match_whole_line_layout() {
+    for scroll in [0.0f32, 200.0] {
+        let (a, _, _) = p443_long_line_frame(4_000, false, scroll);
+        let (b, _, _) = p443_long_line_frame(4_000, true, scroll);
+        for dx in [8.0f32, 60.0, 150.0, 300.0, 560.0] {
+            let ca = a.borrow().hit_test(dx, 40.0);
+            let cb = b.borrow().hit_test(dx, 40.0);
+            assert_eq!(
+                ca, cb,
+                "横滚 {scroll} 列、x={dx} 处两档解出不同落点（前缀档把点击算错了）"
+            );
+        }
+    }
+}
+
+/// P443 护栏④（跨帧扩展）：视口向右挪之后，那一行的前缀表必须跟着变长。
+///
+/// memo 的命中条件里那条「存着的表得够本帧要的长度」就盯这件事；只看单帧的
+/// ①②③ 三条都照绿（每档各自新建 core，memo 恒冷），所以这一条要拿**同一个
+/// core 连画两帧**才量得到。
+#[test]
+fn p443_prefix_table_grows_when_the_viewport_moves_right() {
+    let core = p443_new_core(4_000, false, 0.0);
+    let first = p443_layout_only(&core);
+    core.borrow_mut().scroll_by_columns(1200.0);
+    let second = p443_layout_only(&core);
+    eprintln!("[P443] 同一行跨帧交进排版的字符数：行首 {first} → 横滚 1200 列 {second}");
+    assert!(
+        second > first,
+        "视口右移 1200 列后交进排版的字符数没增长（{first} → {second}）＝前缀表没跟着扩，\
+         新视口的右半没有真实字形位置可用"
+    );
+    // 结果必须与「一开始就横滚到位的整行档」逐列相同
+    let oracle = p443_new_core(4_000, true, 1200.0);
+    let _ = p443_layout_only(&oracle);
+    for dx in [8.0f32, 60.0, 150.0, 300.0, 560.0] {
+        let a = core.borrow().hit_test(dx, 40.0);
+        let b = oracle.borrow().hit_test(dx, 40.0);
+        assert_eq!(a, b, "跨帧扩展出来的那截表，x={dx} 处与整行档解出不一致");
+    }
+}
+
 /// P285 护栏：vendor 给"零面积字形（空格）"补的**负缓存**不得改变像素。
 ///
 /// 改前 `allocate()` 对 `glyph_size == 0` 直接 `return None` 而不入表 ⇒ 空格

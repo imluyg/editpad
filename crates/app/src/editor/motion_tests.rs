@@ -1,5 +1,8 @@
 use super::tests::*;
 use super::*;
+// P443 之后 core.rs 不再转手 `shape_row_xs`（排版侧改用
+// `shape_row_xs_covering`），本文件这两处仍然要整行表当参照，直接从源头引。
+use crate::editor::metrics::shape_row_xs;
 
 // ---------- P33 字体一致性 ----------
 
