@@ -140,6 +140,14 @@ pub struct Settings {
     /// [`crate::document::align_paste_indent`]：目标与块基准互为前缀才平移，
     /// 制表符块粘进空格行这类"平移量没有定义"的情形一律原样。
     pub paste_align_indent: bool,
+    /// P449（路线图 B11）：打字时自动补齐成对括号——打 `(` 得 `()` 且光标停在中间。
+    ///
+    /// **默认关**（与 [`Self::paste_align_indent`] 同一口径）：这一条会写入用户
+    /// **没有按下**的字符，在 `.log` / `.txt` 页上那就是落到磁盘里的错字符，
+    /// 所以行为变更必须显式开启。关着时打字与引入本功能前逐字节相同。
+    /// 开启后仍**不配**的四种情形（判据与理由见 [`crate::pairing`]）：有选区、
+    /// 覆写模式、IME 组字中、列块态与多光标。字符围只有 ASCII `()[]{}`。
+    pub auto_pair_brackets: bool,
     /// B12（功能队列⑤）：变更历史行边条——行号栏最左缘 2px 竖条，标出
     /// **相对上次落盘改过／新增的行**，同一变更块内本身没变的那一段走淡色
     /// （撤销回来的位置）。
@@ -213,6 +221,8 @@ impl Default for Settings {
             edge_column: 0,
             // P322：粘贴缩进对齐默认关（关着＝与引入前逐字节相同）
             paste_align_indent: false,
+            // P449：括号自动配对默认关（它会写入用户没按下的字符，同上一条口径）
+            auto_pair_brackets: false,
             // B12：变更边条默认开（被动显示，同 `indent_guides` 的取舍）
             change_history_strip: true,
             // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
@@ -958,6 +968,12 @@ mod tests {
         assert!(
             loaded.change_history_strip,
             "旧配置缺 change_history_strip 字段时必须落到默认值（开）"
+        );
+        // P449 反向一格：默认**关**的字段缺省时也必须落到关，
+        // 否则升级即改变所有人的打字行为（用户点单定的默认值）。
+        assert!(
+            !loaded.auto_pair_brackets,
+            "旧配置缺 auto_pair_brackets 字段时必须落到默认值（关）"
         );
 
         fs::remove_dir_all(&dir).ok();

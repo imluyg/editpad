@@ -14,6 +14,7 @@ pub mod lang;
 pub mod line_diff;
 pub mod loader;
 pub mod markdown;
+pub mod pairing;
 pub mod paths;
 pub mod saver;
 pub mod search;
@@ -47,6 +48,9 @@ pub use line_diff::{
 pub use loader::{
     decode, load_document_streaming, load_file, load_file_streaming, LoadProgress, LoadedDocument,
     LoadedText,
+};
+pub use pairing::{
+    closer_for, opener_for, pair_action, pair_deletes_whole_pair, PairAction, PairProbe, AUTO_PAIRS,
 };
 pub use paths::{
     data_root, data_root_for, data_root_for_base, instance_mutex_name, pending_open_path,
