@@ -213,7 +213,7 @@ impl EditorCore {
                 marker_start,
                 marker_end,
             }) => {
-                self.select_span(line, marker_start, marker_end - marker_start);
+                self.select_span_quiet(line, marker_start, marker_end - marker_start);
                 self.insert_str("");
                 self.enter();
             }
@@ -271,7 +271,7 @@ impl EditorCore {
             Some((off, len)) => {
                 let at = start + off;
                 let line = self.doc.char_to_line(at);
-                self.select_span(line, at - self.doc.line_to_char(line), len);
+                self.select_span_quiet(line, at - self.doc.line_to_char(line), len);
             }
             None => {
                 // 只落光标：零宽不算选区（`anchor = None` 与 apply_tool 同口径）
@@ -399,17 +399,32 @@ impl EditorCore {
         Ok(true)
     }
 
-    /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区。
+    /// 把选区起点放到 `(line, col)` 并向右延伸 `len_chars` 个字符形成新选区，
+    /// 并把出发点记进跳转历史（P312）。
+    pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
+        self.select_span_nav(line, col, len_chars, true);
+    }
+
+    /// [`Self::select_span`] 的同一条走线，唯一差别＝**不记跳转历史**。
     ///
+    /// 给「编辑动作顺手把结果选上」的场合用（Markdown 包行内标记、空列表项回车退栏）。
+    /// 那些落点不是用户跳过去的，记进历史等于让 `Alt+←` 跳回一个他从没到过的地方——
+    /// 与 `nav_tests::typing_and_arrow_keys_do_not_fill_the_history` 同一条约束。
+    pub fn select_span_quiet(&mut self, line: usize, col: usize, len_chars: usize) {
+        self.select_span_nav(line, col, len_chars, false);
+    }
+
     /// ⚠️ 坐标先夹紧：`line`/`col` 来自**外部表**（「查找全部」面板、FIF 结果、
     /// 书签跳转），而那些表与正文不同源——`undo()` 就不清命中表（台账记过的既有
     /// 口径）。旧写法把越界行号原样挂进 `anchor`/`cursor`，界面看着正常、下一次
     /// 编辑动作才在 ropey 的 `line_to_char` 上炸（实测：`select_span(9999, 0, 3)`
     /// 本身不 panic，紧跟一个 `insert_str` 必 panic）。收敛点放在这里＝所有入口
     /// 共用（`goto_match_index`／`step_match`／`FifGoto`），不各写一份守卫。
-    pub fn select_span(&mut self, line: usize, col: usize, len_chars: usize) {
+    fn select_span_nav(&mut self, line: usize, col: usize, len_chars: usize, record_nav: bool) {
         self.break_typing(); // P37：选区变更打断组（查找跳转/替换当前都经此）
-        self.note_nav_origin(); // P312：查找命中跳转 = 一次远距离跳转
+        if record_nav {
+            self.note_nav_origin(); // P312：查找命中跳转 = 一次远距离跳转
+        }
         self.clear_block(); // 第 67 轮：块态与单选区互斥
         self.collapse_multi(); // B10：选区跳转重置为单光标（白名单外动作）
         let line = line.min(self.doc.line_count().saturating_sub(1));

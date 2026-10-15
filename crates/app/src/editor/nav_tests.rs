@@ -139,3 +139,48 @@ fn reset_document_drops_the_history() {
     assert!(c.nav_fwd.is_empty());
     assert!(!c.nav_back(), "旧坐标系的落点不得作用于新文档");
 }
+
+#[test]
+fn bracket_jump_records_the_origin() {
+    // 配对括号是远距离跳转，与书签／命中定位同一档：跳过去之后 Alt+← 该回得来
+    let mut c = core_with("foo(bar)\nbaz");
+    c.cursor = CursorPos { line: 0, col: 3 };
+    assert!(c.jump_to_matching_bracket());
+    assert_eq!(
+        cur(&c),
+        CursorPos { line: 0, col: 8 },
+        "用例前提：已落到配对括号的另一侧"
+    );
+    assert_eq!(c.nav_back.len(), 1, "括号跳转记出发点");
+    assert!(c.nav_back());
+    assert_eq!(
+        cur(&c),
+        CursorPos { line: 0, col: 3 },
+        "退回首括号之前那一处"
+    );
+}
+
+#[test]
+fn a_failed_bracket_jump_records_nothing() {
+    // 反面格：没跳成就不该留记录，否则用户按一次退回去是原地踏步的假出发点
+    let mut c = core_with("plain text\nno brackets here");
+    c.cursor = CursorPos { line: 0, col: 2 };
+    assert!(!c.jump_to_matching_bracket(), "用例前提：光标不邻接括号");
+    assert!(c.nav_back.is_empty(), "跳转失败不进历史");
+}
+
+#[test]
+fn markdown_edits_do_not_record_the_origin() {
+    // 反向护栏（与 typing_and_arrow_keys_do_not_fill_the_history 同族）：
+    // 包行内标记与「空列表项回车退栏」内部都走选区，但那是编辑落点，不是用户跳过去的
+    let mut c = core_with("甲 乙");
+    c.anchor = Some(CursorPos { line: 0, col: 0 });
+    c.cursor = CursorPos { line: 0, col: 1 };
+    assert!(c.wrap_selection(editpad_core::markdown::MdInlineMarker::Bold));
+    assert_eq!(c.nav_back.len(), 0, "包粗体只是把正文重新选中，不该记跳转");
+
+    let mut d = core_with("- 甲\n- \n");
+    d.cursor = CursorPos { line: 1, col: 2 };
+    d.enter_markdown(); // 空列表项 ⇒ 退出那一层（内部 select_span + 删标记 + 回车）
+    assert_eq!(d.nav_back.len(), 0, "回车退栏不该记跳转");
+}

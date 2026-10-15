@@ -127,7 +127,7 @@ impl EditorCore {
     /// 跳到配对括号的另一侧。光标停在括号前 → 落到配对括号后；停在
     /// 括号后 → 落到配对括号前（保持「相对括号同侧」的手感，来回按即
     /// 在两侧往返）。无邻接括号/无匹配返回 false 不动。纯光标移动：
-    /// 不产生快照，按 P37 口径打断打字组。
+    /// 不产生快照，按 P37 口径打断打字组，按 P312 口径记出发点。
     pub fn jump_to_matching_bracket(&mut self) -> bool {
         let Some((boff, other)) = self.bracket_match() else {
             return false;
@@ -139,6 +139,7 @@ impl EditorCore {
         let target = target.min(self.doc.text_len());
         let line = self.doc.char_to_line(target);
         let col = target - self.doc.line_to_char(line);
+        self.note_nav_origin(); // P312：配对括号也是跳远处，改光标前先记出发点
         self.break_typing();
         self.anchor = None;
         self.cursor = CursorPos { line, col };
