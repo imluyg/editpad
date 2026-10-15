@@ -115,6 +115,8 @@ impl Editpad {
                 let mut tasks: Vec<Task<Message>> = Vec::new();
                 // P126：.LOG 首行时间戳是否已追加（Ok 臂内置位，装载尾部重新置脏）
                 let mut log_appended = false;
+                // P445：本次装载落进的是磁盘只读文件——出声排在整臂收尾之后
+                let mut read_only_notice = false;
                 // P133/A8：一次性跳转意图先摘走，只在「本次装载真的落进了某个页」
                 // 时兑现给**接收文件的那一页**；其余出口（结果丢弃/加载失败）自然
                 // 作废。写在 match 之外并作用于「当时的活动页」曾让一次取消或一次
@@ -216,6 +218,14 @@ impl Editpad {
                         }
                         // P50：载入成功即记外部修改比对戳
                         tab.file_stamp = file_stamp(&job.path);
+                        // P445：磁盘只读属性照实接进这一页的只读闸（与 Ctrl+R
+                        // 共用同一个开关，于是拒收文案、跨标签替换跳过、拖放拒绝
+                        // 全部现成）。**只置真不清真**：手动解除是用户在这一页上
+                        // 明确表过的态，装载不该替他解开。
+                        if crate::file_is_read_only(&job.path) {
+                            tab.editor.borrow_mut().read_only = true;
+                            read_only_notice = target == self.active_tab && !is_restore;
+                        }
                         // P25：真实文件已就位，未命名序号使命完成
                         tab.untitled_num = None;
                         // P31：页内容整体换血（打开/恢复回填）——已提交清单
@@ -300,6 +310,11 @@ impl Editpad {
                 // （restore 与 CLI 两条链不可能同时存在——boot 二者取一）
                 if !self.pending_cli.is_empty() && !self.busy {
                     let _ = self.update(Message::OpenNextCliFile);
+                }
+                // P445：只读出声排在链尾。本臂中间有 `status.clear()`（装载成功
+                // 要抹掉上一条），恢复汇总也在这之后写状态——早写必被覆盖。
+                if read_only_notice {
+                    self.set_status(self.t(editpad_core::Key::StReadOnlyFromDisk).to_owned());
                 }
                 // （跳转意图已在 match 前摘走、Ok 臂内按接收页兑现；到这里
                 //  只剩任务收尾——失败/丢弃出口的意图自然作废）

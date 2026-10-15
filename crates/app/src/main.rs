@@ -848,6 +848,16 @@ fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
     Some((mtime, meta.len()))
 }
 
+/// P445：磁盘上的只读属性（Windows 的 `FILE_ATTRIBUTE_READONLY`／Unix 的
+/// 属主写位）。与 Ctrl+R 的手动锁定是两回事——这份是文件自带的，改前打开时
+/// 不看它，于是只读文件一路可编辑，直到保存失败才出声，期间的改动全落空。
+///
+/// 读不到元数据（刚被删等）按「不是只读」处理：这条链误报的代价是挡住正常
+/// 编辑，漏报的代价只是少一次提示，而保存失败那条路本来就会出声。
+fn file_is_read_only(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.permissions().readonly())
+}
+
 /// 外部修改判定（纯函数可单测）：记录与当前都已知且 (mtime, size) 任一
 /// 分量变化即视为外部修改（size 兜底 FAT 系 2s 粒度的 mtime 盲区）；
 /// 记录缺失 = 从未记录，不判定；当前缺失 = 文件已被外部删除，同样算

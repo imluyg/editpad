@@ -438,6 +438,7 @@ key_table! {
     { StReadOnlyOn => "已锁定只读：编辑与撤销被拒收（Ctrl+R 解除）", "Read-only locked: edits and undo are rejected (Ctrl+R to unlock)" },
     { StReadOnlyOff => "已解除只读", "Read-only unlocked" },
     { StReadOnlyLocked => "文档已锁定只读（Ctrl+R 解除）", "Document is locked read-only (Ctrl+R to unlock)" },
+    { StReadOnlyFromDisk => "磁盘上这份文件是只读的：已按只读打开（Ctrl+R 可解锁编辑）", "This file is read-only on disk: opened read-only (Ctrl+R unlocks editing)" },
     { StJsonOnly => "格式化 JSON 仅对 JSON 文件可用（Ctrl+Shift+F）", "Format JSON is only available for JSON files (Ctrl+Shift+F)" },
     { StJsonFormatted => "已格式化 JSON", "JSON formatted" },
     { StJsonFailed => "JSON 格式化失败：", "JSON formatting failed: " },

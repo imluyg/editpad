@@ -1125,6 +1125,100 @@ fn p63_manual_save_blocked_on_external_change_until_acknowledged() {
     assert!(app.busy, "有意覆盖的第二步应正常走保存");
 }
 
+/// P445：磁盘上带只读属性的文件必须**按只读打开**并当场出声。改前打开时不读
+/// 这个属性，只读文件一路可编辑，直到保存失败才出声——期间的改动全落空。
+/// 落进的是现成那条只读闸（Ctrl+R 的 `read_only`），故拒收文案、跨标签替换
+/// 跳过、拖放拒绝都是既有行为，本用例只钉「属性接进闸」这一格。
+#[test]
+fn opening_a_disk_read_only_file_locks_the_page_and_says_why() {
+    /// 上一次运行若在置只读之后断言失败，残留的只读位会让这次 `fs::write` 直接
+    /// 报错（Windows 上只读文件不可截写），于是下一次的红指错方向。
+    /// Unix 侧 `set_readonly(false)` 会连属主写位一起放开成 world-writable——
+    /// 本夹具只清残留、不设长期权限，且这条链只在 Windows 上被验收，故显式放行。
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn clear_leftover(path: &Path) {
+        if let Ok(meta) = fs::metadata(path) {
+            let mut perm = meta.permissions();
+            perm.set_readonly(false);
+            let _ = fs::set_permissions(path, perm);
+        }
+    }
+
+    let dir = scratch_dir("p445-readonly");
+    let path = dir.join("locked.txt");
+    clear_leftover(&path);
+    fs::write(&path, "只读内容").unwrap();
+    // 记下原始权限，收尾整体还原它（比事后清位更贴近原状）
+    let original = fs::metadata(&path).unwrap().permissions();
+    let mut readonly = original.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&path, readonly).unwrap();
+    assert!(
+        fs::metadata(&path).unwrap().permissions().readonly(),
+        "夹具自证：磁盘侧真的置成了只读"
+    );
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(path.clone()));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("只读内容"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    assert!(
+        app.cur_handle.borrow().read_only,
+        "磁盘只读必须接进这一页的只读闸"
+    );
+    assert!(
+        app.status.contains("只读"),
+        "打开时就出声，实际 {:?}",
+        app.status
+    );
+
+    // 编辑被现成那条闸拒收：一个字都不落进文档
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "只读内容",
+        "只读页不得被编辑"
+    );
+    assert!(!app.tab().dirty, "被拒收的编辑不得置脏");
+
+    // Ctrl+R 是用户的明确表态 ⇒ 解锁照旧可编辑（保存会由 OS 拒，那是既有链）
+    dispatch(&mut app, Message::ToggleReadOnly);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "x只读内容",
+        "手动解锁后照旧可编辑"
+    );
+
+    // 收尾还原原始权限再删文件：Windows 删不掉只读文件，残留还会骗过下一次运行
+    // 的夹具隔离（P290 那一族的 PID 回收坑）
+    fs::set_permissions(&path, original).unwrap();
+    fs::remove_file(&path).ok();
+}
+
+/// 反面一格：可写文件打开后**不该**被锁。缺了它，「无条件置真」的写法
+/// 也能把上面那条用例喂绿。
+#[test]
+fn opening_a_writable_file_leaves_the_page_editable() {
+    let (app, _path) = loaded_real_file_app("p445-writable");
+    assert!(
+        !app.cur_handle.borrow().read_only,
+        "可写文件不该进只读闸：实际 {:?}",
+        app.status
+    );
+}
+
 #[test]
 fn p340_save_as_report_lands_on_the_originating_tab() {
     // 缺陷形状：A 页起「另存为」对话框（busy=true）→ 期间 Ctrl+Tab 切到 B
