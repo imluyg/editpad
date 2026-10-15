@@ -1,7 +1,9 @@
 use super::*;
 // P153：查找框控件的「未淡出态」直接复用既有按钮/复选框样式（保证淡出
-// 开关两侧逐字等价）；二者定义在 settings_ui.rs，不经 main.rs 的 glob 转发。
-use crate::settings_ui::{chrome_button_style, settings_checkbox_style};
+// 开关两侧逐字等价）；P446 起按钮样式在 chrome_styles.rs、复选框仍在
+// settings_ui.rs，都不经 main.rs 的 glob 转发。
+use crate::chrome_styles::chrome_button_style;
+use crate::settings_ui::settings_checkbox_style;
 
 /// 右键菜单卡片的估宽（px）：最宽项「关闭其他标签页(N)」≈ 8 汉字 ×16px
 /// + 内边距。仅用于贴边钳制，与实际 Shrink 宽度的少量偏差可接受。

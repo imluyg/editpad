@@ -42,7 +42,7 @@ pub(crate) use scans::run_find_scan;
 mod snapshots;
 mod tab_menu;
 
-pub(crate) use super::settings_ui::{
+pub(crate) use super::chrome_styles::{
     chrome_button_style, chrome_menu_item_style, menubar_text_style, tab_close_style,
     tab_label_style, tab_pill_style,
 };

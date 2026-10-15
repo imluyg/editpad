@@ -888,6 +888,8 @@ use heartbeat::*;
 mod state;
 use state::*;
 mod chrome;
+// P446：壳层中性样式自 settings_ui.rs 纯移动拆出
+mod chrome_styles;
 use chrome::*;
 // P153：查找卡片的「点击观察层」（内容消费了按下事件也要能观察到）。
 mod press_observer;
