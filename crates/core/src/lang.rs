@@ -133,6 +133,8 @@ pub const ROW_INDENT_GUIDES: &str = "indent_guides";
 pub const ROW_EDGE_COLUMN: &str = "edge_column";
 /// P322：粘贴缩进对齐开关（行键与设置字段同名，控件匹配按它判等）
 pub const ROW_PASTE_ALIGN_INDENT: &str = "paste_align_indent";
+/// P449：打字时自动补齐成对括号（行键与设置字段 `auto_pair_brackets` 同名）
+pub const ROW_AUTO_PAIR: &str = "auto_pair_brackets";
 /// B12：变更历史行边条（行号栏最左缘的改动竖条）。
 pub const ROW_CHANGE_STRIP: &str = "change_history_strip";
 pub const ROW_FONT_FAMILY: &str = "font_family";
@@ -276,6 +278,9 @@ key_table! {
     { RowChangeStrip => "变更历史行边条", "Change History Strip" },
     { RowChangeStripDesc => "开：行号栏最左缘画 2px 竖条，标出相对上次保存改过或新增的行；同一变更块里本身没变的那一段（撤销回来的位置）走淡色。只作显示，不改内容、不影响置脏与撤销；超大文档不计算，边条自然不显示。", "On: a 2px strip on the left edge of the gutter marks lines changed or added since the last save; unchanged lines inside the same changed block (reverted spans) render fainter. Display only — it never edits content and does not affect the dirty flag or undo. Very large documents are not analyzed, so the strip simply stays off." },
     { RowPasteAlignIndentDesc => "开：粘多行文本时，整块按光标所在行的行首缩进平移——相对层次不变，行尾与空行不动，制表符块粘进空格行则原样不动。默认关：关着时粘进来的内容与剪贴板逐字节相同。", "On: shift a multi-line paste onto the indentation of the caret's line — relative structure kept, line endings and blank lines untouched, a tab-indented block pasted into space-indented lines left as it is. Off by default: off means the paste is byte-for-byte the clipboard." },
+    // P449（路线图 B11）：打字自动补齐括号。文案同样把「默认关」与「写入的字符不是你按的」写明白
+    { RowAutoPair => "打字时自动补齐括号", "Auto-close Brackets" },
+    { RowAutoPairDesc => "开：打左括号自动补上右括号，光标停在两者之间；紧接着再打一次右括号会越过它而不是重复一个，此时退格一次删掉整对。手打的括号不受影响；有选区、覆写模式、输入法组字中、列块态与多光标下一律不补。默认关：关着时打字与引入本功能前逐字节相同。", "On: typing a bracket inserts its partner and keeps the caret between them; typing the closing bracket right after steps over it instead of doubling it, and one Backspace then removes the whole pair. Hand-typed brackets are untouched; nothing is inserted while a selection is active, in overtype mode, during IME composition, or in column-block and multi-caret editing. Off by default: off means typing is byte-for-byte what it was before." },
     { RowFontFamily => "正文字体", "Editor Font" },
     { RowFontFamilyDesc => "只作用于正文与 Markdown 预览；菜单/状态栏/行号等界面文字由\
                              「界面语言」与行号位候选链决定。建议选含中文字形的等宽字体，\
@@ -1141,6 +1146,7 @@ mod tests {
             ROW_INDENT_GUIDES,
             ROW_EDGE_COLUMN,
             ROW_PASTE_ALIGN_INDENT,
+            ROW_AUTO_PAIR,
             ROW_CHANGE_STRIP,
             ROW_FONT_FAMILY,
             ROW_FONT_SIZE,

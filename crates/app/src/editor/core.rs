@@ -145,6 +145,14 @@ pub enum Motion {
 pub enum EditOp {
     /// 插入文本（可多行；输入法上屏与普通字符共用）
     InsertText(String),
+    /// P449（路线图 B11）：打下的**一个**字符恰好是配对表的成员（开括号或闭括号）。
+    ///
+    /// 与 [`Self::InsertText`] 分开成两个变体，是为了让"补对"这件事只可能来自
+    /// 真按键那一路：IME 上屏（`view/mod.rs`）、列编辑器对话框生成的文本、
+    /// 列块逐行插入那三条生产者都发 `InsertText`，天生不被牵连。
+    /// 这一击到底补对、越过、还是照常插入，由 `editpad_core::pairing::pair_action`
+    /// 现量决定（判据不在此处），所以开关关掉时行为与引入本功能前逐字节相同。
+    TypedPair(char),
     // ---------- P135：文档内拖拽移动/复制选区（路线图 B8） ----------
     /// 拖拽释放：把当前选区落到 (line, col)——copy=true 复制仅插入，
     /// false 移动先删后插（单快照一次撤销）。执行体 EditorCore::
@@ -927,6 +935,16 @@ pub struct EditorCore {
     /// 光标导航/书签标注照常。每页独立、不持久化，跨重载保持（用户
     /// 显式设定，静默重载不得擅改）。
     pub(crate) read_only: bool,
+    /// P449（路线图 B11）：本功能刚在**光标处**补上的那个闭括号字符；None = 没有。
+    ///
+    /// 记字符而不是记偏移：`(|)` 里继续打字会把那个闭括号一路右移，绝对偏移每插
+    /// 一个字符都得跟着搬，漏搬一次就指错地方。字符标记加"每次现量左右邻居重验"，
+    /// 陈旧这一整类就不存在了——嵌套 `((|))` 因此能连按两个 `)` 一路越过。
+    ///
+    /// 它只用来认"这个右括号是我们补的"，所以清的地方与打字组同一汇点
+    /// （[`Self::break_typing`]）与换文档（[`Self::drop_stale_coordinate_state`]）；
+    /// 每页独立、不持久化、不入快照（同 `overwrite` 那一族）。
+    pub(crate) auto_closer: Option<char>,
 }
 
 /// 光标闪烁半周期。
@@ -1071,6 +1089,8 @@ impl Default for EditorCore {
             wrap_sb_reserve: false,
             overwrite: false,
             read_only: false,
+            // P449：没有"刚补上的右括号"这一说（新页什么都没打过）
+            auto_closer: None,
         }
     }
 }
@@ -1554,6 +1574,8 @@ impl EditorCore {
         //（书签集在 reset_document 里另有条目清空）
         self.nav_back.clear();
         self.nav_fwd.clear();
+        // P449：上一页"刚补上的那个右括号"在新文档里没有指代对象
+        self.auto_closer = None;
     }
 
     /// 用新文档整体替换（加载文件时用），清空历史。

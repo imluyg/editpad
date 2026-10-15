@@ -415,6 +415,10 @@ enum Message {
     /// P322（功能队列①）：设置——多行粘贴按光标行缩进对齐（外观页；**默认关**，
     /// 关着时粘贴与引入本设置前逐字节相同）
     SettingsPasteAlignIndentToggled(bool),
+    /// P449（路线图 B11）：设置 → 外观「打字时自动补齐括号」开关。生效点在
+    /// `apply_edit` 的 `EditOp::TypedPair` 那一臂（读的是这份设置，不在每页镜像
+    /// 一份状态，与 P322 粘贴对齐同口径）。
+    SettingsAutoPairToggled(bool),
     /// B12（功能队列⑤）：变更历史行边条开关（纯绘制，全标签页即时生效）
     SettingsChangeStripToggled(bool),
     /// 设置：右缘标尺列步进（P132，外观页；0 = 关，±4 步进，上限

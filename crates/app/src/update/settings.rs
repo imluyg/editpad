@@ -72,6 +72,14 @@ impl Editpad {
                 self.persist_settings();
                 Task::none()
             }
+            // P449（路线图 B11）：打字自动补齐括号——与上一条同口径：纯偏好，
+            // 不碰渲染层也不碰文档模型，生效点在 `apply_edit` 的 TypedPair 臂，
+            // 所以不往每页 EditorCore 镜像一份（镜像就是第二份真值）
+            Message::SettingsAutoPairToggled(value) => {
+                self.settings.auto_pair_brackets = value;
+                self.persist_settings();
+                Task::none()
+            }
             // B12：变更历史边条——纯绘制开关，与参考线同口径全标签页即时生效。
             // `set_change_strip(false)` 会清缓存，所以"关→开"之间发生过保存
             // 也不会吐旧标记。

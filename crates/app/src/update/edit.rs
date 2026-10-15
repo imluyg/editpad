@@ -6,6 +6,24 @@
 
 use super::*;
 
+/// P449：打字入文的唯一路由（列块态逐行替换 → 多光标同步插入 → 普通插入）。
+///
+/// 单独一份而不是在两处抄，是因为 [`EditOp::TypedPair`] 的"照常插入"那一支必须
+/// 与 [`EditOp::InsertText`] 走同一条路——否则会出现"开关关着时列块态打字行为
+/// 不一样"这种第二套语义。
+fn insert_typed(editor: &mut editor::EditorCore, text: &str) -> bool {
+    if editor.has_block() {
+        // 第 67 轮 ⑮：列块态下输入 = 逐行替换块内容（v1 单行文本）
+        editor.insert_into_block(text)
+    } else if let Some(changed) = editor.multi_edit(editor::MultiEditKind::Insert(text)) {
+        // B10 Phase 2：多光标同步插入（None = 触发折叠回退，落回普通单光标路径）
+        changed
+    } else {
+        editor.insert_str(text);
+        true
+    }
+}
+
 /// P319：会话内剪贴板历史的条数封顶（保新弃旧）。
 const CLIP_HISTORY_MAX: usize = 20;
 
@@ -702,6 +720,7 @@ impl Editpad {
         if !matches!(
             op,
             E::InsertText(_)
+                | E::TypedPair(_)
                 | E::Backspace
                 | E::Delete
                 | E::CancelBlock
@@ -725,6 +744,7 @@ impl Editpad {
             && !matches!(
                 op,
                 E::InsertText(_)
+                    | E::TypedPair(_)
                     | E::Backspace
                     | E::Delete
                     | E::CancelBlock
@@ -774,19 +794,36 @@ impl Editpad {
                 }
                 changed
             }
-            E::InsertText(text) => {
-                // 第 67 轮 ⑮：列块态下输入 = 逐行替换块内容（v1 单行文本）
-                if editor.has_block() {
-                    editor.insert_into_block(&text)
-                } else if let Some(changed) =
-                    editor.multi_edit(editor::MultiEditKind::Insert(&text))
-                {
-                    // B10 Phase 2：多光标同步插入（None = 触发折叠回退，
-                    // 落回普通单光标路径）
-                    changed
+            E::InsertText(text) => insert_typed(&mut editor, &text),
+            // P449（路线图 B11）：打下配对表里的一个字符（开括号或闭括号）。
+            // 开关关着时走的就是上面那条 `insert_typed`——"默认关 ⇒ 逐字节与引入
+            // 本功能前相同"这条证明握在这里，不靠运行时再判一次形状。
+            E::TypedPair(c) => {
+                let typed = c.to_string();
+                if !self.settings.auto_pair_brackets {
+                    insert_typed(&mut editor, &typed)
                 } else {
-                    editor.insert_str(&text);
-                    true
+                    match editpad_core::pairing::pair_action(&editor.pair_probe(c)) {
+                        // 判据只会对表里的开括号说"补对"；这里查不到配对意味着
+                        // 两张表脱钩 ⇒ 退回普通插入，不 panic 也不补半个
+                        editpad_core::pairing::PairAction::InsertPair => {
+                            match editpad_core::closer_for(c) {
+                                Some(close) => {
+                                    editor.insert_pair(c, close);
+                                    true
+                                }
+                                None => insert_typed(&mut editor, &typed),
+                            }
+                        }
+                        // 越过那一下不改内容 ⇒ 恒 false：不置脏、不排自动保存
+                        editpad_core::pairing::PairAction::SkipOver => {
+                            editor.skip_auto_closer();
+                            false
+                        }
+                        editpad_core::pairing::PairAction::Plain => {
+                            insert_typed(&mut editor, &typed)
+                        }
+                    }
                 }
             }
             E::Backspace => {

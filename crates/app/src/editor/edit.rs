@@ -36,6 +36,9 @@ impl EditorCore {
     pub(crate) fn break_typing(&mut self) {
         self.typing_run = None;
         self.typing_run_multi = None;
+        // P449：光标一挪／集合一改／撤销重做，"刚补上的那个右括号"就不再是
+        // 光标处那一个了——清在这里而不是各处自己清，免得又开一条"只清一半"的漏口
+        self.auto_closer = None;
     }
 
     /// 在光标处插入文本（先吃掉当前选区）。支持多行文本。
@@ -466,11 +469,102 @@ impl EditorCore {
         self.char_at(offset) == Some('\r') && self.char_at(offset + 1) == Some('\n')
     }
 
+    /// 全文字符偏移处的光标位置。调用方须保证 `offset <= text_len()`。
+    fn pos_at_offset(&self, offset: usize) -> CursorPos {
+        let line = self.doc.char_to_line(offset);
+        CursorPos {
+            line,
+            col: offset - self.doc.line_to_char(line),
+        }
+    }
+
+    // ---------- P449（路线图 B11）：括号自动配对 ----------
+    // 判据（补对／越过／照常）住在 `editpad_core::pairing`，这一侧只做三件事：
+    // 现量探针、落笔、撤销成组。分开是为了不开窗口就能把整张取舍表逐臂钉死。
+
+    /// 把"这一击该怎么办"的全部已知事实现量成一份探针。
+    ///
+    /// 相邻两个字符走 [`Self::char_at`] 点查，**不物化整行**（这条判据每按一下
+    /// 都要跑，P298 那一族"每帧抄整行"就是这么来的）。
+    pub(crate) fn pair_probe(&self, typed: char) -> editpad_core::pairing::PairProbe {
+        let at = self.cursor_offset();
+        editpad_core::pairing::PairProbe {
+            typed,
+            before: if at == 0 { None } else { self.char_at(at - 1) },
+            after: self.char_at(at),
+            auto_closer: self.auto_closer,
+            // "有选区"的口径与 insert_str 的成组判据同一份（那里问的也是这个）
+            has_selection: self.selection_offsets().is_some(),
+            overwrite: self.overwrite,
+            composing: self.preedit.is_some(),
+            in_block: self.block_sel.is_some(),
+            has_extra_cursors: self.has_multi(),
+        }
+    }
+
+    /// 补上一对括号，光标留在两者之间。
+    ///
+    /// ⚠️ 分两次**单字符** `insert_str`，不是一次插 `"()"`：P37 的成组判据要求
+    /// 载荷恰为一个字符，一次塞两个字符会①凭空开一个新的撤销快照、②把组结束
+    /// 偏移写成 `start_offset + 1`——那个 `+1` 只对单字符成立，于是往后打的每个字
+    /// 都各占一步撤销。两次单字符插入因此不是啰嗦，是这一格的全部难度。
+    pub(crate) fn insert_pair(&mut self, open: char, close: char) {
+        self.insert_str(&open.to_string());
+        self.insert_str(&close.to_string());
+        // 光标退回中间：第二个字符（闭括号）刚插在它前面
+        let between = self.cursor_offset() - 1;
+        self.cursor = self.pos_at_offset(between);
+        self.auto_closer = Some(close);
+        // 重新 arm 打字组——`insert_str` 把组结束写在了闭括号**之后**，光标退回来
+        // 之后下一个字符必须接得上这一组（护栏：a_paired_insert_stays_in_one_undo_group…）
+        self.typing_run = Some(between);
+        self.ensure_visible();
+    }
+
+    /// 越过本功能刚补的那个右括号：不吃字符、不记跳转历史、不碎打字组。
+    ///
+    /// ⚠️ 不走 `apply_motion`——那条会 `break_typing`，把刚开的打字组碎成两步撤销；
+    /// 也不走 `jump_to_matching_bracket`——那条会 `note_nav_origin`，而"一个手势只留
+    /// 一条历史记录"是 P448 立下的规矩，打字不是跳转。
+    pub(crate) fn skip_auto_closer(&mut self) {
+        self.goal_px = None; // 非竖向操作，与 insert_str/backspace 同口径
+        let after = self.cursor_offset() + 1;
+        self.cursor = self.pos_at_offset(after);
+        self.typing_run = Some(after);
+        self.ensure_visible();
+    }
+
+    /// 退格时把整对删掉——只有光标恰好坐在本功能补的那对括号中间才算。
+    ///
+    /// 做法＝造一个正好罩住这两个字符的选区，再走既有 `delete_selection`：
+    /// 单快照（一次撤销整步回来）、书签与高亮失效、`anchor` 收尾全是现成的，
+    /// 不在这里重写第二份。判据那半在 core，含"左侧必须是配对开括号"这道闸——
+    /// 缺了它就会把 `(x|)` 的退格变成连 `x` 一起删。
+    fn delete_auto_pair(&mut self) -> bool {
+        if !editpad_core::pairing::pair_deletes_whole_pair(&self.pair_probe('\u{8}')) {
+            return false;
+        }
+        let at = self.cursor_offset();
+        if at == 0 {
+            return false;
+        }
+        // 标记一旦被这次删除消耗掉就作废：留着它，`(())`（外层是用户手打的）里
+        // 删掉内层那对之后，第二下退格会连用户自己打的括号一起吃掉
+        self.auto_closer = None;
+        self.anchor = Some(self.pos_at_offset(at - 1));
+        self.cursor = self.pos_at_offset(at + 1);
+        self.delete_selection()
+    }
+
     /// 退格。返回是否真的删除了内容——文档原点且无选区时是静默 no-op，
     /// 应用层须以返回值判定置脏/自动保存，不得把空操作当编辑。
     pub fn backspace(&mut self) -> bool {
         self.goal_px = None; // 第 73 轮 ⑯：编辑 = 非竖向操作，清 goal
         if self.delete_selection() {
+            return true;
+        }
+        // P449：光标坐在刚补的那对括号中间时，退格删整对（单快照＝一步撤销回来）
+        if self.delete_auto_pair() {
             return true;
         }
         if self.cursor == CursorPos::default() {

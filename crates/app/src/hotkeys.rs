@@ -947,7 +947,22 @@ pub(crate) fn handle_key(
     }
 
     match &key {
-        Key::Character(chars) => edit(EditOp::InsertText(chars.to_string())),
+        // P449（路线图 B11）：恰好打下配对表里的那一个字符（开括号或闭括号）时，
+        // 发 TypedPair 而不是 InsertText——到底补对／越过／照常插入，由 apply_edit
+        // 现量文档决定。IME 上屏、列编辑器对话框生成的文本、列块逐行插入那三条
+        // 生产者仍发 InsertText，天生不被这一路牵连。
+        Key::Character(chars) => {
+            let mut it = chars.chars();
+            match (it.next(), it.next()) {
+                (Some(c), None)
+                    if editpad_core::closer_for(c).is_some()
+                        || editpad_core::opener_for(c).is_some() =>
+                {
+                    edit(EditOp::TypedPair(c))
+                }
+                _ => edit(EditOp::InsertText(chars.to_string())),
+            }
+        }
         // P166：空格以 Named(Space) 形态上报（winit 把 VK_SPACE 映射为
         // NamedKey::Space，不走 Character），缺此分支 = 空格永远插不进
         // 文档（IME 关闭态直接打空格、组字上屏后补空格均吞键）。输入法

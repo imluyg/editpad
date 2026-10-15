@@ -214,6 +214,9 @@ fn parse_combo_for_test(combo: &str) -> (keyboard::Modifiers, keyboard::Key) {
 mod view_tree;
 pub(crate) use view_tree::ViewTree;
 
+// P449（路线图 B11）：打字自动补齐括号——默认关／光标落在中间／只越过自己补的那一个／
+// 整对删不碰手打的／打字不碎组／跳转历史不受牵连／非按键生产者原样
+mod auto_pair;
 mod bookmarks_panel;
 mod chrome;
 // P319：会话内剪贴板历史（记账／取用／面板预览）
