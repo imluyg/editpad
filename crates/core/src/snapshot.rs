@@ -110,6 +110,53 @@ pub struct SessionTab {
     /// 是为了让未知/未来新增的编码名降级成 `None` 而不是让整份清单解析失败。
     #[serde(default)]
     pub save_encoding: Option<String>,
+    /// P444：该页退出时的**磁盘比对戳**（app 侧 `Tab::file_stamp` 的可序列化
+    /// 形态：mtime 秒 + 纳秒 + 字节数）。
+    ///
+    /// 为什么必须入清单：app 的两道外部修改守卫（显式保存拦截 P63、自动保存
+    /// 拒写）都以「记录缺失 ⇒ 无从比对 ⇒ 放行」为口径。改前恢复链不回填这一
+    /// 戳，于是崩前那份磁盘戳随进程一起没了：崩期间第三方改了文件，重启后
+    /// 第一次写盘（自动或手动）都会无声覆盖对方内容——正是守卫本要拦的那件事。
+    /// 回填后守卫照常比较：清单戳 ≠ 现盘戳 ⇒ 保存被拦下、进 P52 提示条交裁决。
+    ///
+    /// `#[serde(default)]`：旧清单读不出该字段时为 None，app 侧降级成
+    /// 「按恢复时刻的磁盘现戳记账」（比改前的「不记」仍然前进一格）。
+    #[serde(default)]
+    pub disk_stamp: Option<DiskStamp>,
+}
+
+/// 磁盘比对戳在清单里的表示：`(mtime 秒, mtime 纳秒, 字节数)`。
+///
+/// 三分量都是整数 ⇒ TOML 数组同质，`to_string_pretty` 不会因混合类型失败。
+/// 秒用 `u64`（`SystemTime` 早于纪元的时间不入账，见
+/// [`disk_stamp_to_record`]），现实 mtime 远小于 `i64::MAX`，序列化不溢出。
+pub type DiskStamp = (u64, u32, u64);
+
+/// 把 app 的 `(mtime, 长度)` 戳折成可入账形态。
+///
+/// 纪元之前的时间（`duration_since` 失败）返回 None：宁可少一条守卫线索，
+/// 也不给清单写一个读不回来的负值。
+pub fn disk_stamp_to_record(stamp: (SystemTime, u64)) -> Option<DiskStamp> {
+    let (mtime, len) = stamp;
+    let since = mtime.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some((since.as_secs(), since.subsec_nanos(), len))
+}
+
+/// [`disk_stamp_to_record`] 的逆运算：还原成可直接与 `file_stamp()` 比较的
+/// `(SystemTime, 长度)`。
+///
+/// 只做**无损还原**——比较语义必须落在 `SystemTime` 恒等上，故这里不收任何
+/// 粗化表示（截到毫秒会让「还原戳 vs 现盘戳」恒不等 ⇒ 每次保存都误报）。
+/// 纳秒越界（手改/损坏清单）与纪元溢出都返回 None，由调用方降级处理。
+pub fn disk_stamp_from_record(record: DiskStamp) -> Option<(SystemTime, u64)> {
+    let (secs, nanos, len) = record;
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    let since = std::time::Duration::new(secs, nanos);
+    SystemTime::UNIX_EPOCH
+        .checked_add(since)
+        .map(|mtime| (mtime, len))
 }
 
 /// 会话清单：一次快照的提交点。存在且可解析 = 有会话可恢复（P30 消费）；
@@ -741,6 +788,7 @@ mod tests {
             font_size_override: None,
             encoding_label: None,
             save_encoding: None,
+            disk_stamp: None,
         }
     }
 
@@ -758,6 +806,7 @@ mod tests {
             font_size_override: None,
             encoding_label: None,
             save_encoding: None,
+            disk_stamp: None,
         }
     }
 
@@ -794,6 +843,91 @@ mod tests {
         assert_eq!(read.tabs[0].encoding_label, None, "缺字段降级成 None");
         assert_eq!(read.tabs[0].save_encoding, None);
         assert!(read.tabs[0].dirty, "其余字段不受影响");
+    }
+
+    /// P444：磁盘戳的折返必须保住 `SystemTime` **恒等**语义——守卫侧的判据是
+    /// 「还原戳 ≠ 现盘戳 ⇒ 有外部修改」，只要折算是粗化的（截到毫秒/秒），
+    /// 还原值就与任何真实 mtime 恒不等 ⇒ 每次保存都误报。故 roundtrip 断言
+    /// 逐字节相等，而不是「误差在 1s 内」。
+    #[test]
+    fn disk_stamp_roundtrip_preserves_system_time_equality() {
+        let samples = [
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789),
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(0, 999_999_999),
+            // NTFS 的 100ns 分辨率档位
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(1_760_000_000, 500),
+        ];
+        for mtime in samples {
+            let stamp = (mtime, 4096);
+            let record = disk_stamp_to_record(stamp).expect("纪元后的真实 mtime 必须可入账");
+            assert_eq!(
+                disk_stamp_from_record(record),
+                Some(stamp),
+                "折成清单形态再回来必须是同一个时刻"
+            );
+        }
+    }
+
+    /// 入账/还原两侧的降级口子：纪元前的时间没有可表示的 `Duration`，
+    /// 损坏清单里的越界纳秒与纪元溢出都不能把恢复链带进 panic。
+    #[test]
+    fn disk_stamp_degrades_to_none_instead_of_panicking_on_bad_values() {
+        let before_epoch = (
+            SystemTime::UNIX_EPOCH
+                .checked_sub(std::time::Duration::from_secs(5))
+                .unwrap(),
+            10,
+        );
+        assert_eq!(disk_stamp_to_record(before_epoch), None, "纪元前不入账");
+
+        assert_eq!(
+            disk_stamp_from_record((1_700_000_000, 1_000_000_000, 10)),
+            None
+        );
+        assert_eq!(disk_stamp_from_record((u64::MAX, 999_999_999, 10)), None);
+        // 秒位本身可表示（溢出只可能来自 checked_add 那一步）
+        assert!(disk_stamp_from_record((1_700_000_000, 0, 10)).is_some());
+    }
+
+    /// 清单侧：磁盘戳要能随会话 roundtrip；而改前版本写的清单（没这个键）
+    /// 仍须解析成 None，不能把整场可恢复会话判成「清单损坏」。
+    #[test]
+    fn disk_stamp_survives_manifest_roundtrip_and_old_files_still_parse() {
+        let dir = scratch_dir("disk-stamp");
+        let mut t = named_tab("C:/work/外部改动.txt", true);
+        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::new(1_760_000_000, 37);
+        t.disk_stamp = disk_stamp_to_record((mtime, 1234));
+        let written =
+            write_session(&dir, &[page(t.clone(), "崩前改动")], 0, 2).expect("写入应成功");
+
+        let read = read_manifest(&dir).expect("清单必须可解析");
+        assert_eq!(read, written, "清单 roundtrip 必须连磁盘戳一起回来");
+        assert_eq!(
+            read.tabs[0].disk_stamp.and_then(disk_stamp_from_record),
+            Some((mtime, 1234)),
+            "还原出的磁盘戳与写入时刻逐字节相同"
+        );
+
+        // 改前版本写的清单长什么样：`Option::None` 的字段被 toml 整键省略
+        // （本文件的 encoding_label 等同一形状），所以「无 disk_stamp 键」＝
+        // 用一个不带戳的页再写一次，不必手工剥行（数组是多行的，剥行会留半截）。
+        let dir_old = scratch_dir("disk-stamp-old");
+        let mut t_old = t.clone();
+        t_old.disk_stamp = None;
+        let without = write_session(&dir_old, &[page(t_old, "旧清单")], 0, 2).expect("写入应成功");
+        let text = fs::read_to_string(dir_old.join(MANIFEST_NAME)).expect("清单应可读");
+        assert!(
+            !text.contains("disk_stamp"),
+            "不带戳时该键应整条省略（=改前清单的形状）"
+        );
+        assert!(without.tabs[0].disk_stamp.is_none());
+        let read = read_manifest(&dir_old).expect("缺磁盘戳的旧清单必须照旧可解析");
+        assert_eq!(read.tabs[0].disk_stamp, None, "缺字段降级成 None");
+        assert!(read.tabs[0].dirty, "其余字段不受影响");
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&dir_old).ok();
     }
 
     #[test]

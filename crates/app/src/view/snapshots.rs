@@ -29,6 +29,13 @@ impl Editpad {
             // 的既有表示（`Tab::default`），存成 None 免得清单里出现空字符串。
             encoding_label: (!t.encoding_label.is_empty()).then(|| t.encoding_label.clone()),
             save_encoding: t.save_encoding.map(|e| e.label().to_owned()),
+            // P444：外部修改比对戳随会话存活。不带它时，恢复出来的脏页
+            // `file_stamp` 恒为 None，而两道守卫都以「记录缺失 ⇒ 不判定」
+            // 放行（P63 保存拦截、自动保存写前拒跳）——崩期间被第三方改过的
+            // 文件会在第一次写盘时被无声覆盖。
+            disk_stamp: t
+                .file_stamp
+                .and_then(editpad_core::snapshot::disk_stamp_to_record),
         }
     }
 

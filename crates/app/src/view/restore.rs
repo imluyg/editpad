@@ -189,6 +189,20 @@ impl Editpad {
                                 .save_encoding
                                 .as_deref()
                                 .and_then(editpad_core::SaveEncoding::from_label);
+                            // P444：磁盘比对戳带回恢复链。清单里有就照清单里那份记
+                            // ——那正是「我们这份未保存改动落在哪一版磁盘内容之上」，
+                            // 于是崩期间文件被第三方改过时，本会话第一次写盘（显式保存
+                            // 或自动保存）都会被既有守卫拦下、送进 P52 提示条交裁决；
+                            // 清单没有（旧清单、纪元前的 mtime）则退化成按恢复时刻的
+                            // 现盘戳记，此后直到文件再次被改动都不提示，但仍比改前的
+                            // 「不记＝永不拦」前进一格。
+                            // ⚠️ 只能写在快照命中的这一支：排队走加载管线的那两支由
+                            // Loaded 归页时重记戳（update/file.rs），而
+                            // `restore_placeholder_ready` 的占位判据不含本戳。
+                            tab.file_stamp = meta
+                                .disk_stamp
+                                .and_then(editpad_core::snapshot::disk_stamp_from_record)
+                                .or_else(|| crate::file_stamp(Path::new(path)));
                             tab.dirty = true;
                         }
                         None => {

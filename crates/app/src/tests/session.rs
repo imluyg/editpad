@@ -376,6 +376,7 @@ fn clean_named_tab(path: &str) -> editpad_core::snapshot::SessionTab {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     }
 }
 
@@ -428,6 +429,7 @@ fn session_restore_rebuilds_tabs_content_active_and_pending_loads() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let named = editpad_core::snapshot::SessionTab {
         path: Some("C:/w/notes.md".to_owned()),
@@ -442,6 +444,7 @@ fn session_restore_rebuilds_tabs_content_active_and_pending_loads() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -570,6 +573,7 @@ fn restored_tabs_carry_global_font_size() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -621,6 +625,7 @@ fn recovered_named_tab_keeps_its_encoding_so_the_next_save_cannot_silently_trans
         font_size_override: None,
         encoding_label: Some("GBK".to_owned()),
         save_encoding: Some("GBK".to_owned()),
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -690,6 +695,7 @@ fn old_manifest_without_encoding_fields_restores_as_before() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -727,6 +733,7 @@ fn dirty_named_tab_restores_snapshot_instead_of_disk_reload() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -759,6 +766,138 @@ fn dirty_named_tab_restores_snapshot_instead_of_disk_reload() {
     editpad_core::snapshot::clear_session(&dir);
 }
 
+/// P444：恢复出来的置脏命名页必须**带着磁盘比对戳**。改前它是 None，而两道
+/// 守卫（P63 显式保存拦截、自动保存写前拒跳）都以「记录缺失 ⇒ 不判定」放行
+/// ⇒ 崩期间第三方写进那个文件的内容，被重启后的第一次保存无声覆盖；默认
+/// `backup_mode = none` 且自动保存不做写前备份，连一份可回退的副本都不留。
+#[test]
+fn restored_dirty_named_tab_still_blocks_overwrite_after_the_dead_window() {
+    let dir = snapshot_scratch_dir("p444-dead-window");
+    let target = scratch_dir("p444-dead-window").join("报表.txt");
+    fs::write(&target, "磁盘上的旧版").unwrap();
+    // 崩前那次心跳/退出记录的磁盘戳 = 我们这份未保存改动所基于的那版磁盘内容
+    let recorded = editpad_core::snapshot::disk_stamp_to_record(
+        crate::file_stamp(&target).expect("夹具文件必有磁盘戳"),
+    );
+
+    let mut tab = clean_named_tab(&target.display().to_string());
+    tab.dirty = true;
+    tab.disk_stamp = recorded;
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab,
+            doc: editpad_core::Document::from_str("崩前未保存的改动"),
+        }],
+        0,
+        2,
+    )
+    .expect("写会话应成功");
+
+    // 「死掉的那段时间」：第三方改了同一个文件
+    fs::write(&target, "第三方在崩期间写的新版").unwrap();
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "崩前未保存的改动",
+        "夹具前提：内容确实来自快照（即回填磁盘戳的那一支）"
+    );
+    assert_eq!(
+        app.tabs[0]
+            .file_stamp
+            .and_then(editpad_core::snapshot::disk_stamp_to_record),
+        recorded,
+        "恢复页要带的是崩前记录的戳，不是现盘戳——否则死窗口里的那次改动无从比对"
+    );
+    assert_ne!(
+        crate::file_stamp(&target).and_then(editpad_core::snapshot::disk_stamp_to_record),
+        recorded,
+        "夹具前提：磁盘确实已被外部改动"
+    );
+
+    dispatch(&mut app, Message::SaveRequested);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "第三方在崩期间写的新版",
+        "拦截期间外部版本绝不能被覆盖"
+    );
+    assert!(app.tab().dirty, "被拦下必须保持置脏");
+    assert!(!app.busy, "拦截不是进入保存流程");
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[0]),
+        "应把这一页送进 P52 提示条交裁决"
+    );
+
+    // 〔忽略〕按磁盘现状重记戳 ⇒ 再按一次 Ctrl+S 是有意覆盖，正常进保存管线
+    let id = app.tabs[0].id;
+    dispatch(&mut app, Message::IgnoreExternalChange(id));
+    assert!(app.external_change.is_none(), "裁决后收条");
+    assert_eq!(
+        app.tabs[0]
+            .file_stamp
+            .and_then(editpad_core::snapshot::disk_stamp_to_record),
+        crate::file_stamp(&target).and_then(editpad_core::snapshot::disk_stamp_to_record),
+        "〔忽略〕之后比对基准换成磁盘现状"
+    );
+    dispatch(&mut app, Message::SaveRequested);
+    assert!(app.busy, "有意覆盖的第二步应正常走保存");
+
+    editpad_core::snapshot::clear_session(&dir);
+}
+
+/// P444 的另一半：**旧清单**（改前形态，没有 `disk_stamp` 键）降级成
+/// 「按恢复时刻的现盘戳记账」。这仍比改前的「不记＝本会话永不拦」前进一格——
+/// 重启之后发生的任何外部改动都会撞守卫。
+#[test]
+fn restored_tab_without_a_recorded_stamp_falls_back_to_the_current_disk_stamp() {
+    let dir = snapshot_scratch_dir("p444-old-manifest");
+    let target = scratch_dir("p444-old-manifest").join("旧清单.txt");
+    fs::write(&target, "v1").unwrap();
+
+    let mut tab = clean_named_tab(&target.display().to_string());
+    tab.dirty = true;
+    // tab.disk_stamp 刻意保持 None：就是改前那份清单的形状
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab,
+            doc: editpad_core::Document::from_str("崩前未保存的改动"),
+        }],
+        0,
+        2,
+    )
+    .expect("写会话应成功");
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+    assert_eq!(
+        app.tabs[0].file_stamp,
+        crate::file_stamp(&target),
+        "缺记录时按恢复时刻的现盘戳记账，而不是留 None"
+    );
+
+    // 重启之后文件被外部改动 ⇒ 保存必须被拦下
+    fs::write(&target, "重启后被第三方改掉").unwrap();
+    dispatch(&mut app, Message::SaveRequested);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "重启后被第三方改掉",
+        "外部版本必须原封不动"
+    );
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[0]),
+        "改前的 None 戳在这里原本是静默覆盖"
+    );
+
+    editpad_core::snapshot::clear_session(&dir);
+}
+
 #[test]
 fn restored_dirty_pages_stay_dirty_when_undo_revisits_snapshot_state() {
     // P38 × P30 交互回归：恢复出来的置脏页不得把快照内容当落盘基线，
@@ -778,6 +917,7 @@ fn restored_dirty_pages_stay_dirty_when_undo_revisits_snapshot_state() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let named = editpad_core::snapshot::SessionTab {
         path: Some("C:/w/report.txt".to_owned()),
@@ -792,6 +932,7 @@ fn restored_dirty_pages_stay_dirty_when_undo_revisits_snapshot_state() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -1069,6 +1210,7 @@ fn recover_accept_confirms_before_replacing_unsaved_work() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -1142,6 +1284,7 @@ fn recover_confirmation_is_not_inherited_by_the_next_prompt() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
@@ -2272,6 +2415,7 @@ fn heartbeat_result_with_stale_version_does_not_record_account() {
                 font_size_override: None,
                 encoding_label: None,
                 save_encoding: None,
+                disk_stamp: None,
             }],
             active: 0,
             next_untitled: 2,
@@ -2732,6 +2876,7 @@ fn restore_with_all_pages_over_mem_cap_keeps_app_alive() {
         font_size_override: None,
         encoding_label: None,
         save_encoding: None,
+        disk_stamp: None,
     };
     let manifest = editpad_core::snapshot::write_session(
         &dir,
