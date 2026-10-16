@@ -373,14 +373,46 @@ impl Editpad {
                     ed.set_language_by_name(Some(&name));
                     ed.apply_highlight_theme(self.dark_mode);
                 }
-                // 说清楚作用范围：重开那个文件仍按扩展名/内容自动判定
-                // （持久的「扩展名 ↔ 语言」映射是另一格，别在这里假装已经做了）
+                // 档3b：有路径就记进设置（键＝扩展名，或 `.env`/`dockerfile` 这类
+                // 取不到扩展名时的整文件名）；未命名页无处可记 ⇒ 如实说"重开回到自动判定"。
+                let path = self.tab().path.clone();
+                let note = match editpad_core::syntax_override_write_key(path.as_deref()) {
+                    Some(key) => {
+                        self.settings.syntax_overrides.insert(key, name.clone());
+                        self.persist_settings();
+                        self.t(editpad_core::Key::HintSyntaxRemembered).to_owned()
+                    }
+                    None => self.t(editpad_core::Key::HintReloadAutoDetect).to_owned(),
+                };
                 self.set_status(format!(
                     "{} {}（{}）",
                     self.t(editpad_core::Key::HintSyntaxSet),
                     name,
-                    self.t(editpad_core::Key::HintReloadAutoDetect)
+                    note
                 ));
+                Task::none()
+            }
+            // ---------- 档3b：取消这一类文件的手动指定 ----------
+            Message::SyntaxAutoDetect => {
+                let path = self.tab().path.clone();
+                if let Some(key) = editpad_core::syntax_override_write_key(path.as_deref()) {
+                    self.settings.syntax_overrides.remove(&key);
+                    self.persist_settings();
+                }
+                // 本页立刻收回自动判定那三层。样本取文档头一份，与装载／会话恢复
+                // 同一个口径（`head_sample`），否则首行判据会看不到内容。
+                let sample = head_sample(&self.cur_handle.borrow().doc);
+                let language = editpad_core::resolve_language_with(
+                    &self.settings.syntax_overrides,
+                    path.as_deref(),
+                    &sample,
+                );
+                {
+                    let mut ed = self.cur_handle.borrow_mut();
+                    ed.set_language_by_name(language.as_deref());
+                    ed.apply_highlight_theme(self.dark_mode);
+                }
+                self.set_status(self.t(editpad_core::Key::HintSyntaxAutoRestored).to_owned());
                 Task::none()
             }
             // ---------- 正文右键菜单（P308） ----------

@@ -880,6 +880,72 @@ pub fn resolve_language(path: Option<&Path>, sample: &str) -> Option<String> {
     first_line_language(sample)
 }
 
+/// 手动表（档3b）的查键侧：先整文件名（小写），再扩展名（小写、不带点）。
+///
+/// 两个键都查是因为**写入侧与阅读侧看到的形状不同**：用户在 `notes`（无扩展名）
+/// 那页选了语言，记的是整文件名；而他手改 `config.toml` 时更可能写 `h = "C++"`
+/// 这种扩展名形式。只查一半就会出现"表里有值、永远取不到"的那种静默失效——
+/// 本仓已被这一族咬过（别名表里那个不存在的 `"Dockerfile"`）。
+pub fn syntax_override_lookup(
+    overrides: &HashMap<String, String>,
+    path: Option<&Path>,
+) -> Option<String> {
+    if overrides.is_empty() {
+        return None;
+    }
+    let path = path?;
+    if let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) {
+        if let Some(hit) = overrides.get(&name.to_lowercase()) {
+            return Some(hit.clone());
+        }
+    }
+    if let Some(ext) = path.extension().and_then(std::ffi::OsStr::to_str) {
+        if let Some(hit) = overrides.get(&ext.to_lowercase()) {
+            return Some(hit.clone());
+        }
+    }
+    None
+}
+
+/// 手动表的写入侧键：有扩展名记扩展名（一次指定管住同类全部文件，与主流编辑器的
+/// `files.associations` 同口径），否则记整文件名（`.env`/`Dockerfile` 这类
+/// `Path::extension()` 取不到的名字）。未命名页返回 `None` ⇒ 没地方记，
+/// 调用方就该把这次指定说成"只作用本页"。
+pub fn syntax_override_write_key(path: Option<&Path>) -> Option<String> {
+    let path = path?;
+    if let Some(ext) = path.extension().and_then(std::ffi::OsStr::to_str) {
+        let ext = ext.trim().to_lowercase();
+        if !ext.is_empty() {
+            return Some(ext);
+        }
+    }
+    let name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)?
+        .trim()
+        .to_lowercase();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// 统一入口的第二形态：先问手动表，再走自动判定那三层。
+///
+/// 手动那一层**压过一切**（包括扩展名）——用户明确选过的东西不该被扩展名或内容
+/// 推翻，否则「自动判定」的面板就成了摆设。
+pub fn resolve_language_with(
+    overrides: &HashMap<String, String>,
+    path: Option<&Path>,
+    sample: &str,
+) -> Option<String> {
+    if let Some(name) = syntax_override_lookup(overrides, path) {
+        return Some(name);
+    }
+    resolve_language(path, sample)
+}
+
 /// 全部可选语法名（内置包 + 本仓内嵌），**按名字排序**。
 ///
 /// 给「手动指定语言」那一格当数据源：扩展名判错、或者内容根本看不出来时，
@@ -1812,6 +1878,88 @@ mod tests {
         );
         let json_next = json.styled_line(1, "  \"b\": 2", usize::MAX, &mut |_| String::new());
         assert!(json_next.len() >= 3, "下一行仍该分色，实际 {json_next:?}");
+    }
+
+    #[test]
+    fn p453_syntax_override_keys_and_lookup_cover_both_shapes() {
+        use std::collections::HashMap;
+        use std::path::Path;
+        let mut map = HashMap::new();
+        map.insert("h".to_owned(), "Rust".to_owned());
+        map.insert(".env".to_owned(), "Editpad TOML".to_owned());
+        map.insert("dockerfile".to_owned(), "Editpad Dockerfile".to_owned());
+
+        // 写入侧的键：有扩展名记扩展名，没有记整文件名；大小写归一
+        assert_eq!(
+            syntax_override_write_key(Some(Path::new("src/a.B.h"))).as_deref(),
+            Some("h")
+        );
+        assert_eq!(
+            syntax_override_write_key(Some(Path::new("deploy/.env"))).as_deref(),
+            Some(".env"),
+            "点文件的 extension() 取不到 ⇒ 记整名"
+        );
+        assert_eq!(
+            syntax_override_write_key(Some(Path::new("img/DockerFile"))).as_deref(),
+            Some("dockerfile"),
+            "无扩展名的约定名也记整名（小写）"
+        );
+        assert_eq!(syntax_override_write_key(None), None, "未命名页无处可记");
+
+        // 查表侧：整文件名与扩展名两种形状都认（手改 config.toml 的人写哪种都该生效）
+        assert_eq!(
+            syntax_override_lookup(&map, Some(Path::new("inc/win.h"))).as_deref(),
+            Some("Rust")
+        );
+        assert_eq!(
+            syntax_override_lookup(&map, Some(Path::new("deploy/.env"))).as_deref(),
+            Some("Editpad TOML")
+        );
+        assert_eq!(
+            syntax_override_lookup(&map, Some(Path::new("DockerFILE"))).as_deref(),
+            Some("Editpad Dockerfile")
+        );
+        assert_eq!(syntax_override_lookup(&map, None), None);
+        assert_eq!(
+            syntax_override_lookup(&map, Some(Path::new("notes.txt"))),
+            None,
+            "表里没有这一类 ⇒ 交给自动判定"
+        );
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_eq!(syntax_override_lookup(&empty, Some(Path::new("a.h"))), None);
+    }
+
+    #[test]
+    fn p453_manual_choice_outranks_the_extension_layer() {
+        use std::collections::HashMap;
+        use std::path::Path;
+        let mut map = HashMap::new();
+        // 故意选一个与自动判定**不同**的答案：`.rs` 自动是 Rust，这里指定成 Markdown
+        map.insert("rs".to_owned(), "Markdown".to_owned());
+        let p = Path::new("src/main.rs");
+        assert_eq!(
+            resolve_language(Some(p), "fn main() {}").as_deref(),
+            Some("Rust")
+        );
+        assert_eq!(
+            resolve_language_with(&map, Some(p), "fn main() {}").as_deref(),
+            Some("Markdown"),
+            "用户明确选过的东西不许被扩展名推翻，否则那面面板就是摆设"
+        );
+        // 空表 ⇒ 与自动判定逐字相等（这一格挡住"顺手改了自动那三层"）
+        let empty: HashMap<String, String> = HashMap::new();
+        assert_eq!(
+            resolve_language_with(&empty, Some(p), "fn main() {}"),
+            resolve_language(Some(p), "fn main() {}")
+        );
+        // 表里的名字即使不存在也不该由这一层编造——归一在 settings 侧做（见那边用例）
+        let mut bogus = HashMap::new();
+        bogus.insert("rs".to_owned(), "不存在的语法".to_owned());
+        assert_eq!(
+            resolve_language_with(&bogus, Some(p), "fn main() {}").as_deref(),
+            Some("不存在的语法"),
+            "查表层照实返回；把这种值挡在门外是加载归一那一层的责任"
+        );
     }
 
     #[test]

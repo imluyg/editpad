@@ -33,7 +33,8 @@ pub use find_in_files::{
 };
 pub use highlight::{
     available_syntax_names, first_line_language, line_comment_prefix, resolve_fence_language,
-    resolve_language, syntax_for_extension, LazyHighlighter, StyledRun,
+    resolve_language, resolve_language_with, syntax_for_extension, syntax_override_lookup,
+    syntax_override_write_key, LazyHighlighter, StyledRun,
 };
 pub use json::{format_json, validate_json, JsonError};
 pub use lang::{

@@ -581,6 +581,7 @@ impl Editpad {
                     tab_index: None,
                     clip_index: None,
                     syntax_index: None,
+                    clears_syntax: false,
                     title: c.title.to_owned(),
                     detail: self.palette_combo_detail(c.id),
                 })
@@ -594,6 +595,7 @@ impl Editpad {
                     tab_index: Some(i),
                     clip_index: None,
                     syntax_index: None,
+                    clears_syntax: false,
                     title: t.display_name_in(self.lang()),
                     detail: t
                         .path
@@ -613,25 +615,49 @@ impl Editpad {
                     tab_index: None,
                     clip_index: Some(i),
                     syntax_index: None,
+                    clears_syntax: false,
                     title: self.clip_preview(t),
                     detail: self.clip_meta(t),
                 })
                 .collect(),
-            // 档3：语法表。数据源就是 core 那一份排序表（下标即执行参数，
-            // 跨帧稳定），detail 只给本页那一项标一句「当前」。
-            crate::state::PaletteMode::Syntax => editpad_core::available_syntax_names()
-                .into_iter()
-                .enumerate()
-                .map(|(i, name)| PaletteEntry {
+            // 档3：语法表。表头一条是退路（档3b），后面才是 79 门语言。
+            // 数据源就是 core 那一份排序表（下标即执行参数，跨帧稳定），
+            // detail 只给本页那一项标一句「当前」。
+            crate::state::PaletteMode::Syntax => {
+                let mut entries = vec![PaletteEntry {
                     command_id: None,
                     tab_index: None,
                     clip_index: None,
-                    syntax_index: Some(i),
-                    detail: self.current_syntax_note(&name),
-                    title: name,
-                })
-                .collect(),
+                    syntax_index: None,
+                    clears_syntax: true,
+                    detail: self.syntax_override_key_note(),
+                    title: self.t(editpad_core::Key::PaletteAutoSyntax).to_owned(),
+                }];
+                entries.extend(
+                    editpad_core::available_syntax_names()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, name)| PaletteEntry {
+                            command_id: None,
+                            tab_index: None,
+                            clip_index: None,
+                            syntax_index: Some(i),
+                            clears_syntax: false,
+                            detail: self.current_syntax_note(&name),
+                            title: name,
+                        }),
+                );
+                entries
+            }
         }
+    }
+
+    /// 表头那条「自动判定」的 detail：说清它取消的是**哪一类**文件的指定
+    /// （`h`、`.env`、`dockerfile`……与写入口径同一个函数，不另起一份规则）。
+    /// 未命名页没有"类"可记 ⇒ 空串；执行它仍把本页收回自动判定。
+    fn syntax_override_key_note(&self) -> String {
+        let path = self.tab().path.clone();
+        editpad_core::syntax_override_write_key(path.as_deref()).unwrap_or_default()
     }
 
     /// 语法模式条目的 detail：本页当前生效的语法标一句「当前」，其余留空。
@@ -750,16 +776,20 @@ impl Editpad {
         }
         let idx = self.palette_idx.min(entries.len() - 1);
         let entry = &entries[idx];
-        let msg = match (
-            entry.command_id,
-            entry.tab_index,
-            entry.clip_index,
-            entry.syntax_index,
-        ) {
-            (Some(id), ..) => dispatch_action(id, keyboard::Modifiers::empty()),
-            (_, Some(i), _, _) => Some(Message::SwitchTab(i)),
-            (_, _, Some(i), _) => Some(Message::ClipPick(i)),
-            _ => entry.syntax_index.map(Message::SyntaxPick),
+        let msg = if entry.clears_syntax {
+            Some(Message::SyntaxAutoDetect)
+        } else {
+            match (
+                entry.command_id,
+                entry.tab_index,
+                entry.clip_index,
+                entry.syntax_index,
+            ) {
+                (Some(id), ..) => dispatch_action(id, keyboard::Modifiers::empty()),
+                (_, Some(i), _, _) => Some(Message::SwitchTab(i)),
+                (_, _, Some(i), _) => Some(Message::ClipPick(i)),
+                _ => entry.syntax_index.map(Message::SyntaxPick),
+            }
         };
         self.palette_visible = false;
         // P151：面板关闭即把输入焦点还给正文（否则中文输入法在正文里失效）

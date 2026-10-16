@@ -594,6 +594,8 @@ impl Editpad {
             | Message::ClipPick(..)
             // 档3：手动指定本页语法（只换高亮器、不动文档）
             | Message::SyntaxPick(..)
+            // 档3b：取消这一类文件的手动指定
+            | Message::SyntaxAutoDetect
             | Message::KeyPressed(..)
             | Message::HighlightPaveNeeded
             | Message::FormatJson

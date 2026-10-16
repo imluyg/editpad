@@ -16,11 +16,32 @@ fn open_syntax_palette(app: &mut Editpad) {
 }
 
 /// 某门语言在面板数据源里的下标（面板条目带的是下标，测试也得按下标取）。
+/// 表头那条「自动判定」不占下标 ⇒ 语法表下标与 `entries[1..]` 一一对应。
 fn syntax_index_of(name: &str) -> usize {
     editpad_core::available_syntax_names()
         .iter()
         .position(|n| n == name)
         .unwrap_or_else(|| panic!("语法表里没有 {name}"))
+}
+
+/// ⚠️ 档3b 起「选语言」会落盘（`persist_settings`），不钉住这道就是往
+/// **用户真实的 `config.toml`** 写条目（本仓既有口径：`settings_path_override`，
+/// 见 auto_pair／change_strip／paste_indent／settings 那几批用例）。
+/// 任何会走到选语言的测试都必须先调它。
+fn isolate_settings(app: &mut Editpad, tag: &str) -> PathBuf {
+    let dir = scratch_dir(tag);
+    let config = dir.join("config.toml");
+    app.settings_path_override = Some(config.clone());
+    config
+}
+
+/// 面板里那门语言的**行位**（`Message::PalettePick` 的载荷）。
+///
+/// 它与语法表下标差一：表头第一条是「自动判定」那条退路，它不带下标。
+/// 两个量分开命名是刻意的——`PalettePick` 吃行位、`SyntaxPick` 吃表下标，
+/// 混用一个数字就会选到前一门语言（这一格差一就是加表头时踩到的）。
+fn palette_row_of(name: &str) -> usize {
+    syntax_index_of(name) + 1
 }
 
 #[test]
@@ -84,14 +105,20 @@ fn the_syntax_panel_lists_every_language_in_a_stable_order() {
     open_syntax_palette(&mut app);
     let names = editpad_core::available_syntax_names();
     let entries = app.palette_all_entries();
+    // 表头多了一条退路（档3b：自动判定），后面才是全部语言
     assert_eq!(
         entries.len(),
-        names.len(),
-        "面板条目数必须等于语法表长度（下标就是执行参数，两边不同形就选错语言）"
+        names.len() + 1,
+        "面板条目数＝退路一条＋语法表全长（下标就是执行参数，两边不同形就选错语言）"
     );
-    for (i, e) in entries.iter().enumerate() {
+    assert!(
+        entries[0].clears_syntax && entries[0].syntax_index.is_none(),
+        "第一条必须是「自动判定」那条退路"
+    );
+    for (i, e) in entries[1..].iter().enumerate() {
         assert_eq!(e.title, names[i], "第 {i} 条标题与语法表不符");
         assert_eq!(e.syntax_index, Some(i), "第 {i} 条必须带自己的下标");
+        assert!(!e.clears_syntax);
         assert!(e.command_id.is_none() && e.tab_index.is_none() && e.clip_index.is_none());
     }
     // 下标跨帧稳定＝每帧重建的条目序列一模一样（面板每帧重建这个 Vec）
@@ -108,6 +135,7 @@ fn picking_a_language_rehighlights_without_writing_a_single_character() {
     // 夹具：一页**没有行注释前缀**的内容也能被切成 Rust —— 这一格要的不是嗅探，
     // 而是"手动指定"这条路本身。
     let mut app = loaded_txt_app();
+    let config = isolate_settings(&mut app, "switch-syntax-persist");
     let before = app.cur_handle.borrow().doc.to_text().to_owned();
     assert_eq!(
         app.cur_handle.borrow().highlight_syntax_name().as_deref(),
@@ -116,8 +144,7 @@ fn picking_a_language_rehighlights_without_writing_a_single_character() {
     );
 
     open_syntax_palette(&mut app);
-    let idx = syntax_index_of("Rust");
-    dispatch(&mut app, Message::PalettePick(idx));
+    dispatch(&mut app, Message::PalettePick(palette_row_of("Rust")));
 
     let ed = app.cur_handle.borrow();
     assert_eq!(ed.highlight_syntax_name().as_deref(), Some("Rust"));
@@ -127,13 +154,25 @@ fn picking_a_language_rehighlights_without_writing_a_single_character() {
         !app.tab().dirty,
         "换语言不许把页面置脏（它不是编辑动作，关掉程序不该因此问要不要保存）"
     );
-    // 反馈要说清作用范围：重开那个文件仍回到自动判定
+    // 反馈要说清作用范围：这一类文件以后都按它（档3b 持久化）
     let expect = format!(
         "{} Rust（{}）",
         app.t(editpad_core::Key::HintSyntaxSet),
-        app.t(editpad_core::Key::HintReloadAutoDetect)
+        app.t(editpad_core::Key::HintSyntaxRemembered)
     );
     assert_eq!(app.status, expect, "状态栏那句得报出切成了哪门语言");
+    assert_eq!(
+        app.settings.syntax_overrides.get("txt").map(String::as_str),
+        Some("Rust"),
+        "有路径的页面选完就该记进表；键是扩展名（这里 .txt ⇒ \"txt\"）"
+    );
+    // 落盘才是这一格的全部意义：重启后还在
+    let on_disk = editpad_core::Settings::load_from(&config);
+    assert_eq!(
+        on_disk.syntax_overrides.get("txt").map(String::as_str),
+        Some("Rust"),
+        "选完没写进 config.toml 的话，下次开机又回到判错的那一格"
+    );
 }
 
 #[test]
@@ -141,11 +180,12 @@ fn picking_a_language_is_allowed_on_a_read_only_page() {
     // 只读锁挡的是**写正文**的手势。换高亮器不动文档 ⇒ 拦它就是拦掉用户在
     // 只读文件里唯一能纠正误判的手段。
     let mut app = loaded_txt_app();
+    let _config = isolate_settings(&mut app, "switch-syntax-readonly");
     dispatch(&mut app, Message::ToggleReadOnly);
     assert!(app.cur_handle.borrow().read_only, "夹具前提：这页已锁只读");
 
     open_syntax_palette(&mut app);
-    dispatch(&mut app, Message::PalettePick(syntax_index_of("Python")));
+    dispatch(&mut app, Message::PalettePick(palette_row_of("Python")));
     assert_eq!(
         app.cur_handle.borrow().highlight_syntax_name().as_deref(),
         Some("Python"),
@@ -172,15 +212,16 @@ fn the_status_bar_names_the_language_and_falls_back_to_a_dash() {
     let app = Editpad::default();
     assert_eq!(app.status_syntax_label(), "—", "没有高亮器时必须显 —");
 
-    // 手动指定之后显的是**这一页**选定的名字
+    // 手动指定之后显的是**这一页**选定的名字（未命名页 ⇒ 不落盘，见下面那句的口径）
     let mut app = Editpad::default();
     open_syntax_palette(&mut app);
-    dispatch(&mut app, Message::PalettePick(syntax_index_of("Markdown")));
+    dispatch(&mut app, Message::PalettePick(palette_row_of("Markdown")));
     assert_eq!(app.status_syntax_label(), "Markdown");
 
     // 选择是**每页**的属性，不是应用的属性。⚠️ 两页都得有内容：空净页会被
     // FileDropped 复用成同一个标签页（第一版夹具就在这里踩空——它以为开了两页）。
     let mut app = loaded_txt_app();
+    let _config = isolate_settings(&mut app, "switch-syntax-per-tab");
     assert_eq!(
         app.status_syntax_label(),
         "Plain Text",
@@ -241,4 +282,88 @@ fn the_syntax_panel_filters_by_name_and_marks_the_current_one() {
         .map(|e| e.title)
         .collect();
     assert_eq!(marked, vec!["Perl".to_owned()], "detail 只许标住当前那一门");
+}
+
+#[test]
+fn the_manual_choice_reaches_the_next_file_of_that_kind() {
+    // 档3b 的全部意义：判错那一格不必每次重选——按这一类文件记住。
+    let mut app = loaded_txt_app();
+    let config = isolate_settings(&mut app, "switch-syntax-remember");
+    open_syntax_palette(&mut app);
+    dispatch(&mut app, Message::PalettePick(palette_row_of("Rust")));
+    assert_eq!(app.status_syntax_label(), "Rust", "夹具前提：本页已更正");
+
+    // 再开一个同类文件（.txt）：装载那条路必须先问手动表
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/two.txt")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("hello"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert_eq!(app.tabs.len(), 2, "夹具自证：这是第二页");
+    assert_eq!(
+        app.status_syntax_label(),
+        "Rust",
+        "同一类文件第二次打开还得更正后的语言，否则每次开机都要重选一遍"
+    );
+
+    // 退路＝表头那条「自动判定」：撤掉这一类的记录，本页当场收回默认三层
+    open_syntax_palette(&mut app);
+    dispatch(&mut app, Message::PalettePick(0));
+    assert!(
+        !app.settings.syntax_overrides.contains_key("txt"),
+        "退路没把这条记录摘掉"
+    );
+    assert_eq!(
+        app.status_syntax_label(),
+        "Plain Text",
+        "摘掉之后本页应回到自动判定的结果"
+    );
+    assert_eq!(
+        app.status,
+        app.t(editpad_core::Key::HintSyntaxAutoRestored).to_owned(),
+        "得说出发生了什么"
+    );
+    let on_disk = editpad_core::Settings::load_from(&config);
+    assert!(
+        !on_disk.syntax_overrides.contains_key("txt"),
+        "磁盘上还得留着那条记录的话，重启又生效＝退路只是本页一次性"
+    );
+}
+
+#[test]
+fn the_escape_row_names_the_class_it_clears() {
+    // 未命名页没有"类"可记 ⇒ detail 空（但执行它仍不该动表、也不该 panic）
+    let mut app = Editpad::default();
+    open_syntax_palette(&mut app);
+    let row = &app.palette_all_entries()[0];
+    assert!(row.clears_syntax, "第一条必须是退路");
+    assert!(
+        row.detail.is_empty(),
+        "未命名页那条退路不该报出一个文件类别，实际 {:?}",
+        row.detail
+    );
+
+    // 有路径时 detail 说的就是**写入侧同一个键**（不另起一份规则）
+    let mut app = loaded_txt_app();
+    let _config = isolate_settings(&mut app, "switch-syntax-escape-row");
+    open_syntax_palette(&mut app);
+    assert_eq!(app.palette_all_entries()[0].detail, "txt");
+
+    // 未命名页按退路：表不动、不 panic
+    let mut fresh = Editpad::default();
+    let _ = isolate_settings(&mut fresh, "switch-syntax-escape-untitled");
+    dispatch(&mut fresh, Message::SyntaxAutoDetect);
+    assert!(fresh.settings.syntax_overrides.is_empty());
+    assert_eq!(fresh.status_syntax_label(), "—", "空文档本来就判不出语言");
 }

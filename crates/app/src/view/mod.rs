@@ -1148,6 +1148,9 @@ pub(crate) struct PaletteEntry {
     pub(crate) tab_index: Option<usize>,
     pub(crate) clip_index: Option<usize>,
     pub(crate) syntax_index: Option<usize>,
+    /// 档3b：语法模式表头那一条「自动判定」——它不带任何下标，
+    /// 也不借 `command_id`（那条路会被 P321 的「面板内赋键」当成注册表动作）。
+    pub(crate) clears_syntax: bool,
     pub(crate) title: String,
     pub(crate) detail: String,
 }

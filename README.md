@@ -399,7 +399,9 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
   （`<?php`、`<!DOCTYPE html>`、`-*- Mode: C -*-`、`%YAML`、`This is pdfTeX, Version `…）；
 - 状态栏最右一格拉出**本页的语法名**（点它 = 打开「切换语法」面板，79 门语言可搜可选）：
   扩展名判错、内容看不出语言、或这门语言本就没进别名表时，用户自己有地方纠正；选择只作用到本页、
-  不写正文也不置脏，只读页照样可用，重新打开那个文件则回到自动判定；
+  不写正文也不置脏，只读页照样可用；**有路径时这次指定会记进设置**（按扩展名记，取不到扩展名时
+  按整文件名记，如 `.env`／`dockerfile`），同一类文件下次打开就直接按它——面板表头第一条
+  「自动判定」就是这条记录的退路；未命名页无处可记，只作用本页；
 - 行注释前缀（`Ctrl+Q`）按 syntect 的真实语法名取值：`#` 系（bash/Makefile/TOML/Dockerfile/YAML/Perl/R/Tcl…）、
   `--` 系（SQL/Lua/Haskell/AppleScript）、`;` 系（Lisp/Clojure）、`%` 系（Erlang/MATLAB/LaTeX/BibTeX）、
   `'`（ASP）、`::`（批处理）；只有块注释、或根本不是代码的（Markdown/JSON/CSS/HTML/XML/Log）

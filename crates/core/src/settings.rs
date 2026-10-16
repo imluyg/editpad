@@ -165,6 +165,16 @@ pub struct Settings {
     /// 空 = 全部默认。加载时逐条经 [`normalize_combo`] 归一，非法组合
     /// 条目删除；动作 id 的合法性由 app 层过滤（core 不掌握动作清单）。
     pub hotkeys: HashMap<String, String>,
+    /// 档3b：手动的「文件名/扩展名 → 语法名」映射（[`crate::highlight::resolve_language_with`]
+    /// 的第一层）。写入口只有一处：状态栏那格语言位打开的面板里选定一门语言。
+    ///
+    /// 键＝小写扩展名（`h`），无扩展名时＝小写整文件名（`dockerfile`、`.env`）；
+    /// 值＝**必须真实存在**的语法名——加载归一时逐条对着语法集查（私有的 `normalize`）：
+    /// 这一族本仓真踩过（别名表曾把 Dockerfile 指着不存在的
+    /// `"Dockerfile"`，症状是"登记了却一直是纯文本"，而且编译器一声不响）。
+    /// 手改 `config.toml` 时写错的名字、旧版本遗留的名、空白值 ⇒ 那一条整条丢弃，
+    /// 不连坐别的条目（P346 口径）。
+    pub syntax_overrides: HashMap<String, String>,
     /// 设置策略版本（P63）：旧配置缺字段 = 0，加载归一时逐级执行
     /// 策略迁移后推进到 [`SETTINGS_VERSION`]。只承载「默认值语义变更」
     /// 的一次性迁移；普通新增字段一律走 serde default 零迁移。
@@ -228,6 +238,7 @@ impl Default for Settings {
             // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
             backup_mode: BACKUP_MODE_NONE.to_string(),
             hotkeys: HashMap::new(),
+            syntax_overrides: HashMap::new(),
             // 新装用户直接落在当前策略版本：不经历迁移（迁移只面向旧文件）
             settings_version: SETTINGS_VERSION,
             // P102：窗口几何默认未记录（首次启动回退默认尺寸/居中）
@@ -662,6 +673,26 @@ impl Settings {
                 }
                 None => false,
             });
+        // 档3b：手动的「文件名/扩展名 → 语法名」逐条消毒。
+        // 两件事一起做：① 键统一小写并剥空白（查表侧只小写路径那半边，留着
+        // `H = "C++"` 这种手改值就是一条**永不生效**的死条目——本仓被别名表里
+        // 那个不存在的 "Dockerfile" 咬过整整两年）；② 值必须是真实存在的语法名，
+        // 对不上就整条丢弃，不连坐别的条目（P346 口径）。
+        // 表为空时一份语法集都不必建——这条跑在启动路径上。
+        if !self.syntax_overrides.is_empty() {
+            let known = crate::highlight::available_syntax_names();
+            let entries: Vec<(String, String)> = self
+                .syntax_overrides
+                .drain()
+                .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+                .collect();
+            for (key, value) in entries {
+                if key.is_empty() || !known.iter().any(|name| name == &value) {
+                    continue;
+                }
+                self.syntax_overrides.insert(key, value);
+            }
+        }
     }
 
     /// 切换正文字体族（P34）：None = 回退默认等宽。Some 值经与加载归一
@@ -2129,6 +2160,58 @@ mod tests {
         let legacy = dir.join("legacy.toml");
         fs::write(&legacy, "theme = \"dark\"\n").unwrap();
         assert!(Settings::load_from(&legacy).hotkeys.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn p453_syntax_overrides_are_canonicalized_and_unknown_names_dropped() {
+        // 默认 = 空表 ⇒ 加载路径上一份语法集都不必建（归一那条跑在启动路径上）
+        assert!(Settings::default().syntax_overrides.is_empty());
+
+        let dir = scratch_dir("p453-syntax-overrides");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut s = Settings::default();
+        s.syntax_overrides.insert("H".to_owned(), "C++".to_owned());
+        s.syntax_overrides
+            .insert(" .env ".to_owned(), "Editpad TOML".to_owned());
+        // 这一条就是本仓踩过的那颗雷：名字看着像，语法集里根本没有
+        s.syntax_overrides
+            .insert("dockerfile".to_owned(), "Dockerfile".to_owned());
+        s.syntax_overrides.insert("rs".to_owned(), "  ".to_owned());
+        s.save_to(&path).expect("保存应成功");
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(
+            loaded.syntax_overrides.get("h").map(String::as_str),
+            Some("C++"),
+            "键必须小写归一——查表侧只把路径那半边小写，留着 `H` 就是一条永不生效的死条目"
+        );
+        assert_eq!(
+            loaded.syntax_overrides.get(".env").map(String::as_str),
+            Some("Editpad TOML"),
+            "键两端的空白也要剥掉"
+        );
+        assert!(
+            !loaded.syntax_overrides.contains_key("dockerfile"),
+            "对不上真实语法名的条目整条丢弃，不许留在表里当死条目"
+        );
+        assert!(
+            !loaded.syntax_overrides.contains_key("rs"),
+            "空值同样整条丢弃"
+        );
+        assert_eq!(
+            loaded.syntax_overrides.len(),
+            2,
+            "坏值不连坐：其余条目原样留下（P346 口径）"
+        );
+
+        // 旧 config 没有这一格 → 空表，零迁移
+        let legacy = dir.join("legacy.toml");
+        fs::write(&legacy, "theme = \"dark\"\n").unwrap();
+        assert!(Settings::load_from(&legacy).syntax_overrides.is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

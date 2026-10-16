@@ -131,7 +131,10 @@ impl Editpad {
                                         meta.scroll_top,
                                         meta.scroll_left,
                                     );
-                                    // 内容嗅探让未命名草稿同样享受配色
+                                    // 内容嗅探让未命名草稿同样享受配色。
+                                    // 这里刻意用不带手动表的 `resolve_language`（不是漏改）：
+                                    // 档3b 的表按路径取键，未命名页没有键可查，
+                                    // 换成 `resolve_language_with` 结果恒等。
                                     let sample = head_sample(&ed.doc);
                                     ed.set_language_by_name(
                                         editpad_core::resolve_language(None, &sample).as_deref(),
@@ -165,8 +168,12 @@ impl Editpad {
                                 );
                                 let sample = head_sample(&ed.doc);
                                 ed.set_language_by_name(
-                                    editpad_core::resolve_language(Some(Path::new(path)), &sample)
-                                        .as_deref(),
+                                    editpad_core::resolve_language_with(
+                                        &self.settings.syntax_overrides,
+                                        Some(Path::new(path)),
+                                        &sample,
+                                    )
+                                    .as_deref(),
                                 );
                             }
                             tab.path = Some(PathBuf::from(path));

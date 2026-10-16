@@ -132,9 +132,15 @@ impl Editpad {
                 match (result, target) {
                     (Ok((doc, sample, encoding)), Some(target)) => {
                         // P22：语言解析下沉 core——扩展名别名层 + 无扩展名
-                        // 内容嗅探（shebang/XML/JSON/YAML/约定文件名）
-                        let language =
-                            editpad_core::resolve_language(Some(job.path.as_path()), &sample);
+                        // 内容嗅探（shebang/XML/JSON/YAML/约定文件名）。
+                        // 档3b：最前面还有一层**手动表**（`syntax_overrides`），
+                        // 装载与恢复两条路都走同一个 `resolve_language_with`，
+                        // 免得到时候两张表各判各的（围栏那一族就是这么错的）。
+                        let language = editpad_core::resolve_language_with(
+                            &self.settings.syntax_overrides,
+                            Some(job.path.as_path()),
+                            &sample,
+                        );
                         let tab = &mut self.tabs[target];
                         {
                             let mut ed = tab.editor.borrow_mut();
