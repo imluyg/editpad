@@ -973,9 +973,9 @@ impl MdColorBudget {
 /// 文本，与正文无异。`core::highlight::Highlighter` 早就给正文编辑器产出逐行
 /// `StyledRun`（颜色已按主题解算），预览复用零新依赖。
 ///
-/// 认法：先按扩展名（`` ```py ````／`` ```rs ````），再按语法名首字母大写
-/// （`` ```Python ````）；都不中 ⇒ **整块素色**（不嗅探——语言是作者写明的，
-/// 猜错比不猜更误导）。
+/// 认法：交给 core 的 `resolve_fence_language`——先扩展名（含本仓别名表，所以
+/// `toml`／`dockerfile` 也认），再大小写不敏感的语法名（`Python`／`shell`）；
+/// 都不中 ⇒ **整块素色**（不嗅探——语言是作者写明的，猜错比不猜更误导）。
 ///
 /// 成本（实测，release）：3000 行的 ```rs 块走精确 `styled_line` 建树要 **596 ms**，
 /// 同一块认不出语言（整块素色）只要 **2.4 ms** ⇒ 换版那一帧几乎全花在逐行 syntect
@@ -994,21 +994,12 @@ pub(crate) fn code_block_spans(
     // 先领额度：额度为 0 时连高亮器都不必构造
     let colored_allowed = budget.take(lines.len());
 
-    let mut hl = lang.and_then(|raw| {
-        let t = raw.trim();
-        if t.is_empty() {
-            return None;
-        }
-        let named = {
-            let mut n = t.to_owned();
-            if let Some(head) = n.get_mut(0..1) {
-                head.make_ascii_uppercase();
-            }
-            n
-        };
-        editpad_core::LazyHighlighter::new(t)
-            .or_else(|| editpad_core::LazyHighlighter::new_by_name(&named))
-    });
+    // 认法搬进 core（2026-10-16 档1）：这里曾自写一套「扩展名 + 首字母大写的名」，
+    // 与 core 的别名表两套 ⇒ 围栏里 `toml`/`ini`/`log`/`dockerfile` 走不到别名，
+    // `shell`/`console` 这类真名又因大小写敏感对不上，那些块整块素色。
+    let mut hl = lang
+        .and_then(editpad_core::resolve_fence_language)
+        .and_then(|name| editpad_core::LazyHighlighter::new_by_name(&name));
     if let Some(h) = hl.as_mut() {
         h.set_dark_mode(dark);
     }

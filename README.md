@@ -72,8 +72,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
   （UTF-8/BOM、UTF-16LE/BE，GBK 兜底）；自绘虚拟化渲染——只为可见行排版和高亮；
   syntect 逐行懒高亮：检查点式状态机支持视口随机访问，编辑只失效改动处之后的状态，
   大跳转先用近似配色即时显示、精确铺建随后替换
-- **查看**：按扩展名自动语法着色（未知类型走纯文本快速路径）、Log/TOML 内嵌迷你语法、
-  无扩展名内容嗅探、Markdown 预览面板、JSON 一键校验与格式化、不可见字符标记、
+- **查看**：按扩展名自动语法着色（未知类型走纯文本快速路径）、Log/TOML/Dockerfile 内嵌迷你语法、
+  无扩展名内容嗅探＋内置首行判据、Markdown 预览面板、JSON 一键校验与格式化、不可见字符标记、
   深浅主题（高亮配色随主题重建）、正文字号缩放（10~48px）、软换行（词边界优先折行）
 - **文本工具**：选区 Base64 / URL 编解码、MD5 / SHA-256 摘要（零第三方依赖，标准向量钉死）
 - **编辑安全**：只读锁定（改内容动作总闸拒收）、置脏标记（标签页 ● 前缀 + 标题栏）、
@@ -384,11 +384,22 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
 
 ## 格式适配
 
-- 常见代码语言按扩展名自动着色（syntect 内建 + 自维护别名表：
-  `log`/`md`/`markdown`/`toml`/`ini`/`cfg`/`conf`/`mk`/`yml` 等）；
+- 常见代码语言按扩展名自动着色（syntect 内建 75 个语法 / 219 个扩展名 + 自维护别名表）。
+  别名表补的是内置表**查不到或判错**的那些：`log`/`md`/`markdown`/`toml`/`ini`/`cfg`/`conf`/`mk`/`yml`/
+  `dockerfile`，以及 `ts`/`mts`/`cts`/`mjs`/`cjs`（借 JavaScript）、`scss`/`less`（借 CSS）、
+  `jsonc`/`json5`（借 JSON）——只借语法家族相同、且实测**不会把下一行染错**的：
+  `tsx`/`jsx` 就因此不借（JS 语法把 `</div>` 的 `/` 当正则起点，状态跨行存活，实测下一行的 `}` 整行染成字符串色）；
+  另把 `.h` 定给 **C++**（内置索引取表尾，原本判给 Objective-C）；
 - 内嵌迷你语法：**Log**（ERROR/WARN/INFO/DEBUG 级别分色 + 时间戳）、
-  **TOML**（节名/键/字符串/注释），随单文件分发；
-- 无扩展名文件按内容嗅探：shebang、`<?xml`、JSON/YAML 启发，以及 `Dockerfile`/`Makefile` 约定文件名；
+  **TOML**（节名/键/字符串/注释）、**Dockerfile**（指令/字符串/变量/注释/端口），随单文件分发；
+- 无扩展名文件按内容嗅探：shebang、`<?xml`、JSON/YAML 启发，以及约定文件名
+  （`Dockerfile`/`Makefile`/`.env`/`.gitconfig`/`.bashrc` 等——以 `.` 开头且只有一个点的文件名，
+  `Path::extension()` 取不到，只能按整名认）；再兜底用内置包自带的**首行判据**
+  （`<?php`、`<!DOCTYPE html>`、`-*- Mode: C -*-`、`%YAML`、`This is pdfTeX, Version `…）；
+- 行注释前缀（`Ctrl+Q`）按 syntect 的真实语法名取值：`#` 系（bash/Makefile/TOML/Dockerfile/YAML/Perl/R/Tcl…）、
+  `--` 系（SQL/Lua/Haskell/AppleScript）、`;` 系（Lisp/Clojure）、`%` 系（Erlang/MATLAB/LaTeX/BibTeX）、
+  `'`（ASP）、`::`（批处理）；只有块注释、或根本不是代码的（Markdown/JSON/CSS/HTML/XML/Log）
+  一个字都不写；
 - Markdown 文件提供 `MD 预览` 面板（标题/段落/有序无序列表（含序号・嵌套・任务勾选框）/引用/围栏代码（按围栏语言上色）/表格/分隔线，行内粗体斜体・删除线・行内代码・链接与图片；正文按词换行、链接可点、配色随主题；预览与正文同屏分栏（边写边看），预览树跨帧复用并节流换版，只读渲染）；**写的一侧**：回车接住列表与引用（`> - 甲` → `> - `，空项退一层、空栏退引用，有序号进位、任务框给空框），`Ctrl+B`／`Ctrl+I`／`Ctrl+\``／`Ctrl+J`／`Ctrl+K` 把选区包成粗体／斜体／行内代码／删除线／链接，**再按一次解回原样**；Ctrl+Q 在 Markdown 页不适用（它没有行注释前缀），不会往正文插 `//`；
 - JSON 文件支持 `Ctrl+Shift+F` 一键校验并格式化；
 - 深浅主题切换时高亮配色整体重建，深色下不再出现浅色主题残留配色。

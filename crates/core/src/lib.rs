@@ -31,7 +31,10 @@ pub use find_in_files::{
     filter_whole_word_text, find_in_file, find_in_file_with, walk_files, FifMatcher, WalkOutput,
     IGNORED_DIRS, MAX_SCAN_FILE_BYTES, MAX_WALK_DEPTH,
 };
-pub use highlight::{resolve_language, syntax_for_extension, LazyHighlighter, StyledRun};
+pub use highlight::{
+    first_line_language, line_comment_prefix, resolve_fence_language, resolve_language,
+    syntax_for_extension, LazyHighlighter, StyledRun,
+};
 pub use json::{format_json, validate_json, JsonError};
 pub use lang::{
     fmt_bookmark_total, fmt_core_error, fmt_fif_failed, fmt_fif_panel_title, fmt_fif_summary,

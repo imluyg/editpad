@@ -1120,24 +1120,18 @@ impl EditorCore {
         true
     }
 
-    /// 行注释前缀查表（第 64 轮）：按当前语法名（syntect 名，大小写
-    /// 不敏感匹配）取行注释前缀。未知语法默认 `//`。块注释不入表
-    /// （`/* */` 需要成对处理，超出本动作的「整行」范畴）。
+    /// 行注释前缀（第 64 轮，2026-10-16 档1 把判据下沉到 core）：按当前语法名
+    /// 取行注释前缀，未知语法默认 `//`。块注释不入表（`/* */` 需要成对处理，
+    /// 超出本动作的「整行」范畴）。
     ///
-    /// `None` ＝这门语法**没有**行注释。目前只有 Markdown：它没有 `//` 这类整行
-    /// 前缀，硬套只会往正文里塞垃圾（`# ` 是标题、`> ` 是引用，都不是注释）。
-    /// 第 315 轮 C6 现量的就是这个坏格：改前 .md 页按 Ctrl+Q 落进 `_ => "//"`。
+    /// 表为什么搬走：原先这张表住在 app 里、键是**小写的 VS Code 名**
+    /// （`shellscript`/`bash`/`toml`/`ini`/`properties`），而 syntect 内置包 75 个语法的
+    /// 实名是「Bourne Again Shell (bash)」「Editpad TOML」「Java Properties」……
+    /// 一个都对不上 ⇒ bash/Makefile/TOML/Haskell/Lisp/Clojure/MATLAB/LaTeX/ASP
+    /// 全落进 `_ => "//"`，Ctrl+Q 往 `#` 系与 `--` 系语言里插 `//`。
+    /// 判据现在是 [`editpad_core::line_comment_prefix`]，键与取值都由用例逐格钉住。
     pub(crate) fn comment_prefix_for(&self) -> Option<&'static str> {
-        let lang = self.highlight_syntax_name().unwrap_or_default();
-        let lang = lang.to_ascii_lowercase();
-        match lang.as_str() {
-            "markdown" => None,
-            "python" | "ruby" | "shellscript" | "bash" | "yaml" | "toml" | "ini" | "properties"
-            | "r" | "perl" => Some("#"),
-            "sql" | "lua" => Some("--"),
-            "batch file" | "bat" | "dosbatch" => Some("::"),
-            _ => Some("//"), // rust/c/cpp/java/js/ts/go/json/css/php/未知……
-        }
+        editpad_core::line_comment_prefix(self.highlight_syntax_name().as_deref())
     }
 
     /// 行注释切换（Ctrl+Q）。有选区只作用触及块，无选区全文。

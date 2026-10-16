@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use syntect::highlighting::{HighlightIterator, HighlightState, Highlighter, Theme, ThemeSet};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet};
 
-use crate::syntaxes::{LOG, TOML};
+use crate::syntaxes::{DOCKERFILE, LOG, TOML};
 
 /// 检查点间距（行）。
 pub const STRIDE: usize = 128;
@@ -45,9 +45,16 @@ fn next_generation() -> u64 {
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(|| {
         // P22 第一批：默认包 + 内嵌迷你语法（Log/TOML）合并初始化，
-        // 仍走本 OnceLock 懒加载路径，不破坏检查点机制与启动开销模型
+        // 仍走本 OnceLock 懒加载路径，不破坏检查点机制与启动开销模型。
+        // 2026-10-16 档1 加第三份 Dockerfile——默认包实测**没有**这门语法
+        // （75 个语法的名字里不存在 "Dockerfile"），此前别名表与嗅探都指着它，
+        // 于是 Dockerfile 一直走纯文本。
         let mut builder = SyntaxSet::load_defaults_nonewlines().into_builder();
-        for (yaml, fallback) in [(LOG, "Editpad Log"), (TOML, "Editpad TOML")] {
+        for (yaml, fallback) in [
+            (LOG, "Editpad Log"),
+            (TOML, "Editpad TOML"),
+            (DOCKERFILE, "Editpad Dockerfile"),
+        ] {
             match SyntaxDefinition::load_from_str(yaml, false, Some(fallback)) {
                 Ok(def) => builder.add(def),
                 // 内嵌语法写错只损失该格式配色，绝不拖垮编辑器
@@ -667,12 +674,43 @@ fn end_reached(start: usize, end: usize) -> bool {
     end <= start
 }
 
-// ---------- 语言解析：扩展名别名 + 无扩展名嗅探（P22 第一批） ----------
+// ---------- 语言解析：归属覆盖 + 扩展名别名 + 文件名约定 + 首行判据 ----------
+
+/// 内置索引**判错**时的自维护纠正表：扩展名 → 语法名，优先于内置索引。
+///
+/// 为什么需要它：`find_syntax_by_extension` 是 `syntaxes.iter().rev().find(...)`
+/// （syntect `syntax_set.rs:186`），同名列**表尾赢**。实测内置包 75 个语法里
+/// `h` 同时被 C++/C/Objective-C++/Objective-C 声明，Objective-C 排在最后 ⇒
+/// `.h` 判成 Objective-C，C/C++ 项目的头文件按 ObjC 关键字表上色。
+///
+/// 只登记有**正确答案**的那一格：`.s` 内置表里给 R（Lisp 也声明了 `s`），但
+/// `.s` 的真实归属是汇编，而内置包根本没有汇编语法——硬定给 Lisp 或 R 只是换一种
+/// 错，所以不覆盖，留给「手动指定语言」那一档（用户自己判才不会有假答案）。
+const EXT_OVERRIDE: &[(&str, &str)] = &[("h", "C++")];
 
 /// 内置扩展索引未覆盖时的自维护别名表：扩展名 → 语法名。
 ///
-/// 顺序无关（全表精确匹配）；ini/cfg/conf 借道 TOML 语法只是
-/// 「节名+键值+字符串」的近似着色（`;` 注释不识别），已知取舍。
+/// 顺序无关（全表精确匹配）。两张表的分工：`EXT_OVERRIDE` 修内置索引判错的，
+/// `ALIAS_TABLE` 补内置索引查不到的。
+///
+/// 「借道」的口径＝**只借语法家族相同的**，注释与字符串边界必须一致，否则
+/// 上色会看错、Ctrl+Q 会写坏：
+/// * ini/cfg/conf 借 TOML 只是「节名+键值+字符串」的近似着色（`;` 注释不识别），已知取舍；
+/// * ts/mts/cts/mjs/cjs 借 JavaScript——TypeScript 是 JS 超集，多的只是类型标注，
+///   注释与引号边界逐字相同。**tsx/jsx 刻意不借**（一度借了又撤）：JS 语法把
+///   `</div>` 里的 `/` 当正则字面量的起点，那个状态跨行存活——现量过：JSX 行之后
+///   的 `}` 整行染成字符串色、再下一行的前 15 列还困在那一段里。这不是"少一色"，
+///   是把对的代码染成错的。判据由 `p450_jsx_is_not_borrowed_because_js_leaks_state` 钉；
+/// * scss/less 借 CSS、jsonc/json5 借 JSON（`//` 与块注释是它们的扩展，反过来不成立：
+///   CSS 语法不认 `//` 但也不会因此染错下一行）——两支都跑过「跨行不泄漏」的实测，
+///   见 `p450_borrowed_css_and_json_families_do_not_leak_across_lines`；
+/// * `.env` 与 `.gitconfig` 借 TOML（`KEY=value` 与 `#` 注释），登记在
+///   [`sniff_language`] 的约定文件名那一支（这类点文件取不到扩展名）。
+///
+/// 刻意**不**登记的：`lock`（Cargo/poetry.lock 是 TOML、Gemfile.lock 是 YAML、
+/// composer.lock 是 JSON——一个扩展名三种家族，硬借就是判错）、`csv`/`tsv`
+/// （内置包没有表格语法，借任何一家都是错的）、`gitignore`（没有对应语法，
+/// 且它的「注释」就是 `#`，与 Plain Text 一样不值得专门染色）。
 const ALIAS_TABLE: &[(&str, &str)] = &[
     ("log", "Editpad Log"),
     ("markdown", "Markdown"),
@@ -683,13 +721,25 @@ const ALIAS_TABLE: &[(&str, &str)] = &[
     ("conf", "Editpad TOML"),
     ("mk", "Makefile"),
     ("yml", "YAML"),
-    ("dockerfile", "Dockerfile"),
+    ("dockerfile", "Editpad Dockerfile"),
     ("txt", "Plain Text"),
+    ("ts", "JavaScript"),
+    ("mts", "JavaScript"),
+    ("cts", "JavaScript"),
+    ("mjs", "JavaScript"),
+    ("cjs", "JavaScript"),
+    ("scss", "CSS"),
+    ("less", "CSS"),
+    ("jsonc", "JSON"),
+    ("json5", "JSON"),
 ];
 
-/// 扩展名 → 语法名：先查 syntect 内建扩展索引，未命中再查别名表。
+/// 扩展名 → 语法名：纠正表 → syntect 内建扩展索引 → 别名表。
 pub fn syntax_for_extension(ext: &str) -> Option<String> {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    if let Some((_, name)) = EXT_OVERRIDE.iter().find(|(needle, _)| *needle == ext) {
+        return Some((*name).to_owned());
+    }
     if let Some(syntax) = syntax_set().find_syntax_by_extension(&ext) {
         return Some(syntax.name.clone());
     }
@@ -714,14 +764,22 @@ fn shebang_candidates(base: &str) -> &'static [&'static str] {
 }
 
 /// 无扩展名 / 扩展名无解时按内容嗅探语法（P22 第一批）：
-/// shebang、`<?xml`、JSON 前缀启发、YAML 文档分隔符、
-/// Dockerfile/Makefile 约定文件名。只读样本前 4KB。
+/// 约定文件名、shebang、`<?xml`、JSON 前缀启发、YAML 文档分隔符。只读样本前 4KB。
 pub fn sniff_language(sample: &str, file_name: Option<&str>) -> Option<String> {
-    // 约定文件名优先于内容（大小写不敏感）
+    // 约定文件名优先于内容（大小写不敏感）。
+    //
+    // 点后缀的那一批（`.env`/`.bashrc`/`.gitconfig`）以前够不着：Rust 的
+    // `Path::extension()` 对「以 . 开头且只有一个点」的名字返回 None，所以
+    // syntect 内置表里 bash 声明的 `.bashrc`/`.profile` 那些扩展名**永远查不到**，
+    // 只能在这里按整名认。
     if let Some(name) = file_name {
         match name.to_ascii_lowercase().as_str() {
-            "dockerfile" => return Some("Dockerfile".to_owned()),
+            "dockerfile" => return Some("Editpad Dockerfile".to_owned()),
             "makefile" | "gnumakefile" | "bsdmakefile" => return Some("Makefile".to_owned()),
+            ".env" | ".gitconfig" => return Some("Editpad TOML".to_owned()),
+            ".bashrc" | ".bash_profile" | ".bash_login" | ".profile" | ".textmate_init" => {
+                return Some("Bourne Again Shell (bash)".to_owned())
+            }
             _ => {}
         }
     }
@@ -769,8 +827,37 @@ pub fn sniff_language(sample: &str, file_name: Option<&str>) -> Option<String> {
     None
 }
 
+/// 不参与首行判定的语法名。
+///
+/// 内置包里 19 个语法带 `first_line_match`，实测 18 条都是高信噪判据
+/// （shebang、`<?php`、`-*- Mode: C -*-`、`%YAML`、`This is pdfTeX, Version `……），
+/// 只有 Textile 那条是一个**裸词且不锚定**：`textile`——于是一段首行写着
+/// "Just some prose about textile history" 的散文会被判成 Textile。
+/// 这一格不是猜的，是把 19 条判据逐条对 12 句真实首行跑出来的。
+const FIRST_LINE_EXCLUDED: &[&str] = &["Textile"];
+
+/// 按**首行内容**判语言：交给 syntect 内置包自带的 `first_line_match`。
+///
+/// 这一层是 2026-10-16 档1 补的：此前手写嗅探只覆盖 5 个解释器加
+/// `<?xml`/`---`/`{`，而内置包早就带了 19 条判据（PHP/HTML/C/Go/AppleScript/
+/// LaTeX Log/Diff/YAML……）一条没用上。`find_syntax_by_first_line` 自带
+/// `OnceCell` 缓存与 BOM 剥离，且只吃首行，成本与手写层同量级。
+pub fn first_line_language(sample: &str) -> Option<String> {
+    let first = sample.lines().next()?;
+    if first.is_empty() {
+        return None;
+    }
+    let syntax = syntax_set().find_syntax_by_first_line(first)?;
+    if FIRST_LINE_EXCLUDED.contains(&syntax.name.as_str()) {
+        return None;
+    }
+    Some(syntax.name.clone())
+}
+
 /// 统一入口：给定路径（可空）与解码后文本样本，返回应使用的语法名。
-/// 顺序：约定文件名/内容嗅探仅在扩展名无解时介入；扩展名命中即返回。
+///
+/// 四层，从「最可信」到「最兜底」：扩展名（含纠正表与别名表）→ 约定文件名/shebang
+/// 等手写嗅探 → 内置 `first_line_match`。前一层命中即返回，扩展名永远压过内容。
 pub fn resolve_language(path: Option<&Path>, sample: &str) -> Option<String> {
     if let Some(path) = path {
         if let Some(ext) = path.extension().and_then(std::ffi::OsStr::to_str) {
@@ -782,7 +869,139 @@ pub fn resolve_language(path: Option<&Path>, sample: &str) -> Option<String> {
     let file_name = path
         .and_then(Path::file_name)
         .and_then(std::ffi::OsStr::to_str);
-    sniff_language(sample, file_name)
+    if let Some(name) = sniff_language(sample, file_name) {
+        return Some(name);
+    }
+    first_line_language(sample)
+}
+
+/// 语法名 → 行注释前缀（Ctrl+Q 用）。`None` ＝这门语法**没有**行注释。
+///
+/// 为什么这张表住在 core：判据本身与 GUI 无关，而它决定「往正文里写哪几个字符」，
+/// 只有钉得住的用例能证明它不写错。
+///
+/// ⚠️ 键必须是 syntect 的**真实语法名**（内置包 75 个名字实测在
+/// `crates/core/src/highlight.rs` 顶部注释与本模块用例里各钉了一份）。此前这张表
+/// 混进了一整批 VS Code 的名（`shellscript`/`bash`/`toml`/`ini`/`properties`），
+/// 内置包里根本没有这些名字 ⇒ bash/Makefile/TOML/Haskell/Lisp/Clojure/MATLAB/
+/// LaTeX/ASP/AppleScript 全落到 `_ => "//"` 那一支——也就是往 `#` 系与 `--` 系
+/// 语言里插 `//`。前缀取值按内置包 metadata 里的 `TM_COMMENT_START` 对照过：
+/// C/C++/C#/D/Go/Java/JS/Groovy 是 `// `，**CSS 只有 `/* */`**，dosbatch 是
+/// `rem `/`:: `，Erlang 是 `% `，Haskell 是 `-- `，Clojure/Lisp 是 `; `，ASP 是 `' `。
+pub fn line_comment_prefix(syntax_name: Option<&str>) -> Option<&'static str> {
+    let Some(name) = syntax_name else {
+        // 未识别语言＝纯文本路径：沿用「按 `//` 处理」的既有口径
+        return Some("//");
+    };
+    // 这些语法只有块注释（或干脆没有注释），硬给一个行前缀就是往文件里写无效字符
+    if NO_LINE_COMMENT.contains(&name) {
+        return None;
+    }
+    for (needle, prefix) in COMMENT_PREFIX_TABLE {
+        if name.eq_ignore_ascii_case(needle) {
+            return Some(prefix);
+        }
+    }
+    // 表外的一切（C/C++/C#/Java/JS/Go/Rust/PHP/Scala/Groovy/Elixir 借道者/…）沿用
+    // 既有的 `//` 默认；带括注的嵌入门（"HTML (ASP)"、"Java Server Page (JSP)"）
+    // 归谁注释本就有歧义，不为它们编一个前缀
+    Some("//")
+}
+
+/// 没有**行**注释的语法名（Ctrl+Q 在这类页面上一个字都不动）。
+///
+/// 两类：① 只有块注释（CSS/HTML/XML 的 `/* */`、`<!-- -->`）；② 根本不是代码
+/// （Markdown 的 `#` 是标题、Plain Text 与 Log 没有注释概念、JSON 连块注释都没有）。
+/// 第 315 轮 C6 现量的 Markdown 那一格就是这一支，当时只有它一个人在名单上。
+const NO_LINE_COMMENT: &[&str] = &[
+    "Markdown",
+    "MultiMarkdown",
+    "Plain Text",
+    "Editpad Log",
+    "JSON",
+    "CSS",
+    "HTML",
+    "XML",
+    "reStructuredText",
+    "Diff",
+    "JavaDoc",
+    "LaTeX Log",
+    "Make Output",
+    "Cargo Build Results",
+    "Regular Expression",
+    "Regular Expressions (Javascript)",
+    "Regular Expressions (Python)",
+];
+
+/// 行注释前缀表：键为 syntect 真实语法名（大小写不敏感比较）。
+const COMMENT_PREFIX_TABLE: &[(&str, &str)] = &[
+    ("Python", "#"),
+    ("Ruby", "#"),
+    ("Ruby on Rails", "#"),
+    ("Bourne Again Shell (bash)", "#"),
+    ("Shell-Unix-Generic", "#"),
+    ("YAML", "#"),
+    ("Editpad TOML", "#"),
+    ("Editpad Dockerfile", "#"),
+    ("Makefile", "#"),
+    ("Perl", "#"),
+    ("R", "#"),
+    ("R Console", "#"),
+    ("Tcl", "#"),
+    ("Java Properties", "#"),
+    ("SQL", "--"),
+    ("SQL (Rails)", "--"),
+    ("Lua", "--"),
+    ("Haskell", "--"),
+    ("Literate Haskell", "--"),
+    ("AppleScript", "--"),
+    ("Lisp", ";"),
+    ("Clojure", ";"),
+    ("Erlang", "%"),
+    ("MATLAB", "%"),
+    ("LaTeX", "%"),
+    ("TeX", "%"),
+    ("Rd (R Documentation)", "%"),
+    ("BibTeX", "%"),
+    ("ASP", "'"),
+    ("Batch File", "::"),
+];
+
+/// 围栏**专用**的补充别名：GFM 里常见的写法既不是内置扩展名、也不是内置语法名。
+///
+/// 只给围栏，不给扩展名——`shell` 当文件扩展名时不该被认成 bash（那是另一种猜），
+/// 而围栏里的 `shell` 是作者亲手写下的。`console`/`text` 刻意不登记：前者在 GFM
+/// 里既指 shell 会话也指浏览器控制台，家族不确定；后者无论给 Plain Text 还是不给
+/// 都是素色，不值得为它领一份着色额度。
+const FENCE_ALIAS: &[(&str, &str)] = &[
+    ("shell", "Bourne Again Shell (bash)"),
+    ("docker", "Editpad Dockerfile"),
+];
+
+/// 围栏语言串 → 语法名（Markdown 代码块上色用）。
+///
+/// 认法三层，**前两层与文件路径共用同一张 core 表**：先 `syntax_for_extension`
+/// （内置扩展索引 + 纠正表 + 别名表），再 `find_syntax_by_token`（先扩展名、再
+/// 大小写不敏感的语法名），最后围栏专用别名。
+/// 此前预览侧自己抄了一套「扩展名 + 首字母大写的名」，两套查表 ⇒
+/// 别名表里那批（toml/ini/log/dockerfile）在围栏里全走不到，`shell` 这类真名
+/// 因为大小写敏感也永远对不上 ⇒ 那些块整块素色。
+/// 不嗅探内容——围栏里的语言是作者写明的，猜错比不猜更误导。
+pub fn resolve_fence_language(token: &str) -> Option<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if let Some(name) = syntax_for_extension(token) {
+        return Some(name);
+    }
+    if let Some(syntax) = syntax_set().find_syntax_by_token(token) {
+        return Some(syntax.name.clone());
+    }
+    FENCE_ALIAS
+        .iter()
+        .find(|(needle, _)| needle.eq_ignore_ascii_case(token))
+        .map(|(_, name)| name.to_string())
 }
 
 /// 推进一行状态：解析并驱动高亮状态（丢弃着色结果）。
@@ -1402,7 +1621,7 @@ mod tests {
         // 约定文件名优先且大小写不敏感
         assert_eq!(
             sniff_language("", Some("DockerFile")).as_deref(),
-            Some("Dockerfile")
+            Some("Editpad Dockerfile")
         );
         assert_eq!(
             sniff_language("", Some("Makefile")).as_deref(),
@@ -1434,6 +1653,346 @@ mod tests {
         // 有扩展名但完全未知 → 嗅探仍有机会（约定文件名场景之外的内容嗅探）
         let p = Path::new("artifact.xyzzy");
         assert_eq!(resolve_language(Some(p), "plain"), None);
+    }
+
+    // ---------- 2026-10-16 档1：内嵌 Dockerfile / 别名扩容 / 归属覆盖 / 首行判据 ----------
+
+    /// 取某一列实际吃到的着色颜色（用于证明 scope 真的被主题上色了）。
+    fn color_at(runs: &[StyledRun], col: usize) -> [f32; 4] {
+        runs.iter()
+            .find(|r| r.start_col <= col && col < r.end_col)
+            .unwrap_or_else(|| panic!("列 {col} 没被任何着色片段覆盖: {runs:?}"))
+            .color
+    }
+
+    #[test]
+    fn p450_embedded_dockerfile_resolves_and_splits_colors() {
+        // 两层入口都必须指到一个**真实存在**的语法名。此前它们写着 "Dockerfile"，
+        // 内置包 75 个语法里没有这门 ⇒ find_syntax_by_name 精确相等返回 None ⇒
+        // 「登记了」但一直是纯文本——症状是"功能没坏、Dockerfile 没颜色"。
+        assert_eq!(
+            syntax_for_extension("dockerfile").as_deref(),
+            Some("Editpad Dockerfile")
+        );
+        assert_eq!(
+            sniff_language("", Some("Dockerfile")).as_deref(),
+            Some("Editpad Dockerfile")
+        );
+        assert_eq!(
+            LazyHighlighter::new_by_name("Editpad Dockerfile").map(|h| h.syntax_name().to_owned()),
+            Some("Editpad Dockerfile".to_owned()),
+            "内嵌 YAML 写错时 syntax_set 只 eprintln 后缺席，这一格才是它的守卫"
+        );
+
+        // 分色读数：指令(0)/空白(4)/字符串(8)/数字(12) 各拿各的颜色，
+        // 空白列是对照——任何 scope 没被主题上色都会在这里露出来。
+        let mut hl = LazyHighlighter::new_by_name("Editpad Dockerfile").unwrap();
+        let runs = hl.styled_line(0, "COPY x \"y\" 8080", usize::MAX, &mut |_| String::new());
+        let blank = color_at(&runs, 4);
+        assert_ne!(color_at(&runs, 0), blank, "指令必须与素色不同");
+        assert_ne!(color_at(&runs, 8), blank, "字符串必须与素色不同");
+        assert_ne!(color_at(&runs, 12), blank, "数字必须与素色不同");
+        assert_ne!(color_at(&runs, 0), color_at(&runs, 8), "指令与字符串要分色");
+        assert_ne!(
+            color_at(&runs, 8),
+            color_at(&runs, 12),
+            "字符串与数字要分色"
+        );
+        let comment = hl.styled_line(0, "# note", usize::MAX, &mut |_| String::new());
+        assert_eq!(comment.len(), 1, "整行注释＝一段");
+        assert_ne!(comment[0].color, blank, "注释必须与素色不同");
+    }
+
+    #[test]
+    fn p450_mini_syntax_scopes_actually_get_themed_in_both_modes() {
+        // 内嵌迷你语法借的是「主题里已经有规则的那几个 scope」。这一格是必须的：
+        // 现量发现 `entity.name` 与 `entity.name.type` 在 InspiredGitHub／
+        // base16-ocean.dark 里**一条规则都没有** ⇒ TOML 的节名一直拿默认色，
+        // 而 README 写着「节名/键/字符串/注释」上色——声称与实现脱节两年。
+        for dark in [false, true] {
+            let mut toml = LazyHighlighter::new_by_name("Editpad TOML").unwrap();
+            toml.set_dark_mode(dark);
+            // 控制组：纯标识符行＝正文色
+            let body = toml.styled_line(0, "plainword", usize::MAX, &mut |_| String::new());
+            let body_color = body[0].color;
+            let section = toml.styled_line(1, "[sec]", usize::MAX, &mut |_| String::new());
+            assert_eq!(section.len(), 1, "节名＝一整段");
+            assert_ne!(
+                section[0].color, body_color,
+                "dark={dark}：节名没上色（借的 scope 在主题里没有规则）"
+            );
+            // 字符串与注释同理，两档都得有颜色
+            let text = toml.styled_line(2, "k = \"v\"", usize::MAX, &mut |_| String::new());
+            let string_color = text
+                .iter()
+                .find(|r| r.start_col <= 5 && 5 < r.end_col)
+                .expect("字符串列没被覆盖")
+                .color;
+            assert_ne!(string_color, body_color, "dark={dark}：字符串没上色");
+        }
+    }
+
+    #[test]
+    fn p450_jsx_is_not_borrowed_because_js_leaks_state() {
+        // 这一格记录**为什么不借**：JS 语法把 `</div>` 里的 `/` 当成正则字面量的起点，
+        // 于是它进入 regex/string 状态并**跨行存活**。现量（浅色档）：
+        //   `  return <div className="a">hi</div>;` → 从 col 31 起整段串色
+        //   下一行 `}`                              → 整行单色，且颜色与字符串相同
+        //   再下一行 `const y = 42; // plain tail`  → 前 15 列仍在那一段里
+        // 这不是"少一种颜色"，是把对的代码染成错的——所以 tsx/jsx 退回纯文本。
+        let mut hl = LazyHighlighter::new_by_name("JavaScript").unwrap();
+        let control = hl.styled_line(0, "}", usize::MAX, &mut |_| String::new());
+        hl.styled_line(
+            1,
+            "  return <div className=\"a\">hi</div>;",
+            usize::MAX,
+            &mut |_| String::new(),
+        );
+        let after = hl.styled_line(2, "}", usize::MAX, &mut |_| String::new());
+        assert_eq!(after.len(), 1, "JSX 之后那一行被当成一整段＝状态泄漏的形状");
+        assert_ne!(
+            after[0].color, control[0].color,
+            "花括号染上了字符串色＝泄漏确实跨了行"
+        );
+        // 决策本身：这两扩展名不借 JavaScript
+        assert_eq!(syntax_for_extension("tsx"), None);
+        assert_eq!(syntax_for_extension("jsx"), None);
+    }
+
+    #[test]
+    fn p450_borrowed_css_and_json_families_do_not_leak_across_lines() {
+        // 借道能不能留，判据是「会不会把下一行染错」，不是「看起来像不像」。
+        // 两组的形状都现量过：CSS 对 `//` 只是不上色（不给注释色），JSON 语法
+        // 反过来**认** `//` 为注释，且行内含不配对引号的注释也不会把下一行拖进去。
+        let mut css = LazyHighlighter::new_by_name("CSS").unwrap();
+        css.styled_line(
+            0,
+            ".a { color: red; } // scss line comment",
+            usize::MAX,
+            &mut |_| String::new(),
+        );
+        let css_next =
+            css.styled_line(1, ".b { color: blue; }", usize::MAX, &mut |_| String::new());
+        assert!(css_next.len() >= 3, "下一行仍该分色，实际 {css_next:?}");
+
+        let mut json = LazyHighlighter::new_by_name("JSON").unwrap();
+        json.styled_line(
+            0,
+            "  // it's a note with \"unbalanced quote",
+            usize::MAX,
+            &mut |_| String::new(),
+        );
+        let json_next = json.styled_line(1, "  \"b\": 2", usize::MAX, &mut |_| String::new());
+        assert!(json_next.len() >= 3, "下一行仍该分色，实际 {json_next:?}");
+    }
+
+    #[test]
+    fn p450_ext_override_fixes_the_dot_h_tail_win() {
+        // 先证明这一格**真的会被判错**：内置索引是 rev() 取表尾，Objective-C
+        // 最后声明 h ⇒ 它赢。摘掉 EXT_OVERRIDE 这条判据，下面的断言立刻红。
+        assert_eq!(
+            syntax_set().find_syntax_by_extension("h").unwrap().name,
+            "Objective-C",
+            "前置：内置表尾把 .h 判给了 Objective-C"
+        );
+        assert_eq!(syntax_for_extension("h").as_deref(), Some("C++"));
+        assert_eq!(
+            syntax_for_extension(".H").as_deref(),
+            Some("C++"),
+            "大小写归一"
+        );
+        // 刻意**不**覆盖的那一格：.s 的真实归属（汇编）内置包根本没有，
+        // 硬定给 Lisp 或 R 只是换一种错。钉住它，将来改动就得先过这条。
+        assert_eq!(syntax_for_extension("s").as_deref(), Some("R"));
+    }
+
+    #[test]
+    fn p450_alias_table_covers_the_borrowable_families() {
+        for (ext, name) in [
+            ("ts", "JavaScript"),
+            ("mts", "JavaScript"),
+            ("cjs", "JavaScript"),
+            ("mjs", "JavaScript"),
+            ("scss", "CSS"),
+            ("less", "CSS"),
+            ("jsonc", "JSON"),
+            ("json5", "JSON"),
+        ] {
+            assert_eq!(syntax_for_extension(ext).as_deref(), Some(name), "{ext}");
+        }
+        // 刻意不登记：一个扩展名混着三种家族（lock），或内置包没有对应语法（csv、
+        // kt、swift、ps1），或借道会把**下一行**染错（tsx/jsx，见上面那格实测）。
+        for ext in ["lock", "csv", "ps1", "kt", "swift", "tsx", "jsx"] {
+            assert_eq!(syntax_for_extension(ext), None, "{ext} 必须仍走嗅探/纯文本");
+        }
+    }
+
+    #[test]
+    fn p450_convention_names_reach_the_dotfiles() {
+        use std::path::Path;
+        // 为什么要点文件名表：Rust 的 extension() 对「以 . 开头且只有一个点」返回
+        // None ⇒ syntect 内置表里 bash 声明的 .bashrc/.profile 那些扩展名永远查不到。
+        assert_eq!(Path::new(".env").extension(), None, "前置：Rust 的语义");
+        for (name, expected) in [
+            (".env", "Editpad TOML"),
+            (".gitconfig", "Editpad TOML"),
+            (".bashrc", "Bourne Again Shell (bash)"),
+            (".bash_profile", "Bourne Again Shell (bash)"),
+            ("Dockerfile", "Editpad Dockerfile"),
+            ("makefile", "Makefile"),
+        ] {
+            assert_eq!(
+                resolve_language(Some(Path::new(name)), "").as_deref(),
+                Some(expected),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn p450_first_line_match_adds_php_html_yaml_but_skips_textile() {
+        // 内置包 19 条 first_line_match，此前一条没用
+        for (line, expected) in [
+            ("<?php ini_set('x', 1);", "PHP"),
+            ("<!DOCTYPE html>", "HTML"),
+            ("%YAML 1.2", "YAML"),
+            ("-*- Mode: C -*-", "C"),
+            ("This is pdfTeX, Version 3.14", "LaTeX Log"),
+            ("#!/usr/bin/env osascript", "AppleScript"),
+        ] {
+            assert_eq!(
+                first_line_language(line).as_deref(),
+                Some(expected),
+                "{line}"
+            );
+        }
+        // 唯一的误伤格（实测出来的）：Textile 的判据是一个不锚定的裸词 "textile"
+        assert_eq!(
+            first_line_language("Just some prose about textile history"),
+            None,
+            "散文首行提到 textile 不得被判成 Textile"
+        );
+        // 接线：无扩展名 + 手写嗅探未命中 ⇒ 首行判据接管
+        use std::path::Path;
+        assert_eq!(
+            resolve_language(Some(Path::new("index-no-ext")), "<?php echo 1;").as_deref(),
+            Some("PHP")
+        );
+        // 扩展名永远压过内容（.txt 里写 php 也还是 Plain Text）
+        assert_eq!(
+            resolve_language(Some(Path::new("note.txt")), "<?php echo 1;").as_deref(),
+            Some("Plain Text")
+        );
+    }
+
+    #[test]
+    fn p450_line_comment_prefix_uses_real_syntax_names() {
+        // 旧表挂的是小写 VS Code 名（shellscript/bash/toml/ini/properties），
+        // 内置包实名一个都对不上 ⇒ 下面这些全落进 `//`。
+        for (name, expected) in [
+            ("Bourne Again Shell (bash)", Some("#")),
+            ("Shell-Unix-Generic", Some("#")),
+            ("Makefile", Some("#")),
+            ("Editpad TOML", Some("#")),
+            ("Editpad Dockerfile", Some("#")),
+            ("Java Properties", Some("#")),
+            ("Haskell", Some("--")),
+            ("Lisp", Some(";")),
+            ("Clojure", Some(";")),
+            ("MATLAB", Some("%")),
+            ("LaTeX", Some("%")),
+            ("Erlang", Some("%")),
+            ("ASP", Some("'")),
+            ("AppleScript", Some("--")),
+            ("Batch File", Some("::")),
+            ("Tcl", Some("#")),
+            // 本来就对的两支，留着当控制组
+            ("Python", Some("#")),
+            ("Rust", Some("//")),
+            ("SQL", Some("--")),
+            // 只有块注释／不是代码的：一个字都不能写
+            ("Markdown", None),
+            ("JSON", None),
+            ("CSS", None),
+            ("HTML", None),
+            ("XML", None),
+            ("Editpad Log", None),
+        ] {
+            assert_eq!(line_comment_prefix(Some(name)), expected, "{name}");
+        }
+        // 未设语言＝纯文本路径，沿用既有默认
+        assert_eq!(line_comment_prefix(None), Some("//"));
+    }
+
+    #[test]
+    fn p450_comment_tables_only_name_existing_syntaxes() {
+        // 这条才是真正的病根守卫：表里写一个不存在的语法名，编译器一声不响，
+        // 症状只是"这门语言的 Ctrl+Q 不对"。逐格对着语法集查一遍。
+        for (name, prefix) in COMMENT_PREFIX_TABLE {
+            assert!(
+                syntax_set().find_syntax_by_name(name).is_some(),
+                "COMMENT_PREFIX_TABLE 里的 {name} 不是真实语法名（前缀 {prefix} 永远不会生效）"
+            );
+        }
+        for name in NO_LINE_COMMENT {
+            assert!(
+                syntax_set().find_syntax_by_name(name).is_some(),
+                "NO_LINE_COMMENT 里的 {name} 不是真实语法名"
+            );
+        }
+        // 别名表的目标名同样得存在（Dockerfile 那一格就是这么死的）
+        for (_, name) in ALIAS_TABLE {
+            assert!(
+                syntax_set().find_syntax_by_name(name).is_some(),
+                "ALIAS_TABLE 指向了不存在的语法名 {name}"
+            );
+        }
+        // 归属覆盖表亦然
+        for (_, name) in EXT_OVERRIDE {
+            assert!(
+                syntax_set().find_syntax_by_name(name).is_some(),
+                "EXT_OVERRIDE 指向了不存在的语法名 {name}"
+            );
+        }
+        for (_, name) in FENCE_ALIAS {
+            assert!(
+                syntax_set().find_syntax_by_name(name).is_some(),
+                "FENCE_ALIAS 指向了不存在的语法名 {name}"
+            );
+        }
+        // 死名本体的墓碑断言：旧代码两处指着它，而当时的用例只比字符串相等，
+        // 于是「登记了但一直是纯文本」这件事绿了两年。
+        assert!(
+            LazyHighlighter::new_by_name("Dockerfile").is_none(),
+            "内置包里没有 Dockerfile 这门语法——任何新增别名都必须先过上面那几关"
+        );
+    }
+
+    #[test]
+    fn p450_fence_language_walks_the_same_alias_table() {
+        // 改前这里自写「扩展名 + 首字母大写的名」，两套 ⇒ 别名表那批在围栏里走不到
+        for (token, expected) in [
+            ("toml", "Editpad TOML"),
+            ("ini", "Editpad TOML"),
+            ("log", "Editpad Log"),
+            ("dockerfile", "Editpad Dockerfile"),
+            ("ts", "JavaScript"),
+            ("rust", "Rust"),
+            ("Python", "Python"),
+            ("shell", "Bourne Again Shell (bash)"),
+            ("docker", "Editpad Dockerfile"),
+        ] {
+            assert_eq!(
+                resolve_fence_language(token).as_deref(),
+                Some(expected),
+                "{token}"
+            );
+        }
+        // 空串与不认识的串 ⇒ None（整块素色，不嗅探）；console/text 是刻意不登记的
+        assert_eq!(resolve_fence_language("  "), None);
+        assert_eq!(resolve_fence_language("not-a-language"), None);
+        assert_eq!(resolve_fence_language("console"), None);
+        assert_eq!(resolve_fence_language("text"), None);
     }
 
     // ---------- P61 渐进上色（可视区近似上色） ----------

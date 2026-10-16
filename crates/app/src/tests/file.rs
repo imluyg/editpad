@@ -4833,6 +4833,36 @@ fn markdown_preview_colors_fenced_code_by_language() {
     );
     assert!(colors(&dark) >= 2, "深色档没上色");
     assert_ne!(colors(&dark), 0);
+    // 2026-10-16 档1：围栏查表搬进 core 后，**别名表那批**在围栏里也走得到了。
+    // 改前这里自写一套「扩展名 + 首字母大写的名」，`toml`/`dockerfile` 查不到别名、
+    // `shell` 对不上大小写敏感的真名 ⇒ 这些块整块素色。
+    for (token, lines) in [
+        (
+            "toml",
+            vec!["[package]".to_string(), "name = \"x\"".to_string()],
+        ),
+        (
+            "dockerfile",
+            vec!["FROM alpine:3.19".to_string(), "RUN echo 1".to_string()],
+        ),
+        (
+            "shell",
+            vec!["set -eu".to_string(), "echo \"$HOME\"".to_string()],
+        ),
+    ] {
+        let spans = code_block_spans(
+            &lines,
+            Some(token),
+            iced::Font::MONOSPACE,
+            false,
+            &MdColorBudget::default(),
+        );
+        assert!(
+            colors(&spans) >= 2,
+            "```{token} 的代码块没上色（{} 种颜色）",
+            colors(&spans)
+        );
+    }
     // 代码恒等宽族（P406 口径：正文族随设置，代码不跟着变成比例字体）
     for s in &rust {
         let f = s.font.expect("代码段必须显式带字体");

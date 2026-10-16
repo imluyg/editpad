@@ -1379,6 +1379,43 @@ fn toggle_line_comment_prefix_follows_syntax() {
 }
 
 #[test]
+fn p450_toggle_line_comment_reaches_the_other_comment_families() {
+    // 判据住在 core（`line_comment_prefix`），这里验的是它真被 Ctrl+Q 这条路吃到。
+    // 改前那张表挂的是小写 VS Code 名（bash/shellscript/toml/ini/properties），
+    // syntect 内置实名一个都对不上 ⇒ 下面每一行都曾落进 `//`。
+    for (name, src, want) in [
+        ("Bourne Again Shell (bash)", "echo hi\n", "# echo hi\n"),
+        ("Makefile", "all:\n", "# all:\n"),
+        ("Editpad TOML", "a = 1\n", "# a = 1\n"),
+        ("Haskell", "main = return ()\n", "-- main = return ()\n"),
+        ("Lisp", "(defun f () 1)\n", "; (defun f () 1)\n"),
+        ("MATLAB", "x = 1;\n", "% x = 1;\n"),
+        ("Batch File", "echo hi\n", ":: echo hi\n"),
+    ] {
+        let mut c = core_with(src);
+        c.set_language_by_name(Some(name));
+        assert_eq!(
+            c.highlight_syntax_name().as_deref(),
+            Some(name),
+            "{name} 前置"
+        );
+        assert!(c.toggle_line_comment(), "{name} 该动手");
+        assert_eq!(c.doc.to_text(), want, "{name}");
+        // 再按一次必须剥干净（回到原文），否则前缀表与剥前缀那条路不同名
+        assert!(c.toggle_line_comment(), "{name} 反向");
+        assert_eq!(c.doc.to_text(), src, "{name} 剥回原样");
+    }
+
+    // JSON/CSS/HTML 只有块注释：一个字都不能写（改前给它们插 `//`，写出的就是无效文本）
+    for name in ["JSON", "CSS", "HTML", "XML", "Editpad Log"] {
+        let mut c = core_with("abc\n");
+        c.set_language_by_name(Some(name));
+        assert!(!c.toggle_line_comment(), "{name} 没有行注释，该报 no-op");
+        assert_eq!(c.doc.to_text(), "abc\n", "{name} 一个字都不动");
+    }
+}
+
+#[test]
 fn collect_block_keeps_last_real_row_when_selection_reaches_eof() {
     // 第 64 轮勘误回归（🟠 既有缺陷，本测试初版当场暴露）：选区触及
     // 「最后一个真实行」且文档以换行收尾时，该行曾被幻影排除误剔——
