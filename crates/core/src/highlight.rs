@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use syntect::highlighting::{HighlightIterator, HighlightState, Highlighter, Theme, ThemeSet};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet};
 
-use crate::syntaxes::{DOCKERFILE, LOG, TOML};
+use crate::syntaxes::{DOCKERFILE, LOG, POWERSHELL, TOML};
 
 /// 检查点间距（行）。
 pub const STRIDE: usize = 128;
@@ -54,6 +54,7 @@ fn syntax_set() -> &'static SyntaxSet {
             (LOG, "Editpad Log"),
             (TOML, "Editpad TOML"),
             (DOCKERFILE, "Editpad Dockerfile"),
+            (POWERSHELL, "Editpad PowerShell"),
         ] {
             match SyntaxDefinition::load_from_str(yaml, false, Some(fallback)) {
                 Ok(def) => builder.add(def),
@@ -732,6 +733,10 @@ const ALIAS_TABLE: &[(&str, &str)] = &[
     ("less", "CSS"),
     ("jsonc", "JSON"),
     ("json5", "JSON"),
+    // 档2：内置包没有 PowerShell，本仓自己内嵌一份（不是借道，是真语法的一档子集）
+    ("ps1", "Editpad PowerShell"),
+    ("psm1", "Editpad PowerShell"),
+    ("psd1", "Editpad PowerShell"),
 ];
 
 /// 扩展名 → 语法名：纠正表 → syntect 内建扩展索引 → 别名表。
@@ -963,6 +968,7 @@ const COMMENT_PREFIX_TABLE: &[(&str, &str)] = &[
     ("YAML", "#"),
     ("Editpad TOML", "#"),
     ("Editpad Dockerfile", "#"),
+    ("Editpad PowerShell", "#"),
     ("Makefile", "#"),
     ("Perl", "#"),
     ("R", "#"),
@@ -996,6 +1002,8 @@ const COMMENT_PREFIX_TABLE: &[(&str, &str)] = &[
 const FENCE_ALIAS: &[(&str, &str)] = &[
     ("shell", "Bourne Again Shell (bash)"),
     ("docker", "Editpad Dockerfile"),
+    // GFM 围栏习惯写全称（`ps1` 走的是扩展名那一层，已经通）
+    ("powershell", "Editpad PowerShell"),
 ];
 
 /// 围栏语言串 → 语法名（Markdown 代码块上色用）。
@@ -1807,6 +1815,72 @@ mod tests {
     }
 
     #[test]
+    fn p452_powershell_mini_syntax_colors_and_never_leaks_to_the_next_line() {
+        // 三层入口都指得到它：扩展名、围栏 token、行注释前缀
+        for ext in ["ps1", "psm1", "psd1"] {
+            assert_eq!(
+                syntax_for_extension(ext).as_deref(),
+                Some("Editpad PowerShell"),
+                "{ext}"
+            );
+        }
+        assert_eq!(
+            resolve_fence_language("powershell").as_deref(),
+            Some("Editpad PowerShell")
+        );
+        assert_eq!(
+            line_comment_prefix(Some("Editpad PowerShell")),
+            Some("#"),
+            "PowerShell 的行注释是 #"
+        );
+
+        // 分色读数：`Get-Process -Name "x" 42 # tail`
+        // cmdlet(0) / 参数(13) / 字符串(19) / 数字(22) / 注释(26)，对照用 21 那个空格
+        // （11 那个空格不算对照——参数那条规则把前置空白一起吃进匹配里，
+        //   没有字形所以看不出来，但着色片段的边界会盖住它，第一版夹具就踩在这里）
+        let mut hl = LazyHighlighter::new_by_name("Editpad PowerShell").unwrap();
+        let runs = hl.styled_line(
+            0,
+            "Get-Process -Name \"x\" 42 # tail",
+            usize::MAX,
+            &mut |_| String::new(),
+        );
+        let blank = color_at(&runs, 21);
+        for (col, role) in [
+            (0, "cmdlet 名"),
+            (13, "参数"),
+            (19, "字符串"),
+            (22, "数字"),
+            (26, "注释"),
+        ] {
+            assert_ne!(color_at(&runs, col), blank, "{role} 没上色");
+        }
+        assert_ne!(
+            color_at(&runs, 0),
+            color_at(&runs, 19),
+            "cmdlet 与字符串要分色"
+        );
+        assert_ne!(
+            color_at(&runs, 19),
+            color_at(&runs, 26),
+            "字符串与注释要分色"
+        );
+        // 不配对引号那一族：迷你语法的规则全都不 push 上下文 ⇒ 结构上不可能跨行，
+        // 但这条是靠断言站住的，不是靠注释自证（对照 tsx 那一格——真语法也会跨行漏）。
+        hl.styled_line(
+            1,
+            "  Write-Host \"unbalanced quote",
+            usize::MAX,
+            &mut |_| String::new(),
+        );
+        let next = hl.styled_line(2, "$a = 42", usize::MAX, &mut |_| String::new());
+        assert!(
+            next.len() >= 3,
+            "下一行仍该分色，实际 {next:?}＝说明漏了状态"
+        );
+    }
+
+    #[test]
     fn p450_ext_override_fixes_the_dot_h_tail_win() {
         // 先证明这一格**真的会被判错**：内置索引是 rev() 取表尾，Objective-C
         // 最后声明 h ⇒ 它赢。摘掉 EXT_OVERRIDE 这条判据，下面的断言立刻红。
@@ -1830,8 +1904,8 @@ mod tests {
     fn p451_available_syntax_names_is_a_sorted_constructible_list() {
         // 「手动指定语言」那一格的数据源。三条契约都得钉住，因为面板条目带的是**下标**：
         let names = available_syntax_names();
-        // ① 数量＝内置 75（实测解包 dump 得到的数）+ 本仓内嵌 3
-        assert_eq!(names.len(), 78, "语法表规模变了：{names:?}");
+        // ① 数量＝内置 75（实测解包 dump 得到的数）+ 本仓内嵌 4（Log/TOML/Dockerfile/PowerShell）
+        assert_eq!(names.len(), 79, "语法表规模变了：{names:?}");
         // ② 无重复且按大小写不敏感排序（不排序的话面板顺序会随注入顺序变，
         //    于是「第 N 条」在两帧之间会指向两门不同的语言）
         let mut sorted = names.clone();
@@ -1857,6 +1931,7 @@ mod tests {
             "Editpad Log",
             "Editpad TOML",
             "Editpad Dockerfile",
+            "Editpad PowerShell",
         ] {
             assert!(names.iter().any(|n| n == want), "表里该有 {want}");
         }
@@ -1877,8 +1952,8 @@ mod tests {
             assert_eq!(syntax_for_extension(ext).as_deref(), Some(name), "{ext}");
         }
         // 刻意不登记：一个扩展名混着三种家族（lock），或内置包没有对应语法（csv、
-        // kt、swift、ps1），或借道会把**下一行**染错（tsx/jsx，见上面那格实测）。
-        for ext in ["lock", "csv", "ps1", "kt", "swift", "tsx", "jsx"] {
+        // kt、swift），或借道会把**下一行**染错（tsx/jsx，见上面那格实测）。
+        for ext in ["lock", "csv", "kt", "swift"] {
             assert_eq!(syntax_for_extension(ext), None, "{ext} 必须仍走嗅探/纯文本");
         }
     }

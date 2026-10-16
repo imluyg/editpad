@@ -40,6 +40,44 @@ contexts:
       scope: constant.numeric
 "#;
 
+/// PowerShell 语法（档2 第一份）：注释 / 字符串 / 变量与参数 / cmdlet 名 /
+/// 控制词 / 数字。
+///
+/// 为什么是 PowerShell 而不是 Kotlin/Swift：这台机器上的日常手势就是脚本与配置，
+/// 而它的语法家族形状与 Dockerfile 同一档（行式、`#` 注释、双引号插值串、
+/// `Verb-Noun` 这种封闭命名的命令）。
+///
+/// 全部规则**都不 push 上下文**（与 LOG/TOML/DOCKERFILE 一样只用行内匹配）：
+/// 于是"不配对引号把下一行拖进字符串"这一族由构造保证不可能发生——
+/// 这一条在 `p452_powershell_...` 里有实测用例兜底，不靠注释自证。
+/// 反引号续行（`` ` `` 结尾）不做：那需要跨行状态，代价与收益不匹配。
+pub const POWERSHELL: &str = r#"%YAML 1.2
+---
+name: Editpad PowerShell
+file_extensions: [editpad-powershell]
+scope: source.editpad.powershell
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment
+    - match: '"[^"]*"'
+      scope: string
+    - match: "'[^']*'"
+      scope: string
+    - match: '\$\{?[A-Za-z_][A-Za-z0-9_]*'
+      scope: constant.language
+    - match: '(?i)\b(?:Get|Set|New|Remove|Write|Read|Add|Clear|Invoke|Start|Stop|Test|Select|Where|ForEach|Format|Export|Import|ConvertFrom|ConvertTo|Compare|Group|Measure|Out|Update|Restart|Use|Find|Show|Send|Wait)\-[A-Z][A-Za-z0-9]*'
+      scope: entity.name.function
+    - match: '(?i)\b(if|elseif|else|foreach|for|while|do|until|function|filter|param|return|begin|process|end|try|catch|finally|throw|switch|break|continue|in|class|enum|workflow|using|data|hidden|parallel|sequence|trap)\b'
+      scope: keyword.control
+    - match: '(?i)\$(true|false|null)\b'
+      scope: constant.language
+    - match: '(^|\s)-[A-Za-z][A-Za-z0-9]*'
+      scope: constant.language
+    - match: '\b[0-9]+(\.[0-9]+)?\b'
+      scope: constant.numeric
+"#;
+
 /// TOML 语法：节名 / 键 / 字符串 / 布尔 / 数字 / 注释。
 pub const TOML: &str = r#"%YAML 1.2
 ---
