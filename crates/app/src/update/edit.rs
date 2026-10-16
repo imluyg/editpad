@@ -359,6 +359,30 @@ impl Editpad {
                 let tab_id = self.tab().id;
                 self.update(Message::Pasted(tab_id, text))
             }
+            // ---------- 档3：手动指定本页的语法高亮 ----------
+            Message::SyntaxPick(i) => {
+                // 与 ClipPick 同一口径：面板条目带**下标**，名字在执行时刻现取
+                // （数据源是 OnceLock 里那份排序表，跨帧稳定）。越界静默 no-op。
+                let Some(name) = editpad_core::available_syntax_names().into_iter().nth(i) else {
+                    return Task::none();
+                };
+                // 只换高亮器：文档一个字都不动 ⇒ 不置脏、不进撤销栈、也不受
+                // 只读锁阻挡（这一格与 `apply_highlight_theme` 同族，不是写操作）。
+                {
+                    let mut ed = self.cur_handle.borrow_mut();
+                    ed.set_language_by_name(Some(&name));
+                    ed.apply_highlight_theme(self.dark_mode);
+                }
+                // 说清楚作用范围：重开那个文件仍按扩展名/内容自动判定
+                // （持久的「扩展名 ↔ 语言」映射是另一格，别在这里假装已经做了）
+                self.set_status(format!(
+                    "{} {}（{}）",
+                    self.t(editpad_core::Key::HintSyntaxSet),
+                    name,
+                    self.t(editpad_core::Key::HintReloadAutoDetect)
+                ));
+                Task::none()
+            }
             // ---------- 正文右键菜单（P308） ----------
             Message::EditorContextMenu(x, y) => {
                 // 与标签右键菜单互斥：同一时刻只允许一个浮层菜单在场，

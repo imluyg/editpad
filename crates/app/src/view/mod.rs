@@ -91,6 +91,19 @@ impl Editpad {
         key.text(self.settings.language)
     }
 
+    /// 档3：状态栏最右那段「本页是什么语言」。无高亮（纯文本路径）⇒ `—`，
+    /// 与编码那一格的空态同一个形状（这两段都是"文件身份"，不是消息）。
+    ///
+    /// 抽成方法而不是写在 `view()` 里：视图树夹具读得到几何、读不到文本，
+    /// 但这句话本身（"未识别语言时到底显示什么"）得能被用例钉住——与
+    /// [`Self::palette_empty_label`] 同一条理由。
+    pub(crate) fn status_syntax_label(&self) -> String {
+        self.cur_handle
+            .borrow()
+            .highlight_syntax_name()
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
     /// 正文字形族（P34 换装点，**只作用于正文与 Markdown 预览**）。
     /// 生效族名 Some → 以 `Family::Name` 引用（系统字体已在 fontdb 里，
     /// 无需装载字节）；None / 未配置 → 默认等宽（P33 的 CJK 钉字仍生效）。
@@ -939,6 +952,16 @@ impl Editpad {
             .padding([1, 6])
             .style(chrome_button_style)
             .on_press_maybe((!self.busy).then_some(Message::ToggleEncodingMenu)),
+            // 档3：本页语法（点它 = 打开「切换语法」面板）。与 EOL/编码同族——
+            // 都是「这个文件是什么」的身份位。名字自然宽：它只在换语言那一格变宽窄，
+            // 不在打字/选区的每一帧变，所以不会让右组抖动。
+            button(text(self.status_syntax_label()).size(uipx).font(uifont))
+                .padding([1, 6])
+                .style(chrome_button_style)
+                .on_press_maybe(
+                    (!self.busy)
+                        .then_some(Message::PaletteToggled(crate::state::PaletteMode::Syntax,)),
+                ),
         ]
         .spacing(12)
         .align_y(Alignment::Center)
@@ -1114,7 +1137,8 @@ pub(crate) fn match_excerpt(line_text: &str, col: usize, max_cols: usize) -> Str
 
 /// P129：命令面板条目——命令模式带 command_id（经 dispatch_action
 /// 执行），标签模式带 tab_index（SwitchTab 执行），P319 剪贴板历史模式
-/// 带 clip_index（ClipPick 执行）。
+/// 带 clip_index（ClipPick 执行），档3 语法模式带 syntax_index（SyntaxPick 执行，
+/// 下标取自 [`editpad_core::available_syntax_names`] 的排序结果）。
 ///
 /// ⚠️ 条目只携带**下标与展示串**，绝不携带正文：`palette_all_entries` 每帧
 /// 重建这个 Vec，把几兆的历史文本抄进条目就是每帧抄几兆。
@@ -1123,6 +1147,7 @@ pub(crate) struct PaletteEntry {
     pub(crate) command_id: Option<&'static str>,
     pub(crate) tab_index: Option<usize>,
     pub(crate) clip_index: Option<usize>,
+    pub(crate) syntax_index: Option<usize>,
     pub(crate) title: String,
     pub(crate) detail: String,
 }

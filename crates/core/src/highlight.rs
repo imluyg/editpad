@@ -875,6 +875,26 @@ pub fn resolve_language(path: Option<&Path>, sample: &str) -> Option<String> {
     first_line_language(sample)
 }
 
+/// 全部可选语法名（内置包 + 本仓内嵌），**按名字排序**。
+///
+/// 给「手动指定语言」那一格当数据源：扩展名判错、或者内容根本看不出来时，
+/// 用户得有一个能自己选的地方。排序是契约的一部分——命令面板条目带的是**下标**，
+/// 下标必须在「面板建条目那一帧」与「执行那一帧」之间稳定，所以这里不能返回
+/// 语法集的内部顺序（那会随 `into_builder` 的注入顺序变）。
+pub fn available_syntax_names() -> Vec<String> {
+    let mut names: Vec<String> = syntax_set()
+        .syntaxes()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    names.sort_by(|a, b| {
+        a.to_lowercase()
+            .cmp(&b.to_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+    names
+}
+
 /// 语法名 → 行注释前缀（Ctrl+Q 用）。`None` ＝这门语法**没有**行注释。
 ///
 /// 为什么这张表住在 core：判据本身与 GUI 无关，而它决定「往正文里写哪几个字符」，
@@ -1804,6 +1824,42 @@ mod tests {
         // 刻意**不**覆盖的那一格：.s 的真实归属（汇编）内置包根本没有，
         // 硬定给 Lisp 或 R 只是换一种错。钉住它，将来改动就得先过这条。
         assert_eq!(syntax_for_extension("s").as_deref(), Some("R"));
+    }
+
+    #[test]
+    fn p451_available_syntax_names_is_a_sorted_constructible_list() {
+        // 「手动指定语言」那一格的数据源。三条契约都得钉住，因为面板条目带的是**下标**：
+        let names = available_syntax_names();
+        // ① 数量＝内置 75（实测解包 dump 得到的数）+ 本仓内嵌 3
+        assert_eq!(names.len(), 78, "语法表规模变了：{names:?}");
+        // ② 无重复且按大小写不敏感排序（不排序的话面板顺序会随注入顺序变，
+        //    于是「第 N 条」在两帧之间会指向两门不同的语言）
+        let mut sorted = names.clone();
+        sorted.sort_by(|a, b| {
+            a.to_lowercase()
+                .cmp(&b.to_lowercase())
+                .then_with(|| a.cmp(b))
+        });
+        assert_eq!(names, sorted, "表必须已排序");
+        for pair in names.windows(2) {
+            assert_ne!(pair[0], pair[1], "语法名重复会让面板出现两个同名条目");
+        }
+        // ③ 每个名字都真能构造出高亮器（否则用户选了个"没有任何效果"的语言）
+        for name in &names {
+            assert!(
+                LazyHighlighter::new_by_name(name).is_some(),
+                "{name} 在表里却构造不出高亮器"
+            );
+        }
+        for want in [
+            "Rust",
+            "Markdown",
+            "Editpad Log",
+            "Editpad TOML",
+            "Editpad Dockerfile",
+        ] {
+            assert!(names.iter().any(|n| n == want), "表里该有 {want}");
+        }
     }
 
     #[test]

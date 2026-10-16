@@ -592,6 +592,8 @@ impl Editpad {
             | Message::Pasted(..)
             // P319：剪贴板历史取用（与复制/剪切同域，历史账目也在此维护）
             | Message::ClipPick(..)
+            // 档3：手动指定本页语法（只换高亮器、不动文档）
+            | Message::SyntaxPick(..)
             | Message::KeyPressed(..)
             | Message::HighlightPaveNeeded
             | Message::FormatJson

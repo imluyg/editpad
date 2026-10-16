@@ -73,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\gen-bench-log.ps1   # 生成日
   syntect 逐行懒高亮：检查点式状态机支持视口随机访问，编辑只失效改动处之后的状态，
   大跳转先用近似配色即时显示、精确铺建随后替换
 - **查看**：按扩展名自动语法着色（未知类型走纯文本快速路径）、Log/TOML/Dockerfile 内嵌迷你语法、
-  无扩展名内容嗅探＋内置首行判据、Markdown 预览面板、JSON 一键校验与格式化、不可见字符标记、
+  无扩展名内容嗅探＋内置首行判据、状态栏显语法名（点它可手动指定本页语言）、Markdown 预览面板、JSON 一键校验与格式化、不可见字符标记、
   深浅主题（高亮配色随主题重建）、正文字号缩放（10~48px）、软换行（词边界优先折行）
 - **文本工具**：选区 Base64 / URL 编解码、MD5 / SHA-256 摘要（零第三方依赖，标准向量钉死）
 - **编辑安全**：只读锁定（改内容动作总闸拒收）、置脏标记（标签页 ● 前缀 + 标题栏）、
@@ -396,6 +396,9 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
   （`Dockerfile`/`Makefile`/`.env`/`.gitconfig`/`.bashrc` 等——以 `.` 开头且只有一个点的文件名，
   `Path::extension()` 取不到，只能按整名认）；再兜底用内置包自带的**首行判据**
   （`<?php`、`<!DOCTYPE html>`、`-*- Mode: C -*-`、`%YAML`、`This is pdfTeX, Version `…）；
+- 状态栏最右一格拉出**本页的语法名**（点它 = 打开「切换语法」面板，78 门语言可搜可选）：
+  扩展名判错、内容看不出语言、或这门语言本就没进别名表时，用户自己有地方纠正；选择只作用到本页、
+  不写正文也不置脏，只读页照样可用，重新打开那个文件则回到自动判定；
 - 行注释前缀（`Ctrl+Q`）按 syntect 的真实语法名取值：`#` 系（bash/Makefile/TOML/Dockerfile/YAML/Perl/R/Tcl…）、
   `--` 系（SQL/Lua/Haskell/AppleScript）、`;` 系（Lisp/Clojure）、`%` 系（Erlang/MATLAB/LaTeX/BibTeX）、
   `'`（ASP）、`::`（批处理）；只有块注释、或根本不是代码的（Markdown/JSON/CSS/HTML/XML/Log）

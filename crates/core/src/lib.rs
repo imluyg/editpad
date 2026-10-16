@@ -32,8 +32,8 @@ pub use find_in_files::{
     IGNORED_DIRS, MAX_SCAN_FILE_BYTES, MAX_WALK_DEPTH,
 };
 pub use highlight::{
-    first_line_language, line_comment_prefix, resolve_fence_language, resolve_language,
-    syntax_for_extension, LazyHighlighter, StyledRun,
+    available_syntax_names, first_line_language, line_comment_prefix, resolve_fence_language,
+    resolve_language, syntax_for_extension, LazyHighlighter, StyledRun,
 };
 pub use json::{format_json, validate_json, JsonError};
 pub use lang::{

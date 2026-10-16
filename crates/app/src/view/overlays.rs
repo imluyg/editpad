@@ -580,6 +580,7 @@ impl Editpad {
                     command_id: Some(c.id),
                     tab_index: None,
                     clip_index: None,
+                    syntax_index: None,
                     title: c.title.to_owned(),
                     detail: self.palette_combo_detail(c.id),
                 })
@@ -592,6 +593,7 @@ impl Editpad {
                     command_id: None,
                     tab_index: Some(i),
                     clip_index: None,
+                    syntax_index: None,
                     title: t.display_name_in(self.lang()),
                     detail: t
                         .path
@@ -610,10 +612,37 @@ impl Editpad {
                     command_id: None,
                     tab_index: None,
                     clip_index: Some(i),
+                    syntax_index: None,
                     title: self.clip_preview(t),
                     detail: self.clip_meta(t),
                 })
                 .collect(),
+            // 档3：语法表。数据源就是 core 那一份排序表（下标即执行参数，
+            // 跨帧稳定），detail 只给本页那一项标一句「当前」。
+            crate::state::PaletteMode::Syntax => editpad_core::available_syntax_names()
+                .into_iter()
+                .enumerate()
+                .map(|(i, name)| PaletteEntry {
+                    command_id: None,
+                    tab_index: None,
+                    clip_index: None,
+                    syntax_index: Some(i),
+                    detail: self.current_syntax_note(&name),
+                    title: name,
+                })
+                .collect(),
+        }
+    }
+
+    /// 语法模式条目的 detail：本页当前生效的语法标一句「当前」，其余留空。
+    ///
+    /// 为什么不写"这门语言管哪些扩展名"：一门语言在内置表里声明的扩展名可以有
+    /// 十几个（Ruby 就带了 30 来个），窄列放不下、放下也读不完。
+    fn current_syntax_note(&self, name: &str) -> String {
+        let cur = self.cur_handle.borrow().highlight_syntax_name();
+        match cur.as_deref() {
+            Some(cur) if cur == name => self.t(editpad_core::Key::PaletteCurrentSyntax).to_owned(),
+            _ => String::new(),
         }
     }
     /// P319：一条历史的单行预览——前 [`CLIP_PREVIEW_CHARS`] 个字符，
@@ -721,11 +750,16 @@ impl Editpad {
         }
         let idx = self.palette_idx.min(entries.len() - 1);
         let entry = &entries[idx];
-        let msg = match (entry.command_id, entry.tab_index, entry.clip_index) {
+        let msg = match (
+            entry.command_id,
+            entry.tab_index,
+            entry.clip_index,
+            entry.syntax_index,
+        ) {
             (Some(id), ..) => dispatch_action(id, keyboard::Modifiers::empty()),
-            (_, Some(i), _) => Some(Message::SwitchTab(i)),
-            (_, _, Some(i)) => Some(Message::ClipPick(i)),
-            _ => None,
+            (_, Some(i), _, _) => Some(Message::SwitchTab(i)),
+            (_, _, Some(i), _) => Some(Message::ClipPick(i)),
+            _ => entry.syntax_index.map(Message::SyntaxPick),
         };
         self.palette_visible = false;
         // P151：面板关闭即把输入焦点还给正文（否则中文输入法在正文里失效）

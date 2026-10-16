@@ -586,6 +586,11 @@ pub(crate) enum PaletteMode {
     /// P319：会话内剪贴板历史（数据源 = [`Editpad::clip_history`]，
     /// 条目执行 = [`crate::Message::ClipPick`]）
     Clipboard,
+    /// 档3：手动指定本页的语法高亮（数据源 = [`editpad_core::available_syntax_names`]，
+    /// 条目执行 = [`crate::Message::SyntaxPick`]）。开这一模式的理由见
+    /// [`crate::hotkeys`] 里 `switch_syntax` 那条：扩展名判错、或内容看不出语言时，
+    /// 用户得有一个能自己选的地方。
+    Syntax,
 }
 
 /// P209：查找浮层的拖动态（[`Editpad::find_drag`]）。

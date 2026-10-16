@@ -242,6 +242,8 @@ mod readmes;
 mod robustness;
 mod session;
 mod settings;
+// 档3：手动指定本页语法（状态栏语言位 + 面板第四模式；选它不写正文、只读页可用）
+mod switch_syntax;
 mod tabs;
 // P313：键盘字号缩放与热键符号语法
 mod zoom;

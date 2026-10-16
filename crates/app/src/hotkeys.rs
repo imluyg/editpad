@@ -566,6 +566,14 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &[],
         desc: HkSplitSelectionByLines,
     },
+    // 档3：手动指定本页语法高亮。同样**无默认键**：这件事的正确手势是"打开面板、
+    // 打出想要的语言名、回车"，记一个键反而要先背键；26 个 Ctrl+Shift 字母也早已占尽。
+    // 命令面板可见、设置 → 快捷键里可赋键（与 clip_history／split_selection_by_lines 同待遇）。
+    HotkeyAction {
+        id: "switch_syntax",
+        default_combos: &[],
+        desc: HkSwitchSyntax,
+    },
     // A8：在文件中查找。Ctrl+Shift+F 被 format_json 占用（26 个
     // Ctrl+Shift 字母占尽，P129 记录），F 家族空闲 F1/F4/F10/F12 取 F12。
     HotkeyAction {
@@ -882,6 +890,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "add_next_match" => edit(EditOp::AddNextMatch),
         // B10 二期首批：选区按行拆分（无默认键，只能从命令面板/菜单进来）
         "split_selection_by_lines" => edit(EditOp::SplitSelectionByLines),
+        // 档3：语法模式面板（开关口径与命令面板/标签/剪贴板历史完全一致）
+        "switch_syntax" => Some(Message::PaletteToggled(crate::state::PaletteMode::Syntax)),
         // A8：在文件中查找
         "find_in_files" => Some(Message::FindInFilesToggled),
         // 第 315 轮 C3：Markdown 行内标记包／解（闸门在 apply_edit 按语法名收）

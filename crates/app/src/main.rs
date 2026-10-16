@@ -282,6 +282,14 @@ enum Message {
     /// [`Editpad::clip_history`] 上现取；越界按 no-op 处理。
     ClipPick(usize),
 
+    /// 档3：把**本页**的语法高亮手动指定为 [`editpad_core::available_syntax_names`]
+    /// 里第 N 个。载荷取下标而不是名字（与 ClipPick 同一口径：面板每帧重建条目，
+    /// 把 77 个名字抄进消息就是每帧抄一遍）。越界按 no-op。
+    ///
+    /// 只作用到本页、且只到这次会话：重新打开那个文件仍按扩展名/内容自动判定
+    /// ——持久化的「扩展名 ↔ 语言」自定义映射是另一格（见台账待点单）。
+    SyntaxPick(usize),
+
     /// P308：正文右键菜单——载荷 = 打开瞬间的指针位置（窗口系坐标）
     EditorContextMenu(f32, f32),
     /// P308：收起正文右键菜单（点菜单外 / Esc / 切页）
