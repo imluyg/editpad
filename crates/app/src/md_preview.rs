@@ -781,7 +781,15 @@ fn note_block_build() {}
 #[inline]
 pub(crate) fn note_parse() {}
 
-/// 按块缓存的一行＝`(内容指纹, 树)`；整份缓存＝`(上一帧的渲染上下文戳, 行[])`。
+/// 解析缓存的签名＝`(页 id, Tab::version, 正文纪元, 字节数, 行数)`。
+///
+/// 起名字放在这一侧，是为了让"构造键"（`view` 的预览分支）与"声明槽位"
+/// （`state::MdPreviewCache`）**不再各写一遍元组**——P469 补 `content_epoch`
+/// 那一维时，两处元组当场不一致，是编译器拦下来的；写在一个名字上就不用指望编译器。
+/// 各分量的理由见 `state::MdPreviewCache` 的说明。
+pub(crate) type MdPreviewKey = (u64, u64, u64, usize, usize);
+
+/// 预览的按块复用行 `(内容指纹, 树)`。
 /// 起别名是因为 `RefCell<(Option<u64>, Vec<(u64, MdTree)>)>` 这串会把
 /// `clippy::type_complexity` 顶起来（第 338 轮 `block_tests` 那张手势表同款处理：
 /// 改形状，不加 `#[allow]`）。

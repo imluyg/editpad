@@ -291,20 +291,25 @@ impl Editpad {
         // 画布经 view_with_font 每帧传参，无跨帧同步状态）
         let content_font = self.body_font();
         if self.preview_visible && is_markdown {
-            // O-6：解析结果按「页 id + 内容版本 + 字节数 + 行数」缓存。签名
+            // O-6：解析结果按「页 id + 内容版本 + 正文纪元 + 字节数 + 行数」缓存。签名
             // 一致时不再 `doc.to_text()` 拷全文、不再 `parse_markdown` 全量
             // 重解析，只重建 widget 树（即时模式每帧本就要重建）。
             // 版本不足以单独作键：`Tab::version` 只在真实改动时 +1、装载不
-            // 回卷，故再带两个 O(1) 文档指纹，挡住「同一未编辑页被换成等长
-            // 文件」这类岔路。键含页 id：切页不得沿用别页的块表。
+            // 回卷。⚠️ P469 勘误：原来这句话下面的那两个"O(1) 文档指纹"被当成能挡住
+            // 「同一未编辑页被换成等长文件」，实测挡不住——等字节、等行数的一次外部
+            // 重载三个分量照旧 ⇒ 预览停在上一版且不自愈。真正的那一维是
+            // `content_epoch`（`invalidate_highlight_span` 是全部正文突变的唯一汇点，
+            // `reset_document` 也经它，P162）。两个指纹留着当第二道闸，各自 O(1)。
+            // 键含页 id：切页不得沿用别页的块表。
             // 整个构建在缓存的可变借用内完成——`markdown_preview_element`
             // 返回 `Element<'static>`（逐 span 克隆文本），引用不带出借用期。
             let tab = &self.tabs[self.active_tab];
-            let key = {
+            let key: crate::md_preview::MdPreviewKey = {
                 let core = tab.editor.borrow();
                 (
                     tab.id,
                     tab.version,
+                    core.content_epoch,
                     core.doc.text_len_bytes(),
                     core.doc.line_count(),
                 )

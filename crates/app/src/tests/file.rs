@@ -96,10 +96,11 @@ fn preview_toggle_only_flips_for_markdown_documents() {
 /// - 内容一变 → 立即重建，且新块表就是新文档的解析结果（预览陈本是用户
 ///   看得见的错误）。
 ///
-/// ⚠️ 未覆盖的岔路（据代码推定，非实测）：**等长**改动靠键里的
-/// `Tab::version` 分量兜住——真实编辑路径都经 `Tab::note_mutation` 推进
-/// 版本（`tab.rs:142` 是该字段唯一写入点）。本用例只改文档长度，没有
-/// 构造「等长且版本未动」的场景。
+/// ⚠️ 这一格**不覆盖**等长改动：键里的 `Tab::version` 分量只在真实编辑时 +1
+/// （`Tab::note_mutation` 是该字段唯一写入点），本用例只改文档长度。
+/// 「等长且版本未动」那一形由下面的 `p469_...` 实测——它量出靠字节数与行数两个
+/// 指纹兜不住一次外部重载，得看 `content_epoch`（P469 之前这里写的是"据代码推定、
+/// 由 version 分量兜住"，那句推定被用例否掉了）。
 #[test]
 fn markdown_preview_cache_is_reused_until_content_changes() {
     fn md_app(text: &str) -> Editpad {
@@ -171,6 +172,88 @@ fn markdown_preview_cache_is_reused_until_content_changes() {
             .iter()
             .any(|b| matches!(b, editpad_core::markdown::MdBlock::Heading { level: 2, .. })),
         "追加的二级标题应出现在新块表里"
+    );
+    crate::md_preview::MD_SWAP_WINDOW_MS.with(|c| c.set(crate::md_preview::MD_PREVIEW_SWAP_MS));
+}
+
+/// P469＝**等长的外部重载后预览停在旧版、而且不会自愈**：解析缓存的键是
+/// `(页 id, Tab::version, 字节数, 行数)`，而装载那条路**不推 version**
+/// （`tab.rs:138` 那句注释自己写着"只在真实改动时 +1、装载不回卷"；上面那条
+/// 姊妹用例也登记了"本用例只改文档长度，没有构造等长且版本未动的场景"）。
+/// ⇒ 磁盘上的文件被换成字节数与行数都相同的另一版，四个键分量一个都没变，
+/// 预览继续画上一版：左半是磁盘新版、右半是旧版，只有用户再敲一下字才会纠正。
+#[test]
+fn p469_an_equal_length_reload_invalidates_the_preview_parse_cache() {
+    crate::md_preview::MD_SWAP_WINDOW_MS.with(|c| c.set(0)); // 关掉节流：键一变就当帧换
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("x\ny\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, "夹具自证：预览已开");
+    let _ = app.view();
+    let cached = |app: &Editpad| -> std::rc::Rc<Vec<editpad_core::markdown::MdBlock>> {
+        app.md_preview_cache
+            .borrow()
+            .first()
+            .expect("预览开态走过一次 view() 后应建立解析缓存")
+            .1
+            .clone()
+    };
+    assert_eq!(
+        &cached(&app)[..],
+        &editpad_core::markdown::parse_markdown("x\ny\n")[..],
+        "夹具自证：缓存里是第一版"
+    );
+
+    // 重载：同一个页、字节数与行数都相同的新版（键的另两个分量因此照旧）
+    let v_before = app.tabs[0].version;
+    let page = app.tabs[0].id;
+    dispatch(&mut app, Message::ConfirmExternalReload(page));
+    let job = app
+        .active_load
+        .clone()
+        .expect("夹具自证：应有一次落在这一页的在途装载");
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job.id,
+            Ok((
+                editpad_core::Document::from_str("q\ny\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "q\ny\n",
+        "夹具自证：新版已落进这一页"
+    );
+    assert_eq!(
+        app.tabs[0].version, v_before,
+        "夹具自证：装载不推 version（键指望不上它）"
+    );
+
+    let _ = app.view();
+    let now = app.cur_handle.borrow().doc.to_text();
+    assert_eq!(
+        &cached(&app)[..],
+        &editpad_core::markdown::parse_markdown(&now)[..],
+        "等长重载后预览仍用旧块表＝左半新版、右半上一版"
     );
     crate::md_preview::MD_SWAP_WINDOW_MS.with(|c| c.set(crate::md_preview::MD_PREVIEW_SWAP_MS));
 }

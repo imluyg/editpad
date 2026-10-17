@@ -402,10 +402,14 @@ pub(crate) struct Editpad {
 /// 重跑，空闲还有 530ms 光标节拍与 400ms 打开节拍（≈5 次/秒），滚动/打字时
 /// 逐帧——原状等于每秒把整篇文档拷两遍并重新解析。
 ///
-/// 签名 = `(页 id, Tab::version, 字节数, 行数)`。版本单独不足以作键：
-/// `Tab::version` 只在 `note_mutation` 里 +1、装载不回卷，故再带两个 O(1) 的
-/// 文档指纹，挡住「同一未编辑页被换成等长文件」这类岔路；含页 id 则保证切页
-/// 不会沿用别页的块表。
+/// 签名 = `(页 id, Tab::version, 正文纪元, 字节数, 行数)`（元组形状起名叫
+/// `crate::md_preview::MdPreviewKey`，构造处与这里的声明共用一个名字）。
+/// 版本单独不足以作键：`Tab::version` 只在 `note_mutation` 里 +1、装载不推。
+/// ⚠️ P469 勘误：这里原先写"再带两个 O(1) 文档指纹就能挡住『同一未编辑页被换成
+/// 等长文件』"，用例量出挡不住——等字节、等行数的一次外部重载三个分量照旧，
+/// 预览停在上一版且不自愈。真正兜底的那一维是 `EditorCore::content_epoch`
+/// （`invalidate_highlight_span` 是全部正文突变的唯一汇点，`reset_document` 也经它）。
+/// 含页 id 则保证切页不会沿用别页的块表。
 ///
 /// 块表套 `Rc` 是为了让「签名未变 → 确实没有重解析」在测试里**可观测**
 /// （`Rc::ptr_eq` 判同一性），否则缓存是否生效只能靠耗时断言去猜。
@@ -415,7 +419,7 @@ pub(crate) struct Editpad {
 /// （两篇大 .md 来回对照＝每切一次付一次全文拷贝＋全量重解）。槽数与淘汰口径见
 /// [`crate::md_preview::MD_PREVIEW_CACHE_SLOTS`] 与 `view` 里的预览分支。
 type MdPreviewCache = Vec<(
-    (u64, u64, usize, usize),
+    crate::md_preview::MdPreviewKey,
     std::rc::Rc<Vec<editpad_core::markdown::MdBlock>>,
 )>;
 
