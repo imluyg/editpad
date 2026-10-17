@@ -1,4 +1,5 @@
 use super::metrics::leading_indent_cols_of;
+use super::scrollbars::{wrap_sb_reserve_needed, VScrollbar};
 use super::*;
 
 impl EditorCore {
@@ -918,6 +919,37 @@ impl EditorCore {
     /// 内渲染以新预算排布，滚动范围下一帧对齐。
     pub fn set_wrap_sb_reserve(&mut self, reserve: bool) {
         self.wrap_sb_reserve = reserve;
+    }
+
+    /// 竖直滚动条几何的**唯一算式**：绘制、按下命中、悬停点亮、拖拽反解、
+    /// 光标形状五处必须拿到同一份 `needed` 与同一份几何。
+    ///
+    /// 为什么要收成一份：改前只有 `draw` 那处接了 P116 滞回的
+    /// `with_forced_needed`，另四处各自 `VScrollbar::measure` 算一份 ⇒
+    /// 内容压在 ±2 行死区内（`wrap_sb_reserve` 还开着、条照旧画得出来）时
+    /// `hits()` 因 `needed == false` 判不中，**一根看得见的滚动条点不动**，
+    /// 按下落到正文去改选区、光标形状也给成文本 I 型；而抓握建立之后内容才
+    /// 缩进死区那一档更糟——拿到的退化几何是 `thumb_h = 0`、`range_lines = 0`，
+    /// `scroll_for_thumb_y` 恒返回 0 ⇒ 拖到一半视图跳回文档顶。P272 ⑦ 补的是
+    /// 绘制侧的几何，交互侧那四份一直没跟着改（"分叉只守一边"那一族）。
+    pub(crate) fn vscrollbar(&self, widget_h: f32) -> VScrollbar {
+        let lh = self.line_height();
+        let sb = VScrollbar::measure(
+            self.scroll_content_lines(),
+            self.viewport_h,
+            lh,
+            widget_h,
+            self.scroll_top,
+        );
+        if !self.wrap_enabled() {
+            return sb;
+        }
+        sb.with_forced_needed(wrap_sb_reserve_needed(
+            self.scroll_content_lines() as f32,
+            self.viewport_h / lh.max(1e-3),
+            self.wrap_sb_reserve,
+            WRAP_SB_RESERVE_HYSTERESIS_LINES,
+        ))
     }
 
     /// 软换行可用显示列预算 = 折行预算 ÷ 列宽，≥1。

@@ -1995,6 +1995,57 @@ fn wrap_sb_reserve_shrinks_budget_only_when_set() {
     );
 }
 
+/// 死区里的滚动条几何必须与绘制那一份同源（`EditorCore::vscrollbar` 是唯一算式）。
+///
+/// 摆出来的状态＝软换行开、`wrap_sb_reserve` 还开着、内容比视口少两行：
+/// `VScrollbar::measure` 直判 `needed = false`（放得下），而 P116 滞回判 `true`
+/// （还在让位档）——这正是改前"绘制接了 `with_forced_needed`、命中／拖拽没接"
+/// 会分叉的那一档：条画得出来却点不动，拖拽还会拿 `range_lines = 0` 把视图打回顶。
+#[test]
+fn vscrollbar_in_the_hysteresis_band_is_hit_testable_and_draggable() {
+    const N: usize = 8; // 8 行正文 + 幻影末行 = 9 个视觉行
+    let mut c = core_with(&"x\n".repeat(N));
+    c.set_word_wrap(true);
+    let lh = c.line_height();
+    assert!(lh > 0.0, "夹具自证：行高可用");
+    // 视口 = 11 行高 ⇒ 内容(9) 放得下（measure 直判 needed=false），
+    // 而滞回带 = min(2, 11*0.5) = 2 ⇒ 9 >= 11-2 仍判"需要滚动条"
+    c.set_viewport_height(lh * 11.0);
+    c.set_wrap_sb_reserve(true);
+    assert_eq!(
+        c.scroll_content_lines(),
+        N + 1,
+        "夹具自证：短行不折不增段，视觉行数 = 逻辑行数含幻影末行"
+    );
+
+    let widget_w = 600.0f32;
+    let sb = c.vscrollbar(lh * 11.0);
+    assert!(sb.needed, "死区里条照旧在场（滞回把 needed 抬回 true）");
+    assert!(
+        sb.hits(widget_w - 1.0, sb.track_y + 1.0, widget_w),
+        "画得出来的条必须点得动：命中判据与绘制同一份几何"
+    );
+    assert_eq!(sb.thumb_h, sb.track_h, "放得下时的诚实几何＝滑块铺满轨道");
+    assert!(
+        sb.range_lines >= 1.0,
+        "行程不得归零，否则拖拽恒算出 scroll_top = 0（＝跳回文档顶），实得 {}",
+        sb.range_lines
+    );
+    assert!(
+        sb.scroll_for_thumb_y(sb.track_y + sb.thumb_h) > 0.0,
+        "拖到底那一格要给出正行程，不能恒 0"
+    );
+
+    // 反面对照：同一份内容把让位关掉 ⇒ 滞回退出，条真的不该在场
+    // （挡住"开态一律 forced needed = true"这种过宽修法）
+    c.set_wrap_sb_reserve(false);
+    let off = c.vscrollbar(lh * 11.0);
+    assert!(
+        !off.needed && !off.hits(widget_w - 1.0, off.track_y + 1.0, widget_w),
+        "没让位又放得下＝条不该出现，实得 {off:?}"
+    );
+}
+
 #[test]
 fn wrap_sb_reserve_rebreaks_at_smaller_budget() {
     // P99 像素口径：预留后断点按更小预算重算——每段右缘 ≤ 「文本区宽 − 滚动条带」，行尾字符整体在滑块左侧收尾。

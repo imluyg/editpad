@@ -27,14 +27,14 @@ use iced::{
 
 use super::core::{
     lighten, luminance, CursorPos, EditOp, EditorCore, EditorHandle, ImeCommit, CARET_WIDTH,
-    SCROLL_LINES_PER_NOTCH, WRAP_SB_RESERVE_HYSTERESIS_LINES,
+    SCROLL_LINES_PER_NOTCH,
 };
 use super::metrics::{
     char_cols, display_cols, measure_char_width, measure_ink_box, shape_row_xs, TAB_STOP_COLS,
 };
 use super::scrollbars::{
-    mark_y_for_row, resolve_mark_click, wrap_sb_reserve_needed, HScrollbar, MarkTarget, VScrollbar,
-    MARK_HEIGHT, MARK_WIDTH, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
+    mark_y_for_row, resolve_mark_click, HScrollbar, MarkTarget, VScrollbar, MARK_HEIGHT,
+    MARK_WIDTH, SCROLLBAR_EDGE_INSET, SCROLLBAR_THUMB_THICKNESS, SCROLLBAR_WIDTH,
 };
 use super::wrap::pixel_breaks;
 use super::wrap::segment_index as wrap_segment_index;
@@ -2056,24 +2056,11 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
         // P116 续：needed 加**滞回死区**（见下）——垂直行程在惰性收敛期
         // 可能低估（不可见行暂记 1 段），needed 直判会在边界逐帧翻转
         // （滚动条反复出现/消失、段落不停出现消失，用户复报）。
-        let mut sb = VScrollbar::measure(
-            core.scroll_content_lines(),
-            core.viewport_h,
-            lh,
-            bounds.height,
-            core.scroll_top,
-        );
-        if core.wrap_enabled() {
-            // 滞回判定抽成纯函数（穷尽测试见 scrollbars 侧用例），此处负责让
-            // 「绘制、折行预算、滑块几何」三者共用同一个 needed
-            // （⑦：迟滞把 needed 抬回 true 时，measure 的退化几何必须一起改）
-            sb = sb.with_forced_needed(wrap_sb_reserve_needed(
-                core.scroll_content_lines() as f32,
-                core.viewport_h / lh.max(1e-3),
-                core.wrap_sb_reserve,
-                WRAP_SB_RESERVE_HYSTERESIS_LINES,
-            ));
-        }
+        let sb = core.vscrollbar(bounds.height);
+        // ↑ 绘制／按下命中／悬停点亮／拖拽反解／光标形状五处共用这一份算式
+        //   （`EditorCore::vscrollbar`）：滞回把 `needed` 抬回 true 时，退化几何
+        //   必须一起改，否则画出来的条点不动。滞回判定本身是纯函数，穷尽测试在
+        //   scrollbars 侧用例里。
         let (hcontent_px, hview_px) = if core.wrap_enabled() {
             (0.0, (bounds.width - gutter_w).max(0.0))
         } else {
@@ -2419,13 +2406,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 // 悬停会先点亮它（见 CursorMoved），点之前必然可见。
                 {
                     let core = self.core.borrow();
-                    let sb = VScrollbar::measure(
-                        core.scroll_content_lines(),
-                        core.viewport_h,
-                        core.line_height(),
-                        bounds.height,
-                        core.scroll_top,
-                    );
+                    let sb = core.vscrollbar(bounds.height);
                     let (local_x, local_y) = (pos.x - bounds.x, pos.y - bounds.y);
                     if sb.hits(local_x, local_y, bounds.width) && core.scrollbar_visibility() > 0.05
                     {
@@ -2653,13 +2634,7 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
                 // 先可见再可点）；拖拽中随移动续期，条不中途消失。
                 // P54：水平条同款（命中区在下缘窄带）。
                 {
-                    let sb = VScrollbar::measure(
-                        core.scroll_content_lines(),
-                        core.viewport_h,
-                        core.line_height(),
-                        bounds.height,
-                        core.scroll_top,
-                    );
+                    let sb = core.vscrollbar(bounds.height);
                     let hsb = HScrollbar::measure(
                         core.hscroll_content_px(),
                         (bounds.width - core.gutter_width()).max(0.0),
@@ -2678,13 +2653,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
 
                 // 垂直滚动条拖拽中：按抓取偏移反解 scroll_top
                 if let Some(grab) = core.scrollbar_grab {
-                    let sb = VScrollbar::measure(
-                        core.scroll_content_lines(),
-                        core.viewport_h,
-                        core.line_height(),
-                        bounds.height,
-                        core.scroll_top,
-                    );
+                    // 必须与绘制同一份几何：`range_lines = 0` 的退化档会把滚动位置
+                    // 恒算成 0（＝拖到一半跳回文档顶），P272 ⑦ 在绘制侧修过的那半
+                    let sb = core.vscrollbar(bounds.height);
                     core.scroll_top = sb.scroll_for_thumb_y(pos.y - bounds.y - grab);
                     core.clamp_scroll();
                     drop(core);
@@ -2972,13 +2943,9 @@ impl Widget<crate::Message, Theme, iced::Renderer> for EditorView {
             if core.link_hover.is_some() && pos.x - bounds.x >= core.gutter_width() {
                 return mouse::Interaction::Pointer;
             }
-            let sb = VScrollbar::measure(
-                core.scroll_content_lines(),
-                core.viewport_h,
-                core.line_height(),
-                bounds.height,
-                core.scroll_top,
-            );
+            // 滚动条命中区的光标语义要与按下/拖拽同一份几何，否则死区里
+            // 「条看得见、指针是 I 型、点下去落到正文」三件事会同时成立
+            let sb = core.vscrollbar(bounds.height);
             // 滚动条上：拖拽中给 Grabbing，悬停给 Grab；正文仍是文本光标
             if sb.hits(pos.x - bounds.x, pos.y - bounds.y, bounds.width) {
                 return if core.scrollbar_grab.is_some() {
