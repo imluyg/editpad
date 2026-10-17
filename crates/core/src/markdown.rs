@@ -497,6 +497,34 @@ fn each_span_list(blocks: &mut [MdBlock], f: &mut impl FnMut(&mut Vec<MdSpan>)) 
     }
 }
 
+/// 把一趟行内段里的脚注标记发成上标编号（首引顺序）。
+///
+/// 单独成函数是因为**同一趟要对两处跑**：正文块（`each_span_list`）与注脚区的定义正文
+/// （P471——注脚区是在 `assign_footnotes` 末尾才挂上去的，第一趟走不到定义正文，
+/// 于是定义里的嵌套引用 `[^b]` 留着标签原文、样式却是脚注标记＝读起来"见b"）。
+/// 新出现的标签按遇到次序追加 ⇒ 两趟共用一份 `order`，同标签同编号。
+fn number_footnote_refs(
+    spans: &mut [MdSpan],
+    order: &mut Vec<String>,
+    order_at: &mut std::collections::HashMap<String, usize>,
+) {
+    for span in spans.iter_mut() {
+        if span.style & MD_FOOTNOTE == 0 {
+            continue;
+        }
+        let label = normalize_label(&span.text);
+        let idx = match order_at.get(&label) {
+            Some(idx) => *idx,
+            None => {
+                order.push(label.clone());
+                order_at.insert(label, order.len() - 1);
+                order.len() - 1
+            }
+        };
+        span.text = superscript_digits(idx + 1);
+    }
+}
+
 /// 脚注收尾：①按**首次引用**的出现顺序发号，把正文里那截标签换成上标数字；②注脚区挂在
 /// 最后一块——被引用的按编号排，**从没被引用的定义也排在后面**（用户写下的正文不该消失）。
 /// 一张定义表都没有 ⇒ 不产生块。
@@ -507,21 +535,7 @@ fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
     let mut order: Vec<String> = Vec::new();
     let mut order_at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     each_span_list(blocks, &mut |spans: &mut Vec<MdSpan>| {
-        for span in spans.iter_mut() {
-            if span.style & MD_FOOTNOTE == 0 {
-                continue;
-            }
-            let label = normalize_label(&span.text);
-            let idx = match order_at.get(&label) {
-                Some(idx) => *idx,
-                None => {
-                    order.push(label.clone());
-                    order_at.insert(label, order.len() - 1);
-                    order.len() - 1
-                }
-            };
-            span.text = superscript_digits(idx + 1);
-        }
+        number_footnote_refs(spans, &mut order, &mut order_at);
     });
     let mut items: Vec<MdFootnote> = Vec::new();
     let mut emitted = vec![false; defs.notes.len()];
@@ -546,6 +560,12 @@ fn assign_footnotes(blocks: &mut Vec<MdBlock>, defs: &LinkDefs) {
                 spans: inline_with(body, defs),
             });
         }
+    }
+    // P471 第二趟：定义正文里再引的脚注也要发号。放在这里（而不是塞进上面那一趟）是因为
+    // 注脚区此刻还没挂上；条目的**显示序号**已按正文首引顺序定完，这一趟只补上标编号、
+    // 不改条目次序，也不回头再过正文（已过号的标记不能再当标签查一遍）。
+    for item in items.iter_mut() {
+        number_footnote_refs(&mut item.spans, &mut order, &mut order_at);
     }
     if !items.is_empty() {
         blocks.push(MdBlock::Footnotes { items });
@@ -3453,6 +3473,55 @@ mod tests {
             }
             _ => false,
         })
+    }
+
+    /// P471＝注脚定义里再引另一个注脚 ⇒ 那截标签被**吃掉一半**：样式还是脚注标记、
+    /// 文本却留在标签原文，读起来是"见b"（`b` 前面什么都没有）。
+    /// 病＝发号那一趟 `each_span_list` 跑的时候注脚区还没挂上（它在 `assign_footnotes`
+    /// 末尾才 push），而定义正文是在那一趟**之后**才 `inline_with` 出来的。
+    #[test]
+    fn p471_a_footnote_reference_inside_a_definition_gets_a_number() {
+        let blocks = parse_markdown("正文[^a]收尾。\n\n[^a]: 见[^b]。\n\n[^b]: 乙的正文\n");
+        let MdBlock::Footnotes { items } = blocks.last().expect("该有注脚区") else {
+            panic!("末块该是注脚区：{blocks:?}");
+        };
+        assert_eq!(items.len(), 2, "{items:?}");
+        let flat = |i: usize| -> String {
+            items[i]
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(flat(1), "乙的正文");
+        assert_eq!(
+            flat(0),
+            "见²。",
+            "定义里那个 `[^b]` 要发成 b 的编号（上标），不许留裸标签"
+        );
+        // 反面对照：不许把定义里的标记当字面量整截留下（那等于告诉读者这里有个引用却
+        // 永远点不到）——上面那格已经断了"见[^b]"这种形状，这里再断"裸 b"这一形
+        assert!(
+            !items[0].spans.iter().any(|s| s.text == "b"),
+            "标签原文不许当正文留在注脚里：{:?}",
+            items[0].spans
+        );
+
+        // 两趟共用**同一份**首引表：定义里回指一个正文已经发过号的标签，必须拿到
+        // 同一个编号（第二趟另起一张表的话，这里会冒出"第三条脚注"）
+        let back = parse_markdown("正文[^a]与[^b]。\n\n[^a]: 回头看[^b]。\n\n[^b]: 乙\n");
+        let MdBlock::Footnotes { items } = back.last().expect("该有注脚区") else {
+            panic!("{back:?}");
+        };
+        let flat = |i: usize| -> String {
+            items[i]
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
+        };
+        assert_eq!(items.len(), 2, "回指不该冒出第三条脚注：{items:?}");
+        assert_eq!(flat(0), "回头看²。", "定义里的 `[^b]` 用正文那个已发的编号");
     }
 
     /// 脚注：正文里 `[^标签]` 落一个上标编号，定义行**不进正文**，注脚区挂在最后一块。
