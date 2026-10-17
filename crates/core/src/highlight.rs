@@ -2512,4 +2512,150 @@ mod tests {
         );
         assert_eq!(line_comment_prefix(Some("Java")), Some("//"));
     }
+
+    // ---------- 档5：syntect metadata（本轮先只进测试，产品判据下一笔再接） ----------
+
+    #[test]
+    fn p455_default_metadata_is_loaded_and_its_patterns_survive_fancy_regex() {
+        // 为什么这一格必须排在任何"用 metadata 做判据"的代码之前：syntect 的 `Regex`
+        // 存的是**字符串**，首次使用才编译（regex.rs 的 `OnceCell`），而编译失败走
+        // `.expect("regex string should be pre-tested")`＝panic。本仓是 fancy-regex 分支，
+        // 默认 metadata 里混着 Oniguruma 专有形状。⇒「谁调用 metadata 的正则」＝
+        // 「谁负责它 panic 不 panic」。这一笔不调用，只把名单量出来钉住。
+        let md = syntax_set().metadata();
+        let mut checked = 0usize;
+        // 用元组收，别拿 `format!` 拼成串再拆回去：错误信息里也有冒号，拆一次错一次。
+        let mut uncompilable: Vec<(String, String, String)> = Vec::new();
+        let mut empty_patterns: Vec<(String, String)> = Vec::new();
+        for set in &md.scoped_metadata {
+            let items = &set.items;
+            let fields: [(&str, Option<&syntect::parsing::Regex>); 5] = [
+                ("increase", items.increase_indent_pattern.as_ref()),
+                ("decrease", items.decrease_indent_pattern.as_ref()),
+                ("bracket", items.bracket_indent_next_line_pattern.as_ref()),
+                ("disable", items.disable_indent_next_line_pattern.as_ref()),
+                ("unindented", items.unindented_line_pattern.as_ref()),
+            ];
+            for (field, re) in fields {
+                let Some(re) = re else { continue };
+                checked += 1;
+                let pat = re.regex_str();
+                if pat.is_empty() {
+                    // 空正则＝匹配一切：任何「非空即生效」的判据被它一句话废掉
+                    empty_patterns.push((set.selector_string.clone(), field.to_owned()));
+                    continue;
+                }
+                if let Some(err) = syntect::parsing::Regex::try_compile(pat) {
+                    uncompilable.push((
+                        set.selector_string.clone(),
+                        field.to_owned(),
+                        err.to_string().replace('\n', " "),
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "一条正则都没扫到＝metadata 根本没加载（特性没生效）"
+        );
+        // 现量（2026-10-17，69 条正则全扫）：默认 metadata 里有 **2 条在 fancy-regex 下
+        // 编不过**（一条 Oniguruma 反向引用、一条括号形状解析不动），以及 **1 条空串**
+        // （空正则＝匹配一切，任何「非空即生效」的判据被它一句话废掉）。
+        // 这两份名单就是「谁能被调用、谁绝对不能」的账——调用其中任何一条＝进程 panic
+        // （syntect 那边是 `.expect`，不是 Err）。
+        const UNCOMPILABLE: &[(&str, &str)] = &[
+            (
+                "source.php - comment - meta.embedded.html - string - meta.heredoc-end, \
+                 meta.html-newline-after-php",
+                "increase",
+            ),
+            ("text.html", "bracket"),
+        ];
+        const EMPTY: &[(&str, &str)] = &[("source.python", "disable")];
+        for (sel, field, err) in &uncompilable {
+            assert!(
+                UNCOMPILABLE.iter().any(|(s, f)| s == sel && f == field),
+                "新出现一条 fancy-regex 编不过的判据：{sel} @ {field}＝内置包换过，调用面要重判\
+                 （这一条一旦被调用就是 panic，不是少个颜色）。错误＝{err}"
+            );
+        }
+        for (sel, field) in &empty_patterns {
+            assert!(
+                EMPTY.iter().any(|(s, f)| s == sel && f == field),
+                "新出现一条空串判据：{sel} @ {field}＝空正则匹配一切，会废掉整条判据"
+            );
+        }
+        // 口径讲清楚：这条用例守的是「不会有**新的**雷被调用」，不守「雷还在」。
+        // 上面那两条哪天被上游修好，它不会红；总数这一格才是漂移探测器。
+        assert_eq!(
+            checked, 69,
+            "默认 metadata 的正则总数变了＝内置包换过，两份雷区名单要重量"
+        );
+        // 头名裁决：本轮要用的那四门，一条都不许落在雷区里。
+        for (sel, field, _) in &uncompilable {
+            for target in ["source.java", "source.lua", "source.python", "source.yaml"] {
+                assert!(
+                    !sel.contains(target),
+                    "{target} 的 {field} 判据编不过＝缩进那一档对它只能用手写表"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn p455_metadata_answers_for_the_four_languages_but_is_not_the_authority() {
+        let ss = syntax_set();
+        for (name, line, block) in [
+            ("Java", Some("// "), Some(("/*", "*/"))),
+            ("Lua", Some("-- "), Some(("--[[", "--]]"))),
+            ("Python", Some("# "), None),
+            ("YAML", Some("# "), None),
+        ] {
+            let syntax = ss.find_syntax_by_name(name).expect(name);
+            let md = ss
+                .metadata()
+                .metadata_for_scope(std::slice::from_ref(&syntax.scope));
+            assert_eq!(md.line_comment(), line, "{name} 行注释");
+            assert_eq!(md.block_comment(), block, "{name} 块注释");
+        }
+        // ⚠️ 尾随空格是**契约**不是笔误：metadata 给 `"// "`，而编辑器那一侧
+        // （`toggle_line_comment`）自己在前缀后再补一个空格。B3 接进来时必须 trim_end，
+        // 否则 Java 页 Ctrl+Q 写出 `//  `（两个空格），且解包那半按长度剥会剥错位。
+        assert_eq!(
+            line_comment_prefix(Some("Java")),
+            Some("//"),
+            "对照：本仓现在的写法不带尾随空格"
+        );
+        // metadata **不能当唯一权威**的那一格：内置判据给 JSON 一个 `"// "`，
+        // 而严格 JSON 根本没有注释——本仓刻意判它「一个字都不写」。
+        // 下一笔的优先级必须是：否决表 → metadata → 手写表 → 兜底。
+        let json = ss.find_syntax_by_name("JSON").expect("JSON");
+        let json_md = ss
+            .metadata()
+            .metadata_for_scope(std::slice::from_ref(&json.scope));
+        assert_eq!(
+            json_md.line_comment(),
+            Some("// "),
+            "前置：metadata 确实给 JSON 编了一个前缀"
+        );
+        assert_eq!(line_comment_prefix(Some("JSON")), None, "本仓的否决不能丢");
+        // 我们自嵌的四份语法走 `.sublime-syntax` 的 YAML 加载器，而它**不读** metadata
+        // （注释/缩进数据住在独立的 `.tmPreferences` 里，且 `LoadMetadata` 是 pub(crate)）
+        // ⇒ 这四门永远只能靠手写表。这一格是「表为什么还得留着」的证据。
+        for name in [
+            "Editpad Log",
+            "Editpad TOML",
+            "Editpad Dockerfile",
+            "Editpad PowerShell",
+        ] {
+            let syntax = ss.find_syntax_by_name(name).expect(name);
+            let md = ss
+                .metadata()
+                .metadata_for_scope(std::slice::from_ref(&syntax.scope));
+            assert!(
+                md.line_comment().is_none(),
+                "{name} 本该拿不到 metadata（拿到了说明内置包或加载器变了）"
+            );
+        }
+    }
 }

@@ -13,7 +13,11 @@ editpad-core = { path = "crates/core" }
 ropey = "1.6"
 encoding_rs = "0.8"
 thiserror = "2"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+# 语言适配档5：`metadata` 那一档几乎免费——`default-fancy` 已经含 `plist-load`，
+# 而 `plist-load` 就带 `dep:serde_json`，所以开它**不动 Cargo.lock、不新增一个包**，
+# 只多编译 syntect 的 `parsing/metadata.rs` 一个模块；代价是二进制内嵌多
+# 4,976 B 的 `default_metadata.packdump`（53 组）。理由与风险都记在 core 的用例里。
+syntect = { version = "5", default-features = false, features = ["default-fancy", "metadata"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
