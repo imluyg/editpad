@@ -757,6 +757,90 @@ fn reload_clicked_while_a_load_is_running_keeps_the_prompt() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// 外部改动提示条的队列里只许装**活页**。渲染取的是 `queue.first()` 那一页
+/// （`view/mod.rs:718-720`：按 id 找页，找不到就整条不出现），所以队首那一页被关掉之后，
+/// 队列里还活着的那一页从此**点不到**〔重新加载〕／〔忽略〕——而巡检只跑在窗口聚焦
+/// 与监视节拍上，用户一直开着窗口就不会有第二问。三条「真的移除了页」的漏斗
+/// 各自都清了别的按页记账名单（P369／P382／P389 那一族），唯独没清这一份。
+#[test]
+fn closing_a_page_purges_its_pending_external_change_entry() {
+    let dir = scratch_dir("external-dead-head");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path_a = dir.join("a.txt");
+    let path_b = dir.join("b.txt");
+    std::fs::write(&path_a, "base-a").unwrap();
+    std::fs::write(&path_b, "base-b").unwrap();
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(path_a.clone()));
+    let seq_a = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq_a,
+            Ok((
+                editpad_core::Document::from_str("base-a"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::NewTab);
+    dispatch(&mut app, Message::FileDropped(path_b.clone()));
+    let seq_b = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq_b,
+            Ok((
+                editpad_core::Document::from_str("base-b"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    // 第三页是当前的空页：它没有路径，不该进队列，也让前两页都成后台页
+    // （活动页干净时巡检走"静默重载"那支，不进队列）
+    dispatch(&mut app, Message::NewTab);
+    assert_eq!(app.tabs.len(), 3, "夹具自证：三页，当前是那份空页");
+
+    std::fs::write(&path_a, "extern-a").unwrap();
+    std::fs::write(&path_b, "extern-b").unwrap();
+    dispatch(&mut app, Message::WindowFocused);
+    let (id_a, id_b) = (app.tabs[0].id, app.tabs[1].id);
+    assert_eq!(
+        app.external_change,
+        prompt_ids(&app, &[0, 1]),
+        "夹具自证：两份外部改动都交给了提示条，顺序＝页序，实际 {:?}",
+        app.external_change
+    );
+
+    // 关掉队首那一页（干净页 ⇒ 直接落 `close_tab_now` 漏斗）
+    dispatch(&mut app, Message::CloseTabAt(0));
+    assert_eq!(app.tabs.len(), 2, "夹具自证：队首那一页已关");
+    assert!(
+        !app.external_change
+            .as_ref()
+            .is_some_and(|q| q.contains(&id_a)),
+        "死页不许留在队列里，实际 {:?}",
+        app.external_change
+    );
+    assert_eq!(
+        app.external_change,
+        Some(vec![id_b]),
+        "活着那一页必须重新成为条子指得见的第一页"
+    );
+
+    // 再关掉队列里最后一份 ⇒ 整条收起，而不是挂着两个死 id
+    dispatch(&mut app, Message::CloseTabAt(0));
+    assert!(
+        app.external_change.is_none(),
+        "队列空了就该收到 None，实际 {:?}",
+        app.external_change
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 「装载在途 ⇒ `busy` 同为真」这条不变量是几处判据的地基：`menu_writable()` 与
 /// `load_channel_available()` 都只问 `busy`。本轮把八处手写的
 /// `busy || active_load.is_some()` 收成 `io_channel_busy()`（卫生项＝A6），顺手把

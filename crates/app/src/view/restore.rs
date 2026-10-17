@@ -380,6 +380,9 @@ impl Editpad {
         // 全部换锚。这条出路此前连悬停态都没清（另两条清了），所以作废
         // 同样收进漏斗本身，不由调用侧各写一份。
         self.clear_index_addressed_tab_ui();
+        // 外部改动提示条那份按页 id 记的名单同样对账（判据见
+        // `Editpad::purge_dead_pages_from_external_prompt`）
+        self.purge_dead_pages_from_external_prompt();
         // P382：平移动作原本只有这一条出路手写了一份（`close_tab_now`／
         // `close_tabs_now` 两条用户关页漏斗一次都没写过）⇒ 收成与
         // `realign_active_after_removal` 同一条纪律的一份。这一条路上队列里不会有

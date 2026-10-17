@@ -22,6 +22,23 @@ impl Editpad {
         }
     }
 
+    /// 真的移除了页 ⇒ 外部改动提示条的队列里不许留着死页 id。渲染取的是
+    /// `queue.first()` 那一页（`view/mod.rs:718-720` 按 id 找页，找不到就整条不出现），
+    /// 所以队首成了死页 ＝ **队列里还活着的那些页再也点不到**〔重新加载〕／〔忽略〕，
+    /// 而巡检只跑在窗口聚焦与监视节拍上——用户一直开着窗口就没有第二问。
+    /// 队列空了就收成 `None`，与两条裁决出路的「空即收起」同一形态。
+    /// 形状同 [`Self::clear_index_addressed_tab_ui`]／`shift_restore_queue_after_removal`：
+    /// 「页集合变了 ⇒ 按页记账的那份名单要跟着对账」这件事只写在漏斗里。
+    pub(crate) fn purge_dead_pages_from_external_prompt(&mut self) {
+        let alive: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
+        if let Some(queue) = self.external_change.as_mut() {
+            queue.retain(|id| alive.contains(id));
+            if queue.is_empty() {
+                self.external_change = None;
+            }
+        }
+    }
+
     /// 真的移除了页 ⇒ 标签条上那三份**按裸下标找页**的瞬态一律作废：悬停染色、
     /// 右键菜单锚点、双击记账。三条移除出路（[`Self::close_tab_now`]／
     /// [`Self::close_tabs_now`]／[`Self::drop_restore_placeholder`]）共用这一句，
@@ -52,6 +69,8 @@ impl Editpad {
         // 页集合变了 ⇒ 标签条上按裸下标找页的三份瞬态全部作废
         //（P112 起这里原本只清悬停态，另两份留着同一条理由却没人执行）
         self.clear_index_addressed_tab_ui();
+        // 同上对账：提示条那份按页 id 记的名单里不许留着已关的页
+        self.purge_dead_pages_from_external_prompt();
         // P145→S-1：确认条存页 id，这里只需「目标页没了就收起」，不再平移下标
         self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {
@@ -101,6 +120,7 @@ impl Editpad {
         }
         // 同上：悬停页可能在被移除之列，作废与 close_tab_now 收进同一处
         self.clear_index_addressed_tab_ui();
+        self.purge_dead_pages_from_external_prompt();
         // S-1：同 close_tab_now——按页 id 存在性收口，不数移除了几个
         self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {
