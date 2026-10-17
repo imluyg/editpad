@@ -1181,6 +1181,14 @@ fn indented_code(lines: &[&str], start: usize, doc_begin: usize) -> Option<(MdBl
 /// [`looks_like_fence`]（答布尔）过去各写各的，其中定义行扫描那份写的是"开头像围栏就翻状态"，
 /// 于是 `~~~ / ``` / ~~~` 这种混排把它卡在"栏内"，后半篇的 `[^a]:` 与 `[x]:` 整片不收。
 fn fence_open(line: &str) -> Option<(char, usize, Option<String>)> {
+    // ⚠️ 开栏最多缩进 3 格（CommonMark 的规矩）。`:251` 那条「缩进代码排在围栏之前」
+    // 的块级顺序**只在上一行是空行（或文件头）时**才兜得住——`indented_code` 带着
+    // `starts_clean` 那一格，所以紧跟正文的 4 格 ```` ``` ```` 躲过它、又在这儿开了栏
+    // （现量 `"正文\n    ```\n    x\n    ```"` ＝ 段落＋代码块，示例被吞）。
+    // 判据归到开栏自己手上，才与「上一行是什么」无关。
+    if indent_cols(line) >= 4 {
+        return None;
+    }
     let open = line.trim_start();
     // ``` 与 ~~~ 都是围栏（两种 marker 都是三字节 ASCII，切片落在字符边界上）
     let marker = match (open.starts_with("```"), open.starts_with("~~~")) {
@@ -3977,6 +3985,53 @@ mod tests {
             front_matter_end(&split_lines("---\n正文")),
             None,
             "等不到配对 ⇒ 交回普通解析，那个 `---` 是分隔线"
+        );
+    }
+
+    /// `:251` 那句「4 格以上的 ```` ``` ```` 是代码内容，不是开栏（CommonMark 只允许 3 格）」
+    /// 原先**只靠块级顺序**兜：`indented_code` 要上一行是空行（或文件头）才认，
+    /// 紧跟正文的那一发 4 格围栏于是躲过它、被 `fence()` 当成真开栏 ⇒
+    /// 教程类 Markdown（README 里教人怎么写围栏）示例后面的正文被吃进代码块。
+    /// CommonMark 的规矩是**开栏最多缩进 3 格**，与上一行是不是空行无关，
+    /// 所以判据归到 `fence_open` 自己身上。
+    #[test]
+    fn a_fence_indented_four_columns_is_not_an_opener() {
+        let kinds = |src: &str| -> Vec<&'static str> {
+            parse_markdown(src)
+                .iter()
+                .map(|b| match b {
+                    MdBlock::Paragraph { .. } => "paragraph",
+                    MdBlock::CodeBlock { .. } => "code",
+                    _ => "other",
+                })
+                .collect()
+        };
+        // 紧跟正文的 4 格围栏：整段照旧是正文（改前它开栏，把示例连尾巴吞成代码块）
+        let after_prose = parse_markdown("正文\n    ```\n    x\n    ```\n");
+        assert_eq!(
+            kinds("正文\n    ```\n    x\n    ```\n"),
+            vec!["paragraph"],
+            "{after_prose:?}"
+        );
+        let MdBlock::Paragraph { spans } = &after_prose[0] else {
+            panic!("{after_prose:?}");
+        };
+        let text = spans_text(spans);
+        for word in ["正文", "x"] {
+            assert!(text.contains(word), "{word} 从正文里消失了：{text:?}");
+        }
+
+        // 反面对照一：空行之后的 4 格仍然**是缩进代码**（那条顺序判据照旧说话）
+        assert_eq!(
+            kinds("\n    ```\n    x\n    ```\n"),
+            vec!["code"],
+            "≥4 格＋上一行空＝缩进代码块"
+        );
+        // 反面对照二：3 格以内的围栏照旧开栏（CommonMark 允许它打断段落）
+        assert_eq!(
+            kinds("正文\n   ```\n   fn a() {}\n   ```\n"),
+            vec!["paragraph", "code"],
+            "三格开栏是本来的规矩"
         );
     }
 
