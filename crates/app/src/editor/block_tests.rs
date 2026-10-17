@@ -2511,3 +2511,105 @@ fn p462_block_ops_read_the_full_line_break_set_not_a_two_char_copy() {
         diffs.join("\n")
     );
 }
+
+/// 〔行数不变的行块操作〕不许把光标从它自己那一行拽进块内。
+///
+/// 选区尾落在某行**行首**时 [`EditorCore::touched_lines`] 故意不含那一行（那一行
+/// 正文一个字符都没被选到），而光标正停在那一行；[`EditorCore::apply_line_block`]
+/// 收尾那句 `clamp(a, b)` 于是把光标拽进块末，用户下一次打字落进他没指着的那一行。
+/// 第 354 轮给〔去行尾空白〕修掉了这一条并写明「需要同款钳制的是会改行数的写回
+/// 路径」，但同族另外三处没查——本用例三格改前全红（现量：`"a\nb\nc\n"` 上选区
+/// `(0,0)→(2,0)`，按一次 Ctrl+Q 光标跳到第 2 行）。
+#[test]
+fn line_count_preserving_block_ops_keep_the_cursor_on_its_own_line() {
+    type Case = (
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        fn(&mut EditorCore) -> bool,
+        &'static str,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "行注释",
+            "a\nb\nc\n",
+            None,
+            |c| c.toggle_line_comment(),
+            "// a\n// b\nc\n",
+        ),
+        (
+            "Tab 展开",
+            "a\t\nb\nc\n",
+            None,
+            |c| c.convert_tabs_spaces(TabSpaceKind::AllTabsToSpaces),
+            "a   \nb\nc\n",
+        ),
+        (
+            "块注释",
+            "a\nb\nc\n",
+            Some("Java"),
+            |c| c.toggle_block_comment(),
+            "/*a\nb*/\nc\n",
+        ),
+    ];
+    let mut diffs: Vec<String> = Vec::new();
+    for (label, src, lang, op, want_doc) in cases {
+        let mut c = core_with(src);
+        if let Some(name) = lang {
+            c.set_language_by_name(Some(name));
+            assert_eq!(
+                c.highlight_syntax_name().as_deref(),
+                Some(name),
+                "{label}：夹具要把语言真装上"
+            );
+        }
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 2, col: 0 };
+        let touched = c.touched_lines();
+        // 夹具自证：块必须**不含**光标那一行，否则这一格照不出缺陷
+        if touched != (0, 1) {
+            diffs.push(format!("{label}：触及块应为 (0,1)，实得 {touched:?}"));
+        }
+        if !op(&mut c) {
+            diffs.push(format!("{label}：这一发没动手（夹具无牙）"));
+        }
+        if c.doc.to_text() != want_doc {
+            diffs.push(format!("{label}：正文实得 {:?}", c.doc.to_text()));
+        }
+        if c.cursor != (CursorPos { line: 2, col: 0 }) {
+            diffs.push(format!("{label}：光标被拽走，实得 {:?}", c.cursor));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "行数不变的行块操作把光标拽离了原行：\n{}",
+        diffs.join("\n")
+    );
+
+    // 反面对照①：光标在块内时列仍按**它自己那行**的新行长夹紧（挡住"整格放回旧光标"）
+    let mut d = core_with("    x  y\n    p  q\n");
+    d.cursor = CursorPos { line: 0, col: 6 };
+    assert!(d.convert_tabs_spaces(TabSpaceKind::LeadingSpacesToTabs));
+    assert_eq!(
+        d.line_text(0),
+        "\tx  y",
+        "夹具自证：四格行首缩进要真的换成一个制表符"
+    );
+    assert_eq!(
+        d.cursor,
+        CursorPos { line: 0, col: 5 },
+        "首行被压短后光标列要跟着夹紧，实得 {:?}",
+        d.cursor
+    );
+
+    // 反面对照②：**会减行**的那一档照旧夹回块内（挡住"整族都不 clamp"这种过宽改法）
+    let mut e = core_with("x\n \n \nY\n");
+    e.anchor = Some(CursorPos { line: 0, col: 0 });
+    e.cursor = CursorPos { line: 4, col: 0 };
+    assert!(e.delete_empty_lines(BlankKind::Whitespace));
+    assert_eq!(
+        e.cursor.line, 2,
+        "会减行的那一档照旧夹回块内再收敛到行数域（这里落到新的幻影末行），本笔没动它，实得 {:?}",
+        e.cursor
+    );
+}

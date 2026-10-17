@@ -561,6 +561,31 @@ impl EditorCore {
         self.ensure_visible();
     }
 
+    /// [`Self::apply_line_block`] 的**不增不减行**那一档写回：整套记账照用，
+    /// 事后把光标行号放回原处（列仍按新行长夹紧）。
+    ///
+    /// 为什么 [`Self::apply_line_block`] 里那句 `clamp(a, b)` 对这些动作是错的：
+    /// 选区尾落在某行**行首**时 [`Self::touched_lines`] 故意不含那一行（那一行正文
+    /// 一个字符都没被选到），而光标就停在那一行 ⇒ `clamp` 把光标从它自己那行拽进
+    /// 块末，用户下一次打字落进了他没指着的那一行。第 354 轮给〔去行尾空白〕修掉了
+    /// 这一条并写明「需要同款钳制的是会改行数的写回路径」，但**没查同族的另外三处**
+    /// ——〔切换行注释〕〔Tab↔空格〕〔块注释〕同样一行都不增删，改前都还带着它
+    /// （现量：`"a\nb\nc\n"` 上选区 `(0,0)→(2,0)`，按一次 Ctrl+Q 后光标从第 3 行
+    /// 跳到第 2 行）。
+    ///
+    /// 前提＝调用方那个操作既不增行也不减行、且块内是恒等映射（`lines.len()`
+    /// 等于块行数），所以行号放回原处一定还在文档行号域内。
+    pub(crate) fn apply_line_block_same_line_count(&mut self, blk: &LineBlock, lines: &[String]) {
+        let keep = self.cursor;
+        let map: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
+        self.apply_line_block(blk, lines, &map);
+        self.cursor = CursorPos {
+            line: keep.line,
+            col: keep.col.min(self.line_display_len(keep.line)),
+        };
+        self.ensure_visible();
+    }
+
     /// 行排序：有选区只排触及块，无选区排全文档。返回是否改动。
     ///
     /// - 比较口径 = UTF-8 字节序（码点序），大小写敏感、稳定排序；
@@ -734,8 +759,7 @@ impl EditorCore {
         if !changed {
             return false;
         }
-        let map: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
-        self.apply_line_block(&blk, &lines, &map);
+        self.apply_line_block_same_line_count(&blk, &lines);
         true
     }
 
@@ -1249,8 +1273,7 @@ impl EditorCore {
         if !changed {
             return false;
         }
-        let map: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
-        self.apply_line_block(&blk, &lines, &map);
+        self.apply_line_block_same_line_count(&blk, &lines);
         true
     }
 
@@ -1333,8 +1356,7 @@ impl EditorCore {
         if lines == blk.lines {
             return false; // 幂等 no-op：不产快照
         }
-        let map: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
-        self.apply_line_block(&blk, &lines, &map);
+        self.apply_line_block_same_line_count(&blk, &lines);
         true
     }
 
