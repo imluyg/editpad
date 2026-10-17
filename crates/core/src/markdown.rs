@@ -689,12 +689,18 @@ fn is_rule(line: &str) -> bool {
 }
 
 /// 引用行：`>` 串 → Some((深度, 内容))。
+///
+/// ⚠️ 每道栏之后只省**一个**可选空白（CommonMark 的 LB 口径），余下的空白是
+/// **内容自己的缩进**：`> - 甲` 与 `>   - 乙` 里后者是父项下的子列表，
+/// `>     代码` 那四格是缩进代码。改前这里 `trim_start_matches([' ', '\t'])` 把
+/// 缩进一起抹平，引用栏内的子列表在预览里全部贴平父项（现量 `indent` 两档同 0），
+/// 用户多敲的那几格空格一个字都不体现。栏后**不带**空白（`>甲`／`>- 甲`）照旧认。
 fn quote(line: &str) -> Option<(usize, &str)> {
     let mut rest = line.trim_start();
     let mut depth = 0usize;
     while let Some(after) = rest.strip_prefix('>') {
         depth += 1;
-        rest = after.trim_start_matches([' ', '\t']);
+        rest = after.strip_prefix([' ', '\t']).unwrap_or(after);
     }
     if depth == 0 {
         return None;
@@ -2647,6 +2653,44 @@ mod tests {
             vec!["item", "item"],
             "松散列表：空行之后的同级项仍是独立项"
         );
+    }
+
+    /// 引用栏之后**只省一个可选空白**（CommonMark 口径）：余下的空格属于**内容缩进**，
+    /// 子列表与缩进代码全靠它。改前 `quote()` 用 `trim_start_matches([' ', '\t'])`
+    /// 把它们一起抹平 ⇒ `> - 甲` 与 `>   - 乙` 两档 `indent` 同 0，
+    /// 预览里子列表贴平父列表（用户多敲的那两格在右半一个字都不体现）。
+    /// ⚠️ 期望里的 `1` 不是"一格空格"：`MdBlock::ListItem.indent` 记的是**档数**
+    /// （`(cols / 2).min(6)`＝两格一档，与 `list_items_keep_number_indent_and_task_checkbox`
+    /// 那格"四格＝两档"同理）。第一版把这里写成 2，红的是我的期望不是代码。
+    #[test]
+    fn indent_after_the_quote_bar_belongs_to_the_content() {
+        let items = |src: &str| -> Vec<usize> {
+            let blocks = parse_markdown(src);
+            let MdBlock::Quote { blocks: inner, .. } = &blocks[0] else {
+                panic!("期望引用块：{blocks:?}");
+            };
+            inner
+                .iter()
+                .map(|b| match b {
+                    MdBlock::ListItem { indent, .. } => *indent,
+                    other => panic!("期望列表项：{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            items("> - 甲\n>   - 乙\n"),
+            vec![0, 1],
+            "栏后第二个空格留给内容当缩进＝一档（两格一档）"
+        );
+
+        // 反面对照一：栏后一个空格照旧省掉 ⇒ 平级两档都是 0
+        assert_eq!(
+            items("> - 甲\n> - 乙\n"),
+            vec![0, 0],
+            "平级列表不许被算成嵌套"
+        );
+        // 反面对照二：栏后不带空格也认（`>- 甲` 是合法写法）
+        assert_eq!(items(">- 甲\n"), vec![0], "栏后可选空白真的可选");
     }
 
     /// 连续引用行并成一块；`>>` 记深度。
