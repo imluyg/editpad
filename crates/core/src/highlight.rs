@@ -859,7 +859,20 @@ const FIRST_LINE_EXCLUDED: &[&str] = &["Textile"];
 /// LaTeX Log/Diff/YAML……）一条没用上。`find_syntax_by_first_line` 自带
 /// `OnceCell` 缓存与 BOM 剥离，且只吃首行，成本与手写层同量级。
 pub fn first_line_language(sample: &str) -> Option<String> {
-    let first = sample.lines().next()?;
+    // 「首行」= 编辑器的那一行：行界按七个字符的全集判、CRLF 当一个单元（定案
+    // R-11／R-22），复用 [`crate::search::for_each_line_until`] 取第一段即早退。
+    // 旧写法 `sample.lines().next()` 只认 LF 与 CRLF ⇒ CR-only 或含 VT/FF/NEL/LS/PS
+    // 的样本会把第二行一起当首行喂给判据，而内置 `first_line_match` 里的 `.`/`.+`
+    // 跨得到那些字符（正则默认只有 `\n` 例外）⇒ 实测
+    // `"Top of file\rThis is pdfTeX, Version 3.14"` 被整份判成 LaTeX Log，
+    // 而编辑器里首行是"Top of file"（哪条判据都不该中）。
+    let mut first_len: Option<usize> = None;
+    let _ = crate::search::for_each_line_until(sample, |_, line| {
+        // 首行永远从样本开头起算，所以记下长度再切即可（回调的借用出不了它自己的作用域）
+        first_len = Some(line.len());
+        std::ops::ControlFlow::Break(())
+    });
+    let first = &sample[..first_len?];
     if first.is_empty() {
         return None;
     }
@@ -2311,6 +2324,47 @@ mod tests {
             resolve_language(Some(Path::new("note.txt")), "<?php echo 1;").as_deref(),
             Some("Plain Text")
         );
+    }
+
+    /// 嗅探用的「首行」必须与编辑器的那一行同域。`str::lines()` 只认 LF 与 CRLF，
+    /// 而编辑器的行界是七个字符的全集（定案 R-11／R-22）⇒ 以 VT／FF／NEL／LS／PS
+    /// 收尾的第一行会把后面的内容一起喂进 `first_line_match`，而内置判据里的 `.`/`.+`
+    /// **跨得到**那些字符（正则默认只有 `\n` 是"点不匹配"的）⇒ 第二行的单词能替第一行
+    /// 认领语法。判据＝同一份文档形状换个分隔符必须同结论（八种写法一张表）。
+    #[test]
+    fn p481_first_line_sniff_stops_at_the_editors_first_line() {
+        // 八种行界写法：首行"Top of file"什么都判不出，第二行才是 LaTeX Log 的判据词
+        for sep in [
+            "\n", "\r", "\r\n", "\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}",
+        ] {
+            let sample = format!("Top of file{sep}This is pdfTeX, Version 3.14");
+            assert_eq!(
+                first_line_language(&sample).as_deref(),
+                None,
+                "分隔符 {sep:?}：首行之外的内容不得替首行认领语法，实得 {:?}",
+                first_line_language(&sample)
+            );
+        }
+        // 正对照：首行自己就是 bash 的 shebang ⇒ 无论哪种行界都还是 bash，
+        // 既不许被第二行抢走，也不许因为"只截到首行"而丢掉命中
+        for sep in [
+            "\n", "\r", "\r\n", "\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}",
+        ] {
+            let sample = format!("#!/bin/sh{sep}This is pdfTeX, Version 3.14");
+            assert_eq!(
+                first_line_language(&sample).as_deref(),
+                Some("Bourne Again Shell (bash)"),
+                "分隔符 {sep:?}：首行命中必须照旧成立，实得 {:?}",
+                first_line_language(&sample)
+            );
+        }
+        // 首行确实写着 osascript：照旧命中（挡住"干脆不看内容"这种修法）
+        assert_eq!(
+            first_line_language("#!/usr/bin/env osascript").as_deref(),
+            Some("AppleScript"),
+            "首行确实写着 osascript：判据该命中"
+        );
+        assert_eq!(first_line_language(""), None, "空样本仍判不出来");
     }
 
     #[test]

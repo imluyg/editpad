@@ -120,7 +120,11 @@ pub fn for_each_line(text: &str, mut f: impl FnMut(usize, &str)) {
 
 /// [`for_each_line`] 的可早退版：回调返回 [`std::ops::ControlFlow::Break`]
 /// 时立刻停止切行与后续字符扫描（O-13「命中取满即收口」的基础设施）。
-fn for_each_line_until(
+///
+/// `pub(crate)` 而非私有：语言嗅探取「编辑器的第一行」也走这一份（`highlight.rs`
+/// 的 `first_line_language`）——只数一行不必把整份样本切完，而**判据必须是同一份**，
+/// 不能再抄一遍 `str::lines()`（那正是 R-11「读按全集」历来漏的地方）。
+pub(crate) fn for_each_line_until(
     text: &str,
     mut f: impl FnMut(usize, &str) -> std::ops::ControlFlow<()>,
 ) -> std::ops::ControlFlow<()> {
