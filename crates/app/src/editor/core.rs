@@ -73,7 +73,9 @@ pub struct CursorPos {
 }
 
 /// 列块（矩形）选区（第 67 轮 ⑮ v1）：anchor=按下角、head=当前对角。
-/// 归一化矩形 = 两角的行/列分别取 min/max（含端）；行列全等即空块。
+/// 归一化矩形 = 两角的行/列分别取 min/max；**行含端、列半开**（列存的是插入点
+/// 列号，`[c0, c1)` 才是被框住的那几格，与鼠标从 col 2 拖到 col 1 只选一列一致）；
+/// 行列全等即空块。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockSel {
     pub anchor: CursorPos,
@@ -81,7 +83,10 @@ pub struct BlockSel {
 }
 
 impl BlockSel {
-    /// 归一化 → (r0, r1, c0, c1)，均含端且 r0≤r1、c0≤c1。
+    /// 归一化 → `(r0, r1, c0, c1)`：`r0 ≤ r1` **含端**（行是逐行遍历的闭区间），
+    /// `c0 ≤ c1` **半开**（列是 `[c0, c1)`，消费方一律 `start + c0 .. start + c1`
+    /// 切串——见 `block_copy_text`／块内清除／`insert_into_block`；把 `c1` 当含端
+    /// 用会多框一格）。
     pub(crate) fn normalized(&self) -> (usize, usize, usize, usize) {
         let (r0, r1) = if self.anchor.line <= self.head.line {
             (self.anchor.line, self.head.line)
