@@ -18,14 +18,12 @@ impl EditorCore {
 
     /// 当前选区文本（无选区或零宽返回 None）。
     pub fn selected_text(&self) -> Option<String> {
+        // 零宽那一格不必在这里再判一次：`selection_offsets` 已经把空区间收掉（P461）
         let (start_off, end_off) = self.selection_offsets()?;
-        if start_off >= end_off {
-            return None;
-        }
         Some(self.doc.slice_text(start_off, end_off))
     }
 
-    /// 选区的字符偏移区间（有序）。
+    /// 选区的字符偏移区间（有序）。**空区间返回 `None`**——见 [`Self::has_selection`]。
     pub(crate) fn selection_offsets(&self) -> Option<(usize, usize)> {
         let anchor = self.anchor?;
         let (a, b) = if (anchor.line, anchor.col) <= (self.cursor.line, self.cursor.col) {
@@ -35,7 +33,26 @@ impl EditorCore {
         };
         let start = self.doc.line_to_char(a.line) + a.col.min(self.line_display_len(a.line));
         let end = self.doc.line_to_char(b.line) + b.col.min(self.line_display_len(b.line));
-        Some((start.min(end), end.max(start)))
+        let (lo, hi) = (start.min(end), end.max(start));
+        // P461：`anchor` 是**存储**，不是"有选区"这件事本身。`End`→`Shift+Left`→
+        // `Shift+Right` 之后屏幕上高亮已经消失、锚点却还与光标同位，而过去这里返回
+        // `Some((x,x))` ⇒ "有没有选区"在应用层留下三把尺（`anchor.is_some()`／
+        // `selection_offsets().is_some()`／`s < e`），同一个落点按 Tab 会把制表符插到
+        // **行首**（`abc` → `\tabc`）。收成一把：空区间＝没有选区。
+        // ⚠️ 这条闸不只服务编辑器：`tests::find::p70_...` 的"零宽命中在光标处展开替换"
+        // 也依赖这里返回 `None`（探针实测＝摘掉它那一格红），别把它当防御性代码删掉。
+        if lo == hi {
+            return None;
+        }
+        Some((lo, hi))
+    }
+
+    /// 「这一屏上有没有**看得见**的选区」的唯一尺子（P461）。
+    ///
+    /// 判据只有一条：偏移区间非空。谁要问"有选区吗"就问这里，不许再抄
+    /// `anchor.is_some()`——那是状态存储的形状，不是用户看到的形状。
+    pub(crate) fn has_selection(&self) -> bool {
+        self.selection_offsets().is_some()
     }
 
     /// 光标邻接括号与其配对位置（渲染高亮与跳转共用的查询，带缓存）。

@@ -1125,9 +1125,14 @@ fn split_without_a_range_is_an_error_or_no_change() {
     assert!(!c.has_multi());
 
     c.cursor = CursorPos { line: 1, col: 1 };
-    // 零宽"选区"（锚点与光标同位）⇒ Ok(false) 且选区原样留着
+    // 零宽"选区"（锚点与光标同位）＝屏幕上没有选区 ⇒ 与上面那一格**同一个答复**
+    // （P461）。旧期望 `Ok(false)` 钉的正是那条不一致：同一落点、锚点收着与挂着
+    // 给出两种答案，用户看不出差别在哪，只会觉得这条命令"有时不吭声、有时报没选区"。
     c.anchor = Some(CursorPos { line: 1, col: 1 });
-    assert_eq!(c.split_selection_by_lines(), Ok(false));
+    assert!(
+        matches!(c.split_selection_by_lines(), Err(EditErr::NoSelection)),
+        "零宽锚点必须与「无选区」同判"
+    );
     assert_eq!(
         c.anchor,
         Some(CursorPos { line: 1, col: 1 }),

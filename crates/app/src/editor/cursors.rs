@@ -699,7 +699,7 @@ impl EditorCore {
         if self.multi_gesture_blocked() {
             return Ok(false);
         }
-        if self.anchor.is_none() {
+        if !self.has_selection() {
             return Err(EditErr::NoSelection);
         }
         // 行区间口径复用 touched_lines()：它已经把「选区末点落在行首 ⇒ 该行不算
@@ -707,7 +707,7 @@ impl EditorCore {
         // 就是本仓第 7 次口径分叉。
         let (first, last) = self.touched_lines();
         if last <= first {
-            return Ok(false); // 含"锚点与光标同位"的零宽选区
+            return Ok(false); // 选区只触及一行（零宽那形在上面就被当成没选区了）
         }
         let count = last - first + 1;
         if count - 1 > MAX_EXTRA_CURSORS {

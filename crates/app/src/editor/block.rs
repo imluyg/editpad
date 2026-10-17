@@ -238,7 +238,7 @@ impl EditorCore {
         if out == src {
             return false; // 无可转换内容：no-op 不产生撤销快照
         }
-        let had_selection = self.anchor.is_some();
+        let had_selection = self.has_selection();
         // 行号在换行结构不变的前提下保持；列钳到行长防越界
         let keep = self.cursor;
         self.snapshot();
@@ -276,7 +276,7 @@ impl EditorCore {
     /// - 无任何行需要清理时不动、不产快照（幂等 no-op）。
     pub fn trim_touched_lines(&mut self, mode: TrimMode) -> bool {
         let count = self.doc.line_count();
-        let (a, b) = if self.anchor.is_some() {
+        let (a, b) = if self.has_selection() {
             self.touched_lines()
         } else {
             (0, count.saturating_sub(1))
@@ -358,7 +358,7 @@ impl EditorCore {
     /// 反缩进若还按固定 4 格剥，2 格一档的文件里"加两格、退一次"会一次退掉四格
     /// （＝`docs/手测清单.md` 的 H8 那格，本轮从头测把它钉住了而不是留给眼睛）。
     pub fn indent_touched_lines_step(&mut self, outdent: bool, step: Option<usize>) -> bool {
-        let has_sel = self.anchor.is_some();
+        let has_sel = self.has_selection();
         // 列块态：作用范围＝**块跨的那些行**。原先这里只问 `anchor`，而块与
         // 单选区互斥（`anchor` 恒 None）⇒ 同一族里加缩进那支（应用层转给
         // `insert_into_block`）作用整块，反缩进这一支却只作用主光标一行。
@@ -463,7 +463,7 @@ impl EditorCore {
     pub(crate) fn collect_line_block(&self) -> LineBlock {
         let count = self.doc.line_count();
         let len = self.doc.text_len();
-        let (a, b) = if self.anchor.is_some() {
+        let (a, b) = if self.has_selection() {
             self.touched_lines()
         } else {
             (0, count.saturating_sub(1))
@@ -730,7 +730,7 @@ impl EditorCore {
     /// - 无选区且已在末行 / 块内不足两行 → no-op 不产快照。
     pub fn merge_lines(&mut self) -> bool {
         let count = self.doc.line_count();
-        let (a, b) = if self.anchor.is_some() {
+        let (a, b) = if self.has_selection() {
             self.touched_lines()
         } else {
             let a = self.cursor.line.min(count.saturating_sub(1));
@@ -807,9 +807,11 @@ impl EditorCore {
     ///   并入块尾残文行；
     /// - 断在空行正中（前后皆空）→ 内容不变，no-op 不产快照。
     pub fn split_line(&mut self) -> bool {
-        let (s, e) = match self.anchor {
-            None => (self.cursor, self.cursor),
-            Some(_) => self.ordered_selection().expect("有锚必有有序选区"),
+        // P461：问「有选区吗」走唯一那把尺，不问 `anchor`——同位的锚点屏幕上看不见。
+        let (s, e) = if self.has_selection() {
+            self.ordered_selection().expect("有可见选区必有有序区间")
+        } else {
+            (self.cursor, self.cursor)
         };
         let ls = s.line;
         let le = e.line;
@@ -1221,8 +1223,9 @@ impl EditorCore {
     }
 
     /// 块注释切换。作用域与行注释**同一口径**（共用 [`Self::collect_line_block`] 骨架）：
-    /// 有选区＝选区触及的那几行，**无选区＝整篇文档**——最后这条不是本轮新定的，
-    /// 是行注释多年来的既有范围（`anchor` 为空时它返回 `(0, count-1)`）。
+    /// 有可见选区＝选区触及的那几行，**没有选区＝整篇文档**——最后这条不是本轮新定的，
+    /// 是行注释多年来的既有范围（`has_selection()` 为假时它返回 `(0, count-1)`；
+    /// P461 之前问的是「锚点挂着吗」，于是一个屏幕上看不见的高亮会偷偷缩小作用范围）。
     /// 开标记插在首行缩进之后，闭标记接在末行正文之尾。
     ///
     /// ⚠️ 一条**同族的既有语义**，写在这儿免得下轮误判成本笔的缺陷：

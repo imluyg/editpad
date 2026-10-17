@@ -211,7 +211,7 @@ impl EditorCore {
         // 选区跨了几行，而我下面按"起点行的下一行"放光标——跨行选区一进来那个算式就不成立。
         // （多光标不必在这里管：`apply_edit` 的多光标存活名单本来就不含回车，
         //   它在那一层已经折叠成单光标。）
-        if self.anchor.is_some() || self.has_block() {
+        if self.has_selection() || self.has_block() {
             self.enter();
             return;
         }
@@ -450,7 +450,7 @@ impl EditorCore {
         if out == src {
             return Ok(false); // 幂等 no-op
         }
-        let had_selection = self.anchor.is_some();
+        let had_selection = self.has_selection();
         self.snapshot();
         self.doc.remove_range(start, end);
         self.doc.insert(start, &out);
@@ -564,7 +564,7 @@ impl EditorCore {
             after: self.char_at(at),
             auto_closer: self.auto_closer,
             // "有选区"的口径与 insert_str 的成组判据同一份（那里问的也是这个）
-            has_selection: self.selection_offsets().is_some(),
+            has_selection: self.has_selection(),
             overwrite: self.overwrite,
             composing: self.preedit.is_some(),
             in_block: self.block_sel.is_some(),

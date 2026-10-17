@@ -2183,3 +2183,92 @@ fn block_extension_after_an_exotic_line_break_adds_no_phantom_line() {
     assert!(e.insert_into_block("A\nB\nC"));
     assert_eq!(e.doc.to_text(), "A\nB\nC\nef", "LF 档一字不变");
 }
+
+// ---------- P461：零宽锚点＝"看不见的"不许改变结果 ----------
+
+/// 把光标放到当前行行尾，再挂上一个**与光标同位**的锚点。
+///
+/// 可达路径就是键盘上最普通的一下：`End` → `Shift+Left` → `Shift+Right`。
+/// 屏幕上高亮已经没有了，`anchor` 却还挂着——而"有没有选区"这件事在应用层
+/// 有三把尺（`anchor.is_some()`／`selection_offsets().is_some()`／`s < e`），
+/// 对这个状态各说各话。后果不是"某个动作没做"，是**同一段正文、同一个光标，
+/// 按 Tab 把制表符插到了行首**（`abc` → `\tabc`）而不是插到光标处。
+fn arm_zero_width(c: &mut EditorCore) {
+    c.apply_motion(Motion::End, false);
+    c.apply_motion(Motion::Left, true);
+    c.apply_motion(Motion::Right, true);
+}
+
+#[test]
+fn p461_a_zero_width_anchor_changes_no_gesture_result() {
+    // 每格自带夹具：`Shift+Tab` 那形即使按旧尺子走"触及行"分支，触及的也只有光标
+    // 那一行 ⇒ 与无锚点恒等，它落在表里是为了**量出**这件事（探针里它不进红集＝
+    // 那处改动是判据统一、不是行为变更），不是为了凑数。
+    // 类型别名只为躲开 `clippy::type_complexity` 对"三元组里塞函数指针"的抱怨，不是抽象层。
+    type Gesture = (&'static str, &'static str, fn(&mut EditorCore) -> bool);
+    let gestures: &[Gesture] = &[
+        ("Tab 加缩进", "alpha\n  beta\ngamma", |c| {
+            c.indent_touched_lines(false)
+        }),
+        ("Shift+Tab 反缩进", "  alpha\n  beta", |c| {
+            c.indent_touched_lines(true)
+        }),
+        ("Ctrl+Q 行注释", "alpha\n  beta\ngamma", |c| {
+            c.toggle_line_comment()
+        }),
+        ("块注释", "alpha\n  beta\ngamma", |c| {
+            c.toggle_block_comment()
+        }),
+        ("行排序", "gamma\nalpha\nbeta", |c| {
+            c.sort_lines(SortOrder::Ascending)
+        }),
+        ("行去重", "a\nb\na\nb", |c| c.remove_duplicate_lines()),
+        ("合并成一行", "alpha\nbeta", |c| c.merge_lines()),
+        ("Ctrl+Backspace 删词", "alpha beta", |c| {
+            c.delete_word(true)
+        }),
+        ("智能回车", "if (x) {", |c| {
+            // 夹具按 keys 走到"行尾"，这一档的行尾正好是 `{` 右边——
+            // 开着开关时该补一档，被零宽锚点骗去走旧 `enter()` 就只剩一个空行。
+            c.enter_smart();
+            true
+        }),
+        ("拆行", "alpha beta", |c| c.split_line()),
+    ];
+    let mut diffs: Vec<String> = Vec::new();
+    for (name, doc, run) in gestures {
+        let plain = {
+            let mut c = core_with(doc);
+            c.set_language(Some("java"));
+            c.apply_motion(Motion::End, false);
+            let ret = run(&mut c);
+            (c.doc.to_text(), ret, c.cursor)
+        };
+        let armed = {
+            let mut c = core_with(doc);
+            c.set_language(Some("java"));
+            arm_zero_width(&mut c);
+            assert_eq!(
+                c.anchor,
+                Some(c.cursor),
+                "{name}：夹具自证＝锚点与光标同位（用户看不见任何高亮）"
+            );
+            assert!(
+                c.selected_text().is_none(),
+                "{name}：夹具自证＝这一格确实「读起来没有选区」"
+            );
+            let ret = run(&mut c);
+            (c.doc.to_text(), ret, c.cursor)
+        };
+        if plain != armed {
+            // 逐格收集而不是第一格就 panic：这一轮同时改了 8 个读点，
+            // 需要一眼看出**哪几格**真的被这条用例守着（探针要能分账）。
+            diffs.push(format!("{name}：无锚={plain:?} 有零宽锚={armed:?}"));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "零宽锚点改变了这些手势的结果：\n{}",
+        diffs.join("\n")
+    );
+}
