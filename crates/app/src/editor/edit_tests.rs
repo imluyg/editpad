@@ -1027,3 +1027,33 @@ fn p443_h_clip_window_accepts_a_prefix_table_that_reaches_the_band() {
         "前缀盖不住右缘时不许剔"
     );
 }
+
+/// `shape_row_xs` 把 cosmic-text 的 `g.start` 当**字节**偏移回切字符数
+/// （`text[..g.start].chars().count()`），这一步没有 `is_char_boundary` 判据：
+/// 它的成立前提是"簇起点永远落在字符边界上"，而那是本仓之外的保证。
+/// 本用例不证那条前提（证不了），钉的是前提一旦被破坏当场就红——纯 ASCII 行
+/// 照不出这种破坏（字节＝字符），所以夹具必须带多字节字符。
+#[test]
+fn shaping_multibyte_lines_returns_one_x_per_char() {
+    let font = iced::Font::MONOSPACE;
+    for text in [
+        "中文字",         // 每字 3 字节
+        "a中b文",         // 多字节与普通字符交错
+        "abc\u{1F600}中", // 4 字节 emoji
+        "official 中文",  // 连字候选（fi）后面跟多字节
+        "   中文",        // 行首空白 + 多字节
+    ] {
+        let xs = crate::editor::metrics::shape_row_xs(font, 16.0, text)
+            .unwrap_or_else(|| panic!("{text:?} 该有布局（量度失败＝整行退回列模型）"));
+        assert_eq!(
+            xs.len(),
+            text.chars().count() + 1,
+            "{text:?}：表长必须＝字符数 + 1（行尾那格），实得 {}",
+            xs.len()
+        );
+        assert!(
+            xs.windows(2).all(|w| w[1] > w[0]),
+            "{text:?}：每个字符都占正宽度 ⇒ 逐格严格递增，实得 {xs:?}"
+        );
+    }
+}
