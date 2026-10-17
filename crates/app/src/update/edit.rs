@@ -1019,8 +1019,13 @@ impl Editpad {
             // 的块分支去作用**块跨的每一行**（它自己把块收掉）；无块时按原语义
             // （无选区 Tab=插制表符、Shift+Tab=当前行反缩进，函数内兜底）
             E::Enter => {
+                // 次序是判据的一部分：Markdown 页先走它自己的续写判据（列表/引用），
+                // 那一支的落点永远压过花括号推断——`- 甲` 后面该接的是 `- `，不是加一档。
+                // 再才是智能缩进（默认关，B11 口径）；关着时走 `enter()`，与今天逐字相同。
                 if md_page {
                     editor.enter_markdown();
+                } else if self.settings.smart_indent {
+                    editor.enter_smart();
                 } else {
                     editor.enter();
                 }

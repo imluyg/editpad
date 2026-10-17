@@ -242,6 +242,8 @@ mod readmes;
 mod robustness;
 mod session;
 mod settings;
+// 档5：回车补一档（默认关；这里只钉接线那几格，判据用例在 core 的 indent 里）
+mod smart_indent;
 // 档3：手动指定本页语法（状态栏语言位 + 面板第四模式；选它不写正文、只读页可用）
 mod switch_syntax;
 mod tabs;

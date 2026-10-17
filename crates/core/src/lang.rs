@@ -135,6 +135,8 @@ pub const ROW_EDGE_COLUMN: &str = "edge_column";
 pub const ROW_PASTE_ALIGN_INDENT: &str = "paste_align_indent";
 /// P449：打字时自动补齐成对括号（行键与设置字段 `auto_pair_brackets` 同名）
 pub const ROW_AUTO_PAIR: &str = "auto_pair_brackets";
+/// P458：回车补一档缩进（行键与设置字段 `smart_indent` 同名）
+pub const ROW_SMART_INDENT: &str = "smart_indent";
 /// B12：变更历史行边条（行号栏最左缘的改动竖条）。
 pub const ROW_CHANGE_STRIP: &str = "change_history_strip";
 pub const ROW_FONT_FAMILY: &str = "font_family";
@@ -278,6 +280,9 @@ key_table! {
     { RowChangeStrip => "变更历史行边条", "Change History Strip" },
     { RowChangeStripDesc => "开：行号栏最左缘画 2px 竖条，标出相对上次保存改过或新增的行；同一变更块里本身没变的那一段（撤销回来的位置）走淡色。只作显示，不改内容、不影响置脏与撤销；超大文档不计算，边条自然不显示。", "On: a 2px strip on the left edge of the gutter marks lines changed or added since the last save; unchanged lines inside the same changed block (reverted spans) render fainter. Display only — it never edits content and does not affect the dirty flag or undo. Very large documents are not analyzed, so the strip simply stays off." },
     { RowPasteAlignIndentDesc => "开：粘多行文本时，整块按光标所在行的行首缩进平移——相对层次不变，行尾与空行不动，制表符块粘进空格行则原样不动。默认关：关着时粘进来的内容与剪贴板逐字节相同。", "On: shift a multi-line paste onto the indentation of the caret's line — relative structure kept, line endings and blank lines untouched, a tab-indented block pasted into space-indented lines left as it is. Off by default: off means the paste is byte-for-byte the clipboard." },
+    // P458（语言适配档5）：回车补一档。文案同样把「默认关」与「只作用在名单内的语言」写明白
+    { RowSmartIndent => "回车补一档缩进", "Smart Enter Indent" },
+    { RowSmartIndentDesc => "开：行尾是 `{`／`[`／`(` 时新行加一档；光标后只剩 `}` 时那一档退回去；光标卡在 `{` 与 `}` 中间则展开成三行。另外认 Python 的块头（`def x():`）与 Lua 的块头（`then`／`do`／`function`／`repeat`／`else`）。一档多宽跟着这一行自己的风格走：制表符行加制表符，空格行加本文档的步长。只作用在名单内的语言（C 家族／Java／JavaScript／JSON／CSS／Go／Rust／Ruby／PHP／D／Objective-C／YAML／Python／Lua），Markdown 与未登记的语法一个字都不写；列块态与多光标下先折叠再走单光标。默认关：关着时回车与引入本功能前逐字节相同。", "On: a line ending in `{`, `[` or `(` gives the new line one more indent level; when only `}` is left to the right the level is given back; a caret sitting between `{` and `}` expands to three lines. Python headers (`def x():`) and Lua headers (`then`/`do`/`function`/`repeat`/`else`) also add a level. The width follows the caret's own line — a tab on tab-indented lines, otherwise this document's step. Registered languages only (C family, Java, JavaScript, JSON, CSS, Go, Rust, Ruby, PHP, D, Objective-C, YAML, Python, Lua); Markdown and unregistered grammars get nothing inserted, and column-block or multi-caret edits collapse first. Off by default: off keeps Enter byte-for-byte what it was." },
     // P449（路线图 B11）：打字自动补齐括号。文案同样把「默认关」与「写入的字符不是你按的」写明白
     { RowAutoPair => "打字时自动补齐括号", "Auto-close Brackets" },
     { RowAutoPairDesc => "开：打左括号自动补上右括号，光标停在两者之间；紧接着再打一次右括号会越过它而不是重复一个，此时退格一次删掉整对。手打的括号不受影响；有选区、覆写模式、输入法组字中、列块态与多光标下一律不补。默认关：关着时打字与引入本功能前逐字节相同。", "On: typing a bracket inserts its partner and keeps the caret between them; typing the closing bracket right after steps over it instead of doubling it, and one Backspace then removes the whole pair. Hand-typed brackets are untouched; nothing is inserted while a selection is active, in overtype mode, during IME composition, or in column-block and multi-caret editing. Off by default: off means typing is byte-for-byte what it was before." },
@@ -1155,6 +1160,7 @@ mod tests {
             ROW_EDGE_COLUMN,
             ROW_PASTE_ALIGN_INDENT,
             ROW_AUTO_PAIR,
+            ROW_SMART_INDENT,
             ROW_CHANGE_STRIP,
             ROW_FONT_FAMILY,
             ROW_FONT_SIZE,

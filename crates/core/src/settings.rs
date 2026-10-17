@@ -148,6 +148,25 @@ pub struct Settings {
     /// 开启后仍**不配**的四种情形（判据与理由见 [`crate::pairing`]）：有选区、
     /// 覆写模式、IME 组字中、列块态与多光标。字符围只有 ASCII `()[]{}`。
     pub auto_pair_brackets: bool,
+    /// P458（语言适配档5）：回车替**下一行**补一档缩进——跟 `{`／`[`／`(` 加一档、
+    /// 光标后只剩 `}` 时退一档、`{|}` 展开成三行，另外认 Python 的块头（`def x():`）
+    /// 与 Lua 的块头（`then`／`do`／`function`／`repeat`／`else`）。
+    ///
+    /// **默认关**（与 [`Self::auto_pair_brackets`]、[`Self::paste_align_indent`] 同口径，
+    /// B11 定例）：这一条往正文写的还是用户**没有按下**的字符，只不过写的是空白。
+    /// 关着时回车与引入本功能前逐字节相同（那条等式由 app 侧用例钉住）。
+    ///
+    /// 开启后仍**一字不动**的三类，都由判据自己保证、不靠调用方记住：
+    /// ① 名单外的语法——[`crate::indent`] 里是封闭的 17 门名单，Markdown/Makefile/
+    /// TOML/SQL 这些刻意不在内（它们的行尾形状推不出缩进，加了就是加错）；
+    /// ② Markdown 页——那一页的回车有自己的续写判据，且它排在智能缩进之前；
+    /// ③ 列块态与多光标——回车的加档只会作用在主光标那一行（这两张存活名单
+    /// 本来都不含回车）。
+    ///
+    /// ⚠️ 一档多宽**不从 syntect 取**：它的 `SyntaxDefinition` 里没有 `tab_size`／
+    /// `indent_size` 这一族字段（现量：整个 syntect `src/` grep 两个名字＝0 命中），
+    /// 所以宽度按「当前行自己的风格 → 文档主导步长 → 兜底 4 格」推。
+    pub smart_indent: bool,
     /// B12（功能队列⑤）：变更历史行边条——行号栏最左缘 2px 竖条，标出
     /// **相对上次落盘改过／新增的行**，同一变更块内本身没变的那一段走淡色
     /// （撤销回来的位置）。
@@ -233,6 +252,8 @@ impl Default for Settings {
             paste_align_indent: false,
             // P449：括号自动配对默认关（它会写入用户没按下的字符，同上一条口径）
             auto_pair_brackets: false,
+            // P458：智能缩进默认关——同 B11 口径（写用户没按下的字符＝必须显式开启）
+            smart_indent: false,
             // B12：变更边条默认开（被动显示，同 `indent_guides` 的取舍）
             change_history_strip: true,
             // 第 64 轮：默认不备份（保持既有「零额外文件」预期）
@@ -1005,6 +1026,11 @@ mod tests {
         assert!(
             !loaded.auto_pair_brackets,
             "旧配置缺 auto_pair_brackets 字段时必须落到默认值（关）"
+        );
+        // P458 同一条口径的第二格：回车补一档也是"写用户没按下的字符"那一族。
+        assert!(
+            !loaded.smart_indent,
+            "旧配置缺 smart_indent 字段时必须落到默认值（关）"
         );
 
         fs::remove_dir_all(&dir).ok();

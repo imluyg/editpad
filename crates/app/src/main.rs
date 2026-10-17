@@ -432,6 +432,10 @@ enum Message {
     /// `apply_edit` 的 `EditOp::TypedPair` 那一臂（读的是这份设置，不在每页镜像
     /// 一份状态，与 P322 粘贴对齐同口径）。
     SettingsAutoPairToggled(bool),
+    /// P458（语言适配档5）：设置 → 外观「回车补一档缩进」开关。生效点在
+    /// `apply_edit` 的 `E::Enter` 那一臂（读的是这份设置，与 P449 同口径：
+    /// 不在每页 EditorCore 镜像一份状态，镜像就是第二份真值）。
+    SettingsSmartIndentToggled(bool),
     /// B12（功能队列⑤）：变更历史行边条开关（纯绘制，全标签页即时生效）
     SettingsChangeStripToggled(bool),
     /// 设置：右缘标尺列步进（P132，外观页；0 = 关，±4 步进，上限

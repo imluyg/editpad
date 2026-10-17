@@ -645,6 +645,7 @@ impl Editpad {
             | Message::SettingsIndentGuidesToggled(..)
             | Message::SettingsPasteAlignIndentToggled(..)
             | Message::SettingsAutoPairToggled(..)
+            | Message::SettingsSmartIndentToggled(..)
             | Message::SettingsChangeStripToggled(..)
             | Message::SettingsEdgeColumnDelta(..)
             | Message::HotkeyCaptureStarted(..)

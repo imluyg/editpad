@@ -11,8 +11,8 @@ pub(crate) use editpad_core::lang::{
     ROW_ABOUT_VERSION, ROW_AUTOSAVE, ROW_AUTOSAVE_DELAY, ROW_AUTO_PAIR, ROW_BACKUP_MODE,
     ROW_CHANGE_STRIP, ROW_EDGE_COLUMN, ROW_EXIT_MODE, ROW_FONT_FAMILY, ROW_FONT_SIZE,
     ROW_INDENT_GUIDES, ROW_LANGUAGE, ROW_PASTE_ALIGN_INDENT, ROW_REMEMBER_RECENT,
-    ROW_REMEMBER_SESSION, ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE, ROW_SNAPSHOTS,
-    ROW_SNAPSHOT_INTERVAL, ROW_THEME, ROW_WORD_WRAP,
+    ROW_REMEMBER_SESSION, ROW_SHOW_LINE_ENDINGS, ROW_SHOW_WHITESPACE, ROW_SMART_INDENT,
+    ROW_SNAPSHOTS, ROW_SNAPSHOT_INTERVAL, ROW_THEME, ROW_WORD_WRAP,
 };
 
 /// 「正文字体」行的行键（控件匹配与字体挑选块挂载点共用同一常量）。
@@ -174,6 +174,13 @@ pub(crate) const SETTINGS_ROWS: &[StaticRow] = &[
         key: ROW_AUTO_PAIR,
         title: editpad_core::Key::RowAutoPair,
         desc: editpad_core::Key::RowAutoPairDesc,
+    },
+    // P458（语言适配档5）：回车补一档——与上面两条同页同档（替用户落笔、默认关）
+    StaticRow {
+        page: SettingsPage::Appearance,
+        key: ROW_SMART_INDENT,
+        title: editpad_core::Key::RowSmartIndent,
+        desc: editpad_core::Key::RowSmartIndentDesc,
     },
     // B12（功能队列⑤）：变更历史行边条——与参考线/标尺同页（都是"排版辅助"一档）
     StaticRow {
@@ -1037,6 +1044,11 @@ impl Editpad {
             ROW_AUTO_PAIR => checkbox(s.auto_pair_brackets)
                 .style(settings_checkbox_style)
                 .on_toggle(Message::SettingsAutoPairToggled)
+                .into(),
+            // P458：回车补一档（纯偏好，生效点在 apply_edit 的 E::Enter 臂）
+            ROW_SMART_INDENT => checkbox(s.smart_indent)
+                .style(settings_checkbox_style)
+                .on_toggle(Message::SettingsSmartIndentToggled)
                 .into(),
             // B12：变更历史边条（纯绘制开关，全标签页即时生效）
             ROW_CHANGE_STRIP => checkbox(s.change_history_strip)

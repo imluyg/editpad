@@ -134,18 +134,16 @@ pub enum EnterAction {
     ExpandPair,
 }
 
-/// 落地方案：要插入的文本，以及光标应停在插入文本内的第几**个字符**处。
+/// 落地方案：要插入的文本，以及光标应落在**下一行**的第几个字符列。
+///
+/// ⚠️ 这里刻意不用"从插入文本末尾往回数几格"那种写法：插入串是我按 `\n` 造的，
+/// 而 `insert_str` 会把行尾归一成文档的主导风格（CRLF 文档里一个换行是两个字符），
+/// 数回来的列就会错位。"下一行的第几列"与行尾怎么归一**无关**，
+/// 而四种档位里光标都落在起点行的下一行（`ExpandPair` 多出来的那第三行在光标之后）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnterPlan {
     pub insert: String,
-    pub caret_col: usize,
-}
-
-impl EnterPlan {
-    /// 插入后光标要从末尾往回退几个字符（调用方据此移光标，省得两处各算一遍列）。
-    pub fn caret_back(&self) -> usize {
-        self.insert.chars().count() - self.caret_col
-    }
+    pub caret_col_next_line: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,32 +306,37 @@ pub fn enter_action(p: &EnterProbe) -> EnterAction {
     }
 }
 
-/// 判据 + 落地文本＝一次算清（调用方只管 `insert_str` 与移光标）。
+/// 判据 + 落地文本＝一次算清（调用方只管 `insert_str` 与按列设光标）。
 pub fn enter_plan(p: &EnterProbe) -> EnterPlan {
-    let grown = || format!("{}{}", p.indent, p.unit.text());
+    let next_line_indent = |plan_next: String| plan_next.chars().count();
     match enter_action(p) {
-        EnterAction::Plain => {
-            let insert = format!("\n{}", p.indent);
-            let caret_col = insert.chars().count();
-            EnterPlan { insert, caret_col }
-        }
+        EnterAction::Plain => EnterPlan {
+            insert: format!("\n{}", p.indent),
+            caret_col_next_line: next_line_indent(p.indent.to_owned()),
+        },
         EnterAction::Indent => {
-            let insert = format!("\n{}", grown());
-            let caret_col = insert.chars().count();
-            EnterPlan { insert, caret_col }
+            let grown = format!("{}{}", p.indent, p.unit.text());
+            let caret_col_next_line = next_line_indent(grown.clone());
+            EnterPlan {
+                insert: format!("\n{grown}"),
+                caret_col_next_line,
+            }
         }
         EnterAction::OutdentTail => {
-            let insert = format!("\n{}", strip_one_indent(p.indent, p.unit));
-            let caret_col = insert.chars().count();
-            EnterPlan { insert, caret_col }
+            let stripped = strip_one_indent(p.indent, p.unit);
+            let caret_col_next_line = next_line_indent(stripped.clone());
+            EnterPlan {
+                insert: format!("\n{stripped}"),
+                caret_col_next_line,
+            }
         }
         EnterAction::ExpandPair => {
             // `{|}` → `{`⏎`  |`⏎`}`：中间那行加一档、光标留在那儿，闭括号落到第三行行首
-            let middle = grown();
-            let insert = format!("\n{middle}\n{}", p.indent);
+            let middle = format!("{}{}", p.indent, p.unit.text());
+            let caret_col_next_line = next_line_indent(middle.clone());
             EnterPlan {
-                insert,
-                caret_col: 1 + middle.chars().count(),
+                insert: format!("\n{middle}\n{}", p.indent),
+                caret_col_next_line,
             }
         }
     }
@@ -354,19 +357,27 @@ pub const MAX_INDENT_STEP: usize = 8;
 
 /// 从若干行的行首空白归纳一档多宽（空格文件）。拿不到任何证据 ⇒ `None`。
 ///
+/// 泛型到 `AsRef<str>`：调用方手里可能是 `String`（app 逐行取行首空白时不可能借到
+/// 文档的生命周期），判据不该为此逼它先攒一个 `Vec<&str>`。
+///
 /// 规则：只看**纯空格起头**的行。含制表符的行首不参与统计——tab 文件的"一档"就是一个
-/// tab，本来就不需要宽度这个数；而 `  \tx` 这种混排起头说明这份文件的缩进已经不自洽，
-/// 拿它的 2 格当步长是替一个不存在的事实编答案。
-pub fn dominant_indent<'a>(lines: impl Iterator<Item = &'a str>) -> Option<IndentUnit> {
+/// tab，本来就不需要宽度这个数；而 `  \tx` 这种混排起头说明这一行给不出"一档"的宽度。
+/// 但同文件里另一条干净的行照样算证据（见用例里那一格现量）。
+pub fn dominant_indent<I, S>(lines: I) -> Option<IndentUnit>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut min_spaces: Option<usize> = None;
-    for line in lines.take(INDENT_SAMPLE_LINES) {
+    for line in lines.into_iter().take(INDENT_SAMPLE_LINES) {
+        let line = line.as_ref();
         let spaces = line.chars().take_while(|&c| c == ' ').count();
         if spaces == 0 {
             continue;
         }
         if let Some(c) = line.chars().nth(spaces) {
             if c == '\t' {
-                continue; // 混排起头：不算证据
+                continue; // 混排起头：这一行给不出"一档"的宽度
             }
         }
         min_spaces = Some(match min_spaces {
@@ -385,10 +396,11 @@ pub fn dominant_indent<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Inden
 /// `strip_one_indent_unit` 的制表符优先规则同源），是空格就加文档自己的步长——
 /// 硬给人家 2 格缩进的 YAML/Python 文件插 4 格，或插一个制表符，都是往正文里
 /// 写坏文件（Python 3 直接拒绝 tab/空格混用，报 IndentationError）。
-pub fn indent_unit_for<'a>(
-    current_indent: &str,
-    doc_lines: impl Iterator<Item = &'a str>,
-) -> IndentUnit {
+pub fn indent_unit_for<I, S>(current_indent: &str, doc_lines: I) -> IndentUnit
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     if current_indent.starts_with('\t') {
         return IndentUnit::Tab;
     }
@@ -420,7 +432,7 @@ mod tests {
             assert_eq!(enter_action(&p.probe()), EnterAction::Indent, "{syntax}");
             let plan = enter_plan(&p.probe());
             assert_eq!(plan.insert, "\n        ", "{syntax} 插入的文本");
-            assert_eq!(plan.caret_back(), 0, "{syntax} 光标停在末尾");
+            assert_eq!(plan.caret_col_next_line, 8, "{syntax} 光标停在新一档的末尾");
         }
         // 行尾带空格（`{ ` 那形）也是同一档：判据取最后一个**非空白**字符
         assert_eq!(
@@ -542,9 +554,8 @@ mod tests {
         assert_eq!(enter_action(&p.probe()), EnterAction::ExpandPair);
         let plan = enter_plan(&p.probe());
         assert_eq!(plan.insert, "\n        \n    ");
-        // 光标停在中间那行的缩进之后，不是整段末尾
-        assert_eq!(plan.caret_col, 9);
-        assert_eq!(plan.caret_back(), 5, "末尾要往回退过 `\\n    ` 那五格");
+        // 光标停在中间那行的缩进之后（列＝8），第三行的 `}` 在它后面
+        assert_eq!(plan.caret_col_next_line, 8);
     }
 
     #[test]

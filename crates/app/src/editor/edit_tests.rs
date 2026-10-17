@@ -314,6 +314,128 @@ fn enter_uses_dominant_eol_and_is_undoable() {
 
 // ---------- Markdown 页回车接住列表（编辑面） ----------
 
+// ---------- P458（语言适配档5）：回车补一档（编辑面＝判据怎么落到文档上） ----------
+//
+// 接线那一档（设置开关、Markdown 优先、生产消息路）在 `tests/smart_indent.rs`；
+// 这里只盯落地的形状。判据本身住在 `editpad_core::indent`，用例在 core 那一侧。
+
+#[test]
+fn enter_smart_adds_a_level_after_an_open_brace() {
+    let mut c = core_with("if (x) {");
+    c.set_language(Some("java"));
+    c.cursor = CursorPos { line: 0, col: 8 }; // 行尾（`{` 是第 8 个字符，行体共 8 格）
+    c.enter_smart();
+    assert_eq!(c.doc.to_text(), "if (x) {\n    ");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 4 });
+    assert!(c.undo());
+    assert_eq!(
+        c.doc.to_text(),
+        "if (x) {",
+        "换行与补的那一档必须**一次撤销**一起收回，否则撤完留下半截空行"
+    );
+}
+
+#[test]
+fn enter_smart_expands_a_paired_brace_into_three_lines() {
+    let mut c = core_with("if (x) {}");
+    c.set_language(Some("java"));
+    c.cursor = CursorPos {
+        line: 0,
+        col: 8, // 正卡在 `{`(第 8 个字符) 与 `}`(第 9 个) 之间
+    };
+    c.enter_smart();
+    assert_eq!(c.doc.to_text(), "if (x) {\n    \n}");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 4 });
+    assert!(c.undo());
+    assert_eq!(c.doc.to_text(), "if (x) {}", "展开三行也是一次撤销一发收回");
+}
+
+#[test]
+fn enter_smart_gives_the_level_back_before_a_trailing_closer() {
+    let mut c = core_with("    foo();}");
+    c.set_language(Some("java"));
+    c.cursor = CursorPos { line: 0, col: 10 }; // `}` 在第 11 个字符处（前面 10 格）
+    c.enter_smart();
+    assert_eq!(c.doc.to_text(), "    foo();\n}");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 0 });
+}
+
+#[test]
+fn enter_smart_uses_the_documents_own_step_not_a_fixed_four() {
+    // 一份 2 格一档的 Python：块头后回车只补 2 格。硬补 4 会把整份文件的阶梯推歪，
+    // 而 syntect 那里根本没有"这门语言用几格"这个数可取（core 的模块头记着这条现量）。
+    let mut c = core_with("def f():\n  pass");
+    c.set_language(Some("py"));
+    c.cursor = CursorPos { line: 0, col: 8 }; // "def f():" 共 8 格
+    c.enter_smart();
+    assert_eq!(c.doc.to_text(), "def f():\n  \n  pass");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 2 });
+}
+
+#[test]
+fn enter_smart_follows_the_dominant_line_ending() {
+    // CRLF 文档：换行归一成 `\r\n`（两个字符），而光标列按**字符列**给——
+    // 这正是 `EnterPlan` 不用"从插入末尾回数几格"的理由（那样在这里就会错两格）。
+    let mut c = core_with("if (x) {\r\n}");
+    c.set_language(Some("java"));
+    c.cursor = CursorPos { line: 0, col: 8 }; // 行体 "if (x) {" 的第 8 格＝`\r` 之前
+    c.enter_smart();
+    assert_eq!(c.doc.to_text(), "if (x) {\r\n    \r\n}");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 4 });
+}
+
+#[test]
+fn enter_smart_on_an_unlisted_or_plain_page_equals_the_old_enter() {
+    // 判据的 `Plain` 那一支：名单外的语言即使走了新入口，产出也与旧 `enter()` 逐字相同。
+    // 这一格与 `tests/smart_indent.rs` 里"设置关着"那一格是**两条不同的路**：
+    // 那条钉开关，这条钉"开着也不动名单外"。
+    // ⚠️ 这里**逐列对照**而不是点列断言：`insert_str` 的偏移是 `line_to_char＋col`，
+    // 列数错一格就越界（ropey 直接 panic，本轮红过一次），而 CRLF 文档里错一格
+    // 还能捅进行尾单元中间。让期望值从旧入口自己长出来，这一族错就再也犯不了。
+    for text in ["    ERROR boom {", "if (x) {", "  a\n  b", "x"] {
+        let body_len = text.lines().next().unwrap().chars().count();
+        for col in 0..=body_len {
+            let run = |smart: bool| {
+                let mut c = core_with(text);
+                c.set_language(Some("nosuchlang"));
+                c.cursor = CursorPos { line: 0, col };
+                if smart {
+                    c.enter_smart();
+                } else {
+                    c.enter();
+                }
+                (c.doc.to_text(), c.cursor)
+            };
+            assert_eq!(run(true), run(false), "{text:?} @ 列 {col}");
+        }
+    }
+}
+
+#[test]
+fn enter_smart_with_a_selection_defers_to_the_old_enter() {
+    // 有选区＝交回旧 `enter()`：`insert_str` 会先把选区整块替换掉，替换跨几行
+    // 取决于选区，而新入口按"起点行的下一行"放光标——那种落点上算式不成立。
+    // ⚠️ 这条**不比手写常量**，比两个入口的产出：我第一版在这里猜了一个期望串，
+    // 形状是错的（选区替换的行数不是人算出来的东西）。对照式不需要猜。
+    let build = |smart: bool| {
+        let mut c = core_with("aaa\nbbb\nccc");
+        c.set_language(Some("java"));
+        c.cursor = CursorPos { line: 2, col: 1 };
+        c.anchor = Some(CursorPos { line: 0, col: 1 });
+        if smart {
+            c.enter_smart();
+        } else {
+            c.enter();
+        }
+        (c.doc.to_text(), c.cursor)
+    };
+    assert_eq!(
+        build(true),
+        build(false),
+        "选区路径必须与旧 enter() 逐字同一形状"
+    );
+}
+
 #[test]
 fn enter_markdown_continues_unordered_ordered_and_task_items() {
     let mut c = core_with("- 甲");

@@ -80,6 +80,14 @@ impl Editpad {
                 self.persist_settings();
                 Task::none()
             }
+            // P458（语言适配档5）：回车补一档——与上一条同口径：纯偏好，生效点在
+            // `apply_edit` 的 `E::Enter` 臂，不往每页 EditorCore 镜像。
+            // 关着时那一臂走的是 `editor.enter()`，与引入本功能前逐字节相同。
+            Message::SettingsSmartIndentToggled(value) => {
+                self.settings.smart_indent = value;
+                self.persist_settings();
+                Task::none()
+            }
             // B12：变更历史边条——纯绘制开关，与参考线同口径全标签页即时生效。
             // `set_change_strip(false)` 会清缓存，所以"关→开"之间发生过保存
             // 也不会吐旧标记。

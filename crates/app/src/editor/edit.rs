@@ -199,6 +199,60 @@ impl EditorCore {
         self.insert_str(&text);
     }
 
+    /// P458（语言适配档5）：回车补一档（编辑面）。判据全在 core 的 `editpad_core::indent`，
+    /// 这里只做三件事：量事实、落文本、把光标放到「下一行第几列」。
+    ///
+    /// 与 [`enter`](Self::enter) 的关系：`enter()` 一字未动，这条是**并排的另一个入口**，
+    /// 由设置 `smart_indent`（默认关）决定走哪个。core 那侧还有 `Plain` 一支，它产出的
+    /// 文本与 `enter()` 逐字相同——所以"名单外的语言即使把设置打开也等于没开"。
+    pub fn enter_smart(&mut self) {
+        // 有选区／列块态＝不走智能缩进，交回旧的 `enter()`。
+        // 这一格不是防御过头：`insert_str` 会先把选区整块替换掉，替换的**行数**取决于
+        // 选区跨了几行，而我下面按"起点行的下一行"放光标——跨行选区一进来那个算式就不成立。
+        // （多光标不必在这里管：`apply_edit` 的多光标存活名单本来就不含回车，
+        //   它在那一层已经折叠成单光标。）
+        if self.anchor.is_some() || self.has_block() {
+            self.enter();
+            return;
+        }
+        let line = self.cursor.line;
+        let body = self.line_body_without_eol(line);
+        let indent: String = body
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .collect();
+        let unit = editpad_core::indent_unit_for(&indent, self.leading_ws_samples());
+        let facts = editpad_core::EnterFacts::from_line(
+            self.highlight_syntax_name().as_deref(),
+            &body,
+            self.cursor.col,
+            unit,
+        );
+        let plan = editpad_core::enter_plan(&facts.probe());
+        self.insert_str(&plan.insert);
+        // 列＝"下一行第几列"，**不是**"从插入文本末尾回数几格"：`insert_str` 会把 `\n`
+        // 归一成文档的主导行尾，CRLF 文档里一个换行是两个字符，回数必然错位。
+        self.cursor = CursorPos {
+            line: line + 1,
+            col: plan.caret_col_next_line,
+        };
+    }
+
+    /// 逐行的**行首空白**，给 `dominant_indent` 当证据。
+    ///
+    /// 每行只读"开头那连续一串空白"（按字符索引走，不复制整行），所以大文档里
+    /// 按一次回车不会变成一次全文扫描；行数上界由 core 的 `INDENT_SAMPLE_LINES` 管，
+    /// 那里也写明了为什么这一档刻意不缓存。
+    fn leading_ws_samples(&self) -> impl Iterator<Item = String> + '_ {
+        (0..self.doc.line_count()).map(move |i| {
+            let start = self.doc.line_to_char(i);
+            self.doc
+                .chars_from(start)
+                .take_while(|c| matches!(c, ' ' | '\t'))
+                .collect()
+        })
+    }
+
     /// Markdown 页的回车＝**接住列表与引用**（编辑面）。
     ///
     /// 三种落点：① 列表项且已有正文 ⇒ 新行给同样的标记（有序进位、任务框给**空框**；
