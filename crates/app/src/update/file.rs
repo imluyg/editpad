@@ -678,6 +678,16 @@ impl Editpad {
             }
             // ---------- 打开确认 ----------
             Message::ConfirmOpenDiscard => {
+                // P473（P388 同族，兄弟臂〔重新加载〕当时改的就是这个次序）：
+                // **先问通道，再消费这份一次性裁决**。改前顺序＝先 `take()`、
+                // 先把发起页的 ● 抹掉，再去调 `start_loading`，而它开头的早退是
+                // **静默**的 ⇒ 通道被占的那一次点击：文件没开、提示条没了、一句
+                // 话不说，而那一页的未存改动此后再不置脏＝关窗不拦、自动保存不排
+                // （静默丢失，比"什么都没发生"重一档）。保持静默是 house style，
+                // 要害在于裁决与那页的脏账都得原样留在场上，等通道空出来再点一次。
+                if !self.load_channel_available() {
+                    return Task::none();
+                }
                 let Some((tab_id, path)) = self.open_confirm.take() else {
                     return Task::none();
                 };

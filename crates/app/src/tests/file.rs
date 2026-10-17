@@ -3167,6 +3167,78 @@ fn p341_open_confirm_discard_after_originating_tab_closed_still_opens() {
     assert!(!app.tabs[0].dirty, "无人认领的裁决不许改别页账目");
 }
 
+/// 通道被占时点〔放弃并打开〕＝这一整枪必须作废。兄弟臂〔重新加载〕在 P388
+/// 改的就是这个次序，而 `start_loading` 开头的早退是**静默**的：改前先
+/// `take()` 掉这份一次性裁决、先把发起页的 ● 抹掉，再去撞那道早退 ⇒
+/// 文件没开、条也没了，而那一页的未存改动此后**既不弹关页确认、也进不了
+/// 自动保存**（＝静默丢失，比"什么都没发生"更糟的一档）。
+#[test]
+fn open_confirm_discard_asks_the_channel_before_consuming_the_decision() {
+    let mut app = app_with_tabs(2); // 页 0 脏，页 1 是新建的空页
+    app.set_active_tab(0);
+    let pending = PathBuf::from("C:/w/next.txt");
+    dispatch(&mut app, Message::FileDropped(pending.clone()));
+    assert_eq!(
+        app.open_confirm.as_ref().map(|(_, p)| p),
+        Some(&pending),
+        "夹具前提：确认条已弹出且带着待开路径"
+    );
+
+    // 占通道走真实入口：切到干净的新页再拖入另一个文件（它不需要确认 ⇒ 直接起装载）
+    app.set_active_tab(1);
+    let occupier = PathBuf::from("C:/w/occupier.txt");
+    dispatch(&mut app, Message::FileDropped(occupier.clone()));
+    let job_id = app
+        .active_load
+        .as_ref()
+        .expect("夹具前提：第二次打开确实起了装载")
+        .id;
+    assert!(
+        app.busy,
+        "夹具前提：通道被占（`load_channel_available` 问的就是这个）"
+    );
+
+    dispatch(&mut app, Message::ConfirmOpenDiscard);
+
+    assert!(
+        app.tabs[0].dirty,
+        "执行不了的点击不许清掉发起页的 ●：清了就是宣称已保存"
+    );
+    assert_eq!(
+        app.open_confirm.as_ref().map(|(_, p)| p),
+        Some(&pending),
+        "待决裁决必须留在场上，等通道空出来再点一次"
+    );
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.id),
+        Some(job_id),
+        "被占的这一次也不许顺手起第二次装载，实际 {:?}",
+        app.active_load.as_ref().map(|j| j.path.clone())
+    );
+
+    // 反面对照：通道空出来后同一颗按钮真的把要开的文件开出来（挡住"永远点不动"）
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job_id,
+            Ok((
+                editpad_core::Document::from_str("occ\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(!app.busy, "夹具自证：占通道的那次装载已结算");
+    dispatch(&mut app, Message::ConfirmOpenDiscard);
+    assert!(app.open_confirm.is_none(), "兑现之后这份一次性裁决才被消费");
+    assert!(!app.tabs[0].dirty, "兑现时才放弃发起页的改动");
+    assert!(
+        app.active_load.as_ref().is_some_and(|j| j.path == pending),
+        "此刻开的就是那条待决路径，实际 {:?}",
+        app.active_load.as_ref().map(|j| j.path.clone())
+    );
+}
+
 #[test]
 fn cancelling_open_confirm_voids_remaining_cli_queue() {
     let mut app = Editpad::default();
