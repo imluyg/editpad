@@ -36,7 +36,10 @@ impl Editpad {
     ///    `realign_active_after_removal`／`refresh_cur_handle`，压根不经过那儿）。
     ///    关掉的正是那一页而框还开着 ⇒ 再按 Enter 把旧页草稿生成的**多行**内容插进
     ///    新活动页并把它置脏，开着自动保存两秒后连新页磁盘上那份一起被覆写。
-    ///    关掉的是**别的**页时那一页还在、草稿照旧能用 ⇒ 按 id 重认，不是一律收。
+    ///    关掉的是**别的**页时那一页还在、草稿照旧能用 ⇒ 按 id 重认，不是一律收；
+    /// ④ `editor_context_menu_tab`——正文右键菜单与③同一条腿：菜单项经
+    ///    `EditorCtxCommand` 转发给「当下这一页」，所属页被移除后留着它，
+    ///    用户点一下动的是另一页的正文（剪切／粘贴／全选都会置脏）。
     /// 形状同 [`Self::clear_index_addressed_tab_ui`]／`shift_restore_queue_after_removal`：
     /// 「页集合变了 ⇒ 按页记账的那份名单要跟着对账」这件事只写在三条移除漏斗里。
     pub(crate) fn reap_dead_pages_from_id_keyed_prompts(&mut self) {
@@ -59,6 +62,14 @@ impl Editpad {
             .is_some_and(|id| !alive.contains(&id))
         {
             self.close_column_editor();
+        }
+        // ④ 正文右键菜单：同一把尺的第二格——菜单项一律转发给「当下这一页」，
+        //     所属页被移除后留着它，用户点一下动的是另一页（改前正是这一形状）
+        if self
+            .editor_context_menu_tab
+            .is_some_and(|id| !alive.contains(&id))
+        {
+            self.close_editor_context_menu();
         }
     }
 
@@ -359,7 +370,7 @@ impl Editpad {
                     self.menu_anchor = self.cursor_pos;
                     self.tab_context_menu = Some(i);
                     // P308：正文右键菜单同锚点，两类菜单不同屏
-                    self.editor_context_menu = false;
+                    self.close_editor_context_menu();
                 }
                 Task::none()
             }

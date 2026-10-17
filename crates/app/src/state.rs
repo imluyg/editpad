@@ -279,6 +279,12 @@ pub(crate) struct Editpad {
     /// 改的是 `realign_active_after_removal`／`refresh_cur_handle`，不经过 `set_active_tab`
     /// ⇒ 关掉的正是对话框那一页时，框还开着而活动页已经换人。
     pub(crate) column_editor_tab: Option<u64>,
+    /// 正文右键菜单属于**哪一页**（同一把尺，见 [`Self::column_editor_tab`]）。
+    /// 菜单项一律经 `EditorCtxCommand` 转发给「当下这一页」，所以关掉菜单所属那一页
+    /// 之后留着它，用户点一下就是在改另一页——P336 在 `set_active_tab` 上收的
+    /// 正是这一族，而**移除页**那条出路不经过那儿。唯一关闭出口
+    /// `Editpad::close_editor_context_menu` 负责同步清这份记账。
+    pub(crate) editor_context_menu_tab: Option<u64>,
     /// P130：待归页的监视重载（**页 id**, 是否 tail 跟随, 重载前视图）——
     /// check_external_changes 发起监视重载时捕获，Loaded 归页时消费
     ///（元组即重载前视图快照，一次性搬运不设类型别名）。
@@ -524,6 +530,7 @@ impl Default for Editpad {
             tab_context_menu: None,
             // P308：正文右键菜单默认收起
             editor_context_menu: false,
+            editor_context_menu_tab: None,
             // P39/P40：浮层定位初值——锚点给一个可见的保守位置，
             // 尺寸未知 (0,0) = 贴边钳制跳过（启动后首个 Resized 事件校准）
             menu_anchor: (24.0, 56.0),
@@ -702,7 +709,7 @@ impl Backdrop {
     pub(crate) fn close(self, app: &mut Editpad) {
         match self {
             Backdrop::TabMenu => app.tab_context_menu = None,
-            Backdrop::EditorMenu => app.editor_context_menu = false,
+            Backdrop::EditorMenu => app.close_editor_context_menu(),
             Backdrop::EncodingMenu => app.encoding_menu = false,
             Backdrop::EolMenu => app.eol_menu = false,
             Backdrop::Menubar => app.menu_bar_open = None,

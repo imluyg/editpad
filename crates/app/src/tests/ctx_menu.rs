@@ -449,6 +449,84 @@ fn switching_pages_closes_both_context_menus() {
     );
 }
 
+/// P336 那条纪律（浮层绑在打开它那一刻的那一页）只挂在 `set_active_tab` 上，
+/// 而**移除页**走 `realign_active_after_removal`／`refresh_cur_handle`，压根不经过那儿。
+/// 本用例钉的就是那半族：菜单开着时把那一页关掉（菜单不截任何键 ⇒ Ctrl+W 照常落到
+/// 热键表），菜单项经 `EditorCtxCommand` 转发给的是「当下这一页」——
+/// 改前菜单留着，用户点一下动的就是幸存那一页的正文。
+/// 反面对照钉住"关掉的是别的页时菜单照旧在场"，挡住"移除页一律收"的过宽修法。
+#[test]
+fn closing_the_page_a_context_menu_belongs_to_also_closes_the_menu() {
+    let load = |app: &mut Editpad, name: &'static str, body: &'static str| {
+        dispatch(app, Message::FileDropped(PathBuf::from(name)));
+        let seq = app.job_seq;
+        dispatch(
+            app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(body),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+    };
+
+    let mut app = Editpad::default();
+    load(&mut app, "C:/doc/a.txt", "a1\na2\n");
+    load(&mut app, "C:/doc/b.txt", "b1\n");
+    assert_eq!(app.tabs.len(), 2, "夹具自证：两页都是干净命名页");
+    assert_eq!(app.active_tab, 1, "夹具自证：停在 B 页");
+
+    // ---- 缺陷格：关掉菜单所属那一页（A 页）----
+    app.set_active_tab(0);
+    dispatch(&mut app, Message::EditorContextMenu(300.0, 240.0));
+    assert!(app.editor_context_menu, "夹具自证：菜单在 A 页开着");
+    assert_eq!(
+        app.editor_context_menu_tab,
+        Some(app.tabs[0].id),
+        "夹具自证：开框记下了所属页 id"
+    );
+    dispatch(&mut app, Message::CloseTabAt(0));
+    assert_eq!(app.tabs.len(), 1, "夹具自证：A 页真的被移除了");
+    assert!(
+        !app.editor_context_menu,
+        "所属页没了 ⇒ 菜单必须收起（改前它悬在 B 页上继续可用）"
+    );
+    assert_eq!(
+        app.editor_context_menu_tab, None,
+        "收菜单要连带作废那份归属记账"
+    );
+
+    // ---- 反面对照：关掉的是别的页，菜单照旧在场可用 ----
+    let mut app2 = Editpad::default();
+    load(&mut app2, "C:/doc/c.txt", "c1\n");
+    load(&mut app2, "C:/doc/d.txt", "d1\n");
+    app2.set_active_tab(1); // d.txt
+    dispatch(&mut app2, Message::EditorContextMenu(50.0, 60.0));
+    assert!(app2.editor_context_menu, "夹具自证：菜单在 d 页开着");
+    let owner = app2.tabs[1].id;
+    dispatch(&mut app2, Message::CloseTabAt(0)); // 关掉 c.txt
+    assert_eq!(app2.tabs.len(), 1, "夹具自证：关掉的是另一页");
+    assert!(app2.editor_context_menu, "所属页还在 ⇒ 菜单不许被误收");
+    assert_eq!(
+        app2.editor_context_menu_tab,
+        Some(owner),
+        "记账照旧指着 d 页"
+    );
+    // 点菜单项仍作用在它自己那一页：全选 ⇒ 选中该页正文
+    dispatch(
+        &mut app2,
+        Message::EditorCtxCommand(Box::new(Message::Edit(crate::editor::EditOp::SelectAll))),
+    );
+    assert_eq!(
+        app2.cur_handle.borrow().selected_text().as_deref(),
+        Some("d1\n"),
+        "菜单项该动它自己那一页"
+    );
+}
+
 /// P356（第 261 轮池 ⑤）＋P366（第 272 轮池 ③）：**每一类**带整窗背板的浮层，在每个
 /// "必须让路"的入口都得收起。
 ///

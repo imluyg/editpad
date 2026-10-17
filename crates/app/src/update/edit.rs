@@ -422,14 +422,17 @@ impl Editpad {
                 self.tab_context_menu = None;
                 self.menu_anchor = (x, y);
                 self.editor_context_menu = true;
+                // 菜单项经 `EditorCtxCommand` 转发给「当下这一页」⇒ 记下它开在哪一页上，
+                // 移除页的漏斗按这份 id 重认那一页还在不在（P336 只挂在 set_active_tab）
+                self.editor_context_menu_tab = Some(self.tab().id);
                 Task::none()
             }
             Message::EditorContextMenuClosed => {
-                self.editor_context_menu = false;
+                self.close_editor_context_menu();
                 Task::none()
             }
             Message::EditorCtxCommand(inner) => {
-                self.editor_context_menu = false;
+                self.close_editor_context_menu();
                 self.update(*inner)
             }
             // ---------- 按键分发与热键捕获（P62） ----------

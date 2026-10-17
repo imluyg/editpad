@@ -305,7 +305,7 @@ impl Editpad {
         self.cur_handle = self.tabs[self.active_tab].editor.clone();
         // 走唯一出口：对话框带走了键盘焦点，换页把它关掉的同时必须还给**新页**正文
         self.close_column_editor();
-        self.editor_context_menu = false;
+        self.close_editor_context_menu();
         self.tab_context_menu = None;
         self.cancel_find_scan();
     }
@@ -558,6 +558,14 @@ impl Editpad {
             return;
         }
         self.focus_editor();
+    }
+
+    /// 正文右键菜单的**唯一**关闭出口（与 [`Self::close_column_editor`] 同款）：
+    /// 收起浮层的同时作废「它属于哪一页」那份记账。改前五处各自手写
+    /// `editor_context_menu = false`，记账这种东西一手写就会漏一手写。
+    pub(crate) fn close_editor_context_menu(&mut self) {
+        self.editor_context_menu_tab = None;
+        self.editor_context_menu = false;
     }
 
     /// 消息总入口：按域分派到 `update_editor` / `update_tabs` / `update_file` /
@@ -902,7 +910,7 @@ impl Editpad {
         // P28：Esc 同时收起右键菜单与批量关闭确认
         self.tab_context_menu = None;
         // P308：正文右键菜单同一条收起出口
-        self.editor_context_menu = false;
+        self.close_editor_context_menu();
         self.batch_close_confirm = None;
         // 第 69 轮：Esc 同时收起顶部菜单栏浮层
         self.menu_bar_open = None;
