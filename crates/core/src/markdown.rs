@@ -185,14 +185,20 @@ pub enum MdBlock {
 
 /// 文件头元数据块（front matter）**结尾栅栏之后那一行**的下标；不是 front matter 则 `None`。
 ///
-/// 判据取各家渲染器的共同子集：起始栅栏必须顶格落在第一行，往后第一个配对的栅栏即收尾
+/// 判据取各家渲染器的共同子集：起始栅栏必须**顶格**落在第一行，往后第一个配对的栅栏即收尾
 /// （`---` 也接受 `...` 收尾，`+++` 只与 `+++` 配对）。等不到配对就整篇按普通 Markdown 走——
 /// 以一个孤立 `---` 开头的文档里那是分隔线，不是元数据。
+///
+/// ⚠️ 「顶格」是字面意思：起始行一个前导空白都不许有。改前这里 `trim()` 过，于是
+/// `"   ---\n第一段正文\n   ---\n第二段"` 这种**缩进的分隔线**被当成元数据开篇栅栏，
+/// 把第一条规则连后面第一段正文一起隐去——而 front matter 的门槛本就是「整篇开头就是它」，
+/// 缩进的 `---` 在 CommonMark 里是一条分隔线（`is_rule` 也按 trim 认它），不是元数据。
+/// 收尾栅栏一侧**照旧容忍缩进**（这条文档只约束起始行，收紧它属于改判，不动）。
 ///
 /// 这一区域在预览里整块隐去（不是降级成段落）：博客／静态站点生成的 `.md` 十有八九带它，
 /// 留在那儿会把第一眼的好好一段变成 `title: xxx`；要看原文有左半正文页兜着。
 fn front_matter_end(lines: &[&str]) -> Option<usize> {
-    let opener = lines.first()?.trim();
+    let opener = *lines.first()?;
     if opener != "---" && opener != "+++" {
         return None;
     }
@@ -3908,6 +3914,52 @@ mod tests {
             kinds("# H\n\n---\n\n正文"),
             vec!["heading", "rule", "paragraph"],
             "栅栏不在第一行 ⇒ 与 front matter 无关"
+        );
+    }
+
+    /// 「起始栅栏必须**顶格**落在第一行」这句在函数文档与上面那条用例题名里写了两遍，
+    /// 改前代码却 `trim()` 了首行：缩进的分隔线也被当成元数据开篇栅栏。
+    /// `"   ---\n第一段正文\n   ---\n第二段"` 改前只剩「第二段」一条块——两条规则与
+    /// 第一段正文整块隐去；而按 CommonMark 那条缩进的 `---` 就是一条分隔线
+    /// （`is_rule` 自己也按 trim 认它），根本不该走 front matter 这条路。
+    /// 收尾栅栏一侧**照旧容忍缩进**：这条承诺只管起始行，收紧收尾属于改判，
+    /// 所以那也写成一格，免得下一轮有人「顺手统一」。
+    #[test]
+    fn an_indented_opener_is_a_rule_not_front_matter() {
+        assert_eq!(
+            front_matter_end(&split_lines("   ---\ntitle: x\n   ---\n正文")),
+            None,
+            "顶格＝一个前导空白都不许有"
+        );
+        // 端到端：两条规则＋两段正文都在（改前整篇只剩「第二段」那一个段落块）。
+        // 行间的空行是故意的：`正文` 紧跟一行 `---` 会被判成 setext 标题（既定语义，
+        // 与本条缺陷无关），拿空行隔开才看得见「规则/段落/规则/段落」这四块。
+        let kinds: Vec<&'static str> = parse_markdown("   ---\n\n第一段正文\n\n   ---\n\n第二段\n")
+            .iter()
+            .map(|b| match b {
+                MdBlock::Paragraph { .. } => "paragraph",
+                MdBlock::Rule => "rule",
+                MdBlock::Heading { .. } => "heading",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["rule", "paragraph", "rule", "paragraph"],
+            "缩进栅栏不许把后面的正文一起吞掉"
+        );
+
+        // 反面对照：顶格开栏照旧认成 front matter（挡住「一律不认」的过宽修法）
+        assert_eq!(
+            front_matter_end(&split_lines("---\ntitle: x\n---\n正文")),
+            Some(3),
+            "顶格开栏＋顶格收尾＝元数据"
+        );
+        // 收尾行带缩进仍然配对：承诺只约束起始行，这一侧不许跟着收紧
+        assert_eq!(
+            front_matter_end(&split_lines("---\ntitle: x\n   ---\n正文")),
+            Some(3),
+            "收尾栅栏容忍缩进＝既定口径"
         );
     }
 
