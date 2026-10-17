@@ -1890,6 +1890,86 @@ fn restore_plan_prioritizes_active_page_and_truncates_over_cap() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// 内存护栏截断之后，「当前页」要按**保留集里的新位置**解析，不许照抄清单下标。
+/// `plan_restore_order`＝先装激活页、其余按下标升序、最后把 `kept` 排序 ⇒
+/// 激活页**之前**的页可以整页被弃，落地后的 `tabs` 是清单下标的一个子集。
+/// 改前 `self.active_tab = manifest.active.min(tabs.len()-1)` 拿的是旧坐标：
+/// 第 0 页被弃、激活页本是第 1 页时，选中的标签／标题栏／`cur_handle` 一起指到
+/// 清单第 2 页那份文档，用户第一下键入落进他没选过的那一页。
+#[test]
+fn truncated_restore_activates_the_page_the_manifest_called_active() {
+    let dir = snapshot_scratch_dir("p30-active-index");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("s1-t0.snap"), "被护栏弃掉的那页").unwrap();
+    fs::write(dir.join("s1-t1.snap"), "激活页正文").unwrap();
+    fs::write(dir.join("s1-t2.snap"), "另一页正文").unwrap();
+    // 把排在激活页**之前**的那一页撑到超护栏（稀疏文件，只改元数据长度）
+    std::fs::File::options()
+        .write(true)
+        .open(dir.join("s1-t0.snap"))
+        .unwrap()
+        .set_len(crate::session::MULTI_TAB_MEM_CAP_BYTES + 1)
+        .unwrap();
+
+    let dirty_draft = |name: &str, num: u64| editpad_core::snapshot::SessionTab {
+        path: None,
+        untitled_num: Some(num),
+        dirty: true,
+        file: Some(name.to_owned()),
+        ..clean_named_tab("")
+    };
+    let manifest = editpad_core::snapshot::SessionManifest {
+        generation: 1,
+        tabs: vec![
+            dirty_draft("s1-t0.snap", 1),
+            dirty_draft("s1-t1.snap", 2),
+            dirty_draft("s1-t2.snap", 3),
+        ],
+        active: 1,
+        next_untitled: 4,
+        clean_exit: true,
+    };
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+
+    // 夹具自证：第 0 页确实被护栏弃掉，另两页按清单顺序落地
+    // （`restore_dropped` 在汇总交付时已被消费，所以这里读那句出声）
+    assert_eq!(app.tabs.len(), 2, "超护栏那页放弃恢复");
+    assert!(
+        app.status.contains("超出内存护栏"),
+        "截断必须照旧出声，实得 {:?}",
+        app.status
+    );
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "激活页正文",
+        "保留集＝清单下标的子集：清单第 1 页此刻落在下标 0"
+    );
+
+    // 牙齿：当前页与输入落点都是清单里 active 指的那一页
+    assert_eq!(app.active_tab, 0, "改前实得 1 ⇒ 激活的是清单第 2 页");
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "激活页正文",
+        "键入落点必须跟着指到同一页（改前实得「另一页正文」）"
+    );
+
+    // 反面对照：一页都没被弃时，当前页照旧等于清单里那个值（挡住「一律指第一页」）
+    fs::write(dir.join("s1-t0.snap"), "被护栏弃掉的那页").unwrap();
+    let mut app2 = Editpad::default();
+    let _ = app2.restore_from_manifest(&dir, &manifest);
+    assert_eq!(app2.tabs.len(), 3, "夹具自证：这回三页全保");
+    assert_eq!(app2.active_tab, 1, "没截断时当前页＝清单 active");
+    assert_eq!(
+        app2.cur_handle.borrow().doc.to_text(),
+        "激活页正文",
+        "反面对对照：落点仍是那一页"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn loaded_language_routes_through_alias_and_sniff() {
     // P22：扩展名别名层 —— .log 命中「Editpad Log」内嵌语法

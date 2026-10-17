@@ -257,9 +257,18 @@ impl Editpad {
             let tab = self.fresh_tab();
             self.tabs.push(tab);
         }
-        // 激活页最后还原；编号计数取「清单值」与「实际用号+1」的较大者
-        self.active_tab = manifest.active.min(self.tabs.len().saturating_sub(1));
+        // 激活页最后还原，而且**按保留集里的新位置**解析。内存护栏可以把激活页
+        // **之前**的页整页弃掉（`plan_restore_order`＝先装激活页、其余按下标升序，
+        // 最后再把 `kept` 排序 ⇒ 落地顺序是清单下标的**子集**，不是同一串下标）。
+        // 改前这一句拿清单原始下标直接 `.min(len-1)`：第 0 页被弃而激活页本是第 1 页时，
+        // `active_tab` 指到清单第 2 页那份文档——选中的标签、标题栏与 `cur_handle`
+        // 一起错位，用户第一下键入落进他没选过的那一页（第 366 轮那条「判据只写在
+        // 汇点、没写在源头」的同族：`tabs` 已经换了一套坐标，当前页却还在问旧坐标）。
+        // 清单的 `active` 越界、或激活页**自己**超护栏被弃 ⇒ `position` 给不出落点，
+        // 一律落回第一页（改前那种情形指到**最后一页**＝随机指向某页）。
+        self.active_tab = kept.iter().position(|&i| i == manifest.active).unwrap_or(0);
         self.cur_handle = self.tabs[self.active_tab].editor.clone();
+        // 编号计数取「清单值」与「实际用号+1」的较大者
         next_untitled = next_untitled.max(manifest.next_untitled);
         self.untitled_next = next_untitled;
 
