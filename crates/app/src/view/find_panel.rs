@@ -20,6 +20,21 @@ impl Editpad {
         }
     }
 
+    /// 「无匹配」那一句也要带上「结果可能不完整」。
+    ///
+    /// 生产侧的 `capped` 说的是**扫描本身提前收工**这件事，命中为 0 时它照样可能为真：
+    /// 整词模式下前 `FIND_HITS_CAP` 格全被词界判据滤掉、真正的词形命中排在截断点之后，
+    /// 这时只说一句"无匹配"＝在最容易骗人的那种输入上把"我没扫完"这件事咽掉
+    /// （`view/scans.rs` 的注释明写"方向上宁多报不漏报"，L-19 立这句的就是它）。
+    /// 两处显示（查找全部面板标题／浮层计数）共用本函数，不再各写一份判分支。
+    pub(crate) fn no_match_label(&self) -> String {
+        format!(
+            "{}{}",
+            self.t(editpad_core::Key::FindNoMatch),
+            self.hits_capped_suffix()
+        )
+    }
+
     pub(super) fn find_all_panel(&self, uipx: f32, uifont: iced::Font) -> Element<'_, Message> {
         let total = self.matches.hits().len();
         let scanning = self.find_scanning();
@@ -29,7 +44,7 @@ impl Editpad {
             text(if scanning {
                 self.t(editpad_core::Key::FindSearching).to_owned()
             } else if total == 0 {
-                self.t(editpad_core::Key::FindNoMatch).to_owned()
+                self.no_match_label()
             } else {
                 // L-19：扫到上限就明示"列表可能不完整"，不让用户以为看全了
                 format!(
@@ -228,7 +243,7 @@ impl Editpad {
         let position_label = if scanning {
             self.t(editpad_core::Key::FindSearching).to_owned()
         } else if total == 0 {
-            self.t(editpad_core::Key::FindNoMatch).to_owned()
+            self.no_match_label()
         } else {
             match self.match_idx {
                 Some(i) => {

@@ -2283,6 +2283,54 @@ fn hit_cap_truncates_the_table_and_says_so() {
     assert_eq!(app.matches.hits().len(), 1, "夹具自证：未触顶的表原样");
 }
 
+/// 整词 + 截断把命中滤成 0 时，「无匹配」这一句不许把"我没扫完"咽掉——
+/// 生产侧的 `capped` 说的是**扫描提前收工**这件事本身（`view/scans.rs` 的注释：
+/// "整词过滤后可能远少于上限，但扫描确实提前收工了 ⇒ 仍报 capped"），
+/// 与表空不空无关；而显示侧原本只在 `total > 0` 的分支上挂那句限定。
+#[test]
+fn zero_hits_after_the_whole_word_filter_still_say_the_scan_was_capped() {
+    use crate::editor::FIND_HITS_CAP;
+    // 真实产料：连写的 cat 不构成词界 ⇒ 原始命中触顶、整词判据一格都不留
+    let doc = editpad_core::Document::from_str(&"cat".repeat(FIND_HITS_CAP + 2));
+    let out = crate::view::run_find_scan(&doc, "cat", true, false, true);
+    assert!(out.capped, "夹具自证：扫描确实因触顶提前收工");
+    assert!(
+        out.hits.is_empty(),
+        "夹具自证：整词过滤把表滤空，这才是本格要钉的形状"
+    );
+
+    let mut app = Editpad::default();
+    app.find_visible = true;
+    app.find_scan = Some(7);
+    dispatch(
+        &mut app,
+        Message::FindScanDone(7, crate::editor::FindHitTable::new(out.hits, out.capped)),
+    );
+    assert!(
+        app.matches.hits().is_empty(),
+        "夹具自证：面板看到的是 0 命中"
+    );
+
+    let label = app.no_match_label();
+    assert!(
+        label.contains("上限") && label.contains(&FIND_HITS_CAP.to_string()),
+        "0 命中也要说「结果可能不完整」，实得「{label}」"
+    );
+    assert!(
+        label.starts_with(app.t(editpad_core::Key::FindNoMatch)),
+        "「无匹配」那句要还在，只是补一句限定，实得「{label}」"
+    );
+
+    // 反面对照：没触顶的 0 命中只说「无匹配」，不硬凑那句提示
+    app.find_scan = Some(8);
+    dispatch(&mut app, Message::FindScanDone(8, scanned(vec![])));
+    assert_eq!(
+        app.no_match_label(),
+        app.t(editpad_core::Key::FindNoMatch).to_owned(),
+        "未触顶的 0 命中不许多出「上限」那一句"
+    );
+}
+
 // ---------- A7（功能队列②）跨标签全部替换 ----------
 
 /// 造 N 页应用并逐页喂内容：返回的应用活动页恒为第 0 页。
