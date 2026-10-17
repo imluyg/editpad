@@ -990,23 +990,81 @@ pub fn available_syntax_names() -> Vec<String> {
 /// 语言里插 `//`。前缀取值按内置包 metadata 里的 `TM_COMMENT_START` 对照过：
 /// C/C++/C#/D/Go/Java/JS/Groovy 是 `// `，**CSS 只有 `/* */`**，dosbatch 是
 /// `rem `/`:: `，Erlang 是 `% `，Haskell 是 `-- `，Clojure/Lisp 是 `; `，ASP 是 `' `。
+/// 从内置 metadata 取这门语法的行注释前缀（**去掉尾随空格**）。拿不到＝`None`。
+///
+/// 为什么要有这一档：`COMMENT_PREFIX_TABLE` 只登记了 30 来门，表外的一切此前直接落
+/// `//` 那个**猜**——内置包里 45 门语法自带 `TM_COMMENT_START`，一条没用过。现量：
+/// 表外又带 metadata 的门里，`Ruby Haml` 被猜成 `//`（它真正的前缀是 `/`）。
+///
+/// 为什么这一档只能排在手写表**之后**：表里每一条都是做过的决定。`Batch File` 那格
+/// 明知内置给 `rem ` 仍选 `::`（见 [`COMMENT_PREFIX_TABLE`] 上方的注释），让内置数据
+/// 压过来等于把上一轮记档的取舍静默推回去。
+fn metadata_line_comment(name: &str) -> Option<&'static str> {
+    let ss = syntax_set();
+    let syntax = ss.find_syntax_by_name(name)?;
+    let scoped = ss
+        .metadata()
+        .metadata_for_scope(std::slice::from_ref(&syntax.scope));
+    // ⚠️ 这里**不走** `ScopedMetadata::line_comment()`：那个方法的返回值按 `&self`
+    // 推生命周期，而 `scoped` 是本函数的局部变量 ⇒ 拿到的是"引用局部数据"的 &str，
+    // 编不过（E0515）。直接读它的公开字段（元素是 `&'static MetadataSet`）就能把
+    // 'static 带出来。取法与那个方法逐字一致：按匹配顺序取第一个有值的。
+    let raw = scoped
+        .items
+        .iter()
+        .find_map(|(_, set)| set.items.line_comment.as_deref())?;
+    // ⚠️ `trim_end` 是契约的一半：内置存的是 `"// "`／`"# "`（带一个空格），
+    // 而 `toggle_line_comment` 自己在前缀后再补一个空格 ⇒ 不去掉就写两个空格；
+    // 解包那一半按 `prefix.len()` 剥，也会剥错位。由
+    // `p456_no_prefix_ever_carries_a_trailing_space` 全局守着。
+    // 空串前缀一律当"没有"：往行首写一个空字符串没意义。
+    let trimmed = raw.trim_end();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// 语法名 → 行注释前缀（Ctrl+Q 用）。`None` ＝这门语法**没有**行注释。
+///
+/// 为什么这张表住在 core：判据本身与 GUI 无关，而它决定「往正文里写哪几个字符」，
+/// 只有钉得住的用例能证明它不写错。
+///
+/// ⚠️ 键必须是 syntect 的**真实语法名**（内置包 75 个名字实测在
+/// `crates/core/src/highlight.rs` 顶部注释与本模块用例里各钉了一份）。此前这张表
+/// 混进了一整批 VS Code 的名（`shellscript`/`bash`/`toml`/`ini`/`properties`），
+/// 内置包里根本没有这些名字 ⇒ bash/Makefile/TOML/Haskell/Lisp/Clojure/MATLAB/
+/// LaTeX/ASP/AppleScript 全落到 `_ => "//"` 那一支——也就是往 `#` 系与 `--` 系
+/// 语言里插 `//`。前缀取值按内置包 metadata 里的 `TM_COMMENT_START` 对照过：
+/// C/C++/C#/D/Go/Java/JS/Groovy 是 `// `，**CSS 只有 `/* */`**，dosbatch 是
+/// `rem `/`:: `，Erlang 是 `% `，Haskell 是 `-- `，Clojure/Lisp 是 `; `，ASP 是 `' `。
+///
+/// 取值四档，顺序即优先级（①②是**做过的决定**，压过③这份内置数据）：
+/// ① `NO_LINE_COMMENT` 否决 ⇒ 一个字都不写；② `COMMENT_PREFIX_TABLE`；
+/// ③ 内置 metadata 的 `line_comment`（去尾随空格）；④ 兜底 `//`。
+/// （这两张表是本模块私有项，所以这里不用文档链接——链了会撞
+/// `rustdoc::private_intra_doc_links`，那是本仓第 4 次踩这一族。）
 pub fn line_comment_prefix(syntax_name: Option<&str>) -> Option<&'static str> {
     let Some(name) = syntax_name else {
         // 未识别语言＝纯文本路径：沿用「按 `//` 处理」的既有口径
         return Some("//");
     };
-    // 这些语法只有块注释（或干脆没有注释），硬给一个行前缀就是往文件里写无效字符
+    // ① 这些语法只有块注释（或干脆没有注释），硬给一个行前缀就是往文件里写无效字符
     if NO_LINE_COMMENT.contains(&name) {
         return None;
     }
+    // ② 手写表：逐条精确（大小写不敏感）命中。⚠️ 它**压过**下面那档内置数据——
+    // 表里每条都是做过的决定（`Batch File` 明知内置给 `rem ` 仍选 `::`），
+    // 顺序换过来等于把记档的取舍静默推回去；这一格由 `p450_line_comment_prefix_uses_real_syntax_names`
+    // 和 `p456_handwritten_...` 两道闸一起盯着（探针量过：换序时两条同时红）。
     for (needle, prefix) in COMMENT_PREFIX_TABLE {
         if name.eq_ignore_ascii_case(needle) {
             return Some(prefix);
         }
     }
-    // 表外的一切（C/C++/C#/Java/JS/Go/Rust/PHP/Scala/Groovy/Elixir 借道者/…）沿用
-    // 既有的 `//` 默认；带括注的嵌入门（"HTML (ASP)"、"Java Server Page (JSP)"）
-    // 归谁注释本就有歧义，不为它们编一个前缀
+    // ③ 表外先问内置数据，这才是不猜的那一档
+    if let Some(prefix) = metadata_line_comment(name) {
+        return Some(prefix);
+    }
+    // ④ 表外、且内置也没给答案的（含"HTML (ASP)"、"Java Server Page (JSP)"这类带括注
+    // 的嵌入门——归谁注释本就有歧义，不为它们编一个前缀）沿用既有的 `//` 默认
     Some("//")
 }
 
@@ -2656,6 +2714,100 @@ mod tests {
                 md.line_comment().is_none(),
                 "{name} 本该拿不到 metadata（拿到了说明内置包或加载器变了）"
             );
+        }
+    }
+
+    // ---------- 档5 第二笔：手写表与 metadata 的分歧，先量成名单再动判据 ----------
+
+    #[test]
+    fn p456_handwritten_comment_table_diverges_from_metadata_only_where_named() {
+        // 这一格**不动产品行为**。它量的是：下一笔把判据换成 metadata 之后，
+        // 谁给 Ctrl+Q 的答案会变。变的那些必须逐一点名，不许靠「反正都更准」带过。
+        // 只比 metadata **有答案**的格——没带 `.tmPreferences` 的那些（含我们自嵌的四份）
+        // 本来就归手写表管，不构成"分歧"。
+        let ss = syntax_set();
+        let mut diverging: Vec<(String, Option<&'static str>, String)> = Vec::new();
+        let mut agreed = 0usize;
+        for syntax in ss.syntaxes() {
+            let md_set = ss
+                .metadata()
+                .metadata_for_scope(std::slice::from_ref(&syntax.scope));
+            let Some(md_line) = md_set.line_comment() else {
+                continue;
+            };
+            let ours = line_comment_prefix(Some(syntax.name.as_str()));
+            if Some(md_line.trim_end()) == ours {
+                agreed += 1;
+            } else {
+                diverging.push((syntax.name.clone(), ours, md_line.to_owned()));
+            }
+        }
+        assert!(agreed > 0, "一格都没对上＝判据接错了门");
+        // 现量（2026-10-17）：内置 metadata 对行注释**有答案**的一共 45 门，其中 41 门
+        // 与本仓一致；分歧只剩下面这 4 格。每一格都是**做过的决定**，不是漏登记——
+        // 所以这一笔不跟它们改。
+        const NAMED_VETOES: &[(&str, &str)] = &[
+            // 表里明知内置给 `rem ` 仍选 `::`（那是上一轮写在注释里的取舍，不是笔误）。
+            ("Batch File", "内置给 rem，本仓刻意用 ::"),
+            // 两种 literate 方言各对一半：Bird 风格代码行里 `--` 才是注释，LaTeX 风格是 `%`。
+            // 本仓按 Haskell 家族统一 `--`，不为方言再拆一层。
+            ("Literate Haskell", "内置给 %，本仓随 Haskell 家族取 --"),
+            // 严格 JSON 根本没有注释：内置那个 `// ` 是"能骗过编辑器、骗不过解析器"的前缀。
+            ("JSON", "否决表压过内置"),
+            // reStructuredText 不是代码：行首插 `..` 是把正文改成指令/注释块，与 Markdown 同理。
+            ("reStructuredText", "否决表压过内置"),
+        ];
+        let got: Vec<&str> = diverging.iter().map(|(n, _, _)| n.as_str()).collect();
+        for (name, why) in NAMED_VETOES {
+            assert!(
+                got.contains(name),
+                "名单里的 {name} 不见了＝判据变了，{why}"
+            );
+        }
+        for (name, ours, md) in &diverging {
+            assert!(
+                NAMED_VETOES.iter().any(|(n, _)| n == name),
+                "新出现一格分歧：{name} 本仓 {ours:?} / 内置 {md:?}＝内置包换过或判据被动过，\
+                 这一格要先定性（谁的对）再决定改谁"
+            );
+        }
+        assert_eq!(
+            diverging.len(),
+            NAMED_VETOES.len(),
+            "分歧格数与名单不符（多出来的会由上一条抓住，这条兜反向）"
+        );
+    }
+
+    #[test]
+    fn p456_metadata_fills_the_gap_the_tables_never_named() {
+        // 这一档真正的收益不在那 4 格分歧，在**表外的那些门不再靠猜**：
+        // Ruby Haml 两张表都没登记，此前一路落到 `Some("//")` 那个兜底——
+        // 而它的前缀是 `/`（内置 metadata 早就带着，只是没人读）。
+        assert_eq!(line_comment_prefix(Some("Ruby Haml")), Some("/"));
+        // 表外、且内置也没给答案的，仍然走兜底（这一格证明兜底没被摘掉）
+        assert_eq!(line_comment_prefix(Some("Not A Real Syntax")), Some("//"));
+        assert_eq!(
+            line_comment_prefix(None),
+            Some("//"),
+            "未设语言＝纯文本路径"
+        );
+    }
+
+    #[test]
+    fn p456_no_prefix_ever_carries_a_trailing_space() {
+        // 全局不变量：79 门里任何一门拿到的前缀都**不许带空白、也不许是空串**。
+        // 病根：内置 metadata 存的 `"// "`／`"# "` 自带一个空格，而
+        // `toggle_line_comment` 自己在前缀后再补一个 ⇒ 不 trim 就写两个空格，
+        // 且解包那半按 `prefix.len()` 剥会剥错位。这一条比逐门断言便宜，且覆盖
+        // 内置包哪天新增的语法。
+        for syntax in syntax_set().syntaxes() {
+            if let Some(prefix) = line_comment_prefix(Some(syntax.name.as_str())) {
+                assert!(
+                    !prefix.is_empty() && !prefix.ends_with(' ') && !prefix.ends_with('\t'),
+                    "{} 的前缀 {prefix:?} 带空白＝Ctrl+Q 会写两个空格，解包也会错位",
+                    syntax.name
+                );
+            }
         }
     }
 }

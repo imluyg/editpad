@@ -405,11 +405,15 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
   不写正文也不置脏，只读页照样可用；**有路径时这次指定会记进设置**（按扩展名记，取不到扩展名时
   按整文件名记，如 `.env`／`dockerfile`），同一类文件下次打开就直接按它——面板表头第一条
   「自动判定」就是这条记录的退路；未命名页无处可记，只作用本页；
-- 行注释前缀（`Ctrl+Q`）按 syntect 的真实语法名取值：`#` 系（bash/Makefile/TOML/Dockerfile/YAML/Perl/R/Tcl…）、
-  `--` 系（SQL/Lua/Haskell/AppleScript）、`;` 系（Lisp/Clojure）、`%` 系（Erlang/MATLAB/LaTeX/BibTeX）、
-  `'`（ASP）、`::`（批处理）、`//`（Java 显式登记；C/C++/C#/Go/Rust/JS 这些表外的门走同一默认值）；
-  只有块注释、或根本不是代码的（Markdown/JSON/CSS/HTML/XML/Log）
-  一个字都不写；
+- 行注释前缀（`Ctrl+Q`）取值四档，**顺序即优先级**：
+  ① 否决表——只有块注释、或根本不是代码的（Markdown/JSON/CSS/HTML/XML/reStructuredText/Log）一个字都不写；
+  ② 手写表——`#` 系（bash/Makefile/TOML/Dockerfile/YAML/Perl/R/Tcl…）、`--` 系（SQL/Lua/Haskell/AppleScript）、
+  `;` 系（Lisp/Clojure）、`%` 系（Erlang/MATLAB/LaTeX/BibTeX）、`'`（ASP）、`::`（批处理）、`//`（Java）；
+  ③ **内置 metadata**——表外的门不再靠猜，从 syntect 自带的 `TM_COMMENT_START` 读
+  （C/C++/C#/Go/Rust/JS 这些拿到 `//`，`Ruby Haml` 从此是 `/` 而不是被兜底猜成 `//`）；
+  ④ 都没有则兜底 `//`。
+  ②压过③是**有意的**：表里每一条都是做过的决定（`Batch File` 明知内置给 `rem` 仍选 `::`），
+  让内置数据压过来等于把记档的取舍静默推回去——这一格有探针量过（换序时新旧两道用例一起红）；
 - Markdown 文件提供 `MD 预览` 面板（标题/段落/有序无序列表（含序号・嵌套・任务勾选框）/引用/围栏代码（按围栏语言上色）/表格/分隔线，行内粗体斜体・删除线・行内代码・链接与图片；正文按词换行、链接可点、配色随主题；预览与正文同屏分栏（边写边看），预览树跨帧复用并节流换版，只读渲染）；**写的一侧**：回车接住列表与引用（`> - 甲` → `> - `，空项退一层、空栏退引用，有序号进位、任务框给空框），`Ctrl+B`／`Ctrl+I`／`Ctrl+\``／`Ctrl+J`／`Ctrl+K` 把选区包成粗体／斜体／行内代码／删除线／链接，**再按一次解回原样**；Ctrl+Q 在 Markdown 页不适用（它没有行注释前缀），不会往正文插 `//`；
 - JSON 文件支持 `Ctrl+Shift+F` 一键校验并格式化；
 - 深浅主题切换时高亮配色整体重建，深色下不再出现浅色主题残留配色。
