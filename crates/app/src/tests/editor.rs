@@ -899,6 +899,86 @@ fn column_editor_f6_dispatches() {
     assert!(matches!(msg, Some(Message::ColumnEditorToggled)));
 }
 
+/// 关掉「对话框所属那一页」时对话框必须跟着收。P336 那条「浮层绑在活动页上 ⇒
+/// 换页就作废」只挂在 `set_active_tab`，而**移除页**走的是
+/// `realign_active_after_removal`／`refresh_cur_handle`，压根不经过那儿 ⇒ 改前框还开着、
+/// 活动页已经换人：再按 Enter 就把旧页草稿生成的**多行**内容插进新页并置脏
+/// （开着自动保存，两秒后新页磁盘上那份一起被覆写）。
+/// 反面对照：关掉的是**别的**页 ⇒ 那一页还在、草稿照旧能用，不许一律收掉。
+#[test]
+fn closing_the_page_a_column_editor_belongs_to_also_closes_the_dialog() {
+    use crate::editor::{BlockSel, CursorPos};
+    let mk_block = |app: &mut Editpad| {
+        app.cur_handle.borrow_mut().block_sel = Some(BlockSel {
+            anchor: CursorPos { line: 0, col: 1 },
+            head: CursorPos { line: 1, col: 2 },
+        });
+    };
+
+    // ---- 缺陷格：关掉的正是对话框那一页 ----
+    let mut app = app_with_tabs(2);
+    app.set_active_tab(0);
+    dispatch(&mut app, Message::ColumnEditorModeToggled);
+    dispatch(&mut app, Message::ColumnEditorStartChanged("10".into()));
+    mk_block(&mut app);
+    dispatch(&mut app, Message::ColumnEditorToggled);
+    assert!(app.column_editor_visible, "夹具自证：框在页 0 上开着");
+    assert_eq!(
+        app.column_editor_tab,
+        Some(app.tabs[0].id),
+        "夹具自证：开框记下了所属页 id"
+    );
+    // 关页确认条不是本条要盯的东西：清掉脏标记，走"干净页直落漏斗"那条路
+    app.tabs[0].dirty = false;
+    dispatch(&mut app, Message::CloseTabAt(0));
+    assert_eq!(app.tabs.len(), 1, "夹具自证：页 0 真的被移除了");
+    assert!(
+        !app.column_editor_visible,
+        "所属页被移除 ⇒ 对话框必须收起（改前它留着）"
+    );
+    assert_eq!(app.column_editor_tab, None, "收框连带作废那份归属记账");
+    // 此刻按 Enter 不许把旧页草稿写进幸存的那一页
+    let before = app.cur_handle.borrow().doc.to_text();
+    let dirty_before = app.tabs[0].dirty;
+    dispatch(&mut app, Message::ColumnEditorConfirmed);
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        before,
+        "对话框已收 ⇒ 确认是 no-op，正文一字不许动"
+    );
+    assert_eq!(app.tabs[0].dirty, dirty_before, "不许凭空把幸存页置脏");
+
+    // ---- 反面对照：关掉别的页，草稿照旧可用 ----
+    let mut app2 = app_with_tabs(2);
+    app2.set_active_tab(1);
+    dispatch(
+        &mut app2,
+        Message::Edit(EditOp::InsertText("abcdef\nghijkl\n".into())),
+    );
+    dispatch(&mut app2, Message::ColumnEditorModeToggled);
+    dispatch(&mut app2, Message::ColumnEditorStartChanged("10".into()));
+    dispatch(&mut app2, Message::ColumnEditorStepChanged("5".into()));
+    mk_block(&mut app2);
+    dispatch(&mut app2, Message::ColumnEditorToggled);
+    assert!(app2.column_editor_visible, "夹具自证：框在页 1 上开着");
+    let owner1 = app2.tabs[1].id;
+    app2.tabs[0].dirty = false;
+    dispatch(&mut app2, Message::CloseTabAt(0));
+    assert_eq!(app2.tabs.len(), 1, "夹具自证：关掉的是另一页");
+    assert!(app2.column_editor_visible, "所属页还在 ⇒ 框不许被误收");
+    assert_eq!(
+        app2.column_editor_tab,
+        Some(owner1),
+        "归属记账照旧指着那一页"
+    );
+    dispatch(&mut app2, Message::ColumnEditorConfirmed);
+    assert_eq!(
+        app2.cur_handle.borrow().doc.to_text(),
+        "a10cdef\ng15ijkl\n",
+        "草稿仍写进它自己那一页的列块"
+    );
+}
+
 #[test]
 fn column_editor_dialog_open_guard_and_confirm() {
     use crate::editor::{BlockSel, CursorPos, NumBase};

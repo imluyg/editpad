@@ -938,6 +938,9 @@ impl Editpad {
                 self.close_settings_dialog();
                 self.palette_visible = false;
                 self.column_editor_visible = true;
+                // 记下这份草稿属于**哪一页**：移除页的那三条漏斗不经过 `set_active_tab`
+                // （P336 的浮层作废挂在那儿），要靠这份 id 现地重认那一页还在不在
+                self.column_editor_tab = Some(self.tab().id);
                 // P151 那把钥匙剩下的第五个框：开栏就把键盘焦点交给**当下这个模式
                 // 要填的那一栏**。缺这一句时 `F6` 开栏后打的字一个都不进框——它们经
                 // `listen_with` 的 `Status::Ignored` 变成 `KeyPressed` → 热键表 →

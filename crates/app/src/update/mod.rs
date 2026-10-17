@@ -553,6 +553,7 @@ impl Editpad {
     /// `close`，少了这道"本来不在场就什么都不做"的闸，等于每次进 busy 都把焦点
     /// 按回正文——那会夺走查找栏（它**不在**这份名单里）正拿着的焦点。
     pub(crate) fn close_column_editor(&mut self) {
+        self.column_editor_tab = None;
         if !std::mem::replace(&mut self.column_editor_visible, false) {
             return;
         }

@@ -30,7 +30,13 @@ impl Editpad {
     /// ② `batch_close_confirm`——条上那句「将关闭 N 个（M 个未保存）」直接按这份名单
     ///    数（`view/mod.rs:638-644`），留着死 id 就是当着用户的面报一个他根本没选过的数；
     ///    落地侧 P213／P387 早就按 id 现地解析并跳过解析不到的页 ⇒ 行动一直是对的，
-    ///    **话是错的**，所以这一格只能在名单侧收。
+    ///    **话是错的**，所以这一格只能在名单侧收；
+    /// ③ `column_editor_tab`——列编辑器对话框的草稿**绑在它被打开那一刻的那一页**
+    ///    （P336 的「换页作废浮层」只挂在 `set_active_tab` 上，而移除页走的是
+    ///    `realign_active_after_removal`／`refresh_cur_handle`，压根不经过那儿）。
+    ///    关掉的正是那一页而框还开着 ⇒ 再按 Enter 把旧页草稿生成的**多行**内容插进
+    ///    新活动页并把它置脏，开着自动保存两秒后连新页磁盘上那份一起被覆写。
+    ///    关掉的是**别的**页时那一页还在、草稿照旧能用 ⇒ 按 id 重认，不是一律收。
     /// 形状同 [`Self::clear_index_addressed_tab_ui`]／`shift_restore_queue_after_removal`：
     /// 「页集合变了 ⇒ 按页记账的那份名单要跟着对账」这件事只写在三条移除漏斗里。
     pub(crate) fn reap_dead_pages_from_id_keyed_prompts(&mut self) {
@@ -46,6 +52,13 @@ impl Editpad {
             if ids.is_empty() {
                 self.batch_close_confirm = None;
             }
+        }
+        // ③ 列编辑器对话框：草稿绑在它被打开那一页上，那一页被移除就没有落点
+        if self
+            .column_editor_tab
+            .is_some_and(|id| !alive.contains(&id))
+        {
+            self.close_column_editor();
         }
     }
 

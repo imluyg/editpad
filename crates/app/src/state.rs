@@ -271,6 +271,14 @@ pub(crate) struct Editpad {
     pub(crate) column_editor_visible: bool,
     /// 对话框草稿（跨开合保留）
     pub(crate) column_editor: ColumnEditorDraft,
+    /// 这份草稿**属于哪一页**（页 id，S-1 规矩：浮层的待执行意图绑在它被打开那一刻
+    /// 的那一页）。开框时记、关框时清；唯一消费者是
+    /// `Editpad::reap_dead_pages_from_id_keyed_prompts`——真的移除了页的那三条漏斗
+    /// 用它判断「那一页还在不在」，不在就收掉对话框。
+    /// 为什么需要它：P336 的浮层作废只挂在 `set_active_tab` 上，而**移除页**那条出路
+    /// 改的是 `realign_active_after_removal`／`refresh_cur_handle`，不经过 `set_active_tab`
+    /// ⇒ 关掉的正是对话框那一页时，框还开着而活动页已经换人。
+    pub(crate) column_editor_tab: Option<u64>,
     /// P130：待归页的监视重载（**页 id**, 是否 tail 跟随, 重载前视图）——
     /// check_external_changes 发起监视重载时捕获，Loaded 归页时消费
     ///（元组即重载前视图快照，一次性搬运不设类型别名）。
@@ -507,6 +515,7 @@ impl Default for Editpad {
             clip_history: Vec::new(),
             column_editor_visible: false,
             column_editor: ColumnEditorDraft::default(),
+            column_editor_tab: None,
             monitor_pending: None,
             pending_link_goto: None,
             always_on_top: false,
