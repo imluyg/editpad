@@ -445,6 +445,39 @@ fn close_other_tabs_aggregates_dirty_confirm_and_spares_pinned() {
     assert_eq!(app.tabs.len(), 1);
 }
 
+/// 聚合确认条那份 id 名单也是**按页记账的名单**：条上「将关闭 N 个」直接按它数
+/// （`view/mod.rs:638-644`），所以关掉其中一页之后不许还挂着死 id——那既让条报出
+/// 一个用户根本没选过的数，也让〔放弃并关闭〕对着空位算一次。落地侧 P213／P387
+/// 早就按 id 现地解析并跳过解析不到的页 ⇒ 行动一直是对的，**话是错的**。
+#[test]
+fn closing_a_listed_page_drops_it_from_the_batch_close_bar() {
+    let mut app = app_with_tabs(3); // 页 0 置脏，页 1／2 干净
+    dispatch(&mut app, Message::CloseOtherTabs(1)); // 目标 = {0, 2}，含脏页 ⇒ 弹聚合条
+    let (id0, id2) = (app.tabs[0].id, app.tabs[2].id);
+    assert_eq!(
+        app.batch_close_confirm.clone(),
+        Some(vec![id0, id2]),
+        "夹具自证：两份目标都在条上（含置脏的那一页）"
+    );
+
+    // 条子停留期间，把其中那一页干净页直接关掉
+    dispatch(&mut app, Message::CloseTabAt(2));
+    assert_eq!(app.tabs.len(), 2, "夹具自证：那一页确实已被移除");
+    assert_eq!(
+        app.batch_close_confirm,
+        Some(vec![id0]),
+        "已关的那一页不许还挂在条上：条上的「N 个」就是按这份名单数的"
+    );
+
+    // 再关掉最后一份目标 ⇒ 名单空了就收起整条，而不是留一份空列表让按钮空转
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+    assert_eq!(
+        app.batch_close_confirm, None,
+        "目标全没了就收条，实际 {:?}",
+        app.batch_close_confirm
+    );
+}
+
 #[test]
 fn close_right_tabs_only_touches_right_side_non_pinned() {
     // 4 页（页 0 置脏，其余干净）：页 2 固定。「在页 0 上关闭其他」

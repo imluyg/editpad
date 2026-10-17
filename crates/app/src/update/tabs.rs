@@ -22,19 +22,29 @@ impl Editpad {
         }
     }
 
-    /// 真的移除了页 ⇒ 外部改动提示条的队列里不许留着死页 id。渲染取的是
-    /// `queue.first()` 那一页（`view/mod.rs:718-720` 按 id 找页，找不到就整条不出现），
-    /// 所以队首成了死页 ＝ **队列里还活着的那些页再也点不到**〔重新加载〕／〔忽略〕，
-    /// 而巡检只跑在窗口聚焦与监视节拍上——用户一直开着窗口就没有第二问。
-    /// 队列空了就收成 `None`，与两条裁决出路的「空即收起」同一形态。
+    /// 真的移除了页 ⇒ 一切**按页 id 记账的浮层名单**都要跟着对账，名单空了就收起整条：
+    /// ① `external_change`——渲染取的是 `queue.first()` 那一页（`view/mod.rs:718-720`
+    ///    按 id 找页，找不到就整条不出现），队首成了死页 ＝ **队列里还活着的那些页
+    ///    再也点不到**〔重新加载〕／〔忽略〕，而巡检只跑在窗口聚焦与监视节拍上——
+    ///    用户一直开着窗口就没有第二问；
+    /// ② `batch_close_confirm`——条上那句「将关闭 N 个（M 个未保存）」直接按这份名单
+    ///    数（`view/mod.rs:638-644`），留着死 id 就是当着用户的面报一个他根本没选过的数；
+    ///    落地侧 P213／P387 早就按 id 现地解析并跳过解析不到的页 ⇒ 行动一直是对的，
+    ///    **话是错的**，所以这一格只能在名单侧收。
     /// 形状同 [`Self::clear_index_addressed_tab_ui`]／`shift_restore_queue_after_removal`：
-    /// 「页集合变了 ⇒ 按页记账的那份名单要跟着对账」这件事只写在漏斗里。
-    pub(crate) fn purge_dead_pages_from_external_prompt(&mut self) {
+    /// 「页集合变了 ⇒ 按页记账的那份名单要跟着对账」这件事只写在三条移除漏斗里。
+    pub(crate) fn reap_dead_pages_from_id_keyed_prompts(&mut self) {
         let alive: Vec<u64> = self.tabs.iter().map(|t| t.id).collect();
         if let Some(queue) = self.external_change.as_mut() {
             queue.retain(|id| alive.contains(id));
             if queue.is_empty() {
                 self.external_change = None;
+            }
+        }
+        if let Some(ids) = self.batch_close_confirm.as_mut() {
+            ids.retain(|id| alive.contains(id));
+            if ids.is_empty() {
+                self.batch_close_confirm = None;
             }
         }
     }
@@ -69,8 +79,8 @@ impl Editpad {
         // 页集合变了 ⇒ 标签条上按裸下标找页的三份瞬态全部作废
         //（P112 起这里原本只清悬停态，另两份留着同一条理由却没人执行）
         self.clear_index_addressed_tab_ui();
-        // 同上对账：提示条那份按页 id 记的名单里不许留着已关的页
-        self.purge_dead_pages_from_external_prompt();
+        // 同上对账：两条按页 id 记账的名单（外部改动队列／批量关闭条）都不许留着已关的页
+        self.reap_dead_pages_from_id_keyed_prompts();
         // P145→S-1：确认条存页 id，这里只需「目标页没了就收起」，不再平移下标
         self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {
@@ -120,7 +130,7 @@ impl Editpad {
         }
         // 同上：悬停页可能在被移除之列，作废与 close_tab_now 收进同一处
         self.clear_index_addressed_tab_ui();
-        self.purge_dead_pages_from_external_prompt();
+        self.reap_dead_pages_from_id_keyed_prompts();
         // S-1：同 close_tab_now——按页 id 存在性收口，不数移除了几个
         self.dismiss_close_confirm_if_gone();
         if let Some(last) = self.ensure_nonempty_tabs() {
