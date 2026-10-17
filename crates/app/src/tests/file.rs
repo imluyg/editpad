@@ -4330,6 +4330,67 @@ fn markdown_preview_throttles_rebuilds_while_typing() {
     MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
 }
 
+/// P467＝**右半画的是另一篇文档**：预览树的换版闸门只问"键变了没有＋窗口到期没有"，
+/// 而**不知道变了的那一位是页**。解析缓存那一侧早就写着例外（"屏幕上不是这一页 ⇒
+/// 不许等窗口，别页的块表一张也不许借"，`view/mod.rs`），树这一侧漏了同一条 ⇒
+/// 在节流窗口里切标签页，右边继续显示上一页的正文，要等窗口到期后的下一帧才自愈
+/// （而"下一帧"靠的是光标闪烁拍——焦点不在编辑面时可能更久）。
+#[test]
+fn p467_switching_pages_inside_the_window_still_swaps_the_preview_tree() {
+    use crate::md_preview::{MD_BUILD_COUNT, MD_PREVIEW_SWAP_MS, MD_SWAP_WINDOW_MS};
+    let count = || MD_BUILD_COUNT.with(|c| c.get());
+    let loaded = |app: &mut Editpad, name: &str, text: &str| {
+        dispatch(app, Message::FileDropped(PathBuf::from(name)));
+        let seq = app.job_seq;
+        dispatch(
+            app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(text),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+    };
+
+    let mut app = Editpad::default();
+    loaded(&mut app, "C:/x/甲.md", "# 甲页\n\n甲页正文一段\n");
+    // ⚠️ 夹具坑（第 331 轮记过）：`FileDropped` 会复用"空的净页"而不是新开一页
+    // ⇒ 第一页必须先有内容，第二张才真的开出来，所以上面那句不是多余的准备动作。
+    loaded(&mut app, "C:/x/乙.md", "# 乙页\n\n乙页正文一段\n");
+    assert_eq!(app.tabs.len(), 2, "夹具自证：两页都开着");
+    assert_eq!(app.active_tab, 1, "夹具自证：当前在乙页");
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, "夹具自证：预览已开");
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(0));
+    let _ = app.view();
+    let base = count();
+    assert!(
+        base > 0,
+        "夹具自证：首帧确实建过预览树（不然下面的差值是空差值）"
+    );
+
+    // 窗口＝永不到期：这一帧切页，只有"换了页"这一条能准许重建
+    MD_SWAP_WINDOW_MS.with(|c| c.set(u64::MAX));
+    dispatch(&mut app, Message::SwitchTab(0));
+    let _ = app.view();
+    assert_eq!(
+        count() - base,
+        1,
+        "节流窗口里切页却沿用旧树＝把乙页的正文画在甲页的预览里"
+    );
+
+    // 反面对照：同一页连着画两帧不许重建（这次修的是"切页要换"，不是"每帧都换"）
+    let after = count();
+    let _ = app.view();
+    assert_eq!(count(), after, "同页连续帧被这次改动带成逐帧重建");
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
+}
+
 /// 连打时**全篇重解析也要跟着节流走**——不许每键拷一遍全文再重解一遍。
 ///
 /// 上一条用例（`markdown_preview_throttles_rebuilds_while_typing`）只管 widget 树的

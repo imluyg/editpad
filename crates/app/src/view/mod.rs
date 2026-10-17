@@ -372,6 +372,7 @@ impl Editpad {
                     &self.md_preview_tree,
                     &self.md_preview_swap_at,
                     key_hash,
+                    tab.id,
                     || {
                         markdown_preview_element(
                             &shown,

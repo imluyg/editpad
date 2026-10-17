@@ -679,8 +679,8 @@ pub(crate) fn md_preview_can_swap(last: Option<std::time::Instant>) -> bool {
     }
 }
 
-/// 取本帧该用的预览树：键没变⇒复用；键变了但还在节流窗口里⇒**继续用旧树**；
-/// 否则整棵重建并记下换版时刻。
+/// 取本帧该用的预览树：键没变⇒复用；键变了但**还是这一页**且还在节流窗口里⇒继续用旧树；
+/// 换了页⇒立刻换树（旧树是另一篇文档，P467）。
 ///
 /// 旧树是**自足**的（`markdown_preview_element` 把每个 span 的文本克隆成 owned
 /// Fragment），所以即使旧块表已经被释放，旧树仍能把上一版内容完整画出来——
@@ -689,15 +689,19 @@ pub(crate) fn md_preview_tree_for(
     holder: &MdTreeSlot,
     swap_at: &std::cell::Cell<Option<std::time::Instant>>,
     want: u64,
+    page: u64,
     build: impl FnOnce() -> Element<'static, Message>,
 ) -> MdTree {
     let mut held = holder.0.borrow_mut();
     match held.as_mut() {
-        Some((k, slot)) if *k == want => slot.clone(),
-        Some((_, slot)) if !md_preview_can_swap(swap_at.get()) => slot.clone(),
+        Some((k, _, slot)) if *k == want => slot.clone(),
+        // P467：变了的那一位是**页**时不许等窗口——旧树画的是另一篇文档，
+        // 沿用就是把乙页的正文显示在甲页的预览里。解析缓存那一侧早有同一条例外
+        // （"别页的块表一张也不许借"），这里补的是它在树级别的对应物。
+        Some((_, p, slot)) if *p == page && !md_preview_can_swap(swap_at.get()) => slot.clone(),
         _ => {
             let built = Rc::new(std::cell::RefCell::new(Some(build())));
-            *held = Some((want, built.clone()));
+            *held = Some((want, page, built.clone()));
             swap_at.set(Some(std::time::Instant::now()));
             built
         }
@@ -787,7 +791,7 @@ pub(crate) type MdTree = Rc<std::cell::RefCell<Option<Element<'static, Message>>
 ///
 /// 包一层是因为 `Editpad` 整块 `derive(Debug)`，而 iced 的 `Element` 没有 `Debug`。
 #[derive(Clone, Default)]
-pub(crate) struct MdTreeSlot(pub std::cell::RefCell<Option<(u64, MdTree)>>);
+pub(crate) struct MdTreeSlot(pub std::cell::RefCell<Option<(u64, u64, MdTree)>>);
 
 impl std::fmt::Debug for MdTreeSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
