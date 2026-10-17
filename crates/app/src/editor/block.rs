@@ -411,6 +411,12 @@ impl EditorCore {
         for body in &bodies {
             if outdent {
                 let stripped = strip_one_indent_unit(body, step);
+                // ⚠️ `deltas` 被下面的 `shifted` 当**字符列**增量消费，这里算的却是
+                // **字节**差。两者相等的前提＝[`strip_one_indent_unit`] 只会吃掉 ASCII
+                // 的 `\t` 与空格（一个字节＝一列）——该集合一旦放宽（例如把全角空格
+                // U+3000 也当成缩进档），这一句必须同时改成按字符数，否则光标会按
+                // 字节跑进正文里。前提由用例
+                // `outdent_only_strips_ascii_indent_units_and_columns_move_by_chars` 钉住。
                 deltas.push(stripped.len() as isize - body.len() as isize);
                 new_bodies.push(stripped);
             } else {

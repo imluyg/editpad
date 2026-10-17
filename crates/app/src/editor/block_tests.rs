@@ -2064,6 +2064,41 @@ fn outdent_strips_tab_or_up_to_tab_stop_spaces() {
     assert_eq!(c.cursor, CursorPos { line: 3, col: 1 }, "无增量行的列不动");
 }
 
+/// 反缩进剥的集合**只有** ASCII 的 `\t` 与空格。这条前提不是免费的：`block.rs`
+/// 里那份 `deltas` 拿「剥掉的字节数」当「列要回退的字符数」用，只因这两个集合
+/// 里的字符一字节宽。全角空格 U+3000 与 NBSP 在日文/中文正文里就在行首常见，
+/// 谁把它们收进缩进档，`deltas` 必须同时改成按字符数——本用例把「剥不到」钉成
+/// 期望，改集合时这一格会先红，红点直接指到那处算式。
+/// 同一格还顺带钉住列按**字符**走：第三行正文是多字节，列 3 回退两档落到列 1，
+/// 而不是落到字节口径的某个越界列。
+#[test]
+fn outdent_only_strips_ascii_indent_units_and_columns_move_by_chars() {
+    let mut c = core_with("\u{3000}x\n\u{a0}y\n  中文z");
+    c.anchor = Some(CursorPos { line: 0, col: 1 });
+    c.cursor = CursorPos { line: 2, col: 3 };
+    assert!(c.indent_touched_lines(true), "第三行有两个空格可剥＝真动手");
+    // 宽空格不是缩进档 ⇒ 前两行一字不动；第三行剥掉 ASCII 空格
+    assert_eq!(c.doc.to_text(), "\u{3000}x\n\u{a0}y\n中文z");
+    assert_eq!(
+        c.anchor,
+        Some(CursorPos { line: 0, col: 1 }),
+        "零增量行的锚点列不动"
+    );
+    assert_eq!(
+        c.cursor,
+        CursorPos { line: 2, col: 1 },
+        "列按字符回退（「中」与「文」各占一列）"
+    );
+    // 反面对照：只有宽空格可「剥」⇒ 整次按 no-op 收，不产快照
+    let mut only_wide = core_with("\u{3000}\u{a0}x");
+    only_wide.cursor = CursorPos { line: 0, col: 2 };
+    assert!(
+        !only_wide.indent_touched_lines(true),
+        "宽空格不算缩进档 ⇒ 无事可做"
+    );
+    assert_eq!(only_wide.doc.to_text(), "\u{3000}\u{a0}x");
+}
+
 #[test]
 fn outdent_without_selection_outdents_current_line() {
     let mut c = core_with("    x");

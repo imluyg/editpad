@@ -929,8 +929,14 @@ impl Editpad {
         self.find_all_visible = false;
         self.fif_visible = false;
         self.cancel_fif_scan();
-        // 崩溃恢复提示条：Esc = 「这次不裁决」，与〔丢弃〕不同义——那条会
-        // clear_session 把快照删掉。这里只收起提示，快照留在原处下次启动再问。
+        // 崩溃恢复提示条：Esc 与〔丢弃〕不同义——后者调 `discard_session`（P378 起
+        // 只删崩前那一份会话的页与清单，不碰整个快照目录；旧注释写的 `clear_session`
+        // ＝`remove_dir_all` 是改判前的形状）。这里只收起提示条。
+        // ⚠️ 但「收起」在本仓**没有**「下次启动再问」的兑现：提示条唯一的出现处是
+        // 启动时读到崩前那份清单（`view/restore.rs:66`），本进程此后每一拍心跳都
+        // 写一份新清单覆盖它，而 `keeping` 又只从本字段取（`view/snapshots.rs:107-111`）
+        // ⇒ 崩前那几页的文件在下一拍被回收／配额两把刀一起删掉（`core/src/snapshot.rs:396-411`）。
+        // 要不要真「留着再问」＝机制级决定（新增待决字段＋清单如何共存），已登记等他点单。
         self.recover_prompt = None;
         // P364：连带收掉〔恢复〕的「已问过替换未保存改动」记号。留着它 = 一次
         // 误按 Esc 就把护栏永久武装掉，下次弹出的提示条第一下点击直接替换标签页。
