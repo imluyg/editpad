@@ -822,7 +822,11 @@ impl EditorCore {
     /// - 单次快照、主导行尾重建（选区内混合行尾归一）、书签按行结构
     ///   下推/保留：首行（残文前缀所在行）书签原位，其余被拆行的书签
     ///   并入块尾残文行；
-    /// - 断在空行正中（前后皆空）→ 内容不变，no-op 不产快照。
+    /// - 断在既有行界上（选区就是一个换行／空行正中断行）＝**与回车同款，多出一个
+    ///   空行**，不是 no-op：这条语义由 `split_line_cursor_selection_and_noop` 与
+    ///   `split_line_treats_exotic_breaks_like_the_dominant_one` 的参照格钉着，
+    ///   要改成语义级"行界当分隔符"得先重开那条裁决（旧注释写的"前后皆空 ⇒ 内容不变
+    ///   不产快照"与机制不符，第 352 轮按读数改掉）。
     pub fn split_line(&mut self) -> bool {
         // P461：问「有选区吗」走唯一那把尺，不问 `anchor`——同位的锚点屏幕上看不见。
         let (s, e) = if self.has_selection() {
@@ -882,7 +886,8 @@ impl EditorCore {
         new_lines.push(pre);
         new_lines.extend(middle.iter().cloned());
         new_lines.push(post);
-        // no-op 守卫：新旧逐行一致（如空行正中断行）
+        // no-op 守卫：新旧逐行一致才真的什么都不动。⚠️ 空行正中断行**不**命中这一条
+        // （那边产出 ["", ""] 而旧行是 [""]）＝有意多出一个空行，与回车同款。
         let old_lines: Vec<String> = (ls..=le).map(|i| self.line_body_without_eol(i)).collect();
         if new_lines == old_lines {
             return false;
