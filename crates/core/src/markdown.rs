@@ -406,8 +406,9 @@ fn parse_lines(lines: &[&str], defs: &LinkDefs, is_def: &[bool], doc_begin: usiz
 /// 后面的号一律不采信、逐项 +1，**空行也不另起一个列表**。改前我们原样回声，
 /// 于是预览里会冒出「1. 1. 9.」这种作者改完条目忘了改号的数字。
 ///
-/// 层与层各起各的号；中间插入一个无序项 ⇒ 那层的连续号断掉（GitHub 也是两个列表）；
-/// 回到上一层时接着那层已发到的号继续走。
+/// 层与层各起各的号；中间插入一个**同层**无序项 ⇒ 那一层及更深层的连续号断掉
+/// （GitHub 也是两个列表）；而**带缩进**的无序项只是上一层的子列表，外层号照旧续
+/// （P470）；回到上一层时接着那层已发到的号继续走。
 fn renumber_ordered_lists(blocks: &mut [MdBlock]) {
     // (缩进层, 下一个该发的号)
     let mut levels: Vec<(usize, usize)> = Vec::new();
@@ -432,8 +433,15 @@ fn renumber_ordered_lists(blocks: &mut [MdBlock]) {
                 };
                 *n = next;
             }
-            // 无序项／别的块都把这层的号断掉
-            MdBlock::ListItem { order: None, .. } => levels.clear(),
+            // 无序项：**只断它自己那一层及更深层**（P470）。带缩进的无序项是上一层有序项的
+            // 子列表，GitHub 因此照样续外层的号；同层（`indent == 0`）那一形等价于全清，
+            // 就是既有的"另起一个列表"行为。别的块（段落／标题／引用）仍断整条号链——
+            // 那是多年既有口径，本笔没动。
+            MdBlock::ListItem {
+                order: None,
+                indent,
+                ..
+            } => levels.retain(|(d, _)| *d < *indent),
             MdBlock::Quote { blocks: inner, .. } => {
                 renumber_ordered_lists(inner);
                 levels.clear();
@@ -2829,6 +2837,41 @@ mod tests {
             quote_reading(&parse_markdown("> - 甲\n接着写\n")[0]).1,
             vec![("item", "甲 接着写".to_owned())],
             "引用里的项也能接懒续行"
+        );
+    }
+
+    /// P470＝**更深一层的无序项不该把外层的号断掉**。基准仍是 GitHub `/markdown`：
+    /// `5. 五 / （缩进）- 子 / 7. 七` 里那个带缩进的无序项是**第 5 项的子列表**，
+    /// 外层还是同一个 `<ol start="5">` ⇒ 渲染 5、6。改前 `levels.clear()` 把外层一起清了
+    /// ⇒ `7.` 被当成"另起一个列表的首项"原样回声——正是这个函数存在要防的那件事
+    /// （作者插完条目忘了改号）。
+    #[test]
+    fn p470_a_deeper_unordered_item_keeps_the_outer_numbering() {
+        let nums = |src: &str| -> Vec<Option<usize>> {
+            parse_markdown(src)
+                .iter()
+                .filter_map(|b| match b {
+                    MdBlock::ListItem { order, .. } => Some(*order),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            nums("5. 五\n   - 子\n7. 七\n"),
+            vec![Some(5), None, Some(6)],
+            "子层的无序项只该断它自己那一层及更深层"
+        );
+        // 对照一：同层（缩进 0）那个无序项仍照旧断号＝真的另起一个列表
+        assert_eq!(
+            nums("5. 五\n- 甲\n7. 七\n"),
+            vec![Some(5), None, Some(7)],
+            "同层那一形两把尺同答，别被这次放宽带偏"
+        );
+        // 对照二：子层内部插无序项，只断子层那列号、外层照旧续号
+        assert_eq!(
+            nums("3. 外\n   1. 内\n   - 内的无序\n   2. 内二\n4. 外二\n"),
+            vec![Some(3), Some(1), None, Some(2), Some(4)],
+            "两层各起各的号"
         );
     }
 
