@@ -150,30 +150,77 @@ pub(crate) const MAX_BACKUP_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 /// 增长：既吃磁盘，也让目录里再也找不到有用的那一份）。
 pub(crate) const MAX_TIMESTAMPED_BACKUPS: usize = 20;
 
+/// timestamped 档的**时间序**键，可直接比较。
+///
+/// 形状＝`{name}.YYYYMMDD-HHMMSS[-序号].bak`，时间戳固定 15 字符。
+/// ⚠️ 不能拿档名的字典序当时间序，那两句承诺都不成立：
+/// * `-`(0x2D) 排在 `.`(0x2E) **之前** ⇒ 同秒里 `…-1.bak` 排在无后缀档前面，
+///   而按 P148 的生成次序，无后缀那一档是同秒里**最早**的一次保存；
+/// * 序号是十进制整数 ⇒ `-10` 排在 `-2` 之前。
+///
+/// 于是「排序后从头多出来的部分删掉」在淘汰边界落进同秒那一组时，
+/// 删掉的是组里最新的几份、留下的是最旧的——`prune_timestamped_backups`
+/// 那句「留最新的 N 份」因此说话不算。
+///
+/// 形状对不上的档名（时间戳不足 15 字符、后缀不是纯数字）按 `stamp`＋原档名比较，
+/// 与改前的字典序落在同一档位上，不额外改变陌生文件的去留次序。
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ArchiveKey {
+    stamp: String,
+    seq: u32,
+    raw: String,
+}
+
+impl ArchiveKey {
+    /// `tail` ＝ 去掉 `{name}.` 前缀与 `.bak` 后缀之后的那一段。
+    fn of(tail: &str) -> Self {
+        const STAMP_LEN: usize = 15;
+        let head_len = STAMP_LEN.min(tail.chars().count());
+        let byte_head = tail
+            .char_indices()
+            .nth(head_len)
+            .map(|(i, _)| i)
+            .unwrap_or(tail.len());
+        let seq = tail[byte_head..]
+            .strip_prefix('-')
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        Self {
+            stamp: tail[..byte_head].to_owned(),
+            seq,
+            raw: tail.to_owned(),
+        }
+    }
+}
+
 /// 回收 timestamped 目录里超出上限的历史档，**留最新的 N 份**。
 ///
-/// 档名是 `{name}.YYYYMMDD-HHMMSS[-序号].bak`，日期段时间戳的字典序即时间
-/// 序（同秒档的 `-N` 后缀让它在同秒内排在无后缀档之后，仍是「越新越靠后」），
-/// 所以「排序后从头多出来的部分删掉」就等价于「留最新」。只处理本项目命名
-/// 的文件，删不掉则忽略（回收是收尾动作，不该让备份本身失败）。
+/// 档名是 `{name}.YYYYMMDD-HHMMSS[-序号].bak`，时间序由 [`ArchiveKey`] 给出
+/// （**不是**档名字典序——理由见那儿的注释）；排序后从头多出来的部分删掉，
+/// 就等价于「留最新」。只处理本项目命名的文件，删不掉则忽略
+/// （回收是收尾动作，不该让备份本身失败）。
 fn prune_timestamped_backups(dir: &Path, name: &str) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let prefix = format!("{name}.");
-    let mut archive: Vec<std::path::PathBuf> = entries
+    let mut archive: Vec<(ArchiveKey, std::path::PathBuf)> = entries
         .flatten()
         .filter_map(|e| {
             let file = e.path();
             let stem = file.file_name()?.to_string_lossy().into_owned();
-            (stem.starts_with(&prefix) && stem.ends_with(".bak")).then_some(file)
+            if !(stem.starts_with(&prefix) && stem.ends_with(".bak")) {
+                return None;
+            }
+            let tail = &stem[prefix.len()..stem.len() - ".bak".len()];
+            Some((ArchiveKey::of(tail), file))
         })
         .collect();
     if archive.len() <= MAX_TIMESTAMPED_BACKUPS {
         return;
     }
     archive.sort();
-    for stale in archive.into_iter().rev().skip(MAX_TIMESTAMPED_BACKUPS) {
+    for (_, stale) in archive.into_iter().rev().skip(MAX_TIMESTAMPED_BACKUPS) {
         let _ = std::fs::remove_file(stale);
     }
 }
@@ -326,6 +373,81 @@ mod tests {
             names.iter().filter(|n| n.contains("20260101-")).count(),
             MAX_TIMESTAMPED_BACKUPS - 1,
             "留存的 19 份历史档 + 本轮新档 = 上限：{names:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 同秒那一组的时间序：`…-1.bak` 要比无后缀档**新**（P148 的生成次序就是
+    /// 无后缀＝同秒第一次保存），序号到两位数时 `-2` 也要排在 `-10` 之前。
+    /// 拿档名字典序比较会把这两条同时弄反（`-` 0x2D < `.` 0x2E）。
+    #[test]
+    fn archive_key_orders_same_second_copies_by_sequence() {
+        let key = |t: &str| ArchiveKey::of(t);
+        assert!(
+            key("20260101-000000") < key("20260101-000000-1"),
+            "同秒里无后缀档是最早那次保存"
+        );
+        assert!(key("20260101-000000-1") < key("20260101-000000-2"));
+        assert!(
+            key("20260101-000000-2") < key("20260101-000000-10"),
+            "序号按整数比，字典序会把 -10 排在 -2 前面"
+        );
+        assert!(
+            key("20260101-000000-10") < key("20260101-000001"),
+            "秒与秒之间仍按时间戳比，序号不许跨秒生效"
+        );
+    }
+
+    /// 淘汰边界**落进同秒那一组**时，删掉的必须是组里最旧的几份。
+    /// 这里直接调 `prune_timestamped_backups`：生产入口
+    /// `perform_backup_before_overwrite` 只会往最新一端追加一个墙钟时间戳档，
+    /// 构造不出「某一秒的一组正好压在边界上」这一形状（要的是确定性）。
+    #[test]
+    fn pruning_at_a_same_second_group_boundary_keeps_the_newest_copy() {
+        let dir = scratch_dir("p-backup-same-second");
+        fs::create_dir_all(&dir).unwrap();
+        // 最旧那一秒里有三次保存：无后缀（第一次）、-1、-2
+        for suffix in ["", "-1", "-2"] {
+            std::fs::write(
+                dir.join(format!("note.txt.20260101-000000{suffix}.bak")),
+                b"old",
+            )
+            .unwrap();
+        }
+        // 再补 19 份更晚的档 ⇒ 共 22 份、上限 20 ⇒ 该回收最旧的**两份**
+        for i in 0..19u32 {
+            std::fs::write(dir.join(format!("note.txt.20260102-{i:06}.bak")), b"old").unwrap();
+        }
+
+        prune_timestamped_backups(&dir, "note.txt");
+
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.len(),
+            MAX_TIMESTAMPED_BACKUPS,
+            "总数必须封顶在上限，实际 {names:?}"
+        );
+        let has = |n: &str| names.iter().any(|x| x == n);
+        assert!(
+            !has("note.txt.20260101-000000.bak"),
+            "组里最旧那一份（同秒第一次保存）必须最先被回收：{names:?}"
+        );
+        assert!(
+            !has("note.txt.20260101-000000-1.bak"),
+            "边界只吃两份 ⇒ 同秒第二次保存也该回收：{names:?}"
+        );
+        assert!(
+            has("note.txt.20260101-000000-2.bak"),
+            "改前它被当成「比无后缀档更旧」而最先删掉 ⇒ 组里最新那份必须留着：{names:?}"
+        );
+        assert!(
+            has("note.txt.20260102-000018.bak"),
+            "最新的档不能被删：{names:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
