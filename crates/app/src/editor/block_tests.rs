@@ -1246,6 +1246,42 @@ fn split_line_bookmark_shifts_below_block() {
 }
 
 #[test]
+fn p463_deleting_empty_lines_from_an_empty_document_has_no_consequences() {
+    // 空文档＝`collect_line_block` 给一行、且那一行是空的 ⇒ `kept` 少一行 ⇒ 走过
+    // 「全删空」的特殊形态走进 `apply_line_block`：重建串为空、`push_nl` 被算成 false，
+    // 于是**文档一字未动**，却照样 snapshot、返回 true。
+    // 后果（`update/edit.rs` 那一层）＝置脏、排一次自动保存、撤销栈多一个空组
+    // ——用户看到新建的空白页标题上出现"已修改"，第一下 Ctrl+Z 像没反应。
+    for kind in [BlankKind::Empty, BlankKind::Whitespace] {
+        let mut c = core_with("");
+        assert!(!c.delete_empty_lines(kind), "{kind:?}：空文档没有可删的行");
+        assert_eq!(c.doc.to_text(), "", "{kind:?}");
+        assert!(
+            !c.undo(),
+            "{kind:?}：没有后果的动作不该有状态后果（P351 口径）"
+        );
+    }
+    // 反面对照不许跟着收窄：单行文档里真有一个空行可删时照旧动手
+    let mut one = core_with("\n");
+    assert!(
+        one.delete_empty_lines(BlankKind::Empty),
+        "{:?} 档：这里确实少一个字节",
+        one.doc.to_text()
+    );
+    assert_eq!(one.doc.to_text(), "");
+
+    // 只含空白的一行同理：Whitespace 档删它＝真改动，Empty 档不动它＝真 no-op
+    let mut ws = core_with(" ");
+    assert!(
+        !ws.delete_empty_lines(BlankKind::Empty),
+        "严格口径不认纯空白行 ⇒ no-op"
+    );
+    assert!(!ws.undo(), "严格口径那一下不许入栈");
+    assert!(ws.delete_empty_lines(BlankKind::Whitespace));
+    assert_eq!(ws.doc.to_text(), "");
+}
+
+#[test]
 fn delete_empty_lines_modes_scope_and_bookmarks() {
     // 严格口径只删零字符行；幻影末行不参与、尾随换行保持
     let mut c = core_with("a\n\nb\n \n\n");

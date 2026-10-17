@@ -942,6 +942,14 @@ impl EditorCore {
         if kept.len() == blk.lines.len() {
             return false; // 无可删行：幂等 no-op 不产生撤销快照
         }
+        // P463：空文档的形状＝`collect_line_block` 给出一行、那一行是空的 ⇒ `kept` 少一行，
+        // 于是上面那条"无可删行"抓不到它；而块本身覆盖零个字符（`start == end`），
+        // 重建出来还是零个字符 ⇒ **文档一字未动却照样 snapshot、返回 true**，
+        // 应用层据此置脏、排自动保存、撤销栈多一个空组（第一下 Ctrl+Z 像没反应）。
+        // 判据取"这个动作有没有后果"而不是"行数有没有变"——同族的 P351 口径。
+        if kept.is_empty() && blk.start == blk.end {
+            return false;
+        }
         let delta = kept.len() as isize - blk.lines.len() as isize;
         // 全删空的特殊形态学：块内一行不剩时，重建串为空，push_nl 的
         // 直觉（「补回块尾换行」）不再适用——此时它决定的是**前后内容的

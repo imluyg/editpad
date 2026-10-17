@@ -2509,3 +2509,29 @@ fn drop_selection_move_via_apply_edit_marks_dirty_and_single_undo() {
     );
     assert_eq!(app.cur_handle.borrow().doc.to_text(), "abcd\nefbcgh\n");
 }
+
+/// P463（应用层后果）：新建的空白页上点〔删除空行〕——文档一字未动，
+/// 但改前那条 no-op 返回 true，于是 `update/edit.rs` 照样置脏并 `note_mutation()`
+/// 排一次自动保存：标签出现 ● 、关窗无谓拦截。
+/// 上面 `block_tests::p463_...` 盯编辑器层的快照，这一格盯用户看得见的那两个后果。
+#[test]
+fn deleting_empty_lines_on_a_fresh_empty_page_leaves_it_clean() {
+    let mut app = Editpad::default();
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "",
+        "夹具自证：新页就是空文档"
+    );
+    assert!(!app.tab().dirty, "夹具自证：刚建出来不该带脏");
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::DeleteEmptyLines(BlankKind::Empty)),
+    );
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "");
+    assert!(!app.tab().dirty, "空文档点删除空行＝不许置脏");
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::DeleteEmptyLines(BlankKind::Whitespace)),
+    );
+    assert!(!app.tab().dirty, "含空白口径同样不许置脏");
+}
