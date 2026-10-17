@@ -236,6 +236,67 @@ fn p70_regex_replace_current_expands_single_match() {
     assert!(app.tab().dirty, "替换当前是真实文档编辑");
 }
 
+/// 零宽命中（正则 `b*`／`\b`／`^` 这类）选完之后光标就停在它自己的起点上，
+/// 而「下一个」的原点判据是 `col >= 原点` —— 于是下一次 Enter 又选中同一格，
+/// **永久卡住**，面板一直显示「第 1/4」而后三处再也跳不到。
+#[test]
+fn stepping_forward_through_zero_width_hits_walks_the_table() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("abc".into())));
+    app.find_visible = true;
+    app.find_query = "b*".to_owned();
+    dispatch(&mut app, Message::RegexToggled(true));
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.cursor = crate::editor::CursorPos { line: 0, col: 0 };
+        ed.anchor = None;
+    }
+    // 这张表就是真扫描器对 `b*` 在 "abc" 上的产出（"零宽命中被保留"由 core
+    // 侧用例钉，这里注入是为了把判据落在「逐步跳」这一层）
+    let hits = vec![
+        editpad_core::MatchPos {
+            line: 0,
+            col: 0,
+            len_chars: 0,
+        },
+        editpad_core::MatchPos {
+            line: 0,
+            col: 1,
+            len_chars: 1,
+        },
+        editpad_core::MatchPos {
+            line: 0,
+            col: 2,
+            len_chars: 0,
+        },
+        editpad_core::MatchPos {
+            line: 0,
+            col: 3,
+            len_chars: 0,
+        },
+    ];
+    let seq = app.find_seq;
+    app.find_scan = Some(seq);
+    dispatch(&mut app, Message::FindScanDone(seq, scanned(hits)));
+    assert_eq!(app.matches.hits().len(), 4, "夹具自证：四格命中在场");
+
+    for want in 0..4 {
+        dispatch(&mut app, Message::FindNext);
+        assert_eq!(
+            app.match_idx,
+            Some(want),
+            "第 {} 次「下一个」应落在第 {want} 格，卡住＝零宽命中的原点没推出那一格",
+            want + 1
+        );
+    }
+    // 环绕：最后一格之后回到第一格
+    dispatch(&mut app, Message::FindNext);
+    assert_eq!(app.match_idx, Some(0), "到底之后回卷到第一格");
+    // 反面对照：「上一个」一步回一格（它的原点取选区起点、判据是严格小于，本来就没这个洞）
+    dispatch(&mut app, Message::FindPrev);
+    assert_eq!(app.match_idx, Some(3), "上一步应回到最后一格");
+}
+
 // ---------- P338「替换当前」× 在途自动保存 ----------
 
 /// 三档「替换当前」共用的夹具：一页真文件 + 指定正文 + 查询与替换文本。

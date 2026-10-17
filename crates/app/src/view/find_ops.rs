@@ -76,7 +76,20 @@ impl Editpad {
         let (origin_line, origin_col) = {
             let ed = self.cur_handle.borrow();
             if forward {
-                (ed.cursor.line, ed.cursor.col)
+                let mut origin = (ed.cursor.line, ed.cursor.col);
+                // 零宽命中（`b*`／`\b`／`^` 这类）选完之后光标就停在它自己的
+                // 起点上，而原点判据是 `col >=` ⇒ 下一次 Enter 又把同一格当成
+                // "下一个"＝永久卡住。`>=` 本身要留着：相邻命中（前一格末尾
+                // 正好是后一格的起点）靠它才不会被跳过。所以只把"当前这一格
+                // 是零宽且正压在光标上"的那一种情形推出一个字符。
+                if let Some(i) = self.match_idx {
+                    if let Some(m) = self.matches.hits().get(i) {
+                        if m.len_chars == 0 && (m.line, m.col) == origin {
+                            origin.1 += 1;
+                        }
+                    }
+                }
+                origin
             } else {
                 let (start, _) = ed.ordered_selection().unwrap_or((ed.cursor, ed.cursor));
                 (start.line, start.col)
