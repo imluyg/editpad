@@ -1373,10 +1373,22 @@ fn table(lines: &[&str], start: usize, defs: &LinkDefs) -> Option<(MdBlock, usiz
 /// `\|` 是单元格里的一个竖线字符（GFM 口径）。改前它照样分列，多出来那一列被
 /// `normalize_row` 按列数裁掉＝用户写的字静默消失。反斜杠按**奇数串**才算转义，
 /// 所以 `\\|` 是「转义的反斜杠＋真分列」。
+///
+/// ⚠️ 同一条奇偶判据**也管行首行尾那两道分隔符**：GFM 允许一行不以 `|` 收尾，
+/// 于是「最后一格以 `\|` 收尾」时行尾那道竖线是**格内字符**而不是行尾记号。
+/// 改前头两步无条件 `strip_prefix`／`strip_suffix`，把 `| x | y \|` 的最后一格
+/// 弄成 `y \`（现量）＝多一个反斜杠又少一个竖线，与上面那句「按奇数串才算转义」
+/// 各守一边。行首那一侧不可能被转义（要转义它，反斜杠就成了行首字符，
+/// `strip_prefix('|')` 本来就落空），所以只有尾部需要这道闸。
 fn split_row(line: &str) -> Vec<&str> {
-    let t = line.trim();
-    let t = t.strip_prefix('|').unwrap_or(t);
-    let t = t.strip_suffix('|').unwrap_or(t);
+    let mut t = line.trim();
+    t = t.strip_prefix('|').unwrap_or(t);
+    if let Some(rest) = t.strip_suffix('|') {
+        // 尾巴上挂着奇数个反斜杠 ⇒ 那道 `|` 属于格内内容，留着
+        if rest.chars().rev().take_while(|c| *c == '\\').count() % 2 == 0 {
+            t = rest;
+        }
+    }
     let mut cells = Vec::new();
     let mut start = 0usize;
     let mut slashes = 0usize;
@@ -3033,6 +3045,43 @@ mod tests {
         assert_eq!(rows[0].len(), 2, "{two:?}");
         assert_eq!(spans_text(&rows[0][0]), "x \\");
         assert_eq!(spans_text(&rows[0][1]), "y");
+    }
+
+    /// `\|` 的**奇偶判据**原先只管分列那一段：`split_row` 头两步无条件
+    /// `strip_prefix('|')` ＋ `strip_suffix('|')`，于是「最后一格以转义竖线收尾、
+    /// 整行不再用 `|` 收尾」（GFM 允许行尾不带分隔符）这种写法，会被把用户写下的
+    /// 那道竖线连尾巴的反斜杠一起改坏。与上面那句「反斜杠按奇数串才算转义」
+    /// 是同一条判据的两半，改前只守了一边。
+    #[test]
+    fn a_row_final_escaped_pipe_is_not_the_row_terminator() {
+        let blocks = parse_markdown("| a | b |\n|---|---|\n| x | y \\|\n");
+        let MdBlock::Table { header, rows, .. } = &blocks[0] else {
+            panic!("期望一张表：{blocks:?}");
+        };
+        assert_eq!(header.len(), 2, "夹具自证：两格表头成表");
+        assert_eq!(rows[0].len(), 2, "转义竖线不分列：{rows:?}");
+        assert_eq!(spans_text(&rows[0][0]), "x");
+        assert_eq!(
+            spans_text(&rows[0][1]),
+            "y |",
+            "行尾那格要留着用户写的竖线（改前那一格尾巴上挂着一个反斜杠）"
+        );
+
+        // 反面对照一：正常行尾分隔符照旧剥掉，不许多数出一格
+        let term = parse_markdown("| a | b |\n|---|---|\n| x | y |\n");
+        let MdBlock::Table { rows, .. } = &term[0] else {
+            panic!("{term:?}");
+        };
+        assert_eq!(rows[0].len(), 2, "{term:?}");
+        assert_eq!(spans_text(&rows[0][1]), "y");
+
+        // 反面对照二：`\\|`＝转义的反斜杠＋真行尾分隔符 ⇒ 那道 `|` 仍该被剥掉
+        let even = parse_markdown("| a | b |\n|---|---|\n| x | y \\\\|\n");
+        let MdBlock::Table { rows, .. } = &even[0] else {
+            panic!("{even:?}");
+        };
+        assert_eq!(rows[0].len(), 2, "{even:?}");
+        assert_eq!(spans_text(&rows[0][1]), "y \\");
     }
 
     /// P465＝**吃字**：GFM 要求表头行与分隔行**格数相等**，不等则整块不成表。
