@@ -1135,35 +1135,55 @@ fn indented_code(lines: &[&str], start: usize, doc_begin: usize) -> Option<(MdBl
 ///
 /// 闭栏要**不短于开栏**且整行除空白外只有同种标记——` ```` ` 里放 ` ``` ` 是教
 /// Markdown 的文档最常见的写法，改前内层那三根就收了栏，剩下的当成正文染色。
-fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
-    let open = lines[start].trim_start();
+/// 开栏行的判据（`(标记字符, 开栏长度, info 里的语言名)`，不是开栏 ⇒ `None`）。
+///
+/// P466：围栏的**规则**在 core 里必须只有一份——`fence`（抄成块）、[`fence_span`]（定跨度）、
+/// [`looks_like_fence`]（答布尔）过去各写各的，其中定义行扫描那份写的是"开头像围栏就翻状态"，
+/// 于是 `~~~ / ``` / ~~~` 这种混排把它卡在"栏内"，后半篇的 `[^a]:` 与 `[x]:` 整片不收。
+fn fence_open(line: &str) -> Option<(char, usize, Option<String>)> {
+    let open = line.trim_start();
     // ``` 与 ~~~ 都是围栏（两种 marker 都是三字节 ASCII，切片落在字符边界上）
-    let backtick = open.strip_prefix("```");
-    let tilde = open.strip_prefix("~~~");
-    let marker = match (backtick, tilde) {
-        (Some(_), _) => '`',
-        (None, Some(_)) => '~',
-        (None, None) => return None,
+    let marker = match (open.starts_with("```"), open.starts_with("~~~")) {
+        (true, _) => '`',
+        (false, true) => '~',
+        (false, false) => return None,
     };
     let open_len = open.chars().take_while(|c| *c == marker).count();
-    let info = &open[open_len..];
-    let lang = info.split_whitespace().next().map(str::to_owned);
-    let mut body = Vec::new();
+    let lang = open[open_len..]
+        .split_whitespace()
+        .next()
+        .map(str::to_owned);
+    Some((marker, open_len, lang))
+}
+
+/// 围栏的**跨度**：从 `start` 开栏 ⇒ 返回 `(内容结束下标, 围栏之后下一行的下标)`。
+/// 闭栏＝同种 marker、长度 ≥ 开栏、那一行除空白外没有别的字符；未闭栏吃到篇尾
+/// （与 [`fence`] 改前的行为逐字一致——它也是把余下全部当正文）。
+fn fence_span(lines: &[&str], start: usize) -> Option<(usize, usize)> {
+    let (marker, open_len, _) = fence_open(lines[start])?;
     let mut k = start + 1;
     while k < lines.len() {
         let candidate = lines[k].trim();
         let run = candidate.chars().take_while(|c| *c == marker).count();
-        // 闭栏：长度 ≥ 开栏，且这一行除空白外没有别的字符（带 info 的那行是内容）
         if run >= open_len && candidate.chars().all(|c| c == marker) {
-            return Some((MdBlock::CodeBlock { lang, lines: body }, k + 1));
+            return Some((k, k + 1));
         }
-        body.push({
-            note_fence_body();
-            lines[k].to_owned()
-        });
         k += 1;
     }
-    Some((MdBlock::CodeBlock { lang, lines: body }, k))
+    Some((lines.len(), lines.len()))
+}
+
+fn fence(lines: &[&str], start: usize) -> Option<(MdBlock, usize)> {
+    let (_, _, lang) = fence_open(lines[start])?;
+    let (body_end, next) = fence_span(lines, start)?;
+    let body = lines[start + 1..body_end]
+        .iter()
+        .map(|l| {
+            note_fence_body();
+            (*l).to_owned()
+        })
+        .collect();
+    Some((MdBlock::CodeBlock { lang, lines: body }, next))
 }
 
 /// 表格第一行的判定（段落续行要用它断句）。
@@ -1209,8 +1229,7 @@ fn html_comment(lines: &[&str], start: usize) -> Option<usize> {
 /// 写法（贴日志、贴报错最常见）现量＝抄行 720 vs 360，正好整篇两遍。
 /// 布尔判据只需要行首，这一份就只看行首。
 fn looks_like_fence(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with("```") || t.starts_with("~~~")
+    fence_open(line).is_some()
 }
 
 /// 这一行是不是**另起一块**的开头：段落的续行与列表项的续行共用这一份判据
@@ -1630,30 +1649,34 @@ fn footnote_def(line: &str) -> Option<(String, String)> {
 fn collect_link_defs(lines: &[&str]) -> (LinkDefs, Vec<bool>) {
     let mut defs = LinkDefs::default();
     let mut consumed = vec![false; lines.len()];
-    let mut in_fence = false;
-    for (idx, raw) in lines.iter().enumerate() {
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        // P466：围栏跨度交给与块解析同一份判据（[`fence_span`]）。改前这里自己记
+        // `in_fence` 布尔、"开头像围栏就翻状态" ⇒ `~~~ / ``` / ~~~` 这类混排会把扫描
+        // 卡在"栏内"，后半篇的定义行整片不收（前文的引用因此断成字面量）。
+        if let Some((_, next)) = fence_span(lines, idx) {
+            idx = next;
+            continue;
+        }
+        let raw = lines[idx];
         let t = raw.trim();
-        if t.starts_with("```") || t.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
         // 4 格以上缩进（或制表符）＝缩进代码块，不是定义行
         let indent = raw.len() - raw.trim_start().len();
         if raw.starts_with('\t') || indent >= 4 {
+            idx += 1;
             continue;
         }
         if let Some((label, body)) = footnote_def(t) {
             defs.note(label, body);
             consumed[idx] = true;
+            idx += 1;
             continue;
         }
         if let Some((label, dest)) = link_def(t) {
             defs.insert(label, dest);
             consumed[idx] = true;
         }
+        idx += 1;
     }
     (defs, consumed)
 }
@@ -3501,6 +3524,39 @@ mod tests {
         assert!(
             !empty.iter().any(|b| matches!(b, MdBlock::Footnotes { .. })),
             "正文为空不算定义：{empty:?}"
+        );
+    }
+
+    /// P466＝**后半篇的定义行整片丢**：`collect_link_defs` 自己记一个 `in_fence` 布尔，
+    /// 规则是"这行开头像围栏就翻状态"；块解析那套闭栏规则却是"同种 marker＋长度 ≥ 开栏＋
+    /// 那一行除空白没有别的字符"。两份判据不是一份 ⇒ `~~~` / ` ``` ` / `~~~` 这种混排
+    /// 把扫描**卡在栏内**，之后的 `[^a]: …` 与 `[x]: url` 一律不收 ⇒ 前文的引用断成字面量，
+    /// 用户看不出为什么。
+    #[test]
+    fn p466_the_fence_rule_is_shared_with_the_definition_scan() {
+        let has_notes = |src: &str| {
+            parse_markdown(src)
+                .iter()
+                .any(|b| matches!(b, MdBlock::Footnotes { .. }))
+        };
+
+        // 混排围栏：块解析认为 `~~~` 那一段到第三行就闭了 ⇒ 后面的定义必须收得到
+        let mixed = "~~~\n```rust\nx = 1\n~~~\n\n正文[^a]\n\n[^a]: 注脚正文\n";
+        assert!(
+            has_notes(mixed),
+            "混排围栏把扫描卡在栏内 ⇒ 注脚定义整片丢：{:?}",
+            parse_markdown(mixed)
+        );
+        // 对照一：只用一种 marker（真闭栏）那形不许跟着坏
+        assert!(
+            has_notes("~~~\ny = 2\n~~~\n\n正文[^a]\n\n[^a]: 注脚正文\n"),
+            "单种围栏那形仍要收到后面的定义"
+        );
+        // 对照二（反）：定义行**在栏内**时仍然不算定义——那是既有行为，
+        // 不许为了"共用判据"把围栏内的行放开
+        assert!(
+            !has_notes("```\n[^a]: 在代码里\n```\n\n正文[^a]\n"),
+            "围栏内的定义行不算定义"
         );
     }
 
