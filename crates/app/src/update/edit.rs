@@ -1012,6 +1012,21 @@ impl Editpad {
                     editor.toggle_line_comment()
                 }
             }
+            // ---------- 档5 第六笔：块注释切换 ----------
+            // 判不出成对标记的语法必须一个字都不动——与上面行注释那一臂同一条口径：
+            // 拒绝不是"没做成"，而是"这一门的注释形状根本不该由本动作来写"
+            // （理由逐格记在 core 的 NO_BLOCK_COMMENT / 换行形状否决里）。
+            E::ToggleBlockComment => {
+                if editor.block_delims_for().is_none() {
+                    hint = Some(
+                        self.t(editpad_core::Key::StNoBlockCommentForSyntax)
+                            .to_owned(),
+                    );
+                    false
+                } else {
+                    editor.toggle_block_comment()
+                }
+            }
             // ---------- P121：智能缩进与选区块缩进 ----------
             // 回车不入列块白名单：列块态按回车先收块再智能缩进（原「向块
             // 内插换行」无实用语义）；Tab 两向都在白名单里——加缩进仍是块内插

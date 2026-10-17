@@ -574,6 +574,17 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
         default_combos: &[],
         desc: HkSwitchSyntax,
     },
+    // 档5 第六笔：块注释切换。**无默认键**——26 个 Ctrl+Shift 字母全占尽，而组合键
+    // 语法只认 `Ctrl`／`Ctrl+Shift` ＋字母数字或命名白名单，符号表里只有 `-` `=` `` ` ``：
+    // 想登记 JetBrains 同款的 `Ctrl+Shift+/` 得先给解析器加 `Slash`（那要同时动
+    // core 的 COMBO_SYMBOL_KEYS 与本层捕获那一侧的"一一对应"），不在本笔顺手做。
+    // 硬登记一个解析不出来的串＝本仓量过两次的"死键"那一族（Dockerfile 死名同病）。
+    // 命令面板可见、设置 → 快捷键里可赋键，与 switch_syntax 同待遇。
+    HotkeyAction {
+        id: "toggle_block_comment",
+        default_combos: &[],
+        desc: HkToggleBlockComment,
+    },
     // A8：在文件中查找。Ctrl+Shift+F 被 format_json 占用（26 个
     // Ctrl+Shift 字母占尽，P129 记录），F 家族空闲 F1/F4/F10/F12 取 F12。
     HotkeyAction {
@@ -892,6 +903,8 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
         "split_selection_by_lines" => edit(EditOp::SplitSelectionByLines),
         // 档3：语法模式面板（开关口径与命令面板/标签/剪贴板历史完全一致）
         "switch_syntax" => Some(Message::PaletteToggled(crate::state::PaletteMode::Syntax)),
+        // 档5 第六笔：块注释（无默认键，走命令面板或用户自赋键）
+        "toggle_block_comment" => edit(EditOp::ToggleBlockComment),
         // A8：在文件中查找
         "find_in_files" => Some(Message::FindInFilesToggled),
         // 第 315 轮 C3：Markdown 行内标记包／解（闸门在 apply_edit 按语法名收）

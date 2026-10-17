@@ -1132,6 +1132,74 @@ const COMMENT_PREFIX_TABLE: &[(&str, &str)] = &[
     ("Java", "//"),
 ];
 
+/// 没有**块**注释、或"插出去就是坏代码"的语法名（这一条与 [`NO_LINE_COMMENT`] 是
+/// 两张表，不共用——理由不同：那边管"这门语法有没有行注释"，这边管
+/// "成对标记插在这个位置上是否合法"）。
+///
+/// 三格都是**现量**出来的（内置包 39 门带 `block_comment`，逐条看过取值）：
+/// * `JSON`／`JavaDoc` 之类里 JSON 那一格：内置给 `/* */`，而严格 JSON 根本没有注释，
+///   插进去文件就解析不动（与行注释那张表里同一格理由）。
+/// * `Ruby`／`Ruby on Rails`：内置给 `=begin` / `=end`，而这一对**必须顶格**才是注释。
+///   本动作把开标记插在"首个非空白字符之前"＝缩进之后，缩进过的 `=begin` 是坏代码。
+const NO_BLOCK_COMMENT: &[&str] = &["JSON", "Ruby", "Ruby on Rails"];
+
+/// 块注释手写表：只登记内置 metadata **给不出**的那几格——我们自嵌的语法走
+/// `.sublime-syntax` 的 YAML 加载器，它不读 metadata（数据住在 `.tmPreferences`，
+/// 且 `LoadMetadata` 是 `pub(crate)`）⇒ 不登记就永远没有块注释。
+///
+/// ⚠️ 这一行是**PowerShell 语言本身**的形状（`<# … #>`，与位置无关），不是从内置包
+/// 读来的——内置包没有 PowerShell。另外三份内嵌语法（Log/TOML/Dockerfile）没有
+/// 块注释这个东西，所以**故意不登记**：给日志插一对标记只是把噪声变多。
+const BLOCK_COMMENT_TABLE: &[(&str, &str, &str)] = &[("Editpad PowerShell", "<#", "#>")];
+
+/// 语法名 → 块注释成对标记（`(开, 闭)`）。`None`＝这门语法不该被插块注释。
+///
+/// 取值四档，与 [`line_comment_prefix`] 同构、**顺序即优先级**（①②是做过的决定）：
+/// ① `NO_BLOCK_COMMENT` 否决；② `BLOCK_COMMENT_TABLE`；③ 内置 metadata 的
+/// `block_comment`；④ 都没有 ⇒ `None`（动作层给一句状态栏，正文一个字不动）。
+/// （那两张表是本模块私有项，所以这里不用文档链接——公开项文档链私有项会撞
+/// `rustdoc::private_intra_doc_links`，本仓第 5 次踩这一族。）
+///
+/// 第 ③ 档还带一条**形状否决**：标记里含换行的（实测只有 MATLAB——`%{\n` 与 `\n%}`，
+/// 那两个标记必须各自独占一行）一律当没有。本动作只会把开标记插在正文前、
+/// 闭标记接在行尾，那种形状插出去是坏代码，宁可不写。
+pub fn block_comment_delims(syntax_name: Option<&str>) -> Option<(&'static str, &'static str)> {
+    let name = syntax_name?;
+    // ① 否决
+    if NO_BLOCK_COMMENT.contains(&name) {
+        return None;
+    }
+    // ② 手写表（只管内置包给不出的那几格）
+    if let Some((open, close)) = BLOCK_COMMENT_TABLE
+        .iter()
+        .find(|(needle, _, _)| needle.eq_ignore_ascii_case(name))
+        .map(|(_, open, close)| (*open, *close))
+    {
+        return Some((open, close));
+    }
+    // ③ 内置 metadata。⚠️ 不走 `ScopedMetadata::block_comment()`：那个方法的返回值
+    // 按 `&self` 推生命周期，拿不到 `'static`（同一族在 `metadata_line_comment` 里
+    // 撞过 E0515），所以这里直接读公开字段。取法与那个方法逐字一致：按匹配顺序取第一个有值的。
+    let ss = syntax_set();
+    let syntax = ss.find_syntax_by_name(name)?;
+    let scoped = ss
+        .metadata()
+        .metadata_for_scope(std::slice::from_ref(&syntax.scope));
+    let (open, close) = scoped.items.iter().find_map(|(_, set)| {
+        set.items
+            .block_comment
+            .as_ref()
+            .map(|(o, c)| (o.as_str(), c.as_str()))
+    })?;
+    if open.contains('\n') || close.contains('\n') {
+        return None;
+    }
+    if open.is_empty() || close.is_empty() {
+        return None;
+    }
+    Some((open, close))
+}
+
 /// 围栏**专用**的补充别名：GFM 里常见的写法既不是内置扩展名、也不是内置语法名。
 ///
 /// 只给围栏，不给扩展名——`shell` 当文件扩展名时不该被认成 bash（那是另一种猜），
@@ -2807,6 +2875,163 @@ mod tests {
                     "{} 的前缀 {prefix:?} 带空白＝Ctrl+Q 会写两个空格，解包也会错位",
                     syntax.name
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn p457_shipped_metadata_answers_block_comments_for_39_languages() {
+        // 现量哨兵转正：内置包里正好 39 门带 `block_comment`（本轮探针跑出来的名单
+        // 已收进下面的 `p457_block_*` 三条）。这条不是覆盖率装饰，是**数据源漂移探测器**：
+        // 哪天 syntect 换包，下面那三条形如"谁被否决"的账就全要重核。
+        let ss = syntax_set();
+        let mut found = 0usize;
+        for s in ss.syntaxes() {
+            let md = ss
+                .metadata()
+                .metadata_for_scope(std::slice::from_ref(&s.scope));
+            if md
+                .items
+                .iter()
+                .any(|(_, set)| set.items.block_comment.is_some())
+            {
+                found += 1;
+            }
+        }
+        assert_eq!(
+            found, 39,
+            "内置包带 block_comment 的语法数变了＝数据源换过，否决表与用例要重量"
+        );
+    }
+
+    /// 现量名单的取样核对：本仓的动作层要用的是**能不能插**，不是"有没有数据"。
+    ///
+    /// ⚠️ 本轮量到的一条形状差：**成对标记自带空格的有无**——HTML/XML 给的是
+    /// `("<!-- ", " -->")`（带空格），C 家族给 `("/*", "*/")`（不带）。
+    /// ⇒ 动作层必须**原样插**，绝不自己再补空格；解包也按原样剥。
+    /// （行注释那边正相反：内置一律带一个尾随空格，本仓刻意 `trim_end` 后自己补——
+    /// 两张表的口径不同，各自有用例钉住，别照着抄。）
+    #[test]
+    fn p457_block_delims_read_the_shipped_values() {
+        // 下面这批值是本轮**现量**的（先跑收集器一次性打出来，再逐格钉住）
+        for (name, expect) in [
+            ("Java", Some(("/*", "*/"))),
+            ("C++", Some(("/*", "*/"))),
+            ("CSS", Some(("/*", "*/"))),
+            ("Rust", Some(("/*", "*/"))),
+            ("SQL", Some(("/*", "*/"))),
+            ("Lua", Some(("--[[", "--]]"))),
+            ("Haskell", Some(("{-", "-}"))),
+            // 这三对**自带空格**（第一版我把它们抄成了不带空格的形状，测试立刻打回）
+            ("OCaml", Some(("(* ", " *)"))),
+            ("Lisp", Some(("#| ", " |#"))),
+            ("Pascal", Some(("{ ", " }"))),
+            // ⚠️ 这一对**自带空格**：内置给的就是 `"<!-- "` 与 `" -->"`。
+            ("HTML", Some(("<!-- ", " -->"))),
+            ("XML", Some(("<!-- ", " -->"))),
+            // 我们自嵌的那份：metadata 给不出，靠手写表接住
+            ("Editpad PowerShell", Some(("<#", "#>"))),
+            // 内置没给成对标记的 ⇒ None，动作层于是拒绝（一个字符都不写）
+            ("Python", None),
+            ("YAML", None),
+            ("Bourne Again Shell (bash)", None),
+            ("Makefile", None),
+            ("Plain Text", None),
+            ("Editpad Log", None),
+            ("Editpad TOML", None),
+            ("Editpad Dockerfile", None),
+        ] {
+            assert_eq!(block_comment_delims(Some(name)), expect, "{name}");
+        }
+        // 没判出语言的页（纯文本路径）：一个成对标记都不插
+        assert_eq!(block_comment_delims(None), None);
+    }
+
+    /// 三格否决各自都要**先证明数据源确实给了**，否则"拒绝"可能是拒了一个不存在的输入
+    /// （那种红永远照不出来——本档第 331 轮 Dockerfile 死名的同族病）。
+    #[test]
+    fn p457_block_vetoes_are_named_and_proven() {
+        let raw = |name: &str| {
+            let ss = syntax_set();
+            let s = ss.find_syntax_by_name(name)?;
+            let md = ss
+                .metadata()
+                .metadata_for_scope(std::slice::from_ref(&s.scope));
+            md.items.iter().find_map(|(_, set)| {
+                set.items
+                    .block_comment
+                    .as_ref()
+                    .map(|(o, c)| (o.as_str(), c.as_str()))
+            })
+        };
+        // ① JSON：内置给了 `/* */`，本仓刻意不要（严格 JSON 没有注释）
+        assert_eq!(
+            raw("JSON"),
+            Some(("/*", "*/")),
+            "前置：内置确实给了 JSON 一对"
+        );
+        assert_eq!(block_comment_delims(Some("JSON")), None, "否决必须压过内置");
+        // ② Ruby：内置给 `=begin/=end`，而那一对必须顶格，本动作插在缩进后＝坏代码
+        assert_eq!(
+            raw("Ruby"),
+            Some(("=begin", "=end")),
+            "前置：内置给的是必须顶格的那一对"
+        );
+        assert_eq!(
+            block_comment_delims(Some("Ruby")),
+            None,
+            "顶格约束不许被绕过"
+        );
+        // ③ MATLAB：形状否决（标记自带换行）——它**不在**名字表里，是被规则挡住的
+        let matlab = raw("MATLAB").expect("前置：MATLAB 有 block_comment");
+        assert!(
+            matlab.0.contains('\n') || matlab.1.contains('\n'),
+            "前置：MATLAB 的标记自带换行，实测 {matlab:?}"
+        );
+        assert_eq!(
+            block_comment_delims(Some("MATLAB")),
+            None,
+            "含换行的成对标记一律当没有（插在本行前后是坏代码）"
+        );
+    }
+
+    #[test]
+    fn p457_block_tables_only_name_existing_syntaxes() {
+        // 与 :2207 那族同一条守卫：表里写一个不存在的语法名，编译器一声不响，
+        // 症状只是"那门语言的块注释不对"。
+        let names = available_syntax_names();
+        for name in NO_BLOCK_COMMENT {
+            assert!(
+                names.iter().any(|n| n == name),
+                "NO_BLOCK_COMMENT 里的 {name} 不是真实语法名"
+            );
+        }
+        for (name, open, close) in BLOCK_COMMENT_TABLE {
+            assert!(
+                names.iter().any(|n| n == name),
+                "BLOCK_COMMENT_TABLE 里的 {name} 不是真实语法名"
+            );
+            assert!(
+                !open.is_empty() && !close.is_empty(),
+                "{name} 的成对标记不许是空串"
+            );
+        }
+    }
+
+    #[test]
+    fn p457_block_delims_never_hand_back_a_newline_or_empty_pair() {
+        // 全局不变量（与 `p456_no_prefix_ever_carries_a_trailing_space` 同形）：
+        // 79 门里任何一门拿到的成对标记都必须非空、不含换行。
+        // 动作层把开标记插在**行内**，含换行的标记会一行插出一个新行＝坏代码。
+        for syntax in syntax_set().syntaxes() {
+            if let Some((open, close)) = block_comment_delims(Some(syntax.name.as_str())) {
+                for d in [open, close] {
+                    assert!(
+                        !d.is_empty() && !d.contains('\n') && !d.contains('\r'),
+                        "{} 的成对标记 {d:?} 含换行或为空",
+                        syntax.name
+                    );
+                }
             }
         }
     }

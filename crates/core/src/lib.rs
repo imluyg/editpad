@@ -33,9 +33,9 @@ pub use find_in_files::{
     IGNORED_DIRS, MAX_SCAN_FILE_BYTES, MAX_WALK_DEPTH,
 };
 pub use highlight::{
-    available_syntax_names, first_line_language, line_comment_prefix, resolve_fence_language,
-    resolve_language, resolve_language_with, syntax_for_extension, syntax_override_lookup,
-    syntax_override_write_key, LazyHighlighter, StyledRun,
+    available_syntax_names, block_comment_delims, first_line_language, line_comment_prefix,
+    resolve_fence_language, resolve_language, resolve_language_with, syntax_for_extension,
+    syntax_override_lookup, syntax_override_write_key, LazyHighlighter, StyledRun,
 };
 pub use indent::{
     dominant_indent, enter_action, enter_plan, indent_unit_for, strip_one_indent, EnterAction,

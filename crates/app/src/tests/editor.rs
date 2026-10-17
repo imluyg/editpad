@@ -1386,6 +1386,71 @@ fn add_next_match_hotkey_dispatch_full_chain() {
     );
 }
 
+/// 档5 第六笔：块注释切换的全链路。编辑器级用例（`block_tests::toggle_block_comment_*`）
+/// 直接调方法，接不上这三格线也照样绿，所以这里钉：
+/// ① 注册表 id → 消息那条臂存在（**无默认键不等于没臂**）；
+/// ② 走生产消息路真的把成对标记写进正文；
+/// ③ 判不出成对标记的语法（Python）拒收**且状态栏看得见**；
+/// ④ 只读页拒收（它写正文 ⇒ 归"可变"那一族，由 `edit_op_mutates` 的 fail-safe 兜住）。
+#[test]
+fn toggle_block_comment_dispatch_chain_refusal_and_read_only() {
+    let mk = || {
+        crate::hotkeys::dispatch_action("toggle_block_comment", keyboard::Modifiers::empty())
+            .expect("注册了 id 就要有分发分支")
+    };
+    assert!(
+        matches!(mk(), Message::Edit(EditOp::ToggleBlockComment)),
+        "分发的必须是块注释这一条"
+    );
+
+    // ② 生产消息路：打字进正文 → 派发 → 首尾被成对标记包住（无选区＝整篇）
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::Edit(EditOp::InsertText("alpha\nbeta\n".into())),
+    );
+    app.cur_handle
+        .borrow_mut()
+        .set_language_by_name(Some("Java"));
+    dispatch(&mut app, mk());
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "/*alpha\nbeta*/\n",
+        "开着生产路却没包＝接线断了（编辑器级用例照不出这格）"
+    );
+
+    // ③ 这门语法没有可用的成对标记 ⇒ 正文一字不动，但状态栏要给一句话
+    let mut py = Editpad::default();
+    dispatch(
+        &mut py,
+        Message::Edit(EditOp::InsertText("def f():".into())),
+    );
+    py.cur_handle
+        .borrow_mut()
+        .set_language_by_name(Some("Python"));
+    dispatch(&mut py, mk());
+    assert_eq!(py.cur_handle.borrow().doc.to_text(), "def f():");
+    assert!(
+        py.status.contains("块注释"),
+        "拒收要看得见，不能按了没反应：{:?}",
+        py.status
+    );
+
+    // ④ 只读页：写正文的动作必须被拒
+    let mut ro = Editpad::default();
+    dispatch(&mut ro, Message::Edit(EditOp::InsertText("alpha\n".into())));
+    ro.cur_handle
+        .borrow_mut()
+        .set_language_by_name(Some("Java"));
+    dispatch(&mut ro, Message::ToggleReadOnly);
+    dispatch(&mut ro, mk());
+    assert_eq!(
+        ro.cur_handle.borrow().doc.to_text(),
+        "alpha\n",
+        "只读页被插进了成对标记＝分类漏登记"
+    );
+}
+
 /// B10 二期首批（拆行多选）的全链路：注册表 id → 消息 → 集合真的建起来，
 /// 且只读页放行（它改的是光标，不是正文）。
 #[test]
@@ -2273,6 +2338,10 @@ fn edit_op_mutates_classification_is_failsafe() {
     assert!(crate::update::edit_op_mutates(&EditOp::Undo));
     assert!(crate::update::edit_op_mutates(&EditOp::Redo));
     assert!(crate::update::edit_op_mutates(&EditOp::Enter));
+    // 档5 第六笔：块注释切换写正文 ⇒ 必须归在"可变"那一侧（只读页要拒收）。
+    // 这条断言的意义是**显式**：fail-safe 默认也会拒，但默认挡住不等于登记过，
+    // 哪天白名单被反着改写（默认放行）它就漏了。
+    assert!(crate::update::edit_op_mutates(&EditOp::ToggleBlockComment));
     assert!(crate::update::edit_op_mutates(&EditOp::DeleteWordLeft));
     assert!(!crate::update::edit_op_mutates(&EditOp::Motion(
         Motion::Left,

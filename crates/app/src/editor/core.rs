@@ -234,6 +234,13 @@ pub enum EditOp {
     /// 行注释切换：触及块全部已注释则去掉一层前缀，否则加上；
     /// 前缀按当前语法查表（未知语法默认 `//`），Ctrl+Q
     ToggleLineComment,
+    // ---------- 档5 第六笔：块注释切换 ----------
+    /// 成对标记包住／解开触及的行块。标记按当前语法名查
+    /// `editpad_core::block_comment_delims`（否决表→手写表→内置 metadata→没有），
+    /// 判不出可用成对标记的语法（Python／YAML／bash／JSON／Ruby…）一个字都不动。
+    /// **无默认键**：26 个 Ctrl+Shift 字母早已占尽（P129／档3 记录），
+    /// 命令面板可见、设置 → 快捷键里可赋键，与 `switch_syntax` 同待遇。
+    ToggleBlockComment,
     // ---------- 第 67 轮：列块编辑 ----------
     /// 取消列块选区（Esc；不入热键注册表，固定语义）
     CancelBlock,

@@ -1350,6 +1350,138 @@ fn toggle_line_comment_wrap_unwrap_roundtrip() {
 }
 
 #[test]
+fn toggle_block_comment_wraps_and_unwraps_the_touched_lines() {
+    // 无选区＝**整篇**（`collect_line_block` 在 anchor 为空时给 (0, count-1)，
+    // 行注释多年也是这条）。我第一版把这里写成"只作用当前行"，测试直接打回：
+    // 左值 `/*alpha\nbeta*/` 就是整篇被包的形状。
+    let mut c = core_with("alpha\nbeta\n");
+    c.set_language_by_name(Some("Java"));
+    c.cursor = CursorPos { line: 0, col: 0 };
+    assert!(c.toggle_block_comment());
+    assert_eq!(c.doc.to_text(), "/*alpha\nbeta*/\n");
+    assert!(c.toggle_block_comment());
+    assert_eq!(c.doc.to_text(), "alpha\nbeta\n", "再按一次必须逐字回到原样");
+
+    // 只要包一行就**得选一行**：选区限定首行。
+    // ⚠️ 第二下必须**重新框好同一段**再按——`apply_line_block` 收尾会把 anchor 清成
+    // None（这条骨架行注释也共用多年，不是本轮新语义），所以"连按两次"的第二下
+    // 默认作用范围是整篇而不是刚才那一段。真窗口的观感（连按两次该不该退回原范围）
+    // 已记进 docs/days 与手测清单，等用户点单要不要改这条既有语义。
+    let mut s = core_with("alpha\nbeta\n");
+    s.set_language_by_name(Some("Java"));
+    s.anchor = Some(CursorPos { line: 0, col: 0 });
+    s.cursor = CursorPos { line: 0, col: 5 };
+    assert!(s.toggle_block_comment());
+    assert_eq!(
+        s.doc.to_text(),
+        "/*alpha*/\nbeta\n",
+        "选区只碰首行就只包首行"
+    );
+    s.anchor = Some(CursorPos { line: 0, col: 0 });
+    s.cursor = CursorPos { line: 0, col: 9 };
+    assert!(s.toggle_block_comment());
+    assert_eq!(
+        s.doc.to_text(),
+        "alpha\nbeta\n",
+        "同一范围再按一次必须剥回来"
+    );
+
+    // 跨三行选区：开标记落首行缩进后、闭标记接末行正文尾；一次撤销整组收回
+    let mut d = core_with("alpha\nbeta\ngamma\n");
+    d.set_language_by_name(Some("Java"));
+    d.anchor = Some(CursorPos { line: 0, col: 0 });
+    d.cursor = CursorPos { line: 2, col: 5 };
+    assert!(d.toggle_block_comment());
+    assert_eq!(d.doc.to_text(), "/*alpha\nbeta\ngamma*/\n");
+    assert!(d.undo());
+    assert_eq!(
+        d.doc.to_text(),
+        "alpha\nbeta\ngamma\n",
+        "一次写回＝一个撤销组，不许剥两次才回原样"
+    );
+
+    // 缩进保留：开标记插在缩进**之后**，不把行首空白卷进注释里
+    let mut e = core_with("    indented\n");
+    e.set_language_by_name(Some("Java"));
+    assert!(e.toggle_block_comment());
+    assert_eq!(e.doc.to_text(), "    /*indented*/\n");
+    assert!(e.toggle_block_comment());
+    assert_eq!(e.doc.to_text(), "    indented\n");
+
+    // 整块没有非空白字符 ⇒ 拒绝（不许插出一对空标记）；空文档同一条
+    let mut blank = core_with("   \n");
+    blank.set_language_by_name(Some("Java"));
+    assert!(!blank.toggle_block_comment(), "纯空白块该拒绝");
+    assert_eq!(blank.doc.to_text(), "   \n");
+    let mut g = core_with("");
+    g.set_language_by_name(Some("Java"));
+    assert!(!g.toggle_block_comment(), "空文档 no-op，不产快照");
+}
+
+#[test]
+fn toggle_block_comment_inserts_the_pair_verbatim() {
+    // ⚠️ 这条盯的是"不自己补空格"：现量里 HTML 的成对标记**自带那截空格**
+    // （`"<!-- "` 与 `" -->"`），而 C 家族不带（`"/*"`／`"*/"`）。
+    // 动作层若统一补一个空格，两种语言就是两种错——HTML 会写成 `<!--  x  -->`。
+    let mut h = core_with("正文\n");
+    h.set_language_by_name(Some("HTML"));
+    assert!(h.toggle_block_comment());
+    assert_eq!(
+        h.doc.to_text(),
+        "<!-- 正文 -->\n",
+        "HTML 的标记自带空格，原样插"
+    );
+    assert!(h.toggle_block_comment());
+    assert_eq!(h.doc.to_text(), "正文\n");
+
+    // Lua 用的是长括号那一形，两侧都不带空格
+    let mut l = core_with("local x = 1\n");
+    l.set_language_by_name(Some("Lua"));
+    assert!(l.toggle_block_comment());
+    assert_eq!(l.doc.to_text(), "--[[local x = 1--]]\n");
+    assert!(l.toggle_block_comment());
+    assert_eq!(l.doc.to_text(), "local x = 1\n");
+
+    // 我们自嵌的 PowerShell：内置包没有这门，标记来自手写表那一行
+    let mut p = core_with("Get-Process\n");
+    p.set_language_by_name(Some("Editpad PowerShell"));
+    assert!(p.toggle_block_comment());
+    assert_eq!(p.doc.to_text(), "<#Get-Process#>\n");
+    assert!(p.toggle_block_comment());
+    assert_eq!(p.doc.to_text(), "Get-Process\n");
+}
+
+#[test]
+fn toggle_block_comment_refuses_syntaxes_without_a_usable_pair() {
+    // 三类拒绝各有各的理由，名单由 core 那张表与两条规则给出：
+    for (name, why) in [
+        ("Python", "内置没有成对标记"),
+        ("YAML", "内置没有成对标记"),
+        ("Bourne Again Shell (bash)", "内置没有成对标记"),
+        ("Makefile", "内置没有成对标记"),
+        ("Plain Text", "不是代码"),
+        ("Editpad Log", "自嵌语法，metadata 给不出"),
+        ("JSON", "否决表：内置给了 /* */ 而严格 JSON 没有注释"),
+        ("Ruby", "否决表：=begin/=end 必须顶格，插在缩进后是坏代码"),
+        ("MATLAB", "形状否决：%{ 与 %} 必须各自独占一行"),
+    ] {
+        let mut c = core_with("body\n");
+        c.set_language_by_name(Some(name));
+        assert!(!c.toggle_block_comment(), "{name} 该拒绝：{why}");
+        assert_eq!(c.doc.to_text(), "body\n", "{name} 不许动正文");
+    }
+    // 对照：同一份正文换成 Java 就**该**成功——证明拒绝来自判据而不是动作本身坏了
+    let mut j = core_with("body\n");
+    j.set_language_by_name(Some("Java"));
+    assert!(j.toggle_block_comment());
+    assert_eq!(j.doc.to_text(), "/*body*/\n");
+    // 没判出语言的页（纯文本路径）同样拒绝
+    let mut n = core_with("body\n");
+    assert!(!n.toggle_block_comment(), "未命名/纯文本页一个字都不写");
+    assert_eq!(n.doc.to_text(), "body\n");
+}
+
+#[test]
 fn toggle_line_comment_refuses_syntaxes_without_a_line_prefix() {
     // 第 315 轮 C6：Markdown 没有行注释前缀。改前它落进前缀表的 `_ => "//"`，
     // 按一次 Ctrl+Q 就往正文里插两个斜杠

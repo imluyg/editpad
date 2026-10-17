@@ -1207,6 +1207,89 @@ impl EditorCore {
         true
     }
 
+    /// 行块首行切成「缩进 / 缩进后正文」两段。`trim_start` 只会吃掉一个完整前缀，
+    /// 所以字节切片落在字符边界上（与行注释那一族同一取法）。
+    fn split_leading_ws(s: &str) -> (&str, &str) {
+        let t = s.trim_start();
+        (&s[..s.len() - t.len()], t)
+    }
+
+    /// 块注释成对标记（档5 第六笔）。判据与四档优先级、三格否决的理由都记在
+    /// [`editpad_core::block_comment_delims`]。
+    pub(crate) fn block_delims_for(&self) -> Option<(&'static str, &'static str)> {
+        editpad_core::block_comment_delims(self.highlight_syntax_name().as_deref())
+    }
+
+    /// 块注释切换。作用域与行注释**同一口径**（共用 [`Self::collect_line_block`] 骨架）：
+    /// 有选区＝选区触及的那几行，**无选区＝整篇文档**——最后这条不是本轮新定的，
+    /// 是行注释多年来的既有范围（`anchor` 为空时它返回 `(0, count-1)`）。
+    /// 开标记插在首行缩进之后，闭标记接在末行正文之尾。
+    ///
+    /// ⚠️ 一条**同族的既有语义**，写在这儿免得下轮误判成本笔的缺陷：
+    /// [`Self::apply_line_block`] 收尾把 `anchor` 清成 `None` ⇒ "连按两次"的第二下
+    /// 作用范围是整篇，不是刚才那一段。行注释一直是这个形状（它的往返用例从不设选区，
+    /// 所以从没照到过）。要不要让注释类动作保留刚才那段选区，是一条要用户点单的
+    /// 既有行为变更，不在本笔顺手改。
+    ///
+    /// - 判定：首行缩进后正好是开标记 **且** 末行（去行尾空白后）正好以闭标记结尾
+    ///   ⇒ 剥掉这一对；否则加上一对 ⇒ **再按一次回到原样**（往返恒等由用例钉）；
+    /// - 标记**原样插、原样剥，绝不自己补空格**：现量里 HTML 给的是 `"<!-- "`／`" -->"`
+    ///   （自带那截空格），而 C 家族给 `"/*"`／`"*/"`（不带）。补了就是两种语言两种错；
+    /// - 整块一个非空白字符都没有 ⇒ 拒绝。给空文档插出一对 `/**/` 不是"注释了空行"，
+    ///   是把噪声变成哑剧；与行注释"纯空行跳过不参与"同一克制；
+    /// - 解包会把末行的行尾空白一并收掉（那是标记自己那截排版，不值得为它多留一条
+    ///   保空白的分支）⇒ 往返恒等的成立条件是"原文没有行尾空白"；
+    /// - 行数不变 ⇒ 书签恒等映射；无变化 no-op 不产快照；一次写回＝**一个撤销组**；
+    /// - 这门语法没有可用的块注释（Python／YAML／bash／Makefile／JSON／Ruby／MATLAB…，
+    ///   判据给 `None`）⇒ 一个字都不动、返回 false，消息层给一句状态栏。
+    pub fn toggle_block_comment(&mut self) -> bool {
+        let Some((open, close)) = self.block_delims_for() else {
+            return false;
+        };
+        let blk = self.collect_line_block();
+        if blk.lines.is_empty() || blk.lines.iter().all(|l| l.trim().is_empty()) {
+            return false;
+        }
+        let last = blk.lines.len() - 1;
+        let (ind, first_body) = Self::split_leading_ws(&blk.lines[0]);
+        let wrapped = first_body.starts_with(open)
+            && blk.lines[last].trim_end().ends_with(close)
+            // 同一行时两条标记不能互相越过（`/* */` 之外不该被认成"已注释"）
+            && (last > 0 || first_body.len() >= open.len() + close.len());
+        let mut lines: Vec<String> = blk.lines.clone();
+        match (wrapped, last) {
+            (true, 0) => {
+                let inner = first_body[open.len()..].trim_end();
+                let inner = inner.strip_suffix(close).unwrap_or(inner);
+                lines[0] = format!("{ind}{inner}");
+            }
+            (true, _) => {
+                lines[0] = format!("{ind}{}", &first_body[open.len()..]);
+                let lb = blk.lines[last].trim_end();
+                lines[last] = lb[..lb.len() - close.len()].to_owned();
+            }
+            (false, 0) => {
+                let body_trim = first_body.trim_end();
+                lines[0] = if body_trim.is_empty() {
+                    format!("{ind}{open}{close}")
+                } else {
+                    format!("{ind}{open}{body_trim}{close}")
+                };
+            }
+            (false, _) => {
+                lines[0] = format!("{ind}{open}{first_body}");
+                let lb = blk.lines[last].trim_end();
+                lines[last] = format!("{lb}{close}");
+            }
+        }
+        if lines == blk.lines {
+            return false; // 幂等 no-op：不产快照
+        }
+        let map: Vec<Option<usize>> = (0..lines.len()).map(Some).collect();
+        self.apply_line_block(&blk, &lines, &map);
+        true
+    }
+
     /// 当前行是否带书签（渲染层逐可见行查询，O(log n)）。
     pub fn is_bookmarked(&self, line: usize) -> bool {
         self.bookmarks.contains(&line)
