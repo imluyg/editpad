@@ -1771,6 +1771,44 @@ fn column_block_insert_boundaries() {
     assert_eq!(e.doc.to_text(), "Xa\r\nYb\r\ncc", "payload 行尾归一 CRLF");
 }
 
+/// 列块态打字命中「填进去的那一段与块里原本的一字不差」时，整次操作没有
+/// 任何后果 ⇒ 按 P351／P463 那条口径（`convert_case` 的 `out == src`、
+/// `sort_lines` 的已有序）不产撤销快照、不吃块。改前的读数＝正文逐字节相同
+/// 而撤销栈多一格：用户第一次 `Ctrl+Z` 撤掉的是「什么都没发生」，页签还
+/// 被置脏、随即白排一次自动保存。
+#[test]
+fn block_fill_with_identical_text_changes_nothing_at_all() {
+    let mut c = core_with("aa\naa");
+    c.block_sel = Some(BlockSel {
+        anchor: CursorPos { line: 0, col: 0 },
+        head: CursorPos { line: 1, col: 1 },
+    });
+    assert_eq!(
+        c.active_block(),
+        Some((0, 1, 0, 1)),
+        "夹具自检：块跨两行的第一列"
+    );
+    let snaps = c.undo_stack.len();
+    let cursor = c.cursor;
+    assert!(
+        !c.insert_into_block("a"),
+        "填进去的就是原有那个字符＝无事可做"
+    );
+    assert_eq!(c.doc.to_text(), "aa\naa", "正文逐字节不动");
+    assert_eq!(c.undo_stack.len(), snaps, "没有后果的操作不许产撤销快照");
+    assert!(
+        c.has_block(),
+        "失败的那一下不得吃掉块（与失败的撤销同口径）"
+    );
+    assert_eq!(c.cursor, cursor, "也不得挪光标");
+
+    // 正对照：块确实还能用，换一个字符就照常逐行替换并吃掉块
+    assert!(c.insert_into_block("b"), "正对照：内容真的变了照旧生效");
+    assert_eq!(c.doc.to_text(), "ba\nba");
+    assert_eq!(c.undo_stack.len(), snaps + 1, "成功的那一次必须产快照");
+    assert!(!c.has_block(), "成功的填充消费掉块");
+}
+
 #[test]
 fn block_select_lifecycle_and_geometry() {
     let mut c = core_with("abcdef\ngh\nijklm\n");

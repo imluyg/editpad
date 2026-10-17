@@ -1103,8 +1103,25 @@ impl EditorCore {
         if lines.is_empty() || lines.iter().all(|l| l.is_empty()) {
             return false;
         }
-        self.snapshot();
         let rows = r1 - r0 + 1;
+        // 填进去的内容与块里原有的一字不差 ⇒ 整次操作没有任何后果：不产撤销
+        // 快照、不吃块、不挪光标。口径同 `convert_case` 的 `out == src` 与
+        // `sort_lines` 的「已有序」（P351／P463＝没有后果的动作不留状态后果）。
+        // 块扩展那一支必然改变正文，故只在 `lines.len() <= rows` 时才可能命中；
+        // 这里逐行比对的区间算式与下面的写入循环逐字同一份，不留第二把尺。
+        if lines.len() <= rows
+            && (0..rows).all(|offset| {
+                let line = r0 + offset;
+                let start = self.doc.line_to_char(line);
+                let len = self.line_display_len(line);
+                let a = start + c0.min(len);
+                let b = start + c1.min(len);
+                self.doc.slice_text(a, b) == lines[offset % lines.len()]
+            })
+        {
+            return false;
+        }
+        self.snapshot();
         // 逐行删旧块内容 [c0, c1) 再填入（从后往前，前面的偏移不受影响）
         for offset in (0..rows).rev() {
             let line = r0 + offset;
