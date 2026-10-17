@@ -9,6 +9,7 @@ pub mod document;
 pub mod error;
 pub mod find_in_files;
 pub mod highlight;
+pub mod indent;
 pub mod json;
 pub mod lang;
 pub mod line_diff;
@@ -35,6 +36,11 @@ pub use highlight::{
     available_syntax_names, first_line_language, line_comment_prefix, resolve_fence_language,
     resolve_language, resolve_language_with, syntax_for_extension, syntax_override_lookup,
     syntax_override_write_key, LazyHighlighter, StyledRun,
+};
+pub use indent::{
+    dominant_indent, enter_action, enter_plan, indent_unit_for, strip_one_indent, EnterAction,
+    EnterFacts, EnterPlan, EnterProbe, IndentUnit, FALLBACK_INDENT_COLS, INDENT_SAMPLE_LINES,
+    MAX_INDENT_STEP,
 };
 pub use json::{format_json, validate_json, JsonError};
 pub use lang::{
