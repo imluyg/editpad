@@ -660,7 +660,10 @@ impl Editpad {
                 // P102：窗口尺寸记忆（0,0 = 未知窗口，跳过；实测正常值
                 // 才记录）。节流：拖动/拉伸每帧事件，2s 才落盘一次，
                 // 关闭路径 handle_close_request 兜底落盘最后状态。
-                if w > 0.0 && h > 0.0 {
+                if w > 0.0 && h > 0.0 && self.geometry_is_memorable() {
+                    // 全屏期间连**内存里**那份 settings 都不许被全屏值覆写：落盘还有
+                    // 别的出口（切主题／记最近文件／关窗兜底），只挡节流挡不住它们。
+                    // `viewport_size` 本身照记——那是这一帧的真实绘制尺寸。
                     self.settings.window_width = Some(w);
                     self.settings.window_height = Some(h);
                     self.persist_geometry_if_due();

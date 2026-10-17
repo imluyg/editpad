@@ -1991,6 +1991,77 @@ fn p102_window_geometry_events_update_and_persist_settings() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// P126 的另一半：「全屏期间不记忆几何」必须挡在**字段更新**上，不能只挡节流写盘。
+/// 改前只有 `persist_geometry_if_due` 看 `fullscreen`，而 `ViewportResized` 与
+/// `WindowMoved` 两个更新点照旧无条件覆写 `settings.window_*`；落盘又另有出口
+/// （切主题／记最近文件／改热键各调一次 `persist_settings`，关窗再兜底一次）
+/// ⇒ 全屏里切一次主题或直接 Alt+F4，config 里就躺下全屏尺寸，下次启动按它建窗——
+/// 正是那条注释说要避免的结果。反面对照钉住「退出全屏照记」与「绘制用的实时尺寸
+/// 照记」，挡住「全屏一律不写」这种过宽修法。
+#[test]
+fn fullscreen_geometry_reaches_neither_the_settings_nor_the_disk() {
+    let dir = scratch_dir("p126-fullscreen-geom");
+    let mut app = Editpad::default();
+    app.settings_path_override = Some(dir.join("config.toml"));
+
+    // 窗口期：走生产入口先把一份正常几何记进设置（不是手改字段）
+    dispatch(&mut app, Message::ViewportResized(1280.0, 720.0));
+    dispatch(
+        &mut app,
+        Message::WindowMoved(iced::Point::new(320.0, 180.0)),
+    );
+    assert_eq!(
+        (app.settings.window_width, app.settings.window_height),
+        (Some(1280.0), Some(720.0)),
+        "夹具自证：窗口期拉伸照常记忆"
+    );
+
+    // 进全屏（P386 起要有主窗口 id 才翻得了标志）
+    let id = iced::window::Id::unique();
+    dispatch(&mut app, Message::MainWindowResolved(Some(id)));
+    dispatch(&mut app, Message::ToggleFullscreen);
+    assert!(app.fullscreen, "夹具自证：此刻在全屏里");
+
+    dispatch(&mut app, Message::ViewportResized(1920.0, 1080.0));
+    dispatch(&mut app, Message::WindowMoved(iced::Point::new(0.0, 0.0)));
+    assert_eq!(
+        (app.settings.window_width, app.settings.window_height),
+        (Some(1280.0), Some(720.0)),
+        "全屏尺寸不许覆写内存里那份几何（改前实得 1920×1080）"
+    );
+    assert_eq!(
+        (app.settings.window_x, app.settings.window_y),
+        (Some(320), Some(180)),
+        "全屏里挪窗同样不许覆写位置（改前实得 (0, 0)）"
+    );
+    assert_eq!(
+        app.viewport_size,
+        (1920.0, 1080.0),
+        "反面对照：这一帧的绘制尺寸照记，这道闸只管「记忆」"
+    );
+
+    // 漏盘那条路：一次与几何无关的整份落盘（切主题走 `persist_settings`）
+    dispatch(&mut app, Message::ThemeToggled);
+    let loaded = editpad_core::Settings::load_from(&dir.join("config.toml"));
+    assert_eq!(
+        (loaded.window_width, loaded.window_height),
+        (Some(1280.0), Some(720.0)),
+        "全屏里的无关落盘不得把全屏尺寸带进 config"
+    );
+
+    // 退出全屏后照记（挡住「开态一律不记」这种过宽修法）
+    dispatch(&mut app, Message::ToggleFullscreen);
+    assert!(!app.fullscreen, "夹具自证：已退出全屏");
+    dispatch(&mut app, Message::ViewportResized(1024.0, 768.0));
+    assert_eq!(
+        (app.settings.window_width, app.settings.window_height),
+        (Some(1024.0), Some(768.0)),
+        "窗口期恢复记忆"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// P102 契约：restore_window_geometry 把配置换算成建窗参数——
 /// 合法值原样还原、缺省回退默认居中、坏值（越界坐标/极小尺寸）
 /// 回退且不 panic。

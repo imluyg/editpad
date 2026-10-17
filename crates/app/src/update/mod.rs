@@ -1083,10 +1083,13 @@ impl Editpad {
                 task
             }
             Message::WindowMoved(p) => {
-                // P102：窗口位置记忆（逻辑坐标，iced 与建窗 Specific 同空间）
-                self.settings.window_x = Some(p.x as i32);
-                self.settings.window_y = Some(p.y as i32);
-                self.persist_geometry_if_due();
+                // P102：窗口位置记忆（逻辑坐标，iced 与建窗 Specific 同空间）。
+                // 全屏那半边不记，理由同 [`Self::geometry_is_memorable`]。
+                if self.geometry_is_memorable() {
+                    self.settings.window_x = Some(p.x as i32);
+                    self.settings.window_y = Some(p.y as i32);
+                    self.persist_geometry_if_due();
+                }
                 Task::none()
             }
             _ => Task::none(),
@@ -1292,12 +1295,25 @@ impl Editpad {
         }
     }
 
+    /// P126 的那把尺**只允许有一处**：全屏期间窗口尺寸与位置都是全屏值，
+    /// 既不能落盘，也**不能记进内存里那份 settings**——后者才是 P126 真正要防的
+    /// 东西。改前这条判据只写在 [`Self::persist_geometry_if_due`] 头上，两个字段
+    /// 更新点（`ViewportResized`／`WindowMoved`）照旧无条件覆写
+    /// `settings.window_width/height/x/y`，而落盘还有别的出口：切主题／记最近文件／
+    /// 改热键各自的 `persist_settings`，以及关窗兜底 `handle_close_request`——
+    /// 节流闸挡得住「每一帧写盘」，挡不住「下一次无关的整份落盘把污染带走」。
+    /// 实测形状＝F11 进全屏 → 拉伸一次 → 退出全屏前直接 Alt+F4 ⇒ 下次启动按
+    /// 全屏尺寸建窗，正是那句注释说要避免的结果。
+    fn geometry_is_memorable(&self) -> bool {
+        !self.fullscreen
+    }
+
     /// P102：窗口几何节流落盘——拖动/拉伸是每帧事件，至少隔
     /// [`GEOMETRY_PERSIST_INTERVAL`] 才写一次盘；关闭路径在
     /// `handle_close_request` 里兜底补一次（见 view.rs）。
     fn persist_geometry_if_due(&mut self) {
         // P126：全屏期间不记忆几何——尺寸是全屏值，退出全屏按它恢复会错
-        if self.fullscreen {
+        if !self.geometry_is_memorable() {
             return;
         }
         let now = std::time::Instant::now();
