@@ -1229,6 +1229,8 @@ fn starts_new_block(lines: &[&str], i: usize, is_def: &[bool]) -> bool {
 
 /// 表格的**形状**：`(各列对齐方式, 表格之后下一行的下标)`。不成表 ⇒ `None`。
 ///
+/// 成表条件三条（GFM）：表头行含竖线、分隔行只由 `| : - 空格` 组成且至少一格、
+/// **表头与分隔行等格**（P465，缺它就等于把多出来的表头格静默裁掉）。
 /// 一份两用：[`table`] 用它定位要填内容的区间，[`is_table_start`] 用它答布尔。
 /// 这一份**不做行内解析**，所以"这一行是不是新块"那一问的代价与表的格数无关。
 fn table_shape(lines: &[&str], start: usize) -> Option<(Vec<MdAlign>, usize)> {
@@ -1244,6 +1246,13 @@ fn table_shape(lines: &[&str], start: usize) -> Option<(Vec<MdAlign>, usize)> {
         return None;
     }
     let cells = split_row(delim);
+    // P465：GFM 的成表条件里还有半条——**表头行必须与分隔行等格**。改前只数分隔行，
+    // 于是三格的表头配两格的分隔行照样成表，表头随后被 `normalize_row` 裁到两格
+    // ⇒ 用户写下的那一列在预览里静默消失（不报错、也不留任何痕迹）。
+    // 数据行那一侧相反：多出来的格仍按规范裁掉，所以这道闸只管 start 这一行。
+    if split_row(head).len() != cells.len() {
+        return None;
+    }
     let mut align = Vec::new();
     for cell in &cells {
         align.push(parse_align(cell)?);
@@ -2881,6 +2890,43 @@ mod tests {
         assert_eq!(rows[0].len(), 2, "{two:?}");
         assert_eq!(spans_text(&rows[0][0]), "x \\");
         assert_eq!(spans_text(&rows[0][1]), "y");
+    }
+
+    /// P465＝**吃字**：GFM 要求表头行与分隔行**格数相等**，不等则整块不成表。
+    /// 改前 `table_shape` 只数分隔行有几格，表头随后被 `normalize_row` 裁到那个数
+    /// ⇒ 用户写下的第三列在预览里静默消失（不报错、不留痕，唯一的线索是少一列）。
+    #[test]
+    fn p465_a_header_that_disagrees_with_the_delimiter_row_is_not_a_table() {
+        let src = "| 甲 | 乙 | 丙 |\n|--|--|\n| 1 | 2 | 3 |\n";
+        let blocks = parse_markdown(src);
+        assert!(
+            !blocks.iter().any(|b| matches!(b, MdBlock::Table { .. })),
+            "格数不符那一形不许当表：{blocks:?}"
+        );
+        let joined = blocks
+            .iter()
+            .map(|b| match b {
+                MdBlock::Paragraph { spans } => spans_text(spans),
+                MdBlock::ListItem { spans, .. } => spans_text(spans),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in ["甲", "乙", "丙", "1", "2", "3"] {
+            assert!(joined.contains(word), "{word} 从正文里消失了：{joined:?}");
+        }
+        // 对照一：等格仍成表（不许把判据整体收紧成"永远不成表"蒙过这一格）
+        let ok = parse_markdown("| 甲 | 乙 |\n|--|--|\n| 1 | 2 |\n");
+        assert!(
+            matches!(&ok[0], MdBlock::Table { header, .. } if header.len() == 2),
+            "{ok:?}"
+        );
+        // 对照二：多出来的格在**数据行**那一侧仍按 GFM 裁掉——规范只要求表头与分隔行等格
+        let extra = parse_markdown("| 甲 | 乙 |\n|--|--|\n| 1 | 2 | 3 |\n");
+        let MdBlock::Table { rows, .. } = &extra[0] else {
+            panic!("数据行多格那一形仍该是表：{extra:?}");
+        };
+        assert_eq!(rows[0].len(), 2, "数据行多出来的格按 GFM 裁掉：{rows:?}");
     }
 
     /// P376（池 ⑬）：行内代码段里的 `*` 是**字面量**，不参与样式开关。
