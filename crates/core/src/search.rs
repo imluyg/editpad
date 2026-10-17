@@ -714,7 +714,12 @@ fn query_is_multiline(mut q: impl Iterator<Item = char>) -> bool {
 }
 
 /// token 判等：普通字符走 [`case_fold_eq`]（Unicode 简单折叠，全仓唯一判据）；
-/// 查询的换行单元恰好对应文本侧归一换行单元。查询字面 `\r` 对任何文本 token 都失配。
+/// 换行单元只与换行单元相等。
+///
+/// ⚠️ 这里**不存在**「字面 `\r` 恒失配」：`query_tokens` 早在 P257 改判时就把查询里的
+/// `\r` / `\n` / `\r\n` 归一成 `Newline` 单元，与文本侧同一套。真正恒不相等的是
+/// 异体行界（VT/FF/NEL/LS/PS）——查询侧仍按 `Char` 出 token、文本侧折成 `Newline`，
+/// 那是有意裁决，见 `query_is_multiline` 头上那段。
 fn token_matches(qt: ScanToken, tt: ScanToken, case_sensitive: bool) -> bool {
     match (qt, tt) {
         (ScanToken::Char(a), ScanToken::Char(b)) => case_fold_eq(a, b, case_sensitive),
@@ -2657,6 +2662,41 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// 查询整体就是一个裸 `\r`（查找框真能敲出来的形状，也是 `query_is_multiline`
+    /// 文档里那条实测的形状）与裸 `\n` 同价：每个行界各得一个命中。
+    /// P257 换了契约（查询侧与文本侧同一套换行归一），本文件里旧契约那句
+    /// 「查询字面 `\r` 对任何文本 token 都失配」却没跟着改，而这个形状一直没格钉 ⇒
+    /// 注释是残骸、行为无人点名。本格两样一起收。
+    #[test]
+    fn bare_cr_query_matches_line_breaks_exactly_like_bare_lf() {
+        let want = vec![
+            MatchPos {
+                line: 0,
+                col: 1,
+                len_chars: 1,
+            },
+            MatchPos {
+                line: 1,
+                col: 1,
+                len_chars: 1,
+            },
+        ];
+        assert_eq!(
+            find_all("a\nb\n", "\r", true),
+            want,
+            "LF 文档上的裸 \\r 查询"
+        );
+        // 三条路径同源：rope 侧与 &str 侧不许分叉，\n 写法给出同一份
+        assert_eq!(
+            find_all_document(&Document::from_str("a\nb\n"), "\r", true),
+            want,
+            "rope 路径与 &str 路径在裸 \\r 查询上分叉"
+        );
+        assert_eq!(find_all("a\nb\n", "\n", true), want);
+        // 反面对照：文档里一个行界都没有 ⇒ 恒零命中（不是"失配"，是"没有单元可配"）
+        assert!(find_all("abc", "\r", true).is_empty());
     }
 
     /// P257 改判：本用例的前身 `multiline_query_with_literal_cr_never_matches`
