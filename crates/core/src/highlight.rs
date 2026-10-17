@@ -712,6 +712,12 @@ const EXT_OVERRIDE: &[(&str, &str)] = &[("h", "C++")];
 /// composer.lock 是 JSON——一个扩展名三种家族，硬借就是判错）、`csv`/`tsv`
 /// （内置包没有表格语法，借任何一家都是错的）、`gitignore`（没有对应语法，
 /// 且它的「注释」就是 `#`，与 Plain Text 一样不值得专门染色）。
+///
+/// ⚠️ 实测有 5 条**被内置索引遮蔽**（`markdown`/`md`/`mk`/`yml`/`txt`——内置包自己
+/// 就声明了它们，`syntax_for_extension` 走到第二层即返回，别名永远读不到）。留着是因为
+/// 它们与内置判定**同值**，作用是「哪天内置包不声明了仍有人接住」；真正的风险是反过来的：
+/// 若有人把某条的目标改成别的值，改动会**静默不生效**。那一格由用例
+/// `p454_no_alias_is_shadowed_with_a_conflicting_target` 钉住，改之前它会先红。
 const ALIAS_TABLE: &[(&str, &str)] = &[
     ("log", "Editpad Log"),
     ("markdown", "Markdown"),
@@ -737,6 +743,11 @@ const ALIAS_TABLE: &[(&str, &str)] = &[
     ("ps1", "Editpad PowerShell"),
     ("psm1", "Editpad PowerShell"),
     ("psd1", "Editpad PowerShell"),
+    // Luau（Roblox 的 Lua 超集）借 Lua：多的只是类型标注与 `continue`，`--` 行注释与
+    // 引号边界逐字相同。现量记一笔：内置 Lua 语法在**引号不闭合**时会把串状态带过行尾，
+    // 但那是 `.lua` 本尊同样的病、且触发物是语法错误的代码 ⇒ 不是借道新增的东西，
+    // 与 tsx/jsx 那格（正确代码被染错）不同，所以不否决。两条都由用例钉。
+    ("luau", "Lua"),
 ];
 
 /// 扩展名 → 语法名：纠正表 → syntect 内建扩展索引 → 别名表。
@@ -1057,6 +1068,10 @@ const COMMENT_PREFIX_TABLE: &[(&str, &str)] = &[
     ("BibTeX", "%"),
     ("ASP", "'"),
     ("Batch File", "::"),
+    // `//` 系的头名。Java 从下面的兜底分支也能拿到 `//`（值是对的），但那是「对得很
+    // 巧合」：兜底一旦改口径（比如未知语法改成拒写），Java 的 Ctrl+Q 会静默变掉。
+    // 显式一格＋用例里的**结构断言**（表里有 "Java" 这行）才盯得住。
+    ("Java", "//"),
 ];
 
 /// 围栏**专用**的补充别名：GFM 里常见的写法既不是内置扩展名、也不是内置语法名。
@@ -1070,6 +1085,10 @@ const FENCE_ALIAS: &[(&str, &str)] = &[
     ("docker", "Editpad Dockerfile"),
     // GFM 围栏习惯写全称（`ps1` 走的是扩展名那一层，已经通）
     ("powershell", "Editpad PowerShell"),
+    // 带版本号那一形：`py3` 恰好是 Python 内置声明的扩展名所以通，而 `python3`/`python2`
+    // 既不是扩展名、语法名里也没有它（现量＝改前两格都是 None，整块素色）。
+    ("python3", "Python"),
+    ("python2", "Python"),
 ];
 
 /// 围栏语言串 → 语法名（Markdown 代码块上色用）。
@@ -1615,25 +1634,29 @@ mod tests {
     #[test]
     fn builtin_extensions_win_before_alias_table() {
         // 内建索引命中：直接给规范语法名
+        // ⚠️ 2026-10-17 现量修过这一组的名单：`md`/`markdown`/`mk`/`txt` 原本写在这一侧
+        // 的「别名表兜底」组里，其实内置包自己就声明了它们（断言只比最终值，所以两层
+        // 都能绿——标签是错的）。哪一层在干活由
+        // `p454_no_alias_is_shadowed_with_a_conflicting_target` 钉。
         for (ext, name) in [
             ("rs", "Rust"),
             ("py", "Python"),
             ("json", "JSON"),
             ("yml", "YAML"),
+            ("md", "Markdown"),
+            ("markdown", "Markdown"),
+            ("mk", "Makefile"),
+            ("txt", "Plain Text"),
         ] {
             assert_eq!(syntax_for_extension(ext).as_deref(), Some(name), "{ext}");
         }
-        // 别名表兜底
+        // 别名表兜底（内置索引查不到，这一层真在干活）
         for (ext, name) in [
             ("log", "Editpad Log"),
             ("toml", "Editpad TOML"),
-            ("md", "Markdown"),
-            ("markdown", "Markdown"),
             ("ini", "Editpad TOML"),
             ("cfg", "Editpad TOML"),
             ("conf", "Editpad TOML"),
-            ("mk", "Makefile"),
-            ("txt", "Plain Text"),
         ] {
             assert_eq!(syntax_for_extension(ext).as_deref(), Some(name), "{ext}");
         }
@@ -2380,5 +2403,113 @@ mod tests {
         let expected = control.styled_line(250, &edited(250), total, &mut edited);
         let actual = hl.styled_line(250, &edited(250), total, &mut edited);
         assert_eq!(actual, expected, "失效后精确路径不受近似影响");
+    }
+
+    #[test]
+    fn p454_no_alias_is_shadowed_with_a_conflicting_target() {
+        // 这一格盯的不是「今天对不对」，是「将来改别名会不会静默不生效」：
+        // syntax_for_extension 第二层（内置扩展索引）命中就 return，别名永远走不到。
+        // 实测内置包与别名表重名的有 5 条，全部**同值**，所以今天无害；但把某条的
+        // 目标改成别的名字，光看代码会以为改了、行为一点没动。
+        let mut shadowed: Vec<&str> = Vec::new();
+        for (ext, target) in ALIAS_TABLE {
+            if let Some(builtin) = syntax_set().find_syntax_by_extension(ext) {
+                assert_eq!(
+                    builtin.name.as_str(),
+                    *target,
+                    "别名 {ext} 被内置索引遮蔽且目标不一致＝这条改动静默失效（要么改内置那一头，\
+                     要么把这条从别名表里摘掉并说明谁接住）"
+                );
+                shadowed.push(ext);
+            }
+        }
+        // 现量的遮蔽名单（2026-10-17 跑出来的 5 条）。哪天内置包不声明它了，这条会红，
+        // 那正是「重新量一遍哪一层在干活」的信号。
+        for ext in ["markdown", "md", "mk", "yml", "txt"] {
+            assert!(shadowed.contains(&ext), "{ext} 应当仍被内置索引命中");
+        }
+        // 反面对照：这几条内置索引查不到 ⇒ 别名是真在干活的（含本轮新加的 luau）
+        for ext in ["luau", "ts", "jsonc", "ps1", "toml", "dockerfile"] {
+            assert!(
+                syntax_set().find_syntax_by_extension(ext).is_none(),
+                "{ext} 不该被内置索引命中，否则别名那一层是摆设"
+            );
+        }
+    }
+
+    #[test]
+    fn p454_luau_borrows_lua_without_adding_a_new_leak() {
+        // 借道能不能留，判据是「借道**新增**了什么」，不是「这门语法干不干净」。
+        // ⚠️ 夹具口径：借道一律走生产那两条——先 `syntax_for_extension` 判名，再
+        // `new_by_name` 构造。`LazyHighlighter::new(ext)` 只问内置扩展索引（:205），
+        // 别名层在它之后，拿它测借道会得出「借了也不生效」的假结论。
+        let name = syntax_for_extension("luau").expect("luau 经别名表可达 Lua");
+        assert_eq!(name, "Lua");
+        let mut lua = LazyHighlighter::new_by_name(&name).expect("Lua 语法存在");
+        // ① 正确的 Luau 写法（单引号串、类型标注、`--` 注释）不跨行漏状态：
+        //    行首有分色、下一行也照常分色。
+        let typed = lua.styled_line(
+            0,
+            "local name: string = 'roblox' -- note",
+            usize::MAX,
+            &mut |_| String::new(),
+        );
+        assert!(typed.len() >= 2, "类型行应该分色：{typed:?}");
+        let after_typed = lua.styled_line(1, "local n = 42", usize::MAX, &mut |_| String::new());
+        assert!(
+            after_typed.len() >= 2,
+            "正确行之后应该照常分色：{after_typed:?}"
+        );
+        // ② 现量到的一条**真病**（本轮量出来的，写下来免得下轮再猜）：`"` 不闭合时
+        //    Lua 的串上下文跨行存活，下一行整行串色（实测＝18 列一整段）。
+        //    这不否决借道，两个理由：触发物本身是语法错误的代码；且同一门语法作用于
+        //    `.lua` 本尊就是这个结果＝借道没有新增任何东西。对照 tsx/jsx 那一格——
+        //    那里的触发物是**每天在写的正确代码**，所以退回纯文本。
+        //    这条断言是墓碑：哪天内置 Lua 语法修了它，这里会红，届时回来重判 ①。
+        let mut leak = LazyHighlighter::new_by_name("Lua").unwrap();
+        leak.styled_line(0, "local s = \"unbalanced", usize::MAX, &mut |_| {
+            String::new()
+        });
+        let leaked = leak.styled_line(1, "local n = 42", usize::MAX, &mut |_| String::new());
+        assert_eq!(
+            leaked.len(),
+            1,
+            "未闭合引号不再跨行＝②那段账要重记：{leaked:?}"
+        );
+    }
+
+    #[test]
+    fn p454_fence_tokens_cover_the_python_version_forms() {
+        // 现量：改前 `python3`/`python2` 两格都是 None（整块素色）。`py`/`py3` 本来就通，
+        // 走的是扩展名那一层，不是别名——所以补的只有版本号全称这两形。
+        for (token, expected) in [
+            ("python3", "Python"),
+            ("python2", "Python"),
+            ("py", "Python"),
+            ("py3", "Python"),
+            ("python", "Python"),
+        ] {
+            assert_eq!(
+                resolve_fence_language(token).as_deref(),
+                Some(expected),
+                "{token}"
+            );
+        }
+        // 刻意划到的 scope 线：`py2` 这种简写不在 GFM 习惯写法里，没给它领额度。
+        // 哪天要补，这条会红——那时顺便把上面那条注释一起改了。
+        assert_eq!(resolve_fence_language("py2"), None);
+    }
+
+    #[test]
+    fn p454_java_names_its_line_comment_prefix_explicitly() {
+        // **结构断言**，不是行为断言：只比 `line_comment_prefix(Some("Java"))` 摘掉表项
+        // 照样绿（兜底分支给同一个值），那条红就照不出「对得很巧合」这一格。
+        assert!(
+            COMMENT_PREFIX_TABLE
+                .iter()
+                .any(|(n, p)| *n == "Java" && *p == "//"),
+            "Java 必须显式登记在 COMMENT_PREFIX_TABLE，不许靠 _ => \"//\" 蒙对"
+        );
+        assert_eq!(line_comment_prefix(Some("Java")), Some("//"));
     }
 }

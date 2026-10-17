@@ -385,11 +385,14 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
 ## 格式适配
 
 - 常见代码语言按扩展名自动着色（syntect 内建 75 个语法 / 219 个扩展名 + 自维护别名表）。
-  别名表补的是内置表**查不到或判错**的那些：`log`/`md`/`markdown`/`toml`/`ini`/`cfg`/`conf`/`mk`/`yml`/
-  `dockerfile`/`ps1`/`psm1`/`psd1`（指向上面那两份内嵌语法），以及 `ts`/`mts`/`cts`/`mjs`/`cjs`（借 JavaScript）、`scss`/`less`（借 CSS）、
-  `jsonc`/`json5`（借 JSON）——只借语法家族相同、且实测**不会把下一行染错**的：
+  别名表补的是内置表**查不到**的那些：`log`/`toml`/`ini`/`cfg`/`conf`/`dockerfile`/
+  `ps1`/`psm1`/`psd1`（指向上面那几份内嵌语法），以及 `ts`/`mts`/`cts`/`mjs`/`cjs`（借 JavaScript）、`scss`/`less`（借 CSS）、
+  `jsonc`/`json5`（借 JSON）、`luau`（借 Lua）——只借语法家族相同、且实测**不会把正确的代码染错到下一行**的：
   `tsx`/`jsx` 就因此不借（JS 语法把 `</div>` 的 `/` 当正则起点，状态跨行存活，实测下一行的 `}` 整行染成字符串色）；
   另把 `.h` 定给 **C++**（内置索引取表尾，原本判给 Objective-C）；
+  ⚠️ 实测另有 5 条（`md`/`markdown`/`mk`/`yml`/`txt`）**与内置声明重名且同值**：判定走到内置那一层就返回，
+  别名读不到。留着是「内置包哪天不声明了仍有人接住」的保险格，代价是**改它的目标值不会生效**——
+  这一格有守卫用例盯着，改歪了会先红；
 - 内嵌迷你语法：**Log**（ERROR/WARN/INFO/DEBUG 级别分色 + 时间戳）、
   **TOML**（节名/键/字符串/注释）、**Dockerfile**（指令/字符串/变量/注释/端口）、
   **PowerShell**（cmdlet/字符串/变量与参数/控制词/注释/数字），随单文件分发；
@@ -404,7 +407,8 @@ Shift_JIS / EUC-JP / EUC-KR 保存」——选择后本页记住该偏好（此�
   「自动判定」就是这条记录的退路；未命名页无处可记，只作用本页；
 - 行注释前缀（`Ctrl+Q`）按 syntect 的真实语法名取值：`#` 系（bash/Makefile/TOML/Dockerfile/YAML/Perl/R/Tcl…）、
   `--` 系（SQL/Lua/Haskell/AppleScript）、`;` 系（Lisp/Clojure）、`%` 系（Erlang/MATLAB/LaTeX/BibTeX）、
-  `'`（ASP）、`::`（批处理）；只有块注释、或根本不是代码的（Markdown/JSON/CSS/HTML/XML/Log）
+  `'`（ASP）、`::`（批处理）、`//`（Java 显式登记；C/C++/C#/Go/Rust/JS 这些表外的门走同一默认值）；
+  只有块注释、或根本不是代码的（Markdown/JSON/CSS/HTML/XML/Log）
   一个字都不写；
 - Markdown 文件提供 `MD 预览` 面板（标题/段落/有序无序列表（含序号・嵌套・任务勾选框）/引用/围栏代码（按围栏语言上色）/表格/分隔线，行内粗体斜体・删除线・行内代码・链接与图片；正文按词换行、链接可点、配色随主题；预览与正文同屏分栏（边写边看），预览树跨帧复用并节流换版，只读渲染）；**写的一侧**：回车接住列表与引用（`> - 甲` → `> - `，空项退一层、空栏退引用，有序号进位、任务框给空框），`Ctrl+B`／`Ctrl+I`／`Ctrl+\``／`Ctrl+J`／`Ctrl+K` 把选区包成粗体／斜体／行内代码／删除线／链接，**再按一次解回原样**；Ctrl+Q 在 Markdown 页不适用（它没有行注释前缀），不会往正文插 `//`；
 - JSON 文件支持 `Ctrl+Shift+F` 一键校验并格式化；
