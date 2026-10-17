@@ -1034,6 +1034,15 @@ impl Editpad {
             E::TabKey(outdent) => {
                 if !outdent && editor.has_block() {
                     editor.insert_into_block("\t")
+                } else if outdent && self.settings.smart_indent {
+                    // 开着智能缩进时，反缩进与回车用**同一把尺**（文档自己那一档）。
+                    // 不加这一支的后果：2 格一档的文件里"回车加两格 → Shift+Tab"
+                    // 一次退掉四格＝退过头（`docs/手测清单.md` H8 那格，现在由
+                    // `tests::smart_indent::the_outdent_step_follows_the_switch` 钉住）。
+                    // 关着时走下面那条原路，逐字节等于多年的行为——这个开关不许
+                    // 漏到没 opted-in 的用户身上。
+                    let step = editor.doc_indent_step();
+                    editor.indent_touched_lines_step(true, step)
                 } else {
                     editor.indent_touched_lines(outdent)
                 }

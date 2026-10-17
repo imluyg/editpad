@@ -180,3 +180,65 @@ fn the_settings_row_exists_and_persists_both_ways() {
         "关回去也要落盘（两向都要能存）"
     );
 }
+
+/// 第 7 格（H8 从眼验搬回头测）：开着智能缩进时，"回车加一档 → Shift+Tab"一步回到原位。
+///
+/// 这一格存在的理由是我自己上一笔留下的不自洽：回车加的那一档跟着**文档步长**，
+/// 而反缩进（P121 起）按「一个制表符，否则至多 4 空格」剥 ⇒ 2 格一档的文件里
+/// 加 2 再退会一次退掉 4。**一把尺不能只管一边**，所以开关开着时反缩进也换成文档那一档。
+#[test]
+fn smart_enter_then_shift_tab_returns_exactly_one_level() {
+    let mut app = Editpad::default();
+    turn_on(&mut app);
+    set_lang(&mut app, "py");
+    type_text(&mut app, "  while true:");
+    press_enter(&mut app);
+    assert_eq!(
+        doc(&app),
+        "  while true:\n    ",
+        "前提：块头后加了一档（文档 2 格 ⇒ 2+2）"
+    );
+    dispatch(&mut app, Message::Edit(EditOp::TabKey(true)));
+    assert_eq!(
+        doc(&app),
+        "  while true:\n  ",
+        "退一次只退掉刚加的那一档；退掉两档＝把用户自己的缩进也吃了"
+    );
+}
+
+/// 第 8 格（开关外不漏）：同一份 2 格一档的文件，**关着**时 Shift+Tab 还是多年的形状
+/// （一次剥到 4 格上限）。这一格与上一格是同一夹具的一对——差别只在那个开关上，
+/// 所以它盯的是"这笔变更不许漏到没 opted-in 的用户身上"。
+#[test]
+fn the_outdent_step_follows_the_switch_not_the_file() {
+    // 关着：至多剥 4 空格（P121 多年的口径）
+    let mut off = Editpad::default();
+    type_text(&mut off, "    x\n  y");
+    dispatch(
+        &mut off,
+        Message::Edit(EditOp::Motion(Motion::DocStart, false)),
+    );
+    dispatch(&mut off, Message::Edit(EditOp::Motion(Motion::End, false)));
+    dispatch(&mut off, Message::Edit(EditOp::TabKey(true)));
+    assert_eq!(
+        doc(&off),
+        "x\n  y",
+        "没开开关的用户看到的必须还是'一次剥到 4 格'那条既有规则"
+    );
+
+    // 开着：剥文档自己那一档（这份文件最外层是 2 格 ⇒ 4 变 2，不是 4 变 0）
+    let mut on = Editpad::default();
+    turn_on(&mut on);
+    type_text(&mut on, "    x\n  y");
+    dispatch(
+        &mut on,
+        Message::Edit(EditOp::Motion(Motion::DocStart, false)),
+    );
+    dispatch(&mut on, Message::Edit(EditOp::Motion(Motion::End, false)));
+    dispatch(&mut on, Message::Edit(EditOp::TabKey(true)));
+    assert_eq!(
+        doc(&on),
+        "  x\n  y",
+        "开着时反缩进与回车必须是同一把尺（否则上下一格的两档就自相矛盾）"
+    );
+}

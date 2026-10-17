@@ -346,6 +346,18 @@ impl EditorCore {
     /// - 幻影末行不入块（与 [`Self::collect_line_block`] 同款排除）；
     /// - 幂等：无任何行发生改动时不产快照、返回 false。
     pub fn indent_touched_lines(&mut self, outdent: bool) -> bool {
+        // `None`＝多年的既有形状（至多剥 `TAB_STOP_COLS` 个空格）。
+        // 保留这个入口不是兼容壳：反缩进**默认**就该是这一把尺，
+        // 只有开了 `smart_indent` 的调用方才换成"与回车同一把尺"那一条。
+        self.indent_touched_lines_step(outdent, None)
+    }
+
+    /// 同一台机器，但反缩进剥多少**由调用方给**（`None`＝至多 `TAB_STOP_COLS` 格）。
+    ///
+    /// 存在的理由是一条自洽：`smart_indent` 开着时回车加的那一档跟着文档自己的步长，
+    /// 反缩进若还按固定 4 格剥，2 格一档的文件里"加两格、退一次"会一次退掉四格
+    /// （＝`docs/手测清单.md` 的 H8 那格，本轮从头测把它钉住了而不是留给眼睛）。
+    pub fn indent_touched_lines_step(&mut self, outdent: bool, step: Option<usize>) -> bool {
         let has_sel = self.anchor.is_some();
         // 列块态：作用范围＝**块跨的那些行**。原先这里只问 `anchor`，而块与
         // 单选区互斥（`anchor` 恒 None）⇒ 同一族里加缩进那支（应用层转给
@@ -383,7 +395,7 @@ impl EditorCore {
         let mut deltas: Vec<isize> = Vec::with_capacity(bodies.len());
         for body in &bodies {
             if outdent {
-                let stripped = strip_one_indent_unit(body);
+                let stripped = strip_one_indent_unit(body, step);
                 deltas.push(stripped.len() as isize - body.len() as isize);
                 new_bodies.push(stripped);
             } else {
@@ -1575,10 +1587,10 @@ impl EditorCore {
 }
 
 /// P121：反缩进时剥掉一层行首缩进——优先剥一个 `\t`，否则至多剥
-/// [`TAB_STOP_COLS`] 个行首空格（不足一个制表位的零星空格一并收掉）。
-/// 行首非空白开头时原样返回。行首若为空白必然是 ASCII（ropey 口径
+/// `step` 个行首空格（`None`＝[`TAB_STOP_COLS`]，多年的默认口径；不足一格的零星空格
+/// 一并收掉）。行首非空白开头时原样返回。行首若为空白必然是 ASCII（ropey 口径
 /// `\r`/`\n` 是换行单元，不会出现在行体内），字节切片安全。
-fn strip_one_indent_unit(body: &str) -> String {
+fn strip_one_indent_unit(body: &str, step: Option<usize>) -> String {
     if let Some(rest) = body.strip_prefix('\t') {
         return rest.to_owned();
     }
@@ -1586,7 +1598,7 @@ fn strip_one_indent_unit(body: &str) -> String {
     if spaces == 0 {
         return body.to_owned();
     }
-    body[spaces.min(TAB_STOP_COLS)..].to_owned()
+    body[spaces.min(step.unwrap_or(TAB_STOP_COLS))..].to_owned()
 }
 
 /// P124：抽行内第一个带符号十进制整数（跳过前置的非数字字符；

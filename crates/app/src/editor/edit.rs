@@ -238,6 +238,22 @@ impl EditorCore {
         };
     }
 
+    /// 文档自己那一档，给反缩进当尺用（`smart_indent` 开着时才会被问）。
+    ///
+    /// 拿不到证据（全文没有一行带缩进）、或这份文件是制表符起的头 ⇒ 返回 `None`
+    /// ＝调用方保持"至多剥 `TAB_STOP_COLS` 个空格"的多年行为。制表符那一路本来
+    /// 就先剥一个 `\t`，不需要宽度这个数，所以也不必替它编一个。
+    ///
+    /// ⚠️ 与 [`enter_smart`](Self::enter_smart) 用的是**同一个** core 判据
+    /// （`editpad_core::dominant_indent`）＋同一份行首空白采样——两边各算一份就是
+    /// 本仓被咬过多次的"两份判据各说各话"那一族。
+    pub(crate) fn doc_indent_step(&self) -> Option<usize> {
+        match editpad_core::dominant_indent(self.leading_ws_samples()) {
+            Some(editpad_core::IndentUnit::Spaces(n)) => Some(n),
+            _ => None,
+        }
+    }
+
     /// 逐行的**行首空白**，给 `dominant_indent` 当证据。
     ///
     /// 每行只读"开头那连续一串空白"（按字符索引走，不复制整行），所以大文档里
