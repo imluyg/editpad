@@ -599,13 +599,17 @@ fn link_file_name(dest: Option<&str>) -> String {
 
 /// 把 Markdown 的链接目标解析成与正文链接**同一套**可点目标（P133 口径）。
 ///
-/// * scheme 形态（http/https/ftp/file/mailto）→ 交系统打开；
+/// * scheme 形态（http/https/ftp/file/mailto）→ 交系统打开，**查询串是目标本身的一部分**
+///   （`[搜](https://e.io/s?q=md)` 点下去就得是带 `?q=md` 那一个）。改前 `#` 与 `?`
+///   一起当切点 ⇒ 浏览器收到被砍掉半截的 URL，而编辑器那半（`editor::links`）只剥尾部
+///   标点、查询串一路保留＝同一件事的两把尺；
 /// * 其余按文件路径处理：相对路径以**当前文档所在目录**为基准，且必须存在
 ///   （与 `editor::links` 一致——存在性一票否决，避免把 `2026/09/02` 这类
 ///   日期当路径）；
-/// * `#锚点` 与空目标 → `None`（预览没有滚动定位，不给可点外观）。
+/// * `#锚点` 与空目标 → 锚点那一刀**照旧切**（既有契约：`https://e.io/a#frag` 只开到
+///   `.../a`；文档内锚点则不给可点外观，预览没有滚动定位）；空目标同样 `None`。
 pub(crate) fn md_link_target(dest: &str, doc_dir: Option<&Path>) -> Option<LinkTarget> {
-    let head = dest.split(['#', '?']).next().filter(|s| !s.is_empty())?;
+    let head = dest.split('#').next().filter(|s| !s.is_empty())?;
     if head.starts_with("http://")
         || head.starts_with("https://")
         || head.starts_with("ftp://")
@@ -614,6 +618,9 @@ pub(crate) fn md_link_target(dest: &str, doc_dir: Option<&Path>) -> Option<LinkT
     {
         return Some(LinkTarget::Url(head.to_owned()));
     }
+    // 非 scheme＝按本地路径处理，只有这一支才切 `?`：`notes.md?q=1` 的本意就是
+    // `notes.md`（Windows 文件名也不允许 `?`），这一格行为一字未动
+    let head = head.split('?').next().filter(|s| !s.is_empty())?;
     let path = Path::new(head);
     let resolved = if path.is_absolute() {
         path.to_path_buf()

@@ -5608,3 +5608,53 @@ fn markdown_link_targets_follow_the_editor_link_rules() {
     assert_eq!(md_link_target("#章节", Some(dir.as_path())), None);
     let _ = std::fs::remove_file(&file);
 }
+
+/// 预览链接的 URL 一侧不许砍掉**查询串**：`[搜](https://e.io/s?q=md)` 点下去浏览器要拿到
+/// 带 `?q=md` 的那一个。改前 `md_link_target` 用 `split(['#', '?'])` 把锚点与查询串一起
+/// 切掉＝当着用户的面改写他写下的 URL；而编辑器那半（`editor::links`）只剥尾部标点、
+/// 查询串一路保留＝同一件事的两把尺。锚点那一刀是既有契约，本轮照旧留。
+#[test]
+fn markdown_url_links_keep_their_query_string() {
+    use crate::md_preview::md_link_target;
+    assert_eq!(
+        md_link_target("https://e.io/s?q=md", None),
+        Some(crate::editor::LinkTarget::Url(
+            "https://e.io/s?q=md".to_owned()
+        )),
+        "改前实得被砍成 https://e.io/s"
+    );
+    assert_eq!(
+        md_link_target("mailto:a@b.c?subject=x", None),
+        Some(crate::editor::LinkTarget::Url(
+            "mailto:a@b.c?subject=x".to_owned()
+        )),
+        "mailto 的参数同理"
+    );
+
+    // 反面对照一：锚点那一刀照旧（既有契约 `.../a#frag` → `.../a`）
+    assert_eq!(
+        md_link_target("https://e.io/a#frag", None),
+        Some(crate::editor::LinkTarget::Url("https://e.io/a".to_owned()))
+    );
+    // 反面对照二：查询串与锚点同时在场 ⇒ 切锚点、留查询串
+    assert_eq!(
+        md_link_target("https://e.io/s?q=md#top", None),
+        Some(crate::editor::LinkTarget::Url(
+            "https://e.io/s?q=md".to_owned()
+        ))
+    );
+
+    // 反面对照三：路径那一支里 `?` 之后仍不算文件名（`notes.md?q=1` 的本意是 notes.md）
+    let dir = std::env::temp_dir();
+    let file = dir.join("editpad_md_link_query.txt");
+    std::fs::write(&file, "x").unwrap();
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    let hit = md_link_target(&format!("{name}?q=1"), Some(dir.as_path()));
+    assert!(
+        matches!(hit, Some(crate::editor::LinkTarget::File { .. })),
+        "相对文件的 ? 仍该切掉：{name:?}"
+    );
+    // 只剩查询串那一格不许变成「当前目录」
+    assert_eq!(md_link_target("?q=1", Some(dir.as_path())), None);
+    let _ = std::fs::remove_file(&file);
+}
