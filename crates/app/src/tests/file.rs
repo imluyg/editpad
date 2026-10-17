@@ -5160,6 +5160,112 @@ fn markdown_preview_rebuilds_only_the_changed_blocks() {
     MD_SWAP_WINDOW_MS.with(|c| c.set(crate::md_preview::MD_PREVIEW_SWAP_MS));
 }
 
+/// P468＝**换主题／改字号后预览停在旧色旧号**：按块复用的键只有"块的内容指纹"，
+/// 而建树入参里还有字号、明暗（`MdInk` 那一整套色从主题 palette 派生）、字形族、
+/// 相对链接的基准目录。外层整树的键（`md_preview_key`）倒是带齐了这些维度 ⇒
+/// 换主题那一帧确实重进了 `markdown_preview_element`，可那一层里 12 个块**全部命中旧指纹**、
+/// 原样 clone 回来＝重建走了一遍空转，屏幕上还是旧配色旧字号（直到正文改动才自愈）。
+#[test]
+fn p468_a_theme_change_invalidates_the_per_block_cache() {
+    use crate::md_preview::{MD_BLOCK_BUILDS, MD_PREVIEW_SWAP_MS, MD_SWAP_WINDOW_MS};
+    MD_SWAP_WINDOW_MS.with(|c| c.set(0)); // 关掉节流：换版当帧就发生
+    let builds = || MD_BLOCK_BUILDS.with(|c| c.get());
+
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/x/notes.md")),
+    );
+    let seq = app.job_seq;
+    let src: String = (0..12).map(|i| format!("第{i}段正文内容\n\n")).collect();
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str(&src),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    dispatch(&mut app, Message::PreviewToggled);
+    assert!(app.preview_visible, "夹具自证：预览已开");
+
+    let base = builds();
+    let _ = app.view();
+    let first = builds() - base;
+    assert!(
+        (10..=14).contains(&first),
+        "夹具自证：首帧建了 {first} 个块"
+    );
+
+    // 内容一字没动、只换主题 ⇒ 块树要全部重画（旧色烘在 widget 实例里）
+    let mid = builds();
+    dispatch(&mut app, Message::ThemeToggled);
+    let _ = app.view();
+    assert_eq!(
+        builds() - mid,
+        first,
+        "换主题后按块缓存仍全命中＝预览停在旧配色"
+    );
+
+    // 反面对照：上下文没变的连续帧不许被这次改动带成逐帧重建（P412 的复用要照旧成立）
+    let after = builds();
+    let _ = app.view();
+    assert_eq!(
+        builds(),
+        after,
+        "同上下文的连续帧被改成逐帧重建＝把成本契约推翻了"
+    );
+
+    // 上面那格只证到"明暗"这一维。其余四维（字号／字形族／链接目录／截断文案）
+    // 要是不在这张戳里，没有任何用例会红——所以逐维点一次名（本仓"没有独立红点
+    // 就不许写进覆盖"的口径，这里直接把它变成有红点）。
+    let stamp = |px: f32,
+                 dark: bool,
+                 fam: Option<&'static str>,
+                 dir: Option<std::path::PathBuf>,
+                 note: &'static str| {
+        crate::md_preview::md_render_stamp(px, dark, fam, dir.as_deref(), note)
+    };
+    let base_s = stamp(16.0, false, None, None, "A");
+    assert_ne!(
+        stamp(18.0, false, None, None, "A"),
+        base_s,
+        "字号不进戳＝缩放后停在旧字号"
+    );
+    assert_ne!(stamp(16.0, true, None, None, "A"), base_s, "明暗不进戳");
+    assert_ne!(
+        stamp(16.0, false, Some("serif"), None, "A"),
+        base_s,
+        "字形族不进戳"
+    );
+    assert_ne!(
+        stamp(
+            16.0,
+            false,
+            None,
+            Some(std::path::PathBuf::from("C:/y")),
+            "A"
+        ),
+        base_s,
+        "目录不进戳＝换目录后相对链接仍指旧页目录"
+    );
+    assert_ne!(
+        stamp(16.0, false, None, None, "B"),
+        base_s,
+        "文案不进戳＝换语言不重画"
+    );
+    assert_eq!(
+        stamp(16.0, false, None, None, "A"),
+        base_s,
+        "同组上下文必须同戳，否则复用无意义"
+    );
+
+    MD_SWAP_WINDOW_MS.with(|c| c.set(MD_PREVIEW_SWAP_MS));
+}
+
 /// 预览里的链接**点下去要成消息**：`Rich` 的 `on_link_click` 接的是
 /// `Message::LinkClicked`（与正文链接同一套落点），这条线此前只到"span 上有
 /// link 字段"为止，没人从生产视图树点过一次。

@@ -70,12 +70,20 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 /// 代码块失去对齐，这不是「随设置切换」该覆盖的范围。
 /// `doc_dir` = 当前页所在目录，用于解析相对路径链接（`[图](./a.png)`）。
 /// `block_cache` = **按块**复用的上一帧树（见下面的复用说明）。
+/// `render` = 本帧的渲染上下文戳（[`md_render_stamp`]）：块指纹只数内容，
+/// 上下文换了必须把整份旧树作废（P468），否则换主题那一帧是空转。
+// 参数就是这份渲染上下文（块表＋字号／字体／配色／文档目录／上下文戳／块缓存／文案），
+// 与下面 `build_block` 同形。本仓对"渲染上下文就是这么多参数"的既有处理是先例那样的
+// `#[allow(clippy::too_many_arguments)]`（`build_block` 与 `editor::view` 里那几个绘制函数），
+// 这里加 `render` 一维后越过阈值，沿同一处理而不是把上下文塞进元组凑数。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn markdown_preview_element(
     blocks: &[MdBlock],
     font_size: f32,
     base: Font,
     theme: Theme,
     doc_dir: Option<&Path>,
+    render: u64,
     block_cache: &MdBlockCacheSlot,
     trunc_template: &'static str,
 ) -> Element<'static, Message> {
@@ -102,10 +110,21 @@ pub(crate) fn markdown_preview_element(
     // 排版缓存也活着），只有指纹变了的区间才重建。
     // 前后各裁一段公共区：在文末敲一个字 ⇒ 只有那一个块重建；插入一个新块会让
     // 下标整体右移，但**从尾部数过来的公共后缀**仍然对得上，所以也不会全重建。
+    // P468：渲染上下文（主题／字号／字形族／链接目录／截断文案）换了 ⇒ 旧树整份作废。
+    // 内容指纹只数正文，而 `build_block` 把上面那些都烘进了 widget 实例；不查这一维，
+    // 换主题那一帧虽然重进本函数却一个块都不重建＝空转，屏上仍是旧色旧字号。
+    {
+        let mut held = block_cache.0.borrow_mut();
+        if held.0 != Some(render) {
+            held.0 = Some(render);
+            held.1.clear();
+        }
+    }
     let fps: Vec<u64> = shown.iter().map(md_block_fingerprint).collect();
     let mut next: Vec<(u64, MdTree)> = Vec::with_capacity(blocks.len());
     {
-        let old = block_cache.0.borrow();
+        let guard = block_cache.0.borrow();
+        let old = guard.1.as_slice();
         let mut lo = 0usize;
         while lo < fps.len() && lo < old.len() && old[lo].0 == fps[lo] {
             lo += 1;
@@ -133,7 +152,7 @@ pub(crate) fn markdown_preview_element(
         }
         next.extend(old[old.len() - hi..].iter().map(|(f, t)| (*f, t.clone())));
     }
-    *block_cache.0.borrow_mut() = next.clone();
+    block_cache.0.borrow_mut().1 = next.clone();
 
     let mut col = column![].spacing(10).padding(14);
     for (_, tree) in next {
@@ -611,13 +630,15 @@ pub(crate) fn md_link_target(dest: &str, doc_dir: Option<&Path>) -> Option<LinkT
     }
 }
 
-/// 预览缓存的依赖指纹（[`MdCached`] 的比对键）。
+/// **渲染上下文**的指纹：字号＋明暗＋字形族＋链接基准目录＋截断提示文案。
 ///
-/// `seq` 是**必要**的一维，不能只靠块表指针：旧 Rc 一被释放，分配器很可能把同一
-/// 地址给下一份等长 Vec ⇒ 光看指针会把"新文档"认成"没变"，预览停在陈内容。
-pub(crate) fn md_preview_key(
-    seq: u64,
-    blocks_ptr: usize,
+/// P468：这一份是**唯一**那份"上下文维度"的清单——外层整树的键（[`md_preview_key`]）
+/// 与内层的按块复用（[`MdBlockCacheSlot`]）都问它。两处各列一份就是本仓反复被抓的
+/// "两份判据各说各话"：换主题那一帧外层确实重进了建树函数，内层却只认内容指纹，
+/// 把旧配色的块原样搬回来＝重建成一趟空转，屏上仍是旧色旧字号。
+///
+/// 记文案而不是记 `Lang` 枚举：措辞改了也一样要重画。
+pub(crate) fn md_render_stamp(
     font_size: f32,
     dark: bool,
     family: Option<&'static str>,
@@ -626,15 +647,25 @@ pub(crate) fn md_preview_key(
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    seq.hash(&mut h);
-    blocks_ptr.hash(&mut h);
     font_size.to_bits().hash(&mut h);
     dark.hash(&mut h);
     family.hash(&mut h);
     dir.map(|p| p.display().to_string()).hash(&mut h);
-    // 末尾那行截断提示是**界面文案**（随语言切换）⇒ 文案本身进键，换语言就换树。
-    // 记文案而不是记 `Lang` 枚举：措辞改了也一样要重画。
     trunc_note.hash(&mut h);
+    h.finish()
+}
+
+/// 预览缓存的依赖指纹（[`MdCached`] 的比对键）＝内容身份＋渲染上下文戳。
+///
+/// `seq` 是**必要**的一维，不能只靠块表指针：旧 Rc 一被释放，分配器很可能把同一
+/// 地址给下一份等长 Vec ⇒ 光看指针会把"新文档"认成"没变"，预览停在陈内容。
+/// 上下文那五维不在这里重列一遍，一律取自 [`md_render_stamp`]（P468）。
+pub(crate) fn md_preview_key(seq: u64, blocks_ptr: usize, render: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    seq.hash(&mut h);
+    blocks_ptr.hash(&mut h);
+    render.hash(&mut h);
     h.finish()
 }
 
@@ -750,21 +781,31 @@ fn note_block_build() {}
 #[inline]
 pub(crate) fn note_parse() {}
 
-/// 按块缓存的那一排树：`(内容指纹, 树)`，下标＝块序。
+/// 按块缓存的一行＝`(内容指纹, 树)`；整份缓存＝`(上一帧的渲染上下文戳, 行[])`。
+/// 起别名是因为 `RefCell<(Option<u64>, Vec<(u64, MdTree)>)>` 这串会把
+/// `clippy::type_complexity` 顶起来（第 338 轮 `block_tests` 那张手势表同款处理：
+/// 改形状，不加 `#[allow]`）。
+type MdBlockRow = (u64, MdTree);
+type MdBlockCacheInner = (Option<u64>, Vec<MdBlockRow>);
+
+/// 按块缓存的那一排树 `(上一帧的渲染上下文, (内容指纹, 树)[])`，下标＝块序。
 ///
+/// P468：那块"上下文"是必需的——内容指纹只数正文，而建树还吃字号／明暗／字形族／
+/// 链接基准目录。少了这一维，换主题那一帧虽然重进了建树函数，12 个块却全部命中
+/// 旧指纹、原样 clone 回来＝重建成一趟空转，屏上仍是旧配色。
 /// 包一层同样是为了 `Debug`（`Editpad` derive(Debug)，而 `Element` 没有）。
 #[derive(Clone)]
-pub(crate) struct MdBlockCacheSlot(pub std::cell::RefCell<Vec<(u64, MdTree)>>);
+pub(crate) struct MdBlockCacheSlot(pub std::cell::RefCell<MdBlockCacheInner>);
 
 impl Default for MdBlockCacheSlot {
     fn default() -> Self {
-        Self(std::cell::RefCell::new(Vec::new()))
+        Self(std::cell::RefCell::new((None, Vec::new())))
     }
 }
 
 impl std::fmt::Debug for MdBlockCacheSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MdBlockCacheSlot({} 块)", self.0.borrow().len())
+        write!(f, "MdBlockCacheSlot({} 块)", self.0.borrow().1.len())
     }
 }
 
