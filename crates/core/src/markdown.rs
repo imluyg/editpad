@@ -1234,15 +1234,22 @@ fn is_comment_start(line: &str) -> bool {
 /// 只吃**从行首起**的注释：单行闭合（`<!-- … -->`）或跨行吃到 `-->`。行中间的注释
 /// 不动——那是正文的一部分，删掉等于吃字。等不到收尾就交回普通解析（原样看得见，
 /// 比静默吞掉后半篇正文好查）。
+///
+/// ⚠️ 「吃字」那半句同样管**收尾之后**：`<!-- 说明 --> 本文档采用 CC 协议` 那一行
+/// 注释后面还挂着正文，把整行隐去就是当着用户的面吃掉他写下的那句话（改前实测如此，
+/// 与 `:1234` 自己立的底线相反）。所以隐去的前提是**收尾之后这一行内只剩空白**；
+/// 否则整块交回普通解析——注释与正文都原样看得见，沿用上面那条既定取舍，
+/// 不在行内拆注释（行中间的注释不动＝同一份决定的另一半）。
 fn html_comment(lines: &[&str], start: usize) -> Option<usize> {
     let body = lines[start].trim().strip_prefix("<!--")?;
-    if body.contains("-->") {
-        return Some(start + 1);
+    // 收尾之后只剩空白（或什么都没有）才敢把这一行整行隐去
+    if let Some((_, tail)) = body.split_once("-->") {
+        return tail.trim().is_empty().then_some(start + 1);
     }
     let mut k = start + 1;
     while k < lines.len() {
-        if lines[k].contains("-->") {
-            return Some(k + 1);
+        if let Some((_, tail)) = lines[k].split_once("-->") {
+            return tail.trim().is_empty().then_some(k + 1);
         }
         k += 1;
     }
@@ -2828,6 +2835,50 @@ mod tests {
             panic!("{open:?}");
         };
         assert_eq!(spans_text(spans), "<!-- 没关");
+    }
+
+    /// 注释**收尾之后同一行还挂着正文**时不许把整行隐去。改前
+    /// `<!-- 说明 --> 本文档采用 CC 协议` 这一整行在预览里不出现——用户写下的那句
+    /// 声明静默消失，而 `html_comment` 头上的注释自己写着「删掉等于吃字」。
+    /// 现在的口径＝这种形状整块交回普通解析，注释与正文都原样看得见；
+    /// 「行中间的注释不动」那半条不变，所以不在行内把注释拆掉。
+    #[test]
+    fn html_comment_leaves_the_prose_after_its_close_visible() {
+        let one = parse_markdown("<!-- 说明 --> 本文档采用 CC 协议\n");
+        let MdBlock::Paragraph { spans } = &one[0] else {
+            panic!("{one:?}");
+        };
+        assert_eq!(
+            spans_text(spans),
+            "<!-- 说明 --> 本文档采用 CC 协议",
+            "改前这一格根本没有正文块"
+        );
+
+        // 夹在两段正文中间：三段都在，中间那段带着尾巴（改前只剩两段）
+        let mid = parse_markdown("上\n\n<!-- 注 --> 尾巴\n\n下\n");
+        assert_eq!(mid.len(), 3, "{mid:?}");
+
+        // 跨行注释的收尾行带正文：同样不许把正文吞掉
+        let cross = parse_markdown("<!--\n隐藏的行\n--> 收尾后有正文\n");
+        assert!(
+            cross.iter().any(|b| match b {
+                MdBlock::Paragraph { spans } => spans_text(spans).contains("收尾后有正文"),
+                _ => false,
+            }),
+            "跨行形状也不许丢正文：{cross:?}"
+        );
+
+        // 反面对照：收尾之后确实只剩空白 ⇒ 照旧整块隐去（挡住"干脆不隐注释"）
+        assert_eq!(
+            parse_markdown("正文\n\n<!-- 说明 -->\n\n更多\n").len(),
+            2,
+            "行尾没正文的单行注释仍不留块"
+        );
+        assert_eq!(
+            parse_markdown("甲\n\n<!--\n隐藏的行\n-->\n\n乙\n").len(),
+            2,
+            "行尾没正文的跨行注释仍整段吞掉"
+        );
     }
 
     /// 引用块的**懒续行**：紧跟 `>` 行的普通正文行仍属于这个引用——GitHub `/markdown` 对
