@@ -2132,7 +2132,11 @@ fn bare_url(s: &str) -> Option<(usize, String)> {
     let host = if has_scheme {
         literal.split_once("://")?.1
     } else {
-        &literal[4..]
+        // P460：行尾句点的回退能把本体削到比 `www.` 还短（正文里单写 `www.` ⇒ `www`），
+        // 那时它根本不是域名。旧写法 `&literal[4..]` 是按"进来时一定以 `www.` 开头"推的，
+        // 那句只对**回退前的 `end`** 成立 ⇒ 越界 panic 炸掉整篇解析。`strip_prefix`
+        // 把这条前提写回它该在的位置：削短了就 None，这串原样留在正文。
+        literal.strip_prefix("www.")?
     };
     if host.is_empty() {
         return None;
@@ -3065,6 +3069,43 @@ mod tests {
         );
         assert!(links("https://").is_empty(), "空 host 不是链接");
         assert!(links("www.x").is_empty(), "`www.` 后面没有点号不算域名");
+    }
+
+    /// P460＝**崩溃**：正文里只写一个 `www.`（后面什么都不跟，或只跟非 ASCII／空白）时，
+    /// 本体扫到 `end=4`、行尾句点回退把它削到 `end=3` ⇒ `&literal[4..]` 越界 panic，
+    /// 炸的是**整篇**解析（预览与大纲同一条路）。触发它不需要任何畸形写法，中文正文里
+    /// 打「见 www.」就可能碰上。改前这一格红在 panic：byte index 4 is out of bounds of `www`。
+    #[test]
+    fn p460_bare_url_trimmed_below_the_www_prefix_is_plain_text_not_a_panic() {
+        for src in [
+            "www.",
+            "见 www.中",
+            "www..",
+            "网址 www. 结尾",
+            "第一行 www.\n第二行 甲",
+        ] {
+            let spans = inline_with(src, &LinkDefs::default());
+            assert!(
+                spans.iter().all(|s| !s.is_link()),
+                "{src:?} 不是域名，不该产出链接"
+            );
+            // 逐字留在正文：这一串既不当链接、也不许被吞掉或改写字面
+            let flat: String = src.chars().filter(|c| *c != '\n').collect();
+            assert_eq!(spans_text(&spans).replace('\n', ""), flat, "{src:?}");
+            // 整篇入口也跑一遍＝预览每帧真正调的那条路（行定义扫描＋脚注再映射）
+            assert!(
+                !parse_markdown(src).is_empty(),
+                "{src:?} 走整篇解析时被这一 panic 炸掉＝预览整半黑掉"
+            );
+        }
+        // 正对照不许跟着坏：同一判据下真域名照常成链接（摘掉 strip_prefix 换成恒 Some 的
+        // 写法会让上面五格全绿而这一格红）
+        let ok = inline_with("访问 www.example.com 吧", &LinkDefs::default());
+        assert!(
+            ok.iter()
+                .any(|s| s.is_link() && s.link.as_deref() == Some("https://www.example.com")),
+            "真域名那形不能被这次修补弄坏"
+        );
     }
 
     /// 闭栏位置不合格就**跳过它继续往后找**，而不是放弃整对。GitHub `/markdown` 对同一串
