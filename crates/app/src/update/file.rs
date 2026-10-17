@@ -883,6 +883,20 @@ impl Editpad {
         !self.busy
     }
 
+    /// 内存护栏对「这个文件装不进当前这组页」的**唯一**判据：全部页内容按
+    /// **实际 UTF-8 字节量**（`text_len_bytes`）加待载文件字节数与上限比较。
+    /// P300：这里原先累加 `text_len()`（字符数）再在判定里 ×3，与待打开侧按字节
+    /// 记账不同单位 ⇒ ASCII 文档开完就被按 3 倍估价。判定算式见 `mem_guard_allows`。
+    ///
+    /// 为什么要有这个包装：[`Self::start_loading`] 里被拒的装载**什么都不能替换**
+    /// （不早退于 `register_load_job`），而有些调用方在调它**之前**已经改过状态——
+    /// 〔重新打开上次关闭的文件〕要先从栈里 `pop`。那份"被拒"的判断只有这一处说法，
+    /// 调用方才不会另抄一把尺（`load_channel_available` 立的同一条规矩）。
+    pub(crate) fn load_fits_mem_guard(&self, path: &Path) -> bool {
+        let incoming = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        mem_guard_allows(self.tab_content_bytes(), incoming, MULTI_TAB_MEM_CAP_BYTES)
+    }
+
     /// 「读／写通道被占」的唯一判据：一次对话框／写盘往返在途（`busy`），或一次
     /// 装载在途（`active_load`）。这条判据原本在各个臂里各抄一遍，P374 那轮补的
     /// 就是「兄弟臂有、本臂漏」的那半——收进一处，分叉就结构性出局。
@@ -899,13 +913,8 @@ impl Editpad {
         if !self.load_channel_available() {
             return Task::none();
         }
-        // P21 内存护栏（§3 P19 总则第 2 条的骨架实现）：全部页内容按**实际 UTF-8
-        // 字节量**（`text_len_bytes`）加待载文件字节数与上限比较。
-        // P300：这里原先累加 `text_len()`（字符数）再在判定里 ×3，与待打开侧按字节
-        // 记账不同单位 ⇒ ASCII 文档开完就被按 3 倍估价。判定函数见 `mem_guard_allows`。
-        let incoming = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let existing = self.tab_content_bytes();
-        if !mem_guard_allows(existing, incoming, MULTI_TAB_MEM_CAP_BYTES) {
+        // P21 内存护栏（§3 P19 总则第 2 条的骨架实现）：判据见 [`Self::load_fits_mem_guard`]
+        if !self.load_fits_mem_guard(&path) {
             self.status = self.t(editpad_core::Key::StMemoryGuard).to_owned();
             // P215：拒开即作废随本次打开登记的一次性意图——与「save() 的每个
             // 拒绝出口都要顺手作废 pending_close」同一条规矩（本仓第三次应验），

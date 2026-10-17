@@ -563,19 +563,111 @@ fn line_op_hotkeys_dispatch_to_edit_ops() {
 }
 
 #[test]
-fn reopen_last_closed_pops_stack_and_guards_empty() {
+fn reopen_last_closed_takes_front_and_guards_empty() {
     // 空栈：给提示、不进入加载
     let mut app = Editpad::default();
     dispatch(&mut app, Message::ReopenLastClosedFile);
     assert!(app.status.contains("没有可恢复"), "空栈应有状态栏提示");
     assert!(app.active_load.is_none());
-    // 栈非空：出栈并走打开管线（Task 被 dispatch 丢弃，仅查状态）
+    // 栈非空：取栈顶那一格并走打开管线（Task 被 dispatch 丢弃，仅查状态）
     app.closed_stack = vec![std::path::PathBuf::from(r"C:\tmp\gone.txt")];
     app.recents_visible = true;
     dispatch(&mut app, Message::ReopenLastClosedFile);
     assert!(app.closed_stack.is_empty(), "恢复即出栈");
     assert!(app.active_load.is_some(), "复用打开管线进入 busy");
     assert!(!app.recents_visible, "面板随动作收起");
+}
+
+/// 「上次关闭」那颗按钮**显示的是 `closed_stack[0]`**（`view/mod.rs:471`），按下去发的
+/// 就是 `ReopenLastClosedFile`；而 `remember_closed_tab` 用 `insert(0, …)` 把刚关的放最前、
+/// 去重问的也是 `.first()`。改取出栈那端用 `pop()`＝**末尾**＝最久以前关的那一页 ⇒
+/// 两格以上时按钮写着 A、实际打开 C。本用例钉住"取栈顶"。
+#[test]
+fn reopen_last_closed_takes_the_most_recently_closed_page() {
+    let mut app = Editpad::default();
+    let recent = std::path::PathBuf::from(r"C:\tmp\just-closed.txt");
+    let older = std::path::PathBuf::from(r"C:\tmp\closed-long-ago.txt");
+    app.closed_stack = vec![recent.clone(), older.clone()];
+    assert_eq!(
+        app.closed_stack[0], recent,
+        "夹具自证：栈顶＝最近关的那一页（与按钮显示同一格）"
+    );
+
+    dispatch(&mut app, Message::ReopenLastClosedFile);
+    assert_eq!(
+        app.closed_stack,
+        vec![older],
+        "该取走栈顶，留下的是更旧那一格（改前取的是末尾，剩下的是栈顶）"
+    );
+    assert!(app.active_load.is_some(), "取到就该进入打开管线");
+}
+
+/// 被拒的打开不许吃掉「上次关闭」里那一格（P351／P463／P473 那条：没有后果的动作
+/// 才有后果）。`start_loading` 的内存护栏那一支**不动 tabs** 地拒开，而本臂在调它
+/// **之前**已经出栈 ⇒ 改前那个文件从名单里永久消失，再按一次拿到的是更旧的一格，
+/// 而它一直好好躺在磁盘上。判据与装载共用 `load_fits_mem_guard`，不长第二把尺。
+#[test]
+fn refused_reopen_leaves_the_closed_stack_entry_intact() {
+    use crate::session::MULTI_TAB_MEM_CAP_BYTES;
+    let dir = scratch_dir("p-reopen-guard");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("big.txt");
+    std::fs::write(&file, "x").unwrap();
+
+    // 生产入口造一页命名干净页，再关掉它 ⇒ 进「上次关闭」栈
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(file.clone()));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("x"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert_eq!(
+        app.tabs[0].path.as_deref(),
+        Some(file.as_path()),
+        "夹具自证：页带上了路径"
+    );
+    dispatch(&mut app, Message::CloseTabAt(0));
+    assert_eq!(app.closed_stack, vec![file.clone()], "夹具自证：关页进了栈");
+
+    // 把那个文件撑到超护栏（稀疏文件，只改元数据长度）
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_len(MULTI_TAB_MEM_CAP_BYTES + 1)
+        .unwrap();
+
+    dispatch(&mut app, Message::ReopenLastClosedFile);
+    assert!(
+        app.status.contains("内存保护"),
+        "拒开必须照旧出声，实得 {:?}",
+        app.status
+    );
+    assert!(app.active_load.is_none(), "夹具自证：这一次确实被拒");
+    assert_eq!(
+        app.closed_stack,
+        vec![file.clone()],
+        "被拒的打开不许吃掉那一格（改前栈已空）"
+    );
+
+    // 反面对照：文件回到装得下的尺寸 ⇒ 同一格照常开回来
+    std::fs::write(&file, "x").unwrap();
+    dispatch(&mut app, Message::ReopenLastClosedFile);
+    assert!(
+        app.active_load.is_some(),
+        "装得下就该走打开管线，这道闸不许过宽"
+    );
+    assert!(app.closed_stack.is_empty(), "兑现即出栈");
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

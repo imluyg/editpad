@@ -244,10 +244,28 @@ impl Editpad {
                 if self.busy {
                     return Task::none();
                 }
-                let Some(path) = self.closed_stack.pop() else {
+                // 取**栈顶＝`[0]`**，与三处同源：`remember_closed_tab` 用 `insert(0, …)`
+                // 把刚关的那一格放在最前面、去重判据问的是 `.first()`、而最近文件面板
+                // 上那颗按钮**显示的也是 `closed_stack[0]`**（`view/mod.rs:471`）并按的
+                // 就是本条消息。改前这里用 `pop()`＝取**末尾**那一格＝最久以前关的页 ⇒
+                // 两格以上时按钮写着「重新打开 a.txt」、实际打开的是 c.txt。
+                if self.closed_stack.is_empty() {
                     self.set_status(self.t(editpad_core::Key::StNoClosedTab).to_owned());
                     return Task::none();
-                };
+                }
+                let path = self.closed_stack.remove(0);
+                // 被拒的打开不许留下状态后果（P351／P463／P473 那条：没有后果的动作
+                // 才有后果 ⇒ 反过来，没兑现的动作不许留后果）。本臂在调装载**之前**
+                // 已经从「上次关闭」栈里 pop 了一格，而 `start_loading` 的内存护栏
+                // 那一支会**静默不动 tabs** 地拒开 ⇒ 改前那一格从此消失：再按一次
+                // 拿到的是更旧的一条，而被拒的那个文件再也无法经这个入口开回来
+                // （它一直好好躺在磁盘上，只是名单把它丢了）。
+                // 判据与装载共用同一处 [`Editpad::load_fits_mem_guard`]，不长第二把尺。
+                if !self.load_fits_mem_guard(&path) {
+                    self.closed_stack.insert(0, path); // 放回栈顶，这一格没被兑现
+                    self.set_status(self.t(editpad_core::Key::StMemoryGuard).to_owned());
+                    return Task::none();
+                }
                 // 复用打开管线：置脏走既有确认流，光标记忆由 P32 免费找回
                 let tab = self.target_tab_for_open();
                 self.recents_visible = false;
