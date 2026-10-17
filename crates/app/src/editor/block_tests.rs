@@ -369,6 +369,40 @@ fn trim_selection_scope_only_touched_lines() {
     assert_eq!(c.doc.to_text(), "a\r\nb\r\n  c");
 }
 
+/// 选区尾落在某行**行首**时 `touched_lines` 故意不含那一行（那一行的正文一个
+/// 字符都没被选到），而光标正停在那一行上 ⇒ 清理之后光标必须还留在原地。
+/// 改前那句 `clamp(a, b)` 把人从第 2 行拽进触及范围末行（第 1 行），下一次打字
+/// 就落进了那一行——本操作增不了也减不了行，这道钳在这里只剩副作用。
+#[test]
+fn trim_does_not_move_the_caret_off_an_untouched_line() {
+    let mut c = core_with("  a\n  b\n  c");
+    c.anchor = Some(CursorPos { line: 0, col: 0 });
+    c.cursor = CursorPos { line: 2, col: 0 };
+    assert_eq!(
+        c.touched_lines(),
+        (0, 1),
+        "夹具自检：光标所在那一行不在触及范围里"
+    );
+    assert!(c.trim_touched_lines(TrimMode::Leading));
+    assert_eq!(
+        c.doc.to_text(),
+        "a\nb\n  c",
+        "触及行清掉缩进、第三行一字不动"
+    );
+    assert_eq!(c.cursor.line, 2, "光标不许被挪进触及范围");
+
+    // 正对照：光标本就落在被清理的那一行上 ⇒ 行号不变、列钳到清理后的行长
+    let mut d = core_with("  a\n  b\n  c");
+    d.anchor = Some(CursorPos { line: 0, col: 0 });
+    d.cursor = CursorPos { line: 1, col: 2 };
+    assert!(d.trim_touched_lines(TrimMode::Leading));
+    assert_eq!(d.cursor.line, 1, "本就在触及行上：行号照旧");
+    assert_eq!(
+        d.cursor.col, 1,
+        "列钳到清理后的行长（那一行被削短到 1 字符）"
+    );
+}
+
 #[test]
 fn trim_noop_empty_and_phantom_edge_cases() {
     // 空文档：无可清理

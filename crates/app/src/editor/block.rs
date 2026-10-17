@@ -318,8 +318,12 @@ impl EditorCore {
         if !changed {
             return false;
         }
-        // 光标行钳进触及范围、列钳到清理后的行长（行可能变短）
-        let keep_line = self.cursor.line.clamp(a, b);
+        // 列钳到清理后的行长（本行可能被削短），**行号一律不动**：这一支增不了
+        // 也减不了行，而选区尾落在某行行首时 `touched_lines` 故意不含那一行
+        // （那一行正文一个字符都没被选到），旧写法那句 `clamp(a, b)` 恰好把光标
+        // 从那种行拽进范围末行——用户下一次打字落进了他没指着的那一行。
+        // 需要同款钳制的是会改行数的写回路径（`apply_line_block`），不是这里。
+        let keep_line = self.cursor.line;
         let keep_col = self.cursor.col;
         self.snapshot();
         let nl = self.doc.line_ending().newline();
