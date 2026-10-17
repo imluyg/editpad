@@ -2272,3 +2272,134 @@ fn p461_a_zero_width_anchor_changes_no_gesture_result() {
         diffs.join("\n")
     );
 }
+
+// ---------- P462：行界全集（R-11／R-22 同族的第三份抄本） ----------
+
+/// `block.rs` 里"这一段是不是以行尾收尾"的判定手写过 `"\n" | "\r"` 两字符子集，
+/// 而行结构的权威是 core 的 7 字符全集（[`editpad_core::is_line_break`]，
+/// `edit.rs:389` 那条反缩进判据早就改用全集了）。异体行界（VT/FF/NEL/LS/PS）在
+/// ropey 里**同样切行**，于是这些文档上：幻影末行被当成真实内容搬进块里、
+/// 块顶到文档尾时那一个行尾被吃掉、副本前凭空多出一个空行。
+#[test]
+fn p462_block_ops_read_the_full_line_break_set_not_a_two_char_copy() {
+    let seps = [
+        "\n", "\r", "\r\n", "\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}",
+    ];
+    // 逐格收集差异（同 p461 的理由）：本笔一次改了 5 个读点，探针要能看出**哪几处**有人看守。
+    let mut diffs: Vec<String> = Vec::new();
+
+    // ① 复制当前行：副本必须与原文同形（`a␊a␊`），不许在副本前塞一个空行
+    for sep in seps {
+        let mut c = core_with(&format!("a{sep}"));
+        c.cursor = CursorPos { line: 0, col: 0 };
+        let got = c.duplicate_current_lines();
+        let (text, lines) = (c.doc.to_text(), c.doc.line_count());
+        if !got || text != format!("a{sep}a{sep}") || lines != 3 {
+            diffs.push(format!(
+                "复制行 {sep:?}：返回={got} 行数={lines} 文本={text:?}（应为 true／3／a·a· 同形）"
+            ));
+        }
+    }
+
+    // ② 排序：文档只有一行真实内容 ⇒ 与 LF 档同样 no-op（幻影末行不入块）
+    for sep in seps {
+        let mut c = core_with(&format!("b{sep}"));
+        let got = c.sort_lines(SortOrder::Ascending);
+        let text = c.doc.to_text();
+        if got || text != format!("b{sep}") {
+            diffs.push(format!(
+                "排序 {sep:?}：返回={got} 文本={text:?}（幻影空壳不许被当成第二行搬走）"
+            ));
+        }
+    }
+
+    // ③ 加缩进（选区顶到文档尾）：那一个行尾必须补回，否则行数少一行
+    for sep in seps {
+        let mut c = core_with(&format!("a{sep}b{sep}"));
+        let nl = c.doc.line_ending().newline().to_owned();
+        c.anchor = Some(CursorPos { line: 0, col: 0 });
+        c.cursor = CursorPos { line: 2, col: 0 };
+        let got = c.indent_touched_lines(false);
+        let (text, lines) = (c.doc.to_text(), c.doc.line_count());
+        if !got || !text.ends_with(&nl) || lines != 3 {
+            diffs.push(format!(
+                "加缩进 {sep:?}：返回={got} 行数={lines} 文本={text:?}（块顶到文档尾时那一个行尾被吃掉）"
+            ));
+        }
+    }
+
+    // ④⑤ 合并成一行／拆行：这一族实际抄了 **5 处**而不是审计清单说的 3 处
+    // （`merge_lines` 与 `split_line` 各有一处同形状判定）。观察量取"形状"三元组
+    // （行数／是否仍以行界收尾／返回没返回），不比对具体文本——两支的重建把 `nl`
+    // 取自主导行尾，异体档因此被归一，那是 R-11 的既有口径、不在本笔改。
+    let shape = |doc: &str, merge: bool| -> (usize, bool, bool) {
+        let mut c = core_with(doc);
+        // 拆行那格把光标放到**最后一个真实行**：`nl_tail` 只有当选区/光标所在行的
+        // 行尾正好是文档末尾时才参与重建（探针实测＝光标放在第 0 行时这一处不红，
+        // 因为那支的 end_off 落在文档中间，两把尺在那儿给出同一个答案）。
+        c.cursor = if merge {
+            CursorPos { line: 0, col: 1 }
+        } else {
+            CursorPos { line: 1, col: 1 }
+        };
+        let ret = if merge {
+            c.merge_lines()
+        } else {
+            c.split_line()
+        };
+        let ends_break = c.doc.to_text().ends_with(editpad_core::is_line_break);
+        (c.doc.line_count(), ends_break, ret)
+    };
+    for sep in seps {
+        for merge in [true, false] {
+            let label = if merge { "合并" } else { "拆行" };
+            let got = shape(&format!("a{sep}b{sep}"), merge);
+            let want = shape("a\nb\n", merge);
+            if got != want {
+                diffs.push(format!(
+                    "{label} {sep:?}：与 LF 档不同形 实得={got:?} 期望={want:?}"
+                ));
+            }
+        }
+    }
+
+    // ⑥⑦ 行尾清理／移动当前行：模块级那份 `block_rebuild_needs_tail_nl` 的两个消费者
+    // （P462 现量＝这一族不是审计清单说的 3 处，而是 **6 处**，其中两处藏在这个共用判定里）
+    let shape2 = |doc: &str, trim: bool| -> (usize, bool, bool) {
+        let mut c = core_with(doc);
+        c.cursor = if trim {
+            CursorPos { line: 0, col: 0 }
+        } else {
+            CursorPos { line: 1, col: 0 }
+        };
+        let ret = if trim {
+            c.trim_touched_lines(TrimMode::Trailing)
+        } else {
+            c.move_current_lines(true)
+        };
+        let ends_break = c.doc.to_text().ends_with(editpad_core::is_line_break);
+        (c.doc.line_count(), ends_break, ret)
+    };
+    for sep in seps {
+        for trim in [true, false] {
+            let label = if trim {
+                "行尾清理"
+            } else {
+                "移动当前行"
+            };
+            let got = shape2(&format!("a  {sep}b{sep}"), trim);
+            let want = shape2("a  \nb\n", trim);
+            if got != want {
+                diffs.push(format!(
+                    "{label} {sep:?}：与 LF 档不同形 实得={got:?} 期望={want:?}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        diffs.is_empty(),
+        "这些行界异体档与 LF 档不同形：\n{}",
+        diffs.join("\n")
+    );
+}

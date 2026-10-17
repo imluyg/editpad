@@ -17,11 +17,24 @@ use super::*;
 /// 那一对判据（第 64 轮「勘误第二半」）同口径，P80 勘误
 /// （`duplicate_current_lines`）是同族第三处；`move_current_lines` 与
 /// `trim_touched_lines` 是漏抄的两份副本，现收成一处防第五份。
+/// 偏移 `at` **前面**那个字符是否构成一个行界。行界全集见
+/// [`editpad_core::is_line_break`]（定案 R-11／R-22）——本文件曾手写过
+/// `"\n" | "\r"` 的两字符子集共 6 处，而异体行界（VT/FF/NEL/LS/PS）在 ropey 里
+/// 同样切行，于是那类文档上"块顶到文档尾"被读成"块没到文档尾"：
+/// 补回的那一个行尾没了、幻影末行被当真内容搬走、行数与滚动条当场对不上。
+/// P462 把 6 处一起收到这里，判据只许问这一处。
+fn char_before_is_line_break(doc: &Document, at: usize) -> bool {
+    at > 0
+        && doc
+            .slice_text(at - 1, at)
+            .chars()
+            .next()
+            .is_some_and(editpad_core::is_line_break)
+}
+
 fn block_rebuild_needs_tail_nl(doc: &Document, rs: usize, re: usize, last: usize) -> bool {
     let phantom_included = last + 1 == doc.line_count() && doc.line_len_chars(last) == 0;
-    !phantom_included
-        && (re < doc.text_len()
-            || (re > rs && matches!(doc.slice_text(re - 1, re).as_str(), "\n" | "\r")))
+    !phantom_included && (re < doc.text_len() || (re > rs && char_before_is_line_break(doc, re)))
 }
 
 impl EditorCore {
@@ -110,7 +123,7 @@ impl EditorCore {
         // 「块文本是否已带行尾单元」，而非 end < len——文档以换行收尾时
         // 末真实行的块文本自带行尾但 end == len，旧条件误补行尾，
         // 副本前凭空多出一个空行。
-        let ins = if text.ends_with('\n') || text.ends_with('\r') {
+        let ins = if text.ends_with(editpad_core::is_line_break) {
             text
         } else {
             format!("{nl}{text}")
@@ -382,9 +395,7 @@ impl EditorCore {
         };
         // 块尾换行补回判定与幻影末行排除（collect_line_block 同口径：
         // 文档以换行收尾且块顶到文档尾时，末空壳行不入块）
-        let nl_tail = end == len
-            && len > start
-            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let nl_tail = end == len && len > start && self.last_char_is_line_break();
         let last = if nl_tail && b == count - 1 && b > a {
             b - 1
         } else {
@@ -460,6 +471,13 @@ impl EditorCore {
         editpad_core::trim_line_breaks(&self.doc.line_str(i)).to_owned()
     }
 
+    /// 文档**最后一个字符**是否构成一个行界。判据与理由都在模块级的
+    /// [`char_before_is_line_break`]，这里只是给 `self.doc` 的末尾偏移取一个读法。
+    fn last_char_is_line_break(&self) -> bool {
+        let len = self.doc.text_len();
+        char_before_is_line_break(&self.doc, len)
+    }
+
     pub(crate) fn collect_line_block(&self) -> LineBlock {
         let count = self.doc.line_count();
         let len = self.doc.text_len();
@@ -482,16 +500,12 @@ impl EditorCore {
         // 是文档最后一行；此前凡块区域顶到文档尾就把 b 行当幻影剔除，
         // 「选中含末真实行、未含末尾换行后的空壳」的局部选区会把该行
         // 从重建内容里丢掉（排序/去重/注释切换共用此骨架，均受影响）。
-        let phantom_tail = end == len
-            && len > start
-            && b == count - 1
-            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let phantom_tail =
+            end == len && len > start && b == count - 1 && self.last_char_is_line_break();
         // 块尾换行补回判定与幻影排除解耦（第 64 轮勘误第二半）：只要块
         // 区域以换行单元收尾（含「选中真实末行、其行尾即文档末尾换行」），
         // 行数不变式重建就必须补回，否则丢尾随换行。
-        let nl_tail = end == len
-            && len > start
-            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let nl_tail = end == len && len > start && self.last_char_is_line_break();
         let last = if phantom_tail && b > a { b - 1 } else { b };
         let lines: Vec<String> = (a..=last).map(|i| self.line_body_without_eol(i)).collect();
         LineBlock {
@@ -745,13 +759,12 @@ impl EditorCore {
         } else {
             self.doc.text_len()
         };
-        // 区域尾字节是否换行单元（\n / 孤立 \r）：决定重建时是否补回
+        // 区域尾是否以一个行界收尾（全集见 [`char_before_is_line_break`]，P462）：
+        // 决定重建时是否补回
         // 块尾换行——选中真实末行（其行尾即文档末尾换行）时同样成立，
         // 不能只看「块不在文档末尾」
         let len = self.doc.text_len();
-        let nl_tail = end == len
-            && end > start
-            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let nl_tail = end == len && end > start && self.last_char_is_line_break();
         // 幻影末行排除：仅当 b 本身就是文档最后一行（ropey 在尾随换行后
         // 多出的空壳行）且区域确以换行收尾。b 是唯一真实行的场景无从回
         // 退，直接按无可并内容处理。
@@ -860,9 +873,7 @@ impl EditorCore {
             self.doc.text_len()
         };
         let len = self.doc.text_len();
-        let nl_tail = end_off == len
-            && end_off > start_off
-            && matches!(self.doc.slice_text(len - 1, len).as_str(), "\n" | "\r");
+        let nl_tail = end_off == len && end_off > start_off && self.last_char_is_line_break();
         let mut new_lines = Vec::with_capacity(middle.len() + 2);
         new_lines.push(pre);
         new_lines.extend(middle.iter().cloned());
