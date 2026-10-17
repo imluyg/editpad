@@ -518,6 +518,30 @@ fn enter_markdown_leaves_non_list_lines_to_smart_indent() {
     assert_eq!(c.doc.to_text(), "\n- 甲");
 }
 
+#[test]
+fn enter_markdown_does_not_number_an_overlong_ordered_marker() {
+    // P464（编辑面）：`18446744073709551615.` 正好是 `usize::MAX`——改前这里按回车
+    // 进位算 `n + 1` ⇒ **debug 当场 panic**（整条编辑路炸掉）、release 绕回 `0. `。
+    // 预览那一侧同一条行不是列表项，所以编辑面也不许接。
+    let mut c = core_with("18446744073709551615. 甲");
+    c.cursor = CursorPos { line: 0, col: 23 };
+    c.enter_markdown();
+    assert_eq!(
+        c.doc.to_text(),
+        "18446744073709551615. 甲\n",
+        "超出位数上限那一形＝普通回车，不补标记"
+    );
+    // 九位仍然照接（把闸收到 8 位也算蒙混过关）
+    let mut d = core_with("999999999. 甲");
+    d.cursor = CursorPos { line: 0, col: 12 };
+    d.enter_markdown();
+    assert_eq!(
+        d.doc.to_text(),
+        "999999999. 甲\n1000000000. ",
+        "九位标记照常进位"
+    );
+}
+
 // ---------- 第 315 轮 C5：Markdown 页回车接住引用块（编辑面） ----------
 
 #[test]

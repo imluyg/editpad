@@ -707,9 +707,9 @@ fn list_item(raw: &str) -> Option<MdListItem<'_>> {
     let (order, after, marker_cols) = if let Some(after) = rest.strip_prefix(['-', '*', '+']) {
         (None, after, 1usize)
     } else {
-        // 有序：≤9 位数字 + `.` 或 `)`
+        // 有序：≤9 位数字 + `.` 或 `)`（上限与编辑面进位共用 [`MAX_ORDER_DIGITS`]）
         let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-        if digits == 0 || digits > 9 {
+        if digits == 0 || digits > MAX_ORDER_DIGITS {
             return None;
         }
         let byte_len: usize = rest[..digits].chars().map(char::len_utf8).sum();
@@ -761,6 +761,12 @@ pub enum MdListEnter {
     },
 }
 
+/// 有序标记的数字位数上限（P464）。**解析器与编辑面进位共用这一张闸**：
+/// 两边各写一个数就是本仓反复被抓的"两份判据各说各话"——编辑面曾没有这道闸，
+/// 于是 `18446744073709551615.`（＝`usize::MAX`）进位时 `n + 1` 溢出
+/// （debug panic／release 绕回 `0.`），而同一条行在预览里根本不是列表项。
+const MAX_ORDER_DIGITS: usize = 9;
+
 /// 列表项回车续写的判据（编辑面）。`marker_end` ＝正文起始的**字符列**，
 /// 因标记区全是 ASCII，它同时是字节偏移。
 ///
@@ -784,6 +790,10 @@ pub fn list_enter_action(line: &str) -> Option<MdListEnter> {
                 .take_while(|c| c.is_ascii_digit())
                 .map(char::len_utf8)
                 .sum();
+            // 与解析器同一条闸：超出上限 ⇒ 这一行不是列表项，回车就是普通回车
+            if digits == 0 || digits > MAX_ORDER_DIGITS {
+                return None;
+            }
             let sep = rest[digits..]
                 .chars()
                 .next()
@@ -2362,6 +2372,41 @@ mod tests {
             "{blocks:?}"
         );
         assert_eq!(blocks[4], MdBlock::Rule);
+    }
+
+    /// P464＝**panic**＋两套判据：编辑面那条有序标记判据没有解析器 `list_item`
+    /// 的「≤9 位数字」那道闸，于是 `18446744073709551615.`（正好是 `usize::MAX`）
+    /// 在按回车进位时 `n + 1` 溢出＝**debug 直接炸、release 绕回 `0.`**；
+    /// 而预览那一侧同一条行压根不当它是列表项 ⇒ 同一个手势，一边接、一边不接。
+    #[test]
+    fn p464_huge_ordered_markers_answer_the_same_on_both_sides() {
+        // 溢出那一格放在最前：改前要拿到的是 debug 里 `n + 1` 当场 panic 的现场，
+        // 不是被后面那格的断言先挡下来。
+        let huge = "18446744073709551615. 甲";
+        assert!(list_enter_action(huge).is_none(), "{huge} 不该被接成列表项");
+        assert!(!matches!(
+            parse_markdown(huge).first(),
+            Some(MdBlock::ListItem { .. })
+        ));
+        // 编辑面接不接＝预览里是不是列表项。逐位数字都跑一遍，边界两侧都要同判。
+        for digits in 1..=20usize {
+            let line = format!("{}9. 甲", "1".repeat(digits - 1));
+            let edited = list_enter_action(&line).is_some();
+            let parsed = matches!(
+                parse_markdown(&line).first(),
+                Some(MdBlock::ListItem { order: Some(_), .. })
+            );
+            assert_eq!(edited, parsed, "{line} 两侧判据不同（位数={digits}）");
+        }
+        // 九位那形仍然照接（不许把闸收紧到 8 位蒙混过去）
+        assert_eq!(
+            list_enter_action("999999999. 甲"),
+            Some(MdListEnter::Next {
+                prefix: "1000000000. ".to_owned(),
+                from_col: 11
+            }),
+            "九位标记仍进位，进位数宽自然超出零位补齐"
+        );
     }
 
     /// 有序序号／缩进层级／任务勾选框——预览要按这三格排版。
