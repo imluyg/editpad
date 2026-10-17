@@ -727,13 +727,22 @@ impl Editpad {
             self.t(editpad_core::Key::PaletteNoMatch)
         }
     }
-    /// P319：一条历史的规模摘要「N 行 · M 字节」。行数按 `lines()`（正文
-    /// 末尾换行不多算一行），字节按**实际 UTF-8 长度**——与逐出侧同一个口径。
-    fn clip_meta(&self, text: &str) -> String {
+    /// P319：一条历史的规模摘要「N 行 · M 字节」。字节按**实际 UTF-8 长度**
+    /// （与逐出侧同一个口径）；行数按**编辑器的行界全集**数——见函数体注释。
+    pub(crate) fn clip_meta(&self, text: &str) -> String {
         use editpad_core::Key as K;
+        // 「N 行」说的是"粘回编辑器会得到几行"，而编辑器的行界是七个字符的全集
+        // （定案 R-11／R-22）。旧写法 `text.lines().count()` 只认 LF 与 CRLF ⇒
+        // 含 VT/FF/NEL/LS/PS 的那条历史报成 1 行、粘出来是三行（同族：P396 修的
+        // 是「已复制命中行，共 0」，那是 CR-only 文档上同一把窄尺子的另一头）。
+        // 剥掉末尾行界再数：与 `lines()` 一致，尾随换行不多算一行（逐格对照见用例）。
+        let lines = if text.is_empty() {
+            0
+        } else {
+            editpad_core::line_break_units(editpad_core::trim_end_line_breaks(text)) + 1
+        };
         format!(
-            "{} {} · {} {}",
-            text.lines().count(),
+            "{lines} {} · {} {}",
             self.t(K::ClipUnitLines),
             text.len(),
             self.t(K::ClipUnitBytes)

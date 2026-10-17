@@ -603,3 +603,31 @@ fn empty_history_still_opens_a_card_and_says_what_is_missing() {
         "剪贴板模式的空态该另说一句，实得「{clip_label}」，命令模式是「{generic}」"
     );
 }
+
+/// 条目上那句「N 行」说的是**粘回编辑器会得到几行**，而编辑器的行界是七个字符的
+/// 全集（定案 R-11／R-22）。改前按 `str::lines()` 数：只认 LF 与 CRLF ⇒ 一条含
+/// LS／VT 的历史报成 1 行、取用却粘出三行（同族：P396 修的是「已复制命中行，共 0」，
+/// 那是 CR-only 文档上同一把窄尺子的另一头）。
+#[test]
+fn clip_meta_counts_lines_with_the_editors_break_set() {
+    let app = Editpad::default();
+    let lines_of = |t: &str| {
+        app.clip_meta(t)
+            .split(' ')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    // 控制行：纯 LF／CRLF 一律与 `str::lines()` 逐格同数（改前改后都不许多改行为）
+    for t in ["", "a", "a\n", "a\nb", "a\r\nb\r\n", "\n"] {
+        assert_eq!(
+            lines_of(t),
+            t.lines().count().to_string(),
+            "控制行 {t:?} 不该被本次改动动到"
+        );
+    }
+    // 缺陷行：异体行界照样切行；末尾那一个行界仍然不多算一行
+    assert_eq!(lines_of("a\u{2028}b\u{000b}c"), "3", "LS 与 VT 都是行界");
+    assert_eq!(lines_of("a\u{2029}"), "1", "PS 收尾＝一行，不多算空行");
+    assert_eq!(lines_of("\u{0085}"), "1", "整条只有一个 NEL＝一行");
+}
