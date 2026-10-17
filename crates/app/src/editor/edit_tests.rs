@@ -351,12 +351,52 @@ fn enter_smart_expands_a_paired_brace_into_three_lines() {
 }
 
 #[test]
+fn enter_smart_expands_the_pair_even_when_the_caret_sits_off_the_brace() {
+    // P459（编辑面）：`{` 与光标之间那一格空白不许把手势换成另一种结果。
+    // 改前现量＝`if (x) { |}` 回车把 `}` 甩到**第 0 列**（走退档那一支），
+    // 而紧贴的 `if (x) {|}` 同一手势展开三行——两块落点相差一格空白、产出相差一档。
+    let mut c = core_with("if (x) { }");
+    c.set_language(Some("java"));
+    c.cursor = CursorPos { line: 0, col: 9 }; // `{`=7、空白=8、`}`=9 ⇒ 光标在空白之后
+    c.enter_smart();
+    assert_eq!(c.doc.to_text(), "if (x) { \n    \n}");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 4 });
+    assert!(c.undo());
+    assert_eq!(
+        c.doc.to_text(),
+        "if (x) { }",
+        "空白留在原处：展开不许顺手删用户打的字符"
+    );
+
+    // 光标紧贴 `{`、`}` 在空白之后＝同一形（右边那截空白由 closers_only_tail 容忍）
+    let mut d = core_with("if (x) { }");
+    d.set_language(Some("java"));
+    d.cursor = CursorPos { line: 0, col: 8 };
+    d.enter_smart();
+    assert_eq!(d.doc.to_text(), "if (x) {\n    \n }");
+    assert_eq!(d.cursor, CursorPos { line: 1, col: 4 });
+}
+
+#[test]
 fn enter_smart_gives_the_level_back_before_a_trailing_closer() {
     let mut c = core_with("    foo();}");
     c.set_language(Some("java"));
     c.cursor = CursorPos { line: 0, col: 10 }; // `}` 在第 11 个字符处（前面 10 格）
     c.enter_smart();
     assert_eq!(c.doc.to_text(), "    foo();\n}");
+    assert_eq!(c.cursor, CursorPos { line: 1, col: 0 });
+}
+
+#[test]
+fn enter_smart_gives_the_level_back_when_the_closer_is_not_adjacent() {
+    // P459：`closers_only_tail` 自写成"连着好几个、中间夹空白"都算只剩闭括号，可②当年
+    // 还叠了一句"紧贴光标的那个字符必须是 `}`"——自己允许的形状被自己挡在门外。
+    // 改前现量＝这一形给 Plain（`}` 留在原地、一档不退）。
+    let mut c = core_with("    foo();  }");
+    c.set_language(Some("java"));
+    c.cursor = CursorPos { line: 0, col: 10 }; // `;` 之后隔着两格空白才到 `}`
+    c.enter_smart();
+    assert_eq!(c.doc.to_text(), "    foo();\n  }");
     assert_eq!(c.cursor, CursorPos { line: 1, col: 0 });
 }
 

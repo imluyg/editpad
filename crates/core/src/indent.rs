@@ -130,7 +130,8 @@ pub enum EnterAction {
     Indent,
     /// 光标后只剩闭花括号 ⇒ 新行＝当前缩进 − 一档（那个 `}` 自己落到新行）。
     OutdentTail,
-    /// 光标正卡在 `{` 与 `}` 中间 ⇒ 展开成三行，光标停在中间那行。
+    /// 光标两边最近的非空白字符是 `{` 与 `}`（夹不夹空白同一形）⇒ 展开成三行，
+    /// 光标停在中间那行。
     ExpandPair,
 }
 
@@ -193,19 +194,26 @@ fn rule_for(syntax: Option<&str>) -> Option<HeadRule> {
         .map(|(_, rule)| *rule)
 }
 
-/// 行尾最后一个**非空白**字符是开括号？
+/// 离光标最近的那个**非空白**字符（往行首方向看）。
 ///
-/// ⚠️ 是"倒数第一个非空白"，不是"最后一个字符若不是空白就作数"——`if (x) { |`
-/// 这种光标前留了一个空格的落点很常见，写错的话它就整个不加成（本轮红过一次）。
-fn ends_with_opener(prefix: &str) -> bool {
-    matches!(
-        prefix.chars().rev().find(|c| !c.is_whitespace()),
-        Some('{') | Some('[') | Some('(')
-    )
+/// ⚠️ 不是"最后一个字符若不是空白就作数"——`if (x) { |` 这种光标前留了一格空白的
+/// 落点很常见，写错的话它整个不加成（p457 那轮红过一次）。P459 把这条口径统一到
+/// 三档判据：光标左边的一切判据都走这里，不许一边跳过空白、一边按相邻字符读。
+fn last_non_blank(s: &str) -> Option<char> {
+    s.chars().rev().find(|c| !c.is_whitespace())
 }
 
-/// 光标后是否只剩闭花括号（可以连着好几个、中间夹空白）——`OutdentTail` 的形状。
+/// 行尾最后一个**非空白**字符是开括号？
+fn ends_with_opener(prefix: &str) -> bool {
+    matches!(last_non_blank(prefix), Some('{') | Some('[') | Some('('))
+}
+
+/// 光标后是否**只剩**闭花括号（可以连着好几个、中间夹空白）——②的整条形判据。
 /// 只认 `}`：`)`／`]` 结尾退档会在实参列表里猜错（`foo(a, |)` 不该把整行提走一档）。
+///
+/// P459：这一条自写成就容忍空白，②却还额外要求"紧贴的那个字符是 `}`"，等于把
+/// 自己允许的形状挡在门外——那个守卫已删，`closers_only_tail` 单独作数。
+/// 反过来它也是①的右半边（`{ |}` 与 `{|}` 同一形），所以两处共用一把尺。
 fn closers_only_tail(tail: &str) -> bool {
     let mut saw_closer = false;
     for c in tail.chars() {
@@ -281,18 +289,12 @@ pub fn enter_action(p: &EnterProbe) -> EnterAction {
     let Some(rule) = rule_for(p.syntax) else {
         return EnterAction::Plain;
     };
-    let last = p.line_prefix.chars().next_back();
-    let first = p.line_tail.chars().next();
-    // ① 光标正卡在 `{` 与 `}` 中间 ⇒ 展开三行（先判这条：它同时满足"右边是 `}`"）
-    if last == Some('{') && first == Some('}') {
+    // ① 光标两边最近的非空白字符是 `{` 与 `}` ⇒ 展开三行（先判这条：它同时满足②那条形）
+    if last_non_blank(p.line_prefix) == Some('{') && closers_only_tail(p.line_tail) {
         return EnterAction::ExpandPair;
     }
     // ② 光标后只剩闭花括号，且这一行确实有内容、有缩进可退 ⇒ 那一档退回去
-    if first == Some('}')
-        && !p.line_prefix.trim().is_empty()
-        && !p.indent.is_empty()
-        && closers_only_tail(p.line_tail)
-    {
+    if closers_only_tail(p.line_tail) && !p.line_prefix.trim().is_empty() && !p.indent.is_empty() {
         return EnterAction::OutdentTail;
     }
     // ③ 加档
@@ -331,7 +333,9 @@ pub fn enter_plan(p: &EnterProbe) -> EnterPlan {
             }
         }
         EnterAction::ExpandPair => {
-            // `{|}` → `{`⏎`  |`⏎`}`：中间那行加一档、光标留在那儿，闭括号落到第三行行首
+            // `{|}` → `{`⏎`  |`⏎`}`：中间那行加一档、光标留在那儿，闭括号落到第三行行首。
+            // ⚠️ `{` 与光标之间那截空白**原样留在第一行**——吞掉它等于删掉用户自己打下的
+            // 字符，与"补对只认本功能自己补的"（B11）同一条克制。
             let middle = format!("{}{}", p.indent, p.unit.text());
             let caret_col_next_line = next_line_indent(middle.clone());
             EnterPlan {
@@ -591,6 +595,65 @@ mod tests {
         );
         // 行首没缩进可退 ⇒ 不许产出负缩进
         assert_eq!(action(Some("Java"), "a();", "}", ""), EnterAction::Plain);
+    }
+
+    #[test]
+    fn p459_expand_pair_reads_the_nearest_non_blank_not_the_adjacent_char() {
+        // 同一个手势不该因为 `{` 与光标之间有一个空格就换一种结果。
+        // 改前现量：后两格走 OutdentTail ⇒ `}` 掉到**第 0 列**、`{` 那行还留着尾随空格，
+        // 而紧贴那一形（第一格）多年都是展开三行。判据的口径在③早就写成"取最后一个
+        // 非空白字符"（`ends_with_opener` 的注释自陈"写错的话它就整个不加成"），
+        // ①却还按相邻字符读＝同一把尺只管一边。
+        for (prefix, tail) in [
+            ("    fn f() {", "}"),
+            ("    fn f() { ", "}"),
+            ("    fn f() {   ", "}"),
+        ] {
+            let p = facts(Some("Rust"), prefix, tail, "    ");
+            assert_eq!(
+                enter_action(&p.probe()),
+                EnterAction::ExpandPair,
+                "{prefix}"
+            );
+            let plan = enter_plan(&p.probe());
+            assert_eq!(plan.insert, "\n        \n    ", "{prefix} 展开成三行");
+            assert_eq!(plan.caret_col_next_line, 8, "{prefix} 光标停在中间那行");
+        }
+        // 光标右边隔着空白也一样认（②的 closers_only_tail 本来就容忍空白）
+        let p = facts(Some("Rust"), "    fn f() {", " }", "    ");
+        assert_eq!(enter_action(&p.probe()), EnterAction::ExpandPair);
+    }
+
+    #[test]
+    fn p459_outdent_tail_also_reads_through_the_whitespace() {
+        // ②的 `closers_only_tail` 一开始就写成"可以连着好几个、中间夹空白"，但守卫里
+        // 那句 `first == Some('}')` 把空白那一形直接挡回 Plain——两处口径打架。
+        // 现量（改前）：`        foo(); |  }` 给 Plain（那个 `}` 留在原地、不退档），
+        // 而把空白挪到光标左边（`        foo();   |}`）就给 OutdentTail。
+        for tail in ["}", " }", "  }", "} }"] {
+            let p = facts(Some("Java"), "        foo();", tail, "        ");
+            assert_eq!(
+                enter_action(&p.probe()),
+                EnterAction::OutdentTail,
+                "光标后只剩闭括号（夹不夹空白）＝同一形：{tail:?}"
+            );
+            assert_eq!(
+                enter_plan(&p.probe()).insert,
+                "\n    ",
+                "退的就是那一档：{tail:?}"
+            );
+        }
+        // 反面对照不许跟着放宽：右边还有正文／行首没缩进可退／左边是别的开括号
+        assert_eq!(
+            action(Some("Java"), "        foo();", "} b", "        "),
+            EnterAction::Plain
+        );
+        assert_eq!(action(Some("Java"), "a();", "  }", ""), EnterAction::Plain);
+        assert_eq!(
+            action(Some("Java"), "    foo(", "  )", "    "),
+            EnterAction::Indent,
+            "圆括号那形既不展开也不退档，仍是加档"
+        );
     }
 
     #[test]
