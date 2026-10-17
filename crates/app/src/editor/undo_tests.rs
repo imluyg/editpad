@@ -237,20 +237,32 @@ fn strip_newlines(s: &str) -> String {
 }
 
 /// ropey 行界口径切行，返回不含行尾的各行内容。
+/// ropey `unicode_lines` 行界口径切行，返回不含行尾的各行内容。
+///
+/// ⚠️ 本函数原来只切 `\n`/`\r`/`\r\n` 三种，注释却写着"ropey 行界口径"——编辑器的行
+/// 模型是**七个字符的全集**（LF/CR/FF/VT/NEL/LS/PS，定案 R-11），所以语料里一旦出现异体
+/// 行界，这条参照就会比 ropey 少数行（第 355 轮把语料扩到异体行界时当场撞出来：
+/// `"\u{000C}\u{2028}\r"` 参照数成 1 段而 ropey 数成 3 段）。参照实现按规格独立写一遍，
+/// 不去调 core 的切行函数——对拍的牙就在于两份算式互相看不见。
 fn rope_line_bodies(s: &str) -> Vec<String> {
+    fn is_break(c: char) -> bool {
+        matches!(
+            c,
+            '\u{000A}' | '\u{000B}' | '\u{000C}' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+        )
+    }
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        match c {
-            '\n' => out.push(std::mem::take(&mut cur)),
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                out.push(std::mem::take(&mut cur));
+        if is_break(c) {
+            // `\r\n` 当一个单元（与 ropey 的配对规则一致）
+            if c == '\r' && chars.peek() == Some(&'\u{000A}') {
+                chars.next();
             }
-            other => cur.push(other),
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
         }
     }
     out.push(cur);
@@ -289,7 +301,8 @@ fn assert_structural_invariants(c: &EditorCore) {
 fn random_mixed_ops_preserve_invariants_undo_replays_exactly() {
     // 混入三种行尾、CJK、emoji 与加长映射字符（ß），覆盖新旧行为交互
     const TOKENS: &[&str] = &[
-        "a", "Z", "9", "中", "文", "🚀", "ß", " ", "\t", "  ", "\n", "\r\n",
+        "a", "Z", "9", "中", "文", "🚀", "ß", " ", "\t", "  ", "\n", "\r\n", "\u{000B}",
+        "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}", "\r",
     ];
     let motions = [
         Motion::Left,
@@ -299,7 +312,13 @@ fn random_mixed_ops_preserve_invariants_undo_replays_exactly() {
         Motion::Home,
         Motion::End,
     ];
-    for seed in [1u64, 0xDEAD_BEEF, 0x5EED_1234] {
+    // 语料含异体行界（VT/FF/NEL/LS/PS 与孤立 CR）：编辑器的行模型是这七个字符的
+    // 全集（定案 R-11），而 `insert_str` 只把 `\r\n`/`\r` 归一到主导行尾——其余五个
+    // 原样入文却**照样切行**。这正是本仓历次缺陷（P392/P393/P396/P399/P461…）住过的
+    // 地方，语料里没有它们就等于这一族没人对拍。种子数按"整条测试 ≈2 s"定档
+    // （实测 602 种子 10.8 s ⇒ 每种子约 18 ms，100 种子约 1.8 s；再大就是把
+    // 全量池从 22 s 拖向翻倍，第 319 轮那条"探针把套件从 24 s 拖到 120 s"的教训）。
+    for seed in (1u64..=100).chain([0xDEAD_BEEF, 0x5EED_1234]) {
         let mut rng = XorShift64(seed);
         let mut init = String::new();
         for _ in 0..rng.below(20) + 5 {
@@ -422,6 +441,12 @@ fn random_mixed_ops_preserve_invariants_undo_replays_exactly() {
         // 撤销到底必须逐字节回到初始文本；重做推进到顶终态一致（可复演性）
         // 第 60 轮起书签同拍对拍：初始无书签 → 撤销到底必空 → 重放到
         // 顶与终态书签集一致
+        // ⚠️ 对拍的前提是"取的是当前分支的尖端"：op 菜单里混着 undo（95..=96 与
+        // 兜底臂），所以循环结束时 redo 栈完全可以还挂着一条**合法的**可重做分支。
+        // 不先走到尖端就取终态，后面"重做到底 == 终态"这句根本不成立——它会拿
+        // 栈底那条旧分支当答案（第 355 轮把语料扩到异体行界后 seed=7 当场撞出：
+        // 终态差一个孤立 `\r`，实为陈旧分支而非快照丢帧）。
+        while c.redo() {}
         let final_text = c.doc.to_text();
         let final_marks = c.bookmarked_lines();
         while c.undo() {}
