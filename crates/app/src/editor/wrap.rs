@@ -29,27 +29,36 @@ use super::metrics::char_cols;
 ///   （见 [`choose_break`]）；
 /// * 与渲染同源：宽度累计用 `char_cols`（宽字符 2、Tab 跳制表位），
 ///   保证「折行位置」与「关闭软换行时的像素列」逐列一致。
+///
+/// ⚠️ 「同源」的**单位**是绝对列，不是段内列：Tab 的制表位按整行的绝对列跳
+/// （[`pixel_breaks`] 拿的是绝对 x 之差，`motion.rs` 的回退列算式注释也明写着
+/// 「Tab 宽度依赖绝对列，不能段内重算」）。改前这里在每个折点把列归零重算，
+/// 于是**折点之后那一截里的 Tab** 比另两处少跳一档 ⇒ 索引以为塞得下、画出去
+/// 超出栏宽（行尾那列被右缘裁掉），同一行在两条路径上段数与落点都不一样。
+/// 现在宽度只来自一份绝对列前缀表，段宽＝两端相减，不再有为折点回退而写的
+/// 第二次累计（那正是"两份算式各说各话"的形状）。
 pub(crate) fn wrap_breaks(body: &str, max_cols: usize) -> Vec<usize> {
     let max_cols = max_cols.max(1);
     let chars: Vec<char> = body.chars().collect();
+    // 绝对显示列前缀：`abs_at[i]` = 第 i 个字符**之前**已占用的显示列。
+    // 一次正着累计 O(n)，换来每次折点的段宽都是 O(1) 相减。
+    let mut abs_at: Vec<usize> = Vec::with_capacity(chars.len() + 1);
+    let mut col = 0usize;
+    abs_at.push(col);
+    for &c in &chars {
+        col += char_cols(c, col) as usize;
+        abs_at.push(col);
+    }
+
     let mut breaks = vec![0usize];
-    let mut w: usize = 0;
     for i in 0..chars.len() {
-        let cw = char_cols(chars[i], w) as usize;
-        if w > 0 && w + cw > max_cols {
+        let seg_start = *breaks.last().unwrap();
+        let cw = abs_at[i + 1] - abs_at[i];
+        if i > seg_start && (abs_at[i] - abs_at[seg_start]) + cw > max_cols {
             // 当前字符放不进本段：从优选断点（回退至多到段首+1，至少
-            // 占它自身宽度）起新段；新段宽按段首重算——Tab 的制表位
-            // 展开依赖段内列，断点前移后宽度必须逐字符重新累计
-            let seg_start = breaks[breaks.len() - 1];
+            // 占它自身宽度）起新段。段宽不必重算——绝对列前缀表就是尺子
             let b = choose_break(&chars, seg_start, i);
             breaks.push(b);
-            let mut w2 = 0usize;
-            for &c in &chars[b..=i] {
-                w2 += char_cols(c, w2) as usize;
-            }
-            w = w2;
-        } else {
-            w += cw;
         }
     }
     breaks
@@ -542,6 +551,71 @@ mod tests {
             wrap_breaks("\tXX", 4),
             vec![0, 1],
             "第二段 XX 共 2 列放得下"
+        );
+    }
+
+    /// 断点必须按**绝对列**展开制表位——这条不是新偏好，是本仓已经写死在另外
+    /// 两处算式里的口径：`pixel_breaks` 拿的是绝对 x 的差（`xs[k+1] - xs[prev]`），
+    /// 而 `motion.rs` 的回退列算式注释明写着「Tab 宽度依赖绝对列，不能段内重算」。
+    /// 改前 `wrap_breaks` 在每个折点把列归零重算 ⇒ 折点之后那一截里的 Tab 按段内
+    /// 列跳档，与另两条路不等价：索引以为塞得下（少算一列），画出去却超出栏宽，
+    /// 于是同一行在「有像素布局」与「回退列模型」两条路上段数与落点都不一样。
+    #[test]
+    fn every_segment_fits_the_absolute_column_budget_when_tabs_are_involved() {
+        // 3 列起一段（`ab ` 之后从 `c` 起），续段里 `cd` 占 2 列，Tab 的**绝对列**
+        // 是 5 ⇒ 该跳到 8（占 3 列），段内列却把它当成 2 列 ⇒ 那段画出来 5 列 > 预算 4
+        let body = "ab cd\tZZZZ";
+        let max = 4usize;
+        let chars: Vec<char> = body.chars().collect();
+        // 绝对列前缀：abs[i] = 第 i 个字符**之前**的显示列（与 display_cols 同一把尺）
+        let mut abs: Vec<usize> = vec![0];
+        for (i, c) in chars.iter().enumerate() {
+            abs.push(abs[i] + char_cols(*c, abs[i]) as usize);
+        }
+
+        let breaks = wrap_breaks(body, max);
+        for (k, &s) in breaks.iter().enumerate() {
+            let e = *breaks.get(k + 1).unwrap_or(&chars.len());
+            let drawn = abs[e] - abs[s];
+            assert!(
+                drawn <= max,
+                "段 {k}（字符 {s}..{e}）按绝对列宽 {drawn}，超出预算 {max}＝行尾那列被右缘裁掉；\n                折点表 {:?}",
+                breaks
+            );
+        }
+
+        // 正对照：不含 Tab 的行一把尺都不动（改前改后逐字相同，挡住"为修 Tab 把别的也改了"）
+        assert_eq!(wrap_breaks("abcdefgh", 4), vec![0, 4]);
+        assert_eq!(wrap_breaks("中中中", 4), vec![0, 2]);
+    }
+
+    /// 更强的那一格：**两条回退路径逐格相等**。像素断点拿的一直是绝对 x 的差，
+    /// 列模型改完也拿绝对列的差 ⇒ 把 `xs` 灌成「每列等宽」这份理想布局时，
+    /// 两边的折点表必须一字不差。本用例与预算那条各钉一支（顺序断言会让第一个
+    /// 红点盖住后面的格子），摘掉尺子任一侧的绝对列都会在这里现形。
+    #[test]
+    fn column_model_and_pixel_breaks_agree_on_a_line_containing_a_tab() {
+        let body = "ab cd\tZZZZ";
+        let max = 4usize;
+        let chars: Vec<char> = body.chars().collect();
+        let mut abs: Vec<usize> = vec![0];
+        for (i, c) in chars.iter().enumerate() {
+            abs.push(abs[i] + char_cols(*c, abs[i]) as usize);
+        }
+        let xs: Vec<f32> = abs.iter().map(|&c| c as f32 * 10.0).collect();
+
+        let by_cols = wrap_breaks(body, max);
+        let by_px = pixel_breaks(&xs, max as f32 * 10.0, body);
+        assert_eq!(
+            by_cols, by_px,
+            "列模型与像素断点在同一条含 Tab 的行上给了两套折点（列 {:?} ／ 像素 {:?}）",
+            by_cols, by_px
+        );
+        // 自证这不是"两边都恒返回 [0]"的空转：这一行确实被折开了
+        assert!(
+            by_cols.len() >= 3,
+            "夹具自证：含 Tab 的这行应折出多段，实得 {:?}",
+            by_cols
         );
     }
 
