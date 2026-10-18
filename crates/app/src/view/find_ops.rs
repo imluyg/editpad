@@ -57,6 +57,20 @@ impl Editpad {
     }
 
     pub(crate) fn step_match(&mut self, forward: bool) -> Task<Message> {
+        // A8「目录模式下文档导航禁用」当时只做在按钮那一侧（`doc_nav` 置灰），
+        // 而同一个动作还有两条腿没闸：查找框的 `on_submit`（Enter）与热键
+        // `find_next`／`find_prev`——两条都直接落到本函数，而动的是**文档命中表**
+        // ＝目录结果的另一套数据源。改前的后果分两支：命中表非空时 Enter 把正文
+        // 的选区跳到文档里的某一处、状态栏跟着报「第 N/M 处匹配」（用户此刻在
+        // 目录模式，根本没在导航文档）；命中表为空时更糟——下面那支懒触发直接
+        // 排一次**文档**扫描，既把正文高亮铺到目录模式上，又点亮 `find_scanning()`，
+        // 于是〔全部替换〕〔跨标签全部替换〕两条臂静默早退（它们的热键同样不闸）
+        // ＝按了没反应也没一句话。
+        // 口径与 [`Self::schedule_active_scan`] 共用同一份：**模式决定动作**，
+        // 目录模式下这个入口做的就是这个模式自己的搜索，本函数只服务文档命中表。
+        if self.fif_visible {
+            return self.schedule_active_scan();
+        }
         if self.busy || self.find_query.is_empty() {
             return Task::none();
         }

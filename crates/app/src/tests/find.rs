@@ -1375,6 +1375,119 @@ fn find_in_files_toggle_scan_done_and_seq_guard() {
     );
 }
 
+/// A8 那条「目录模式下文档导航禁用」只做在**按钮那一侧**（`view/find_panel.rs`
+/// 的 `doc_nav`），而同一个动作还有两条腿没闸：查找框的 `on_submit`（Enter）与
+/// 热键 `find_next`／`find_prev`——两条都直接进 `step_match`，而动的是文档命中表
+/// ＝目录结果之外的另一套数据源。本用例钉三条腿现在都归模式管。
+#[test]
+fn enter_in_fif_mode_searches_the_directory_instead_of_stepping_document_hits() {
+    let (mut app, path) = loaded_real_file_app("fif-enter");
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("aXbXc"));
+    }
+    app.find_visible = true;
+    app.find_query = "X".to_owned();
+    let seq = app.find_seq;
+    app.find_scan = Some(seq);
+    dispatch(
+        &mut app,
+        Message::FindScanDone(
+            seq,
+            scanned(vec![
+                editpad_core::MatchPos {
+                    line: 0,
+                    col: 1,
+                    len_chars: 1,
+                },
+                editpad_core::MatchPos {
+                    line: 0,
+                    col: 3,
+                    len_chars: 1,
+                },
+            ]),
+        ),
+    );
+    assert_eq!(app.matches.hits().len(), 2, "夹具自证：文档命中表灌起来了");
+
+    dispatch(&mut app, Message::FindInFilesToggled);
+    assert!(app.fif_visible, "夹具自证：进了目录模式");
+    assert_eq!(
+        app.fif_dir.as_deref(),
+        path.parent(),
+        "夹具自证：目录锚在当前页所在目录"
+    );
+    assert_eq!(app.match_idx, None, "夹具自证：还没步进过");
+    let before = {
+        let ed = app.cur_handle.borrow();
+        (ed.cursor, ed.anchor, ed.doc.to_text())
+    };
+
+    // ---- 缺陷一：Enter 把正文选区跳走了（两颗按钮早就灰了，这一击没闸）----
+    let fif_seq_before = app.fif_seq;
+    dispatch(&mut app, Message::FindNext);
+    assert_eq!(app.match_idx, None, "目录模式下 Enter 不许步进文档命中");
+    let after = {
+        let ed = app.cur_handle.borrow();
+        (ed.cursor, ed.anchor, ed.doc.to_text())
+    };
+    assert_eq!(
+        before, after,
+        "正文·选区·文档逐字节不动（改前选区跳到第 1 个命中）"
+    );
+    assert!(
+        !app.status.contains("处匹配"),
+        "状态栏不许报文档命中计数：{}",
+        app.status
+    );
+    // 这一击做的是这个模式自己的动作：重排一次目录扫描（代次前进＝真的排了）
+    assert_eq!(app.fif_seq, fif_seq_before + 1, "Enter 应走目录搜索那一路");
+    assert_eq!(app.fif_scan, Some(app.fif_seq), "排上的就是刚起的这一代");
+
+    // ---- 反面对照：退出目录模式后同一击照常步进文档命中（闸门不许过宽）----
+    dispatch(&mut app, Message::FindInFilesToggled);
+    assert!(!app.fif_visible, "夹具自证：已退出目录模式");
+    dispatch(&mut app, Message::FindNext);
+    assert_eq!(app.match_idx, Some(0), "文档模式下 Enter 照选中第 1 个命中");
+    let ed = app.cur_handle.borrow();
+    assert_ne!((ed.cursor, ed.anchor), (before.0, before.1), "选区该跟着动");
+}
+
+/// 同一族里的**第二格**，夹具与观察量都不同：命中表为空时 `step_match` 走的是
+/// 那支「懒触发」，而它当时直接调 `schedule_find_scan()`（文档侧那一路），
+/// 绕过了模式派发的 `schedule_active_scan()`。点亮 `find_scanning()` 的代价不在
+/// 查找栏里，而在**别的入口**上：〔全部替换〕〔跨标签全部替换〕两条臂只看这个
+/// 标志就静默早退，而它们的热键路径同样不闸 ⇒ 用户按了没反应也没一句话。
+/// 本用例与上一条各钉一支：摘掉闸门时两条红点互不顶班。
+#[test]
+fn enter_in_fif_mode_with_empty_hit_table_queues_no_document_scan() {
+    let mut app = Editpad::default();
+    app.find_visible = true;
+    app.fif_visible = true;
+    app.find_query = "X".to_owned();
+    app.find_scan = None;
+    app.matches = std::rc::Rc::new(crate::FindHitTable::default());
+    app.fif_dir = std::env::temp_dir().into();
+    assert!(app.matches.hits().is_empty(), "夹具自证：文档命中表为空");
+    assert!(!app.find_scanning(), "夹具自证：此刻没有文档扫描在途");
+
+    let fif_seq = app.fif_seq;
+    dispatch(&mut app, Message::FindNext);
+    assert!(
+        !app.find_scanning(),
+        "目录模式下的 Enter 不得排**文档**扫描（改前它点亮 find_scanning，\n        于是〔全部替换〕两条臂静默早退）"
+    );
+    assert_eq!(app.fif_seq, fif_seq + 1, "这一击该归目录那一侧");
+    assert_eq!(app.fif_scan, Some(app.fif_seq), "排上的就是刚起的这一代");
+
+    // 正对照：退出目录模式后同一击确实会排文档扫描（懒触发那支照旧活着，
+    // 挡住「目录模式的闸门顺手把文档模式的懒触发也关掉」这种过宽修法）
+    app.fif_visible = false;
+    app.find_scan = None;
+    dispatch(&mut app, Message::FindNext);
+    assert!(app.find_scanning(), "文档模式下懒触发该排一次文档扫描");
+}
+
 #[test]
 fn find_in_files_hotkey_f12_and_goto_open_tab() {
     use crate::find_scan::{FileHit, FileHits};
