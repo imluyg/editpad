@@ -4,7 +4,8 @@
 //! 带可选 `:行号` 后缀的文件路径（编辑器内打开，`src/main.rs:42` /
 //! `C:\log\run.txt:10` 语法）。识别口径：
 //! * token = 行内以空白分隔的连续非空白段（从给定列向两侧扩展）；
-//! * URL：前缀判定 + 尾部收尾标点剥离（`,.` 等与中文句读）；
+//! * URL（`https://`／`http://`／`file://` 三类**同一套切法**）：token 内取
+//!   最靠前的 scheme＋首个非 ASCII 处截断＋尾部收尾标点剥离（`,.` 等与中文句读）；
 //! * 路径：必须含路径分隔符 `\` / `/`，且**磁盘存在**（绝对与相对一律
 //!   经存在性判定——纯结构判定会把 `2026/09/02` 这类日期当路径，存在性
 //!   一票否决最省心）；存在性/相对解析由调用方注入闭包（可含 base_dir
@@ -61,7 +62,17 @@ fn classify(
     token: &str,
     resolve_path: &dyn Fn(&str) -> Option<PathBuf>,
 ) -> Option<(usize, usize, LinkTarget)> {
-    if let Some(byte_pos) = token.find("https://").or_else(|| token.find("http://")) {
+    // 三类 URL **同一套切法**：在 token 内任意位置找 scheme（中文「详见URL」无空格
+    // 分词，前文紧贴 scheme），在首个非 ASCII 字符处截断，再剥尾部收尾标点。
+    // 取**最靠前**的那个 scheme 而不是"先查 https 再查 http"：一行里
+    // `http://a/?ref=https://b` 的链接本体是整条，认后面那个会把前文切掉、
+    // 打开另一个地址。
+    // ⚠️ 改前 `file://` 另走一支：只认 token 开头、既不找中段也不剥尾部标点
+    // ⇒ 同一句里 `https://…` 成链而 `file:///…` 不成链（中文顿号/逗号紧贴时
+    // 整段不算链接），或者带着那个逗号交系统打开（打不开）。
+    const SCHEMES: [&str; 3] = ["https://", "http://", "file://"];
+    let byte_pos = SCHEMES.iter().filter_map(|&s| token.find(s)).min();
+    if let Some(byte_pos) = byte_pos {
         // URL 恒为 ASCII（非 ASCII 属百分号编码前的原文）——中文句读
         // 会并入 token，先在首个非 ASCII 字符处截断
         let rest = &token[byte_pos..];
@@ -76,10 +87,6 @@ fn classify(
         }
         let start = token[..byte_pos].chars().count();
         return Some((start, t.chars().count(), LinkTarget::Url(t.to_string())));
-    }
-    if token.starts_with("file://") {
-        let n = token.chars().count();
-        return Some((0, n, LinkTarget::Url(token.to_string())));
     }
     // 路径候选：必须含分隔符
     if !token.contains('\\') && !token.contains('/') {
@@ -216,5 +223,51 @@ mod tests {
         let text = "go https://x.io/a";
         let (_, _, t) = link_at(text, text.chars().count(), &NO_PATH).unwrap();
         assert_eq!(t, LinkTarget::Url("https://x.io/a".to_string()));
+    }
+
+    /// `file://` 必须与 `https://` 共用同一套切法。改前它另走一支：只认 token
+    /// 开头、整段照收 ⇒ ①「详见file:///C:/a.txt。」这种紧贴中文、中文句读收尾的
+    /// URI **整段不成链**（Ctrl+点击与悬停手型都没反应），而同一句换成 https 就成链；
+    /// ②「file:///C:/a.txt,」把那个逗号一起交系统打开（打不开）。
+    #[test]
+    fn file_uri_shares_the_url_cutting_rules() {
+        let slice = |s: &str, c0: usize, c1: usize| -> String {
+            s.chars().skip(c0).take(c1 - c0).collect()
+        };
+
+        // ① 中文前文紧贴＋中文句号收尾：链接本体只有 URI 那 16 个字符
+        let text = "详见file:///C:/a.txt。其中";
+        for col in [0usize, 2, 6, 20] {
+            let (c0, c1, t) = link_at(text, col, &NO_PATH).expect("应识别出 file:// URI");
+            assert_eq!(
+                slice(text, c0, c1),
+                "file:///C:/a.txt",
+                "列 {col} 落在紧贴中文的 URI 上，本体不该带前后文"
+            );
+            assert_eq!(t, LinkTarget::Url("file:///C:/a.txt".to_string()));
+        }
+
+        // ② 尾部 ASCII 逗号不属于链接本体
+        let (_, _, t) = link_at("open file:///C:/a.txt, now", 6, &NO_PATH).unwrap();
+        assert_eq!(t, LinkTarget::Url("file:///C:/a.txt".to_string()));
+
+        // 裸 scheme 不成链（与 https 那一支同一条判据）
+        assert!(link_at("file://", 3, &NO_PATH).is_none());
+
+        // 正对照：干净的一条 URI 逐字不变（既有那格同源）
+        let (_, _, t) = link_at("file:///C:/logs", 2, &NO_PATH).unwrap();
+        assert_eq!(t, LinkTarget::Url("file:///C:/logs".to_string()));
+    }
+
+    /// 一个 token 里同时有两条 scheme 时，链接本体是**最靠前**那条（整条）。
+    /// 改前按"https 优先于 http"的查找顺序认后面那条 ⇒ 前文被切掉、打开的是
+    /// 另一个地址（`?ref=` 这种回跳参数在真实 URL 里很常见）。
+    #[test]
+    fn earliest_scheme_wins_when_a_token_holds_two() {
+        let text = "http://a/?ref=https://b";
+        let (c0, c1, t) = link_at(text, 0, &NO_PATH).expect("应成链");
+        assert_eq!(c0, 0, "链接本体该从最靠前的 scheme 起，实得 c0={c0}");
+        assert_eq!(&text[c0..c1], "http://a/?ref=https://b");
+        assert_eq!(t, LinkTarget::Url("http://a/?ref=https://b".to_string()));
     }
 }
