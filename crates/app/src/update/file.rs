@@ -785,16 +785,29 @@ impl Editpad {
                     ));
                     return Task::none();
                 }
-                if current == target {
+                // 「这一刀会不会真的改动正文」只认正文：改前问的是
+                // `current == target`（＝检测出来的**主导**那一档），于是混合行尾的
+                // 文件（CRLF 为主、夹几行 LF）永远无法归一到它自己的主导档——
+                // 报一句「已是 CRLF」，那几个散行 LF 一个都不改，而〔转换为 CRLF〕
+                // 那颗按钮还被同一把尺判成灰的（见 `Editpad::eol_item_disabled`）。
+                // 现在与写入那一支共用同一份算式（`normalize` 的产物逐字比对），
+                // 不长第二把尺；口径同 `convert_case` 的 `out == src`、`sort_lines`
+                // 的已有序＝没有真实变化就不产快照、不置脏、不推版本、不排自动保存。
+                // P9 的归一函数即行尾转换：CRLF/LF/孤立 CR 全部统一到目标，
+                // 异体行界字符不参与（定案 R-11）。
+                let new_text = target.normalize(&text);
+                if new_text == text {
+                    // 如实报**当前那一档**而不是所选目标：无换行的文档 `detect`
+                    // 恒回 LF，改前这一支会往下走、改写文档＋置脏＋推版本＋
+                    // 回报「已转换为 CRLF」，而 `from_str` 检回的仍是 LF＝徽章没动、
+                    // 正文一字未改的一句假话。
                     self.set_status(format!(
                         "{}{}",
                         self.t(editpad_core::Key::StEolAlreadyMiddle),
-                        eol_label(target)
+                        eol_label(current)
                     ));
                     return Task::none();
                 }
-                // P9 的归一函数即行尾转换：CRLF/LF/孤立 CR 全部统一到目标
-                let new_text = target.normalize(&text);
                 // replace_whole_document 内部快照 → 可撤销（与全部替换同款）
                 self.cur()
                     .borrow_mut()

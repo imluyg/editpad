@@ -1625,8 +1625,12 @@ fn eol_convert_items_are_disabled_for_locked_pages_and_matching_eol() {
         // 正对照：可写页上「转换为 CRLF」必须**能点**——否则下面三格会在
         // 「恒灰」的实现下也全绿（灰掉一切同样"没有能点的项"）
         (false, false, LE::CrLf, false),
-        // 已是目标：转换无处可转，灰（既有口径，本轮不许改）
-        (false, false, LE::Lf, true),
+        // 「已是主导档」不再被面侧当成"无处可转"（第 383 轮改判）：这个夹具是
+        // **无换行**文档，主导档落 LF，但"有没有可转的东西"要拿正文比对才知道——
+        // 面侧一旦按主导档预测，混合行尾那格就被永久灰掉了。点了无处可转时
+        // 汇点如实报「已是 LF」，见 `p67_convert_eol_rewrites_document_undoably`
+        // 与 `mixed_line_endings_can_be_normalized_to_their_own_dominant_style`。
+        (false, false, LE::Lf, false),
         // 只读页：动作会被闸拒收 ⇒ 面上也不许看着能点（本轮补的那一半）
         (true, false, LE::CrLf, true),
         // busy：这一族动作在忙碌期间一律灰（与正文右键菜单同一把尺子）
@@ -1643,6 +1647,88 @@ fn eol_convert_items_are_disabled_for_locked_pages_and_matching_eol() {
             "read_only={locked} busy={busy} target={target:?} 的置灰判据错位"
         );
     }
+}
+
+/// 混合行尾的文件必须能归一到**它自己的主导档**。改前「已是目标」那道早退问的是
+/// 检测出来的主导那一档（与弹层置灰同一把尺），于是 CRLF 为主、中间夹一行 LF 的
+/// 文档里那几个散行 LF 谁也清不掉——〔转换为 CRLF〕那颗按钮被同一把尺判成灰的，
+/// 就算按得动也只回报一句「已是 CRLF」。判「这一刀会不会真的改动正文」从此只认正文。
+#[test]
+fn mixed_line_endings_can_be_normalized_to_their_own_dominant_style() {
+    use editpad_core::LineEnding as LE;
+    let mut app = loaded_txt_app();
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("a\r\nb\nc\r\n"));
+    }
+    let v0 = app.tab().version;
+    {
+        let ed = app.cur_handle.borrow();
+        assert_eq!(ed.doc.line_ending(), LE::CrLf, "夹具自证：主导档是 CRLF");
+        assert_eq!(
+            ed.doc.to_text(),
+            "a\r\nb\nc\r\n",
+            "夹具自证：中间那行是孤立 LF（＝这一刀有活可干）"
+        );
+    }
+    assert!(
+        !app.eol_item_disabled(LE::CrLf),
+        "混合行尾的页上〔转换为 CRLF〕不许灰（改前按主导档被永久灰掉）"
+    );
+
+    dispatch(&mut app, Message::ConvertEol(LE::CrLf));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "a\r\nb\r\nc\r\n",
+        "那一刀要把夹着的 LF 一起归到主导档"
+    );
+    assert!(app.tab().dirty, "改动正文就是真实编辑");
+    assert_eq!(app.tab().version, v0 + 1, "版本推进＝自动保存的触发依据");
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "a\r\nb\nc\r\n",
+        "归一必须可撤销（与全部替换同款）"
+    );
+}
+
+/// 同一把尺的**另一半**：没有真实变化就不许留后果。无换行的文档选 CRLF 时改前
+/// 会整篇改写＋置脏＋推版本，并回报「已转换为 CRLF」——而 `from_str` 对无换行
+/// 文本恒检回 LF ⇒ 徽章没动、正文一字未改，只留下一句假话，还顺手排一次自动保存
+/// 覆写磁盘。现在如实回报当前那一档（口径同 `convert_case` 的 `out == src`）。
+#[test]
+fn eol_convert_with_nothing_to_change_leaves_no_trace_and_says_so() {
+    use editpad_core::LineEnding as LE;
+    let mut app = loaded_txt_app();
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("单行没有换行"));
+    }
+    let v0 = app.tab().version;
+    let dirty0 = app.tab().dirty;
+
+    dispatch(&mut app, Message::ConvertEol(LE::CrLf));
+    assert_eq!(
+        app.cur_handle.borrow().doc.to_text(),
+        "单行没有换行",
+        "无处可转时正文一字不动"
+    );
+    assert_eq!(app.tab().version, v0, "不推版本＝不排自动保存");
+    assert_eq!(app.tab().dirty, dirty0, "不新增置脏");
+    assert!(
+        app.status.contains("已是") && app.status.contains("LF"),
+        "该如实报当前那一档（LF）而不是所选目标，实得 {:?}",
+        app.status
+    );
+
+    // 正对照：真有活可干那一档照常改写并推版本（挡住「一律早退」这种过窄修法）
+    {
+        let mut ed = app.cur_handle.borrow_mut();
+        ed.reset_document(editpad_core::Document::from_str("a\nb\n"));
+    }
+    dispatch(&mut app, Message::ConvertEol(LE::CrLf));
+    assert_eq!(app.cur_handle.borrow().doc.to_text(), "a\r\nb\r\n");
+    assert!(app.tab().version > v0, "正对照：这一发改了正文就该推版本");
 }
 
 #[test]

@@ -114,15 +114,23 @@ impl Editpad {
         !self.busy && !self.cur_handle.borrow().read_only
     }
 
-    /// 行尾弹菜单里「转换为 `target`」这一项该不该灰掉：已是目标，或这一页不许
-    /// 改写。抽成方法是为了让 headless 用例能把三态列表格。
+    /// 行尾弹菜单里「转换为 `target`」这一项该不该灰掉：这一页不许改写才灰。
+    /// 抽成方法是为了让 headless 用例能把三态列表格。
     ///
-    /// ⚠️ 它盯不到「有人在 [`Self::eol_menu_overlay`] 里绕过它另写一个判据」——
+    /// ⚠️ 改前这里还多问一句 `doc.line_ending() == target`（＝主导那一档）而把它
+    /// 灰掉，理由是「转换无处可转」。那条预测对**混合行尾**的文件是错的：主导是
+    /// CRLF 而夹着几行 LF 的文件恰恰最需要〔转换为 CRLF〕，而这一项被永久灰掉＝
+    /// 用户唯一能清掉那几个散行 LF 的办法是先转 LF 再转回来。判"有没有可转的东西"
+    /// 是汇点的活（`update/file.rs` 拿 `normalize` 的产物与正文逐字比对），
+    /// 面侧不预测：点下去真无处可转时它会如实报「已是 X」，比一颗永远按不动的
+    /// 按钮诚实。
+    ///
+    /// 它盯不到「有人在 [`Self::eol_menu_overlay`] 里绕过它另写一个判据」——
     /// 叠层里的按钮 `ViewTree::click` 打不到（设施边界见 `tests/bookmarks_panel.rs`
     /// 的 `open_panel_renders_one_row_area_per_listed_bookmark` 注释，同 P259 在
     /// `tests/chrome.rs` 里申报的那半），逐条点击的接线留手测。
-    pub(crate) fn eol_item_disabled(&self, target: editpad_core::LineEnding) -> bool {
-        self.cur_handle.borrow().doc.line_ending() == target || !self.menu_writable()
+    pub(crate) fn eol_item_disabled(&self, _target: editpad_core::LineEnding) -> bool {
+        !self.menu_writable()
     }
 
     /// P308：正文右键菜单面板。菜单项一律经 [`Message::EditorCtxCommand`]
