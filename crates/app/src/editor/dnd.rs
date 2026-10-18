@@ -119,8 +119,15 @@ impl EditorCore {
         if start_off >= end_off {
             return false;
         }
+        // 落点行号夹紧：`drop` 是**上一次鼠标移动时**算出来的，而那一行到现在
+        // 可能已经不存在（`Document::line_to_char` 对越界行号是 panic，不是空串；
+        // 兄弟 `line_body_len_chars` 早就带了这道夹子，这一处没有）。
+        // 上游 `apply_edit` 已改成「正文真变了就作废这次拖拽会话」，所以正常路径
+        // 走不到这里；留着它是给「会话与文档之间还有别的时间差」那半族兜底——
+        // 崩一次＝丢掉未保存的整篇，比落到最近的一行贵得多。
+        let drop_line = drop.line.min(self.doc.line_count().saturating_sub(1));
         let drop_off =
-            self.doc.line_to_char(drop.line) + drop.col.min(self.line_display_len(drop.line));
+            self.doc.line_to_char(drop_line) + drop.col.min(self.line_display_len(drop_line));
         if !copy && drop_off >= start_off && drop_off <= end_off {
             return false; // 移动落点在选区内 = 无变化
         }
@@ -344,5 +351,34 @@ mod tests {
         // 距按下点 5px：超阈值进入拖拽
         assert!(c.update_dnd(1005.0, 0.0));
         assert!(c.dnd.as_ref().unwrap().started);
+    }
+
+    /// 落点行号越界＝`Document::line_to_char` 直接 panic（兄弟
+    /// `line_body_len_chars` 早带了那道夹子，这一处没有）。上游已经改成
+    /// 「正文一变就作废会话」，正常路径走不到这里；本用例钉的是夹紧那半族：
+    /// 陈旧落点该落到**最近的一行**，而不是把整篇未保存的正文一起崩掉。
+    #[test]
+    fn a_stale_drop_line_clamps_to_the_last_line_instead_of_panicking() {
+        let mut c = core_with("abcd\nefgh\n");
+        select(&mut c, 0, 1, 0, 3); // "bc"
+        assert!(
+            c.doc.line_count() < 9,
+            "夹具自证：那一行早已不存在（行数 {}）",
+            c.doc.line_count()
+        );
+
+        // 行 9 → 夹到末行＝文档末尾；选区里的 "bc" 被搬到文末
+        assert!(c.finish_drop_selection(CursorPos { line: 9, col: 0 }, false));
+        assert_eq!(
+            c.doc.to_text(),
+            "ad\nefgh\nbc",
+            "越界落点夹到最后一行、正常完成移动，不 panic"
+        );
+
+        // 正对照：行号没越界时算式一字不变（闸门不许把有效落点也夹走）
+        let mut c2 = core_with("abcd\nefgh\n");
+        select(&mut c2, 0, 1, 0, 3);
+        assert!(c2.finish_drop_selection(CursorPos { line: 1, col: 2 }, false));
+        assert_eq!(c2.doc.to_text(), "ad\nefbcgh\n");
     }
 }

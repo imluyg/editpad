@@ -2500,6 +2500,112 @@ fn read_only_lock_blocks_a_drag_that_started_before_the_lock() {
     assert!(app.tab().dirty);
 }
 
+/// 把一次「已起步的拖拽」摆到给定 app 上：选区在 0 行、落点在 `drop_line` 行。
+/// 落点是上一次鼠标移动时算好的（视图侧 `update_dnd` 写的就是这个字段），
+/// 本函数直接摆它＝把时间拨到「鼠标已经拖到那一行」那一刻。
+fn start_drag_to_line(app: &mut Editpad, drop_line: usize) {
+    let mut ed = app.cur_handle.borrow_mut();
+    // 同一夹具里可能已经挂着一份会话（正对照那一格就是先验证"会话还活着"）
+    ed.cancel_dnd();
+    ed.anchor = Some(crate::editor::CursorPos { line: 0, col: 1 });
+    ed.cursor = crate::editor::CursorPos { line: 0, col: 3 };
+    assert!(
+        ed.begin_dnd_at(crate::editor::CursorPos { line: 0, col: 2 }),
+        "夹具自证：拖拽应能起步"
+    );
+    let d = ed.dnd.as_mut().unwrap();
+    d.started = true;
+    d.drop = crate::editor::CursorPos {
+        line: drop_line,
+        col: 0,
+    };
+}
+
+/// 装载一份三行文档并把当前页命名起来（与同文件那几条拖拽用例同一夹具口径）。
+fn loaded_three_line_app(tag_path: &str) -> Editpad {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FileDropped(PathBuf::from(tag_path)));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("abcd\nefgh\nijkl\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    app
+}
+
+/// 拖拽会话的落点属于**按下与拖动那一刻**的那套坐标系：正文一变就该作废它。
+/// `EditorCore::cancel_dnd` 的注释从这条功能落地起就写着「Esc／其他键按下」取消，
+/// 而当时只实现了 Esc 那一条腿（`E::CancelBlock` 臂）——按住左键期间键盘事件照旧
+/// 进得来（`Message::KeyPressed` 开头只看热键捕获态与面板态，既不闸 `busy`
+/// 也不看在途拖拽），于是「拖住的同时按一下」会让落点那一行不再存在，
+/// 或者指的是另一行内容。
+#[test]
+fn an_edit_that_lands_while_a_drag_is_pending_voids_the_drop_point() {
+    let mut app = loaded_three_line_app("C:/dnd-stale.txt");
+    start_drag_to_line(&mut app, 2);
+
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("\n".to_owned())));
+    assert!(
+        app.cur_handle.borrow().dnd.is_none(),
+        "正文真的变了 ⇒ 在途拖拽的落点作废（改前它带着旧行号一直活着，\n        释放时按那个行号去问已经不存在的那一行）"
+    );
+    // 这条纪律只收会话，不顺手改选区以外的账：置脏与版本照常推进
+    assert!(app.tab().dirty, "被插入的这一改本身仍要置脏");
+}
+
+/// 与上一条**对称**的那一半：**没改成正文**的动作不许吃掉在途拖拽
+/// （P351／P463／P377 那条「没有后果的动作不许留后果」）。
+/// 两格各钉一条早退出路，末尾再给一格正对照＝闸门不许排在改动判定之前。
+#[test]
+fn an_edit_that_changed_nothing_keeps_the_pending_drag_session() {
+    // ① 撤销栈是空的：这一按连正文都没碰
+    let mut app = loaded_three_line_app("C:/dnd-undo.txt");
+    start_drag_to_line(&mut app, 2);
+    dispatch(&mut app, Message::Edit(EditOp::Undo));
+    assert!(
+        app.cur_handle.borrow().dnd.is_some(),
+        "失败的撤销不许吃掉这次拖拽（会话作废是「正文变了」的后果，这里没变）"
+    );
+
+    // ② 只读页：总闸在改动之前就拒收，同样不许留痕迹
+    let mut app2 = loaded_three_line_app("C:/dnd-locked.txt");
+    start_drag_to_line(&mut app2, 2);
+    dispatch(&mut app2, Message::ToggleReadOnly);
+    let before = app2.cur_handle.borrow().doc.to_text();
+    dispatch(
+        &mut app2,
+        Message::Edit(EditOp::InsertText("\n".to_owned())),
+    );
+    assert!(
+        app2.cur_handle.borrow().dnd.is_some(),
+        "被拒的编辑同样不许吃会话"
+    );
+    assert_eq!(
+        app2.cur_handle.borrow().doc.to_text(),
+        before,
+        "夹具自证：这一按确实一个字都没写"
+    );
+
+    // 正对照：解锁后同一击既改正文、也作废会话（挡住"闸在开头一律收"那种修法）
+    dispatch(&mut app2, Message::ToggleReadOnly);
+    start_drag_to_line(&mut app2, 2);
+    dispatch(
+        &mut app2,
+        Message::Edit(EditOp::InsertText("\n".to_owned())),
+    );
+    assert!(
+        app2.cur_handle.borrow().dnd.is_none(),
+        "真的改到正文就该作废"
+    );
+}
+
 #[test]
 fn edit_op_mutates_classification_is_failsafe() {
     // P126：白名单外默认按可变拒绝（fail-safe）——新变体忘登记时

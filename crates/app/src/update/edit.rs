@@ -1125,6 +1125,16 @@ impl Editpad {
             if !self.status_is_error {
                 self.status.clear();
             }
+            // 正文真的变了 ⇒ 在途拖拽的落点属于**改动前**的那套坐标系，作废它。
+            // `EditorCore::cancel_dnd` 自己的注释早就承诺「Esc／其他键按下」取消，
+            // 而当时只有 Esc 那一条腿（`E::CancelBlock`）实现了——按住左键拖着的时候
+            // 键盘事件照旧进得来（`Message::KeyPressed` 开头不闸 `busy`，也不看在途拖拽），
+            // 于是拖住的同时按 Ctrl+Z／删行／打字，落点那一行就不存在了或者指的是别的。
+            // 与 [`EditorCore::drop_stale_coordinate_state`] 同一条纪律，只是这一支不必
+            // 连列块/跳转历史一起收：本函数改动的就是正文，别的浮层不欠它。
+            // ⚠️ 排在 `if changed` 里＝被拒的、无事发生的编辑**不许**吃掉这次拖拽
+            //    （`undo_failure_preserves_the_column_block` 那条同口径）。
+            self.cur_handle.borrow_mut().cancel_dnd();
         } else if let Some(hint) = hint {
             self.set_status(hint);
         }
