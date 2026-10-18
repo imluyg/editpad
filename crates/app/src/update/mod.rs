@@ -307,6 +307,13 @@ impl Editpad {
         self.close_column_editor();
         self.close_editor_context_menu();
         self.tab_context_menu = None;
+        // 状态栏那两格弹层同一条腿：它们渲染的是「当下这一页」的编码与行尾，
+        // 菜单项（`SaveWithEncoding`／`ConvertEol`）动的也是当下那一页。留着它
+        // 换页 ⇒ 点一下把**另一页**的文件按错编码写盘（或整篇改写行尾并置脏、
+        // 排一次自动保存）。P376 那条「浮层对账」名单当时只数了带 id 的三个，
+        // 这两个裸 bool 因为「没有 id 可对」而被整族漏掉——现在它们带上了所属页。
+        self.close_encoding_menu();
+        self.close_eol_menu();
         self.cancel_find_scan();
     }
 
@@ -566,6 +573,18 @@ impl Editpad {
     pub(crate) fn close_editor_context_menu(&mut self) {
         self.editor_context_menu_tab = None;
         self.editor_context_menu = false;
+    }
+
+    /// 状态栏编码菜单的唯一收起出口（在场标记与所属页一起清，不留半份账）。
+    pub(crate) fn close_encoding_menu(&mut self) {
+        self.encoding_menu_tab = None;
+        self.encoding_menu = false;
+    }
+
+    /// 状态栏行尾菜单的唯一收起出口，理由同 [`Self::close_encoding_menu`]。
+    pub(crate) fn close_eol_menu(&mut self) {
+        self.eol_menu_tab = None;
+        self.eol_menu = false;
     }
 
     /// 消息总入口：按域分派到 `update_editor` / `update_tabs` / `update_file` /
@@ -920,8 +939,8 @@ impl Editpad {
         self.renaming_tab = None;
         self.rename_input.clear();
         // P67：Esc 一并收起状态栏编码/行尾菜单
-        self.encoding_menu = false;
-        self.eol_menu = false;
+        self.close_encoding_menu();
+        self.close_eol_menu();
         // P10：取消在途扫描 + 清结果（含序号失效）
         self.cancel_find_scan();
         // 关栏（Esc 路径）同样清掉查找进度提示，避免左下角残留；

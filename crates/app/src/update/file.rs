@@ -721,20 +721,33 @@ impl Editpad {
                     return Task::none();
                 }
                 // 互斥：开一个关另一个
-                self.eol_menu = false;
-                self.encoding_menu = !self.encoding_menu;
+                self.close_eol_menu();
+                if self.encoding_menu {
+                    self.close_encoding_menu();
+                } else {
+                    self.encoding_menu = true;
+                    // 开栏那一刻的页就是这批菜单项的目标：`SaveWithEncoding`
+                    // 写的是「当下这一页」，所以所属页必须随浮层一起记账，
+                    // 换页/关页时才有东西可对（见 `Editpad::set_active_tab`）。
+                    self.encoding_menu_tab = Some(self.tab().id);
+                }
                 Task::none()
             }
             Message::ToggleEolMenu => {
                 if self.busy {
                     return Task::none();
                 }
-                self.encoding_menu = false;
-                self.eol_menu = !self.eol_menu;
+                self.close_encoding_menu();
+                if self.eol_menu {
+                    self.close_eol_menu();
+                } else {
+                    self.eol_menu = true;
+                    self.eol_menu_tab = Some(self.tab().id);
+                }
                 Task::none()
             }
             Message::SaveWithEncoding(encoding) => {
-                self.encoding_menu = false;
+                self.close_encoding_menu();
                 if self.busy {
                     return Task::none();
                 }
@@ -747,7 +760,7 @@ impl Editpad {
                 self.save()
             }
             Message::ConvertEol(target) => {
-                self.eol_menu = false;
+                self.close_eol_menu();
                 if self.io_channel_busy() {
                     return Task::none();
                 }

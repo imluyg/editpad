@@ -110,8 +110,16 @@ pub(crate) struct Editpad {
     pub(crate) rename_input: String,
     /// P67：状态栏「编码」弹出菜单可见。
     pub(crate) encoding_menu: bool,
+    /// 编码菜单开在哪一页上（页 **id**）。菜单项按「当下这一页」执行
+    /// （`SaveWithEncoding` 写的是 `tab_mut()`），所以这份在场标记必须带上
+    /// 所属页——否则换页/关页后留着它，点一下动的是另一页的文件：改编码保存
+    /// 会把那页按错编码写盘。与 [`Self::editor_context_menu_tab`] 同一形状。
+    pub(crate) encoding_menu_tab: Option<u64>,
     /// P67：状态栏「行尾」弹出菜单可见（与编码菜单互斥）。
     pub(crate) eol_menu: bool,
+    /// 行尾菜单的所属页 id，理由同 [`Self::encoding_menu_tab`]
+    /// （`ConvertEol` 改写并置脏的是「当下这一页」）。
+    pub(crate) eol_menu_tab: Option<u64>,
     /// P70：正则查找模式（查找栏「.*」开关；会话态不持久化）。
     pub(crate) regex_enabled: bool,
     /// 整词匹配开关（查找栏「整词」；命中前后均非词字符。正则模式
@@ -462,7 +470,9 @@ impl Default for Editpad {
             renaming_tab: None,
             rename_input: String::new(),
             encoding_menu: false,
+            encoding_menu_tab: None,
             eol_menu: false,
+            eol_menu_tab: None,
             regex_enabled: false,
             whole_word: false,
             last_tab_click: None,
@@ -710,8 +720,8 @@ impl Backdrop {
         match self {
             Backdrop::TabMenu => app.tab_context_menu = None,
             Backdrop::EditorMenu => app.close_editor_context_menu(),
-            Backdrop::EncodingMenu => app.encoding_menu = false,
-            Backdrop::EolMenu => app.eol_menu = false,
+            Backdrop::EncodingMenu => app.close_encoding_menu(),
+            Backdrop::EolMenu => app.close_eol_menu(),
             Backdrop::Menubar => app.menu_bar_open = None,
             Backdrop::Palette => {
                 app.palette_visible = false;

@@ -40,6 +40,13 @@ impl Editpad {
     /// ④ `editor_context_menu_tab`——正文右键菜单与③同一条腿：菜单项经
     ///    `EditorCtxCommand` 转发给「当下这一页」，所属页被移除后留着它，
     ///    用户点一下动的是另一页的正文（剪切／粘贴／全选都会置脏）。
+    /// ⑤ `encoding_menu_tab`／`eol_menu_tab`——状态栏那两格弹层。它们原本只是两个
+    ///    裸 bool，**没有任何 id 可对**，所以 P376 枚举这一族时把「带 id 的三个」数完
+    ///    就宣布收干净了，这两个被整族漏掉。菜单项按「当下这一页」执行
+    ///    （`SaveWithEncoding` 给那页定编码并**立刻写盘**，`ConvertEol` 整篇改写那页
+    ///    正文、置脏、排自动保存）⇒ 所属页没了而弹层还开着，点一下动的就是别人。
+    ///    现在两份在场标记各带所属页，收法与③④同一条腿：**只有所属页被移除才收**——
+    ///    关掉的是别的页时活动页没动，那两格渲染与执行的对象都还是它 ⇒ 照旧留着。
     /// 形状同 [`Self::clear_index_addressed_tab_ui`]／`shift_restore_queue_after_removal`：
     /// 「页集合变了 ⇒ 按页记账的那份名单要跟着对账」这件事只写在三条移除漏斗里。
     pub(crate) fn reap_dead_pages_from_id_keyed_prompts(&mut self) {
@@ -70,6 +77,16 @@ impl Editpad {
             .is_some_and(|id| !alive.contains(&id))
         {
             self.close_editor_context_menu();
+        }
+        // ⑤ 状态栏两格弹层：与③④同一把尺子（所属页没了才收）
+        if self
+            .encoding_menu_tab
+            .is_some_and(|id| !alive.contains(&id))
+        {
+            self.close_encoding_menu();
+        }
+        if self.eol_menu_tab.is_some_and(|id| !alive.contains(&id)) {
+            self.close_eol_menu();
         }
     }
 

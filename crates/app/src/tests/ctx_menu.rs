@@ -527,6 +527,108 @@ fn closing_the_page_a_context_menu_belongs_to_also_closes_the_menu() {
     );
 }
 
+/// 状态栏那两格弹层（编码／行尾）是这一族里**最后两份没有所属页可对**的在场标记：
+/// 第 376 轮枚举「浮层对账」时把带 id 的三个数完就宣布这一族没有已知缺口，而这两个
+/// 裸 bool 正因为拿不出 id 被整族漏掉。它们的菜单项动的都是「当下这一页」——
+/// `SaveWithEncoding` 给那页定编码并**立刻写盘**，`ConvertEol` 整篇改写那页正文、
+/// 置脏、排一次自动保存。可达性：两格的开栏按钮按 `!busy` 置灰
+/// （`view/mod.rs:952`／`:964`），但换页与关页都来自**热键**
+/// （`hotkeys.rs:832-833` next_tab／prev_tab、`close_tab`＝Ctrl+W），不经那层门
+/// ⇒ 改前「开着编码菜单按 Ctrl+Tab 再点一项」＝把另一页的文件按错编码写盘。
+#[test]
+fn status_bar_menus_belong_to_the_page_they_were_opened_on() {
+    let load = |app: &mut Editpad, name: &'static str, body: &'static str| {
+        dispatch(app, Message::FileDropped(PathBuf::from(name)));
+        let seq = app.job_seq;
+        dispatch(
+            app,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str(body),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+    };
+
+    // ---------- 换页这条腿（`set_active_tab`）----------
+    let mut app = Editpad::default();
+    load(&mut app, "C:/doc/a.txt", "a1\na2\n");
+    load(&mut app, "C:/doc/b.txt", "b1\n");
+    assert_eq!(app.tabs.len(), 2, "夹具自证：两页都是干净命名页");
+    assert_eq!(app.active_tab, 1, "夹具自证：停在 B 页");
+
+    app.set_active_tab(0); // 站到 A 页，再开菜单
+    dispatch(&mut app, Message::ToggleEncodingMenu);
+    assert!(app.encoding_menu, "夹具自证：编码菜单在 A 页开着");
+    assert_eq!(
+        app.encoding_menu_tab,
+        Some(app.tabs[0].id),
+        "夹具自证：开栏那一刻记下了所属页 id"
+    );
+    // 生产入口的换页（热键 next_tab）——不是直接调 set_active_tab
+    dispatch(&mut app, Message::SwitchTabNext);
+    assert_eq!(app.active_tab, 1, "夹具自证：确实切到了 B 页");
+    assert!(
+        !app.encoding_menu,
+        "换页 ⇒ 编码菜单必须收起（改前它悬在 B 页上继续可用）"
+    );
+    assert_eq!(
+        app.encoding_menu_tab, None,
+        "收起要连带作废那份归属记账，不留半份账"
+    );
+
+    // 行尾菜单同一条腿
+    dispatch(&mut app, Message::ToggleEolMenu);
+    assert!(app.eol_menu, "夹具自证：行尾菜单在 B 页开着");
+    assert_eq!(app.eol_menu_tab, Some(app.tabs[1].id));
+    app.set_active_tab(0);
+    assert!(!app.eol_menu, "换页同样收起开在另一页的行尾菜单");
+    assert_eq!(app.eol_menu_tab, None, "同一条收起出口");
+
+    // ---------- 移除这条腿（不经过 set_active_tab）----------
+    let mut app2 = Editpad::default();
+    load(&mut app2, "C:/doc/c.txt", "c1\n");
+    load(&mut app2, "C:/doc/d.txt", "d1\n");
+    app2.set_active_tab(0); // c.txt
+    dispatch(&mut app2, Message::ToggleEncodingMenu);
+    assert!(app2.encoding_menu, "夹具自证：编码菜单开在 c 页");
+    dispatch(&mut app2, Message::CloseTabAt(0)); // 关掉它自己那一页
+    assert_eq!(app2.tabs.len(), 1, "夹具自证：c 页真的被移除了");
+    assert!(
+        !app2.encoding_menu,
+        "所属页被移除 ⇒ 弹层必须收起（移除页不经过 set_active_tab）"
+    );
+    assert_eq!(app2.encoding_menu_tab, None);
+
+    // ---------- 反面对照：关掉的是别的页 ⇒ 不许误收，且菜单项仍作用在自己那页 ----------
+    let mut app3 = Editpad::default();
+    load(&mut app3, "C:/doc/e.txt", "e1\n");
+    load(&mut app3, "C:/doc/f.txt", "f1\n");
+    app3.set_active_tab(1); // f.txt
+    dispatch(&mut app3, Message::ToggleEolMenu);
+    assert!(app3.eol_menu, "夹具自证：行尾菜单开在 f 页");
+    let owner = app3.tabs[1].id;
+    dispatch(&mut app3, Message::CloseTabAt(0)); // 关掉 e.txt
+    assert_eq!(app3.tabs.len(), 1, "夹具自证：关掉的是另一页");
+    assert!(
+        app3.eol_menu,
+        "所属页还在 ⇒ 弹层不许被误收（挡住「移页一律收」）"
+    );
+    assert_eq!(app3.eol_menu_tab, Some(owner), "记账照旧指着 f 页");
+    dispatch(
+        &mut app3,
+        Message::ConvertEol(editpad_core::LineEnding::CrLf),
+    );
+    assert_eq!(
+        app3.cur_handle.borrow().doc.to_text(),
+        "f1\r\n",
+        "菜单项作用的还是它自己那一页"
+    );
+}
+
 /// P356（第 261 轮池 ⑤）＋P366（第 272 轮池 ③）：**每一类**带整窗背板的浮层，在每个
 /// "必须让路"的入口都得收起。
 ///
