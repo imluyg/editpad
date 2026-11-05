@@ -121,7 +121,7 @@ pub(crate) fn markdown_preview_element(
         }
     }
     let fps: Vec<u64> = shown.iter().map(md_block_fingerprint).collect();
-    let mut next: Vec<(u64, MdTree)> = Vec::with_capacity(blocks.len());
+    let mut next: Vec<MdBlockRow> = Vec::with_capacity(blocks.len());
     {
         let guard = block_cache.0.borrow();
         let old = guard.1.as_slice();
@@ -136,26 +136,43 @@ pub(crate) fn markdown_preview_element(
         {
             hi += 1;
         }
-        next.extend(old[..lo].iter().map(|(f, t)| (*f, t.clone())));
-        for i in lo..fps.len() - hi {
-            let tree: MdTree = Rc::new(std::cell::RefCell::new(Some(build_block(
-                &shown[i],
-                &scaled,
-                base,
-                &ink,
-                dark,
-                doc_dir,
-                &color_budget,
-                None,
-            ))));
-            next.push((fps[i], tree));
+        let suffix = fps.len() - hi; // 尾段在 fps 里的起点
+                                     // 按**文档顺序**走，而不是「先拷前缀、再建中段、再拷后缀」：着色额度
+                                     // 是有顺序的消耗品——复用的块不重建、也不领额度，但它屏上那几行已经
+                                     // 着色，必须照样记回去。否则只重建中段时那个块拿到满额度，整篇着色
+                                     // 行数顶破上限，且与「整篇重建」的产出色数不一致（换主题一趟就变样）。
+        for i in 0..fps.len() {
+            let reuse = if i < lo {
+                Some(i)
+            } else if i >= suffix {
+                Some(old.len() - hi + (i - suffix))
+            } else {
+                None
+            };
+            if let Some(index) = reuse {
+                let (fingerprint, tree, spent) = &old[index];
+                color_budget.charge(*spent);
+                next.push((*fingerprint, tree.clone(), *spent));
+            } else {
+                let before = color_budget.remaining();
+                let tree: MdTree = Rc::new(std::cell::RefCell::new(Some(build_block(
+                    &shown[i],
+                    &scaled,
+                    base,
+                    &ink,
+                    dark,
+                    doc_dir,
+                    &color_budget,
+                    None,
+                ))));
+                next.push((fps[i], tree, before - color_budget.remaining()));
+            }
         }
-        next.extend(old[old.len() - hi..].iter().map(|(f, t)| (*f, t.clone())));
     }
     block_cache.0.borrow_mut().1 = next.clone();
 
     let mut col = column![].spacing(10).padding(14);
-    for (_, tree) in next {
+    for (_, tree, _) in next {
         col = col.push(Element::new(MdCached::new(tree)));
     }
     // 额度用尽：把"没画完"这件事**说出来**——静默截断会被当成预览坏了。
@@ -796,14 +813,18 @@ pub(crate) fn note_parse() {}
 /// 各分量的理由见 `state::MdPreviewCache` 的说明。
 pub(crate) type MdPreviewKey = (u64, u64, u64, usize, usize);
 
-/// 预览的按块复用行 `(内容指纹, 树)`。
-/// 起别名是因为 `RefCell<(Option<u64>, Vec<(u64, MdTree)>)>` 这串会把
+/// 预览的按块复用行 `(内容指纹, 树, 该块吃掉的着色行数)`。
+///
+/// 第三格是额度账：复用的块不重建、也不再向 [`MdColorBudget`] 领额度，但它
+/// 屏上那几行确实已经着色，必须按文档顺序记回去（见
+/// [`markdown_preview_element`] 里的复用说明）。
+/// 起别名是因为 `RefCell<(Option<u64>, Vec<(u64, MdTree, usize)>)>` 这串会把
 /// `clippy::type_complexity` 顶起来（第 338 轮 `block_tests` 那张手势表同款处理：
 /// 改形状，不加 `#[allow]`）。
-type MdBlockRow = (u64, MdTree);
+type MdBlockRow = (u64, MdTree, usize);
 type MdBlockCacheInner = (Option<u64>, Vec<MdBlockRow>);
 
-/// 按块缓存的那一排树 `(上一帧的渲染上下文, (内容指纹, 树)[])`，下标＝块序。
+/// 按块缓存的那一排树 `(上一帧的渲染上下文, (内容指纹, 树, 着色行数)[])`，下标＝块序。
 ///
 /// P468：那块"上下文"是必需的——内容指纹只数正文，而建树还吃字号／明暗／字形族／
 /// 链接基准目录。少了这一维，换主题那一帧虽然重进了建树函数，12 个块却全部命中
@@ -1024,6 +1045,16 @@ impl MdColorBudget {
         let got = want.min(left);
         self.0.set(left - got);
         got
+    }
+
+    /// 记一笔**已经画在屏上**的着色行（复用的旧块）：不重建、但额度照算。
+    pub(crate) fn charge(&self, spent: usize) {
+        self.0.set(self.0.get().saturating_sub(spent));
+    }
+
+    /// 当前剩余额度。建一块前后取差＝该块实际吃掉的着色行数。
+    pub(crate) fn remaining(&self) -> usize {
+        self.0.get()
     }
 }
 

@@ -5410,6 +5410,74 @@ fn markdown_preview_color_budget_bounds_the_work() {
     assert_eq!(joined_plain, joined, "素色档必须与上色档逐字相同");
 }
 
+/// 着色额度要按**文档顺序**结算：复用的块不重建、也不再领额度，但它屏上
+/// 那几行已经着色。旧实现只给重建区间一份满额度 ⇒ 改第二块一个字就让两块
+/// 都全色（整篇着色行数顶破上限），而整篇重建（换主题）时第二块又回到半色。
+#[test]
+fn preview_color_budget_counts_reused_blocks_in_document_order() {
+    use crate::md_preview::{
+        markdown_preview_element, md_render_stamp, MdBlockCacheSlot, MD_COLOR_LINE_BUDGET,
+    };
+    let code = |tag: char| {
+        let body: String = (0..1000)
+            .map(|i| format!("let v{i} = {i}; // {tag}\n"))
+            .collect();
+        format!("```rs\n{body}```\n\n")
+    };
+    let first = format!("{}{}", code('a'), code('b'));
+    assert_eq!(
+        editpad_core::markdown::parse_markdown(&first).len(),
+        2,
+        "夹具自证：两段代码块"
+    );
+
+    let slot = MdBlockCacheSlot::default();
+    let stamp = md_render_stamp(16.0, false, None, None, "T");
+    let draw = |src: &str| {
+        let blocks = editpad_core::markdown::parse_markdown(src);
+        let _ = markdown_preview_element(
+            &blocks,
+            16.0,
+            iced::Font::MONOSPACE,
+            iced::Theme::Light,
+            None,
+            stamp,
+            &slot,
+            "x",
+        );
+        slot.0
+            .borrow()
+            .1
+            .iter()
+            .map(|row| row.2)
+            .collect::<Vec<_>>()
+    };
+
+    let before = draw(&first);
+    assert_eq!(before.len(), 2, "夹具自证：两块都建了树");
+    assert_eq!(before[0], 1000, "首块吃掉自己那 1000 行");
+    assert_eq!(
+        before.iter().sum::<usize>(),
+        MD_COLOR_LINE_BUDGET,
+        "首建必须把额度吃满：{before:?}"
+    );
+
+    // 只改第二块的一个字 ⇒ 按块缓存只重建第二块
+    let edited = first.replacen("let v999 = 999; // b", "let v998 = 998; // b", 1);
+    assert_ne!(edited, first, "夹具自证：编辑确实落进源码");
+    let after = draw(&edited);
+    assert_eq!(after[0], 1000, "未改的块照旧复用");
+    let total: usize = after.iter().sum();
+    assert!(
+        total <= MD_COLOR_LINE_BUDGET,
+        "复用的块没记账 ⇒ 整篇着色 {total} 行，超上限 {MD_COLOR_LINE_BUDGET}：{after:?}"
+    );
+    assert_eq!(
+        after, before,
+        "只改第二块不该改变两块的着色行数（否则换个主题就变样）"
+    );
+}
+
 /// 换版时**只重建变了的那些块**（P412）。
 ///
 /// 尺子是 `MD_BLOCK_BUILDS`（按块建树的次数）。外层整树缓存只管"内容没变的帧"，
