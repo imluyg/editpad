@@ -381,9 +381,16 @@ impl Editpad {
             // 点击结果条目：按索引直接选中该命中（与 step_match 同一
             // select_span 口径）；扫描在途时命中表是过期快照，拒绝跳转
             Message::FindAllGoto(index) => {
-                if !self.busy && !self.find_scanning() {
-                    self.goto_match_index(index);
+                if self.busy {
+                    return Task::none();
                 }
+                if self.find_scanning() {
+                    // 扫描在途：命中表是过期快照。与 `step_match` 同一句文案，
+                    // 不静默吞掉点击（行在视图里同时按同一判据置灰）。
+                    self.set_status(self.t(editpad_core::Key::FindSearching).to_owned());
+                    return Task::none();
+                }
+                self.goto_match_index(index);
                 Task::none()
             }
             Message::CaseToggled(value) => {

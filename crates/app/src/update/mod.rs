@@ -315,6 +315,12 @@ impl Editpad {
         self.close_encoding_menu();
         self.close_eol_menu();
         self.cancel_find_scan();
+        // 命中表是**每文档**的窗口级数据（P213 的作废理由），切页后空表
+        // 不等于"新文档没命中"。查找栏还开着且有查询 ⇒ 在新页上补扫一次；
+        // 目录模式（FIF）不在此列（那套结果与页无关）。
+        if self.find_visible && !self.find_query.is_empty() && !self.fif_visible {
+            self.find_rescan_pending = true;
+        }
     }
 
     /// 与 tabs 对齐刷新别名（增删页后调用）。
@@ -808,7 +814,21 @@ impl Editpad {
         // 通知（P210 起空拍一条消息都不发），所以"等下一拍自愈合"不成立——
         // 忙时存进 `pending_open_stash` 的那一批路径早已从磁盘抢走，若本轮之后
         // 已不忙而队列里还攥着它，就在这里接上打开链（实现见 file.rs 同名方法）。
-        self.drive_stashed_pending_open(task)
+        let task = self.drive_stashed_pending_open(task);
+        self.drive_pending_find_rescan(task)
+    }
+
+    /// 切页补扫的唯一驱动点：`set_active_tab` 只记意图（它不带 Task），
+    /// 本轮消息处理完后在这里接上。`find_visible`/查询可能在同一条消息里
+    /// 被关掉，故这里再核一次，不只看标记。
+    fn drive_pending_find_rescan(&mut self, task: Task<Message>) -> Task<Message> {
+        if !std::mem::take(&mut self.find_rescan_pending) {
+            return task;
+        }
+        if !self.find_visible || self.find_query.is_empty() || self.fif_visible {
+            return task;
+        }
+        Task::batch([task, self.schedule_find_scan()])
     }
 
     // ---------- domain methods (round 81 Phase 1: update() split) ----------

@@ -81,7 +81,11 @@ impl Editpad {
                     .width(Fill)
                     .padding([3, 10])
                     .style(chrome_menu_item_style)
-                    .on_press(Message::FindAllGoto(i)),
+                    // 扫描在途时命中表是上一轮的快照：行置灰，判据与
+                    // `FindAllGoto` 臂逐字相同（点下去只会得到「查找中…」）。
+                    .on_press_maybe(
+                        (!self.busy && !self.find_scanning()).then_some(Message::FindAllGoto(i)),
+                    ),
                 );
             }
         }
@@ -538,7 +542,13 @@ impl Editpad {
         // 按下与松开可能落在同一次事件批里（视图重建还没发生），此时若
         // 监听位还没挂上就再也收不到松开，浮层会粘在光标上——宁可每拍
         // 一次点击的开销，也不赌那个窗口。
-        let pos = self.find_pos.unwrap_or_else(|| self.default_find_pos());
+        // 用的时候再钳一次：拖动只在拖动那一刻按当时的视口钳制，之后窗口
+        // 缩小/还原会把旧坐标变成"窗外"——`find_visible` 还是真，屏上却什么都
+        // 没有（Ctrl+F 关开回到同一坐标），查找/替换整个不可用。
+        let pos = self
+            .find_pos
+            .map(|p| self.clamp_find_pos(p))
+            .unwrap_or_else(|| self.default_find_pos());
         let area = mouse_area(
             container(card)
                 .width(Fill)

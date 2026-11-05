@@ -3003,3 +3003,79 @@ fn opening_goto_hides_fif_mode_and_cancels_its_scan() {
         app.status
     );
 }
+
+/// 浮层位置只在拖动那一刻按当时的视口钳制：之后窗口缩小，旧坐标整张卡片
+/// 落在窗外——`find_visible` 仍是真，屏上却什么都没有，查找/替换整会话不可用。
+#[test]
+fn a_find_overlay_dragged_to_the_edge_stays_inside_a_shrunk_window() {
+    let mut app = app_with_lines(3);
+    dispatch(&mut app, Message::ViewportResized(1280.0, 800.0));
+    dispatch(&mut app, Message::FindToggled);
+    app.find_pos = Some(Point::new(1000.0, 700.0));
+
+    dispatch(&mut app, Message::ViewportResized(640.0, 480.0));
+    let card = ViewTree::layout(&app, iced::Size::new(640.0, 480.0)).find_layer_card();
+    assert!(
+        card.x >= 0.0 && card.x + card.width <= 641.0,
+        "浮层横向越界：{card:?}"
+    );
+    assert!(
+        card.y >= 0.0 && card.y + card.height <= 481.0,
+        "浮层纵向越界：{card:?}"
+    );
+}
+
+/// 切页会作废每文档的命中表；查找栏还开着时必须在**新页**上补扫，
+/// 否则面板拿空表显示「无匹配」、动作全灰（旧行为），要再按一次回车才恢复。
+#[test]
+fn switching_tabs_with_the_find_bar_open_rescans_the_new_page() {
+    let mut app = app_with_tabs(2);
+    app.set_active_tab(0);
+    dispatch(&mut app, Message::FindToggled);
+    app.find_query = "x".to_owned();
+    assert!(app.find_scan.is_none(), "夹具自证：此刻没有在途扫描");
+
+    dispatch(&mut app, Message::SwitchTabNext);
+
+    assert_eq!(app.active_tab, 1, "夹具自证：确实切了页");
+    assert!(
+        app.find_scan.is_some(),
+        "查找栏开着切页 ⇒ 必须在新页上补扫（旧行为：空表 + 无匹配）"
+    );
+    assert!(app.matches.hits().is_empty(), "旧页命中表必须先作废");
+
+    // 反面对照：关栏后切页不排后台扫描
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.find_visible);
+    dispatch(&mut app, Message::SwitchTabNext);
+    assert!(app.find_scan.is_none(), "查找栏关着不该有后台扫描");
+}
+
+/// 结果行在扫描在途时是上一轮的快照：点下去不许按过期坐标跳，也不许一声不吭。
+#[test]
+fn clicking_a_find_all_row_during_a_rescan_says_searching() {
+    let mut app = app_with_lines(3);
+    dispatch(&mut app, Message::FindToggled);
+    app.find_query = "line".to_owned();
+    app.matches = std::rc::Rc::new(scanned(vec![editpad_core::MatchPos {
+        line: 2,
+        col: 0,
+        len_chars: 1,
+    }]));
+    app.match_idx = None;
+    let before = app.cur_handle.borrow().cursor;
+    app.find_scan = Some(99); // 模拟"新一轮扫描在途、表还是旧的"
+
+    dispatch(&mut app, Message::FindAllGoto(0));
+
+    assert_eq!(
+        app.cur_handle.borrow().cursor,
+        before,
+        "扫描在途不许按过期表跳转"
+    );
+    assert_eq!(
+        app.status,
+        app.t(editpad_core::Key::FindSearching),
+        "点击要有回音，不能静默吞掉"
+    );
+}

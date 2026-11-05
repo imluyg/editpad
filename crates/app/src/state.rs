@@ -185,6 +185,10 @@ pub(crate) struct Editpad {
     pub(crate) match_idx: Option<usize>,
     /// 在途后台扫描的序号；None 表示没有。迟到的旧结果按它丢弃（P10）
     pub(crate) find_scan: Option<u64>,
+    /// 切页把命中表作废了、而查找栏还开着 ⇒ 待在新页上补扫一次。
+    /// `set_active_tab` 的返回类型不带 Task，意图记成标记、驱动点收在
+    /// `update()` 末尾一处（同 `pending_open_stash` 的「唯一驱动点」口径）。
+    pub(crate) find_rescan_pending: bool,
     pub(crate) find_seq: u64,
     /// 当前代扫描的取消标志；新任务排队时把旧标志置位（P10 防抖取消）
     pub(crate) find_cancel: Arc<AtomicBool>,
@@ -497,6 +501,7 @@ impl Default for Editpad {
             matches: Rc::new(crate::editor::FindHitTable::default()),
             match_idx: None,
             find_scan: None,
+            find_rescan_pending: false,
             find_seq: 0,
             find_cancel: Arc::default(),
             find_all_visible: false,
