@@ -1133,6 +1133,53 @@ fn autosave_failure_traces_status_keeps_dirty_and_allows_requeue() {
     assert!(app.tabs[0].autosave_inflight, "新编辑应重新排队");
 }
 
+/// 手动保存写盘期间又敲了一个字：保存回报按版本守卫保持置脏，但**没有**
+/// 任何东西重排自动保存 ⇒ 用户停手后那一笔永远停在内存里（崩溃即丢）。
+/// 自动保存的触发点不能只剩「再敲一次键」。
+#[test]
+fn a_manual_save_that_raced_an_edit_requeues_autosave() {
+    let mut app = loaded_txt_app();
+    app.settings.autosave_enabled = true;
+    let stale = app.tab().version;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tid = app.tabs[0].id;
+    // 夹具形状：只留一份「手动保存在途」，编辑时排的那轮自动保存不在场
+    app.tabs[0].autosave_inflight = false;
+    assert_ne!(app.tab().version, stale, "夹具自证：保存的是更早的版本");
+
+    dispatch(
+        &mut app,
+        Message::Saved(tid, stale, Ok(editpad_core::EncodeNotice::default())),
+    );
+
+    assert!(app.tab().dirty, "保存期间的新编辑必须保持置脏");
+    assert!(
+        app.tabs[0].autosave_inflight,
+        "置脏页必须重排一轮自动保存，否则停手后再无触发点"
+    );
+}
+
+/// 同一扇门的兄弟臂：「保存并关闭」写盘期间又敲字 ⇒ 页被留下且置脏，
+/// 旧实现同样不重排自动保存。两臂各有一个独立红点，别让一条修法只盖住一半。
+#[test]
+fn a_save_and_close_that_raced_an_edit_requeues_autosave() {
+    let mut app = loaded_txt_app();
+    app.settings.autosave_enabled = true;
+    let stale = app.tab().version;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tid = app.tabs[0].id;
+    app.tabs[0].autosave_inflight = false;
+    assert_ne!(app.tab().version, stale, "夹具自证：保存的是更早的版本");
+
+    dispatch(&mut app, Message::TabSaved(tid, stale, Ok(())));
+
+    assert!(app.tab().dirty, "写盘期间的新编辑必须保持置脏");
+    assert!(
+        app.tabs[0].autosave_inflight,
+        "置脏页必须重排自动保存，否则关页被拒后这一笔再无落盘机会"
+    );
+}
+
 #[test]
 fn autosave_skipped_for_untitled_or_disabled() {
     // 未命名文档（path == None）：绝不自动落盘

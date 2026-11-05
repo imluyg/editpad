@@ -507,6 +507,12 @@ impl Editpad {
                     }
                     self.set_status(self.t(editpad_core::Key::StSwitchCancelledClose).to_owned());
                 }
+                if self.tabs[idx].dirty {
+                    // 保存期间的编辑保持了置脏，但自动保存不能只剩「再敲一次键」
+                    // 这个触发点：用户停手后这一笔会永远停在内存里（崩溃即丢）。
+                    // 版本比对已在上面做过——此时重排一轮防抖即最终一致。
+                    return self.maybe_schedule_autosave();
+                }
                 Task::none()
             }
             Message::Saved(_, _, Err(error)) => {
@@ -876,6 +882,11 @@ impl Editpad {
                         );
                         self.pending_close_tab = None;
                     }
+                }
+                if self.tabs.iter().any(|t| t.id == tab_id && t.dirty) {
+                    // 同 `Saved(Ok)`：写盘期间的新编辑（或写盘失败）让页保持置脏，
+                    // 停手之后必须还能落盘，不能只等下一次按键来触发。
+                    return self.maybe_schedule_autosave();
                 }
                 Task::none()
             }
