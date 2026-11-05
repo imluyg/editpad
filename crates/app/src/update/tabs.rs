@@ -391,6 +391,13 @@ impl Editpad {
                 if idx >= self.tabs.len() || self.busy {
                     return Task::none();
                 }
+                // P387 同规：确认条停留期间右键〔固定〕是可达的——那一下之后
+                // 〔保存并关闭〕也必须让路（`tab.rs` 那句"固定页豁免一切关闭
+                // 路径"）。这是第三条"发起关闭"的闸，兄弟两条早已有这道判据。
+                if self.tabs[idx].pinned {
+                    self.set_status(self.t(editpad_core::Key::StPinnedMustUnpin).to_owned());
+                    return Task::none();
+                }
                 if self.tabs[idx].path.is_none() {
                     self.set_status(self.t(editpad_core::Key::StRenameUntitledFirst).to_owned());
                     return Task::none();

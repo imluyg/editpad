@@ -1337,6 +1337,50 @@ fn batch_close_clears_confirm_bar_when_confirmed_tab_in_targets() {
     );
 }
 
+/// `CloseTabSave` 是第三条"发起关闭"的闸：确认条停留期间右键〔固定〕之后
+/// 点〔保存并关闭〕，旧实现照样起写盘并登记 `pending_close_tab`，落地就关页。
+#[test]
+fn pinning_a_page_while_the_close_bar_is_up_blocks_save_and_close() {
+    let mut app = loaded_txt_app();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(app.tab().dirty, "夹具自证：这一页已置脏");
+    dispatch(&mut app, Message::CloseTabRequest);
+    let page = app.tab().id;
+    assert_eq!(
+        app.close_tab_confirm,
+        Some(page),
+        "夹具自证：确认条已起（裸 id）"
+    );
+    dispatch(&mut app, Message::TabContextMenu(0));
+    dispatch(&mut app, Message::TogglePinTab(0));
+    assert!(app.tab().pinned, "夹具自证：确认条停留期间这一页被固定了");
+
+    dispatch(&mut app, Message::CloseTabSave(0));
+
+    assert!(
+        app.pending_close_tab.is_none() && !app.busy,
+        "固定页不该起这轮写盘（旧实现登记 pending_close_tab，落地即关页）"
+    );
+    assert!(app.tabs.iter().any(|t| t.id == page && t.pinned));
+    assert!(
+        app.status.contains("固定"),
+        "要按兄弟臂的同一口径出声（StPinnedMustUnpin），实际 {:?}",
+        app.status
+    );
+
+    // 反面对照：同一手势在未固定的页上照常起写盘（挡住"保存并关闭被一律拒收"）
+    let mut app2 = loaded_txt_app();
+    dispatch(&mut app2, Message::Edit(EditOp::InsertText("x".into())));
+    dispatch(&mut app2, Message::CloseTabRequest);
+    let page2 = app2.tab().id;
+    dispatch(&mut app2, Message::CloseTabSave(0));
+    assert_eq!(
+        app2.pending_close_tab,
+        Some(page2),
+        "未固定的页照常走保存并关闭"
+    );
+}
+
 /// P387（池 M3）：固定页的豁免写在两处"发起关闭"的闸上（`CloseTabRequest` 与
 /// `CloseTabAt`），但两条**〔放弃并关闭〕的落地臂**一次都不重查 ——而确认条停留期间
 /// 右键〔固定〕是可达的（`TabContextMenu` 只挡 busy）。于是 `tab.rs:65` 那条不变量
