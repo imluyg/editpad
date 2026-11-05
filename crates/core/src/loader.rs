@@ -420,7 +420,11 @@ fn scaled_done(done: u64, total_bytes: u64, progress_span: u64) -> u64 {
     if total_bytes == 0 {
         return 0;
     }
-    (done.min(total_bytes) * progress_span) / total_bytes
+    // 乘积在 u64 里会越界：`progress_span` 本身就是总量的 3/4，而 `done`
+    // 可以等于总量 ⇒ 5 GiB 上下就超过 `u64::MAX`（debug 下溢出检查 panic，
+    // release 下回绕出一份乱序进度）。换 u128 做中间量；结果 ≤ `progress_span`
+    // 故回落 u64 无损。
+    ((done.min(total_bytes) as u128 * progress_span as u128) / total_bytes as u128) as u64
 }
 
 // 测试钩子（O-9 趟数契约）：实际读到的字节总数。
@@ -1619,5 +1623,26 @@ mod tests {
         let before = s.buf.clone();
         s.push(chunk);
         assert_eq!(s.buf, before, "full 之后不得再增长");
+    }
+
+    /// 进度映射对大文件不能越界：`done * span` 在 5 GiB 上就超过 `u64::MAX`，
+    /// 旧算式 debug 下 panic、release 下回绕。契约是「落在 [0, span] 且单调」。
+    #[test]
+    fn scaled_done_stays_in_range_for_files_past_the_u64_product_limit() {
+        let total = 5u64 << 30; // 5 GiB ⇒ 0.75·total² ≈ 2.0e19 > u64::MAX
+        let span = total - total / 4;
+        assert_eq!(scaled_done(0, total, span), 0);
+        assert_eq!(scaled_done(total / 2, total, span), span / 2);
+        assert!(scaled_done(total, total, span) <= span);
+        assert_eq!(scaled_done(total, total, span), span);
+        // 单调不减（回绕时这一步会掉下来）
+        let mut last = 0;
+        for step in 0..=16 {
+            let done = total / 16 * step;
+            let at = scaled_done(done, total, span);
+            assert!(at >= last, "进度回退：{done} 字节映射成 {at} < {last}");
+            assert!(at <= span);
+            last = at;
+        }
     }
 }
