@@ -688,6 +688,69 @@ fn close_tab_pushes_named_path_into_closed_stack() {
     assert_eq!(app.closed_stack.len(), 1);
 }
 
+/// 〔放弃并关闭〕曾在移除之前把 `path` 清成 None，而 `close_tab_now` 的记录
+/// 两步（最近文件光标记忆、上次关闭栈）都按 path 取键 ⇒ 命名页被丢弃后
+/// Ctrl+Shift+T 找不回来、光标记忆也没写回。
+#[test]
+fn discarding_a_dirty_named_page_still_records_it_for_reopen() {
+    // ── 单页：置脏 → Ctrl+W → 〔放弃并关闭〕
+    let mut app = loaded_txt_app();
+    let path = PathBuf::from("C:/doc/note.txt");
+    assert_eq!(app.tabs[0].path.as_ref(), Some(&path), "夹具自证：页带路径");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    dispatch(&mut app, Message::CloseTabRequest);
+    assert!(app.close_tab_confirm.is_some(), "夹具自证：确认条已起");
+
+    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
+
+    assert_eq!(
+        app.closed_stack,
+        vec![path.clone()],
+        "丢弃的命名页也要进上次关闭栈"
+    );
+    assert!(
+        app.settings.recent_view(&path).is_some(),
+        "移除前那次光标记忆必须按路径写回"
+    );
+
+    // ── 批量：〔关闭其他〕+〔放弃并关闭〕同款
+    let paths: Vec<PathBuf> = ["a.txt", "b.txt"]
+        .iter()
+        .map(|n| PathBuf::from(format!("C:/doc/{n}")))
+        .collect();
+    let mut app2 = Editpad::default();
+    for p in &paths {
+        dispatch(&mut app2, Message::FileDropped(p.clone()));
+        let seq = app2.job_seq;
+        dispatch(
+            &mut app2,
+            Message::Loaded(
+                seq,
+                Ok((
+                    editpad_core::Document::from_str("x"),
+                    String::new(),
+                    "UTF-8".to_owned(),
+                )),
+            ),
+        );
+    }
+    app2.set_active_tab(1);
+    dispatch(&mut app2, Message::Edit(EditOp::InsertText("y".into())));
+    dispatch(&mut app2, Message::CloseOtherTabs(0));
+    assert!(
+        app2.batch_close_confirm.is_some(),
+        "夹具自证：批量确认条已起"
+    );
+
+    dispatch(&mut app2, Message::ConfirmBatchCloseDiscard);
+
+    assert!(
+        app2.closed_stack.contains(&paths[1]),
+        "批量丢弃的命名页也要进上次关闭栈：{:?}",
+        app2.closed_stack
+    );
+}
+
 #[test]
 fn invisibles_settings_propagate_to_all_tabs() {
     let mut app = Editpad::default();

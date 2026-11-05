@@ -366,16 +366,12 @@ impl Editpad {
                     self.set_status(self.t(editpad_core::Key::StPinnedMustUnpin).to_owned());
                     return Task::none();
                 }
-                if idx < self.tabs.len() {
-                    // 关最后一页时槽位会被复用：先清空内容与路径
-                    let tab = &mut self.tabs[idx];
-                    tab.dirty = false;
-                    tab.path = None;
-                    tab.editor.borrow_mut().set_base_dir(None);
-                    tab.editor
-                        .borrow_mut()
-                        .reset_document(editpad_core::Document::new());
-                }
+                // 不在移除前清 `path`／正文：`close_tab_now` 的两步记录
+                //（最近文件光标记忆、上次关闭栈）都按 path 取键，先清就让
+                //〔放弃并关闭〕的命名页既进不了 `closed_stack`、也留不下光标
+                // 记忆（Ctrl+Shift+T 找不回来）。当初「关最后一页时槽位会被
+                // 复用」的理由在 S-1 之后已不成立——`ensure_nonempty_tabs`
+                // 是新建一页，不复用槽位。
                 self.close_tab_now(idx);
                 Task::none()
             }
@@ -523,18 +519,8 @@ impl Editpad {
                     if targets.is_empty() {
                         return Task::none();
                     }
-                    // 统一放弃：先清各页置脏与内容（与 ConfirmCloseTabDiscard
-                    // 同款，防「已移除页的 rope 仍被别名引用」的错觉），再移除。
-                    for &idx in &targets {
-                        if let Some(tab) = self.tabs.get_mut(idx) {
-                            tab.dirty = false;
-                            tab.path = None;
-                            tab.editor.borrow_mut().set_base_dir(None);
-                            tab.editor
-                                .borrow_mut()
-                                .reset_document(editpad_core::Document::new());
-                        }
-                    }
+                    // 同单页那条：不要在移除前清 `path`／正文——记录两步都按
+                    // path 取键，先清就把这些命名页从「上次关闭」记忆里抹掉。
                     self.close_tabs_now(&targets);
                 }
                 Task::none()
