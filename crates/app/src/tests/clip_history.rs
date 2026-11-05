@@ -619,7 +619,19 @@ fn clip_meta_counts_lines_with_the_editors_break_set() {
             .to_owned()
     };
     // 控制行：纯 LF／CRLF 一律与 `str::lines()` 逐格同数（改前改后都不许多改行为）
-    for t in ["", "a", "a\n", "a\nb", "a\r\nb\r\n", "\n"] {
+    for t in [
+        "",
+        "a",
+        "a\n",
+        "a\nb",
+        "a\r\nb\r\n",
+        "\n",
+        // 连续两个以上末尾行界：`lines()` 数得出空行，剥光再 +1 会少算
+        "a\n\n",
+        "a\n\n\n",
+        "\n\n",
+        "a\r\n\r\n",
+    ] {
         assert_eq!(
             lines_of(t),
             t.lines().count().to_string(),

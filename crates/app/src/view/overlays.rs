@@ -744,10 +744,17 @@ impl Editpad {
         // 含 VT/FF/NEL/LS/PS 的那条历史报成 1 行、粘出来是三行（同族：P396 修的
         // 是「已复制命中行，共 0」，那是 CR-only 文档上同一把窄尺子的另一头）。
         // 剥掉末尾行界再数：与 `lines()` 一致，尾随换行不多算一行（逐格对照见用例）。
+        // ⚠️ 只减**一个**：`"a\n\n"` 是两行（`["a", ""]`），把末尾所有行界都剥掉
+        // 再 +1 会得到 1（旧实现正是这么算的）。
         let lines = if text.is_empty() {
             0
         } else {
-            editpad_core::line_break_units(editpad_core::trim_end_line_breaks(text)) + 1
+            let total = editpad_core::line_break_units(text);
+            let ends_with_break = text
+                .chars()
+                .next_back()
+                .is_some_and(editpad_core::is_line_break);
+            total + 1 - usize::from(ends_with_break)
         };
         format!(
             "{lines} {} · {} {}",
