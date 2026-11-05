@@ -1348,6 +1348,46 @@ fn delete_empty_lines_modes_scope_and_bookmarks() {
     assert_eq!(f.undo_stack.len(), snaps);
 }
 
+/// 无选区〔删除空行〕的块边界取的是**旧**末行（幻影行）。`shift_bookmarks_below`
+/// 只搬边界之上的行 ⇒ 恰在幻影行上的那条书签原地留着；F2 再跳过去就把光标送到
+/// 越界行号，下一次打字在 `line_to_char` 处 panic。
+#[test]
+fn deleting_empty_lines_drops_a_bookmark_on_the_phantom_row() {
+    let mut c = core_with("a\n\n\n\n");
+    let phantom = c.doc.line_count() - 1;
+    assert_eq!(phantom, 4, "夹具自证：末尾确实是幻影行");
+    c.cursor = CursorPos {
+        line: phantom,
+        col: 0,
+    };
+    assert!(c.toggle_bookmark());
+    assert_eq!(
+        c.bookmarked_lines(),
+        vec![phantom],
+        "夹具自证：幻影行已标记"
+    );
+
+    assert!(c.delete_empty_lines(BlankKind::Empty));
+    assert_eq!(c.doc.to_text(), "a\n");
+    assert!(
+        c.bookmarked_lines().iter().all(|&l| l < c.doc.line_count()),
+        "行数收缩后不得留下悬空书签：{:?}（行数 {}）",
+        c.bookmarked_lines(),
+        c.doc.line_count()
+    );
+    // 后果那半：导航不许把光标送到越界行，后续编辑不许 panic
+    assert!(!c.next_bookmark(true), "没有可用书签了");
+    assert!(c.cursor.line < c.doc.line_count());
+    c.insert_str("x");
+    assert_eq!(c.doc.to_text(), "a\nx", "光标收敛到末行后照常打字");
+
+    // 兜底那一半：即便别处塞进悬空行号（文档变短与再映射之间没有全局锁），
+    // 导航也不许把它当落点
+    c.bookmarks.insert(99);
+    assert!(!c.next_bookmark(true), "悬空行号不参与跳转");
+    assert!(c.cursor.line < c.doc.line_count());
+}
+
 #[test]
 fn selection_display_len_matches_len_chars_semantics() {
     // 单行：纯列差

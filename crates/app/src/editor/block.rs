@@ -1003,6 +1003,12 @@ impl EditorCore {
         self.apply_line_block(&blk, &kept, &map);
         // 净删了若干行：块尾之下的书签整体上移
         self.shift_bookmarks_below(blk.b, delta);
+        // 恰在块边界（本操作的旧幻影末行）上的书签不会被上面那句搬走，而
+        // 新行数域已经容不下它——留着会让 F2 跳到越界行、下一次打字在
+        // `line_to_char` 处 panic。收缩之后按新行数域收一遍（快照已在前一步
+        // 入栈，撤销照常找回）。
+        let line_count = self.doc.line_count();
+        self.bookmarks.retain(|&l| l < line_count);
         true
     }
 
@@ -1489,17 +1495,21 @@ impl EditorCore {
     /// 光标之后（前）最近者；没有更近的就回绕到第一个（最后一个）。
     pub(crate) fn next_bookmark_line(&self, forward: bool) -> Option<usize> {
         let cur = self.cursor.line;
+        // 悬空行号（文档变短后尚未再映射）不参与跳转：`line_to_char` 会 panic。
+        // 用迭代替 `next()/next_back()` 再过滤，回绕那一半才有可能被选中。
+        let last = self.doc.line_count();
         if forward {
             self.bookmarks
                 .range((std::ops::Bound::Excluded(cur), std::ops::Bound::Unbounded))
-                .next()
-                .or_else(|| self.bookmarks.iter().next())
+                .chain(self.bookmarks.range(..=cur))
+                .find(|&&l| l < last)
                 .copied()
         } else {
             self.bookmarks
                 .range((std::ops::Bound::Unbounded, std::ops::Bound::Excluded(cur)))
-                .next_back()
-                .or_else(|| self.bookmarks.iter().next_back())
+                .rev()
+                .chain(self.bookmarks.range(cur..).rev())
+                .find(|&&l| l < last)
                 .copied()
         }
     }
