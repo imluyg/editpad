@@ -184,7 +184,7 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
     }
     let q: Vec<char> = query.chars().collect();
     if query_is_multiline(q.iter().copied()) {
-        scan_multiline_str(text, &q, case_sensitive, &mut out);
+        scan_multiline_str(text, &q, case_sensitive, &mut out, usize::MAX);
         return out;
     }
     // O-11：查询备好一次，逐行只碰字节（旧版此处是跨行复用的 Vec<char>）
@@ -201,8 +201,8 @@ pub fn find_all(text: &str, query: &str, case_sensitive: bool) -> Vec<MatchPos> 
 /// 旧做法「全收进 Vec 再 truncate」在 64MB 文件搜 `the` 要先收约 100 万
 /// 个 `MatchPos`（24B/个）再丢弃，且剩余文本继续白扫。
 ///
-/// 仅覆盖**不含换行的字面查询**：跨行查询走 [`find_all`] 的
-/// [`MultiLineScanner`] 分支（该内核不接封顶参数，保持全量后截断），
+/// 跨行查询同样走封顶：`MultiLineScanner` 到点后不再吃 token（此前那条
+/// 分支是全量物化再 `truncate`，「取满即收工」的承诺对含换行的查询不成立）。
 /// 结果仍与 `find_all(..).take(limit)` 相等。`limit == 0` 直接空表。
 pub(crate) fn find_all_limited(
     text: &str,
@@ -216,9 +216,8 @@ pub(crate) fn find_all_limited(
     }
     let q: Vec<char> = query.chars().collect();
     if query_is_multiline(q.iter().copied()) {
-        let mut all = find_all(text, query, case_sensitive);
-        all.truncate(limit);
-        return all;
+        scan_multiline_str(text, &q, case_sensitive, &mut out, limit);
+        return out;
     }
     let lq = LiteralQuery::new(query, case_sensitive);
     let _ = for_each_line_until(text, |line_idx, line| {
@@ -265,8 +264,8 @@ pub fn find_all_document(doc: &Document, query: &str, case_sensitive: bool) -> V
 /// `FIND_HITS_CAP`），这样封顶是**数出来的**而不是猜的。
 ///
 /// 语义与 [`find_all_document`] 逐格相同，只是可能提前收尾：字面档按行流式
-/// 扫到第 `limit` 条即返回；跨行查询走的 `scan_multiline_chunks` 内核不接
-/// 封顶参数（与 `find_all_limited` 同一口径），故仍是一次全量后 `truncate`。
+/// 扫到第 `limit` 条即返回；跨行查询共用 `MultiLineScanner` 的封顶（到点后
+/// 不再吃 token），不再全量物化后 `truncate`。
 pub fn find_all_document_limited(
     doc: &Document,
     query: &str,
@@ -282,8 +281,7 @@ pub fn find_all_document_limited(
     // P26：跨行查询与 find_all 共用同一个扫描器（对拍不发散的结构保证），
     // rope 按存储块流式喂入，窗口缓冲 O(查询长度)
     if query_is_multiline(q.iter().copied()) {
-        scan_multiline_chunks(doc, &q, case_sensitive, &mut out);
-        out.truncate(limit);
+        scan_multiline_chunks(doc, &q, case_sensitive, &mut out, limit);
         return out;
     }
 
@@ -759,10 +757,13 @@ struct MultiLineScanner {
     cur_col: usize,
     /// 上一推送片段以 `\r` 结尾且尚未裁决是否 CRLF
     pending_cr: bool,
+    /// 命中数上限（`usize::MAX` = 不收工）；到点后不再吃 token
+    limit: usize,
+    done: bool,
 }
 
 impl MultiLineScanner {
-    fn new(q: &[char], case_sensitive: bool) -> Self {
+    fn new(q: &[char], case_sensitive: bool, limit: usize) -> Self {
         Self {
             q: query_tokens(q),
             case_sensitive,
@@ -770,6 +771,8 @@ impl MultiLineScanner {
             cur_line: 0,
             cur_col: 0,
             pending_cr: false,
+            limit,
+            done: false,
         }
     }
 
@@ -778,6 +781,9 @@ impl MultiLineScanner {
     /// 结构与 [`crate::document::EolCounter`] 同构：peekable 单遍扫描，
     /// `\r` 在片段末尾时悬置到下一片段裁决，孤立 `\r` 当场定案为换行。
     fn push_str(&mut self, text: &str, out: &mut Vec<MatchPos>) {
+        if self.done {
+            return;
+        }
         let mut chars = text.chars().peekable();
         // 先裁决上一片段悬置的 `\r`（片段边界切在 `\r\n` 中间的情况）
         if self.pending_cr {
@@ -796,6 +802,9 @@ impl MultiLineScanner {
             }
         }
         while let Some(c) = chars.next() {
+            if self.done {
+                return;
+            }
             match c {
                 '\r' => match chars.peek() {
                     Some('\n') => {
@@ -815,6 +824,9 @@ impl MultiLineScanner {
 
     /// 文本推送完毕：悬置的 `\r` 以孤立换行定案并做最后一次窗口检查。
     fn finish(&mut self, out: &mut Vec<MatchPos>) {
+        if self.done {
+            return;
+        }
         if self.pending_cr {
             self.pending_cr = false;
             self.push_token(ScanToken::Newline, out);
@@ -826,6 +838,8 @@ impl MultiLineScanner {
     /// 命中跨度 = 窗口内 token 数——正是「选区显示跨度」口径：
     /// 普通字符计 1、每次跨行计 1（`\r\n` 整体计 1）。
     fn push_token(&mut self, token: ScanToken, out: &mut Vec<MatchPos>) {
+        #[cfg(test)]
+        MULTILINE_TOKENS.with(|c| c.set(c.get() + 1));
         let qlen = self.q.len();
         // 尾 token 快速过滤：新进 token 必须等于查询尾 token 才可能补全命中
         let may_complete = token_matches(self.q[qlen - 1], token, self.case_sensitive);
@@ -854,6 +868,9 @@ impl MultiLineScanner {
                 col: front.col,
                 len_chars: qlen,
             });
+            if out.len() >= self.limit {
+                self.done = true;
+            }
         }
     }
 
@@ -866,10 +883,28 @@ impl MultiLineScanner {
 }
 
 /// [`find_all`] 的跨行入口：&str 一次喂入。
-fn scan_multiline_str(text: &str, q: &[char], case_sensitive: bool, out: &mut Vec<MatchPos>) {
-    let mut scanner = MultiLineScanner::new(q, case_sensitive);
+fn scan_multiline_str(
+    text: &str,
+    q: &[char],
+    case_sensitive: bool,
+    out: &mut Vec<MatchPos>,
+    limit: usize,
+) {
+    let mut scanner = MultiLineScanner::new(q, case_sensitive, limit);
     scanner.push_str(text, out);
     scanner.finish(out);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 测试钩子：跨行扫描实际吃进的 token 数。封顶档的判据是「取满即收工」，
+    /// 只看返回条数分不清"提前停了"和"扫完全程再截断"（两者内存差一个文档长度）。
+    static MULTILINE_TOKENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_multiline_tokens() -> usize {
+    MULTILINE_TOKENS.with(|c| c.replace(0))
 }
 
 /// [`find_all_document`] 的跨行入口：rope 存储块零拷贝流式喂入。
@@ -878,9 +913,13 @@ fn scan_multiline_chunks(
     q: &[char],
     case_sensitive: bool,
     out: &mut Vec<MatchPos>,
+    limit: usize,
 ) {
-    let mut scanner = MultiLineScanner::new(q, case_sensitive);
+    let mut scanner = MultiLineScanner::new(q, case_sensitive, limit);
     for chunk in doc.chunks() {
+        if scanner.done {
+            break;
+        }
         scanner.push_str(chunk, out);
     }
     scanner.finish(out);
@@ -2819,13 +2858,13 @@ mod tests {
             for q in &queries {
                 // 参照一：一次整段推送
                 let mut whole_out = Vec::new();
-                let mut whole = MultiLineScanner::new(q, false);
+                let mut whole = MultiLineScanner::new(q, false, usize::MAX);
                 whole.push_str(text, &mut whole_out);
                 whole.finish(&mut whole_out);
 
                 // 参照二：逐字符碎片化推送（极端块相位）
                 let mut frag_out = Vec::new();
-                let mut frag = MultiLineScanner::new(q, false);
+                let mut frag = MultiLineScanner::new(q, false, usize::MAX);
                 for c in text.chars() {
                     let mut buf = [0u8; 4];
                     frag.push_str(c.encode_utf8(&mut buf), &mut frag_out);
@@ -3825,15 +3864,32 @@ mod tests {
         );
 
         assert!(find_all_document_limited(&doc, "hello", true, 0).is_empty());
-        // 跨行查询那支内核不接封顶（与 find_all_limited 同口径）⇒ 全量后截断，
-        // 结果仍必须是前缀
+        // 跨行查询同一封顶：结果必须是前缀，而且**真的提前收工**
+        //（旧写法全量物化再 truncate，token 数会等于整篇）。
+        // 期望值先算好再清零计数器——全量档也在同一线程里吃 token。
+        let expected = find_all_document(&doc, "xx\nxx", true)[..7].to_vec();
+        let _ = take_multiline_tokens();
         let multi = find_all_document_limited(&doc, "xx\nxx", true, 7);
-        assert_eq!(
-            multi,
-            find_all_document(&doc, "xx\nxx", true)[..7].to_vec(),
-            "跨行查询的封顶档也该是前缀"
-        );
+        assert_eq!(multi, expected, "跨行查询的封顶档也该是前缀");
         assert!(!multi.is_empty(), "夹具自证：跨行那格确实有命中");
+        let fed = take_multiline_tokens();
+        assert!(
+            fed < 200,
+            "跨行封顶档必须取满即收工，实际吃进 {fed} 个 token（整篇 {} 行）",
+            doc.line_count()
+        );
+
+        // &str 路径同款（FIF 的每文件封顶走这条）
+        let text = "xx hello xx\n".repeat(4_000);
+        let expected_str = find_all(&text, "xx\nxx", true)[..7].to_vec();
+        let _ = take_multiline_tokens();
+        let str_multi = find_all_limited(&text, "xx\nxx", true, 7);
+        assert_eq!(str_multi, expected_str, "两条路径给出同一前缀");
+        let fed = take_multiline_tokens();
+        assert!(
+            fed < 200,
+            "&str 路径同样取满即收工，实际吃进 {fed} 个 token"
+        );
     }
 
     /// L-19：正则档的封顶——引擎取满即停，产出同样是前缀。
