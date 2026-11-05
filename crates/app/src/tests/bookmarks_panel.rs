@@ -202,3 +202,20 @@ fn open_panel_renders_one_row_area_per_listed_bookmark() {
     );
     assert_eq!(app.bookmark_panel_lines().len(), 2, "前提：只剩两条书签");
 }
+
+/// 窄窗里书签面板必须收进窗口：固定 560 会把卡片顶出两侧，标题行的
+/// 「清除全部／×」与逐条「×」都点不到。
+#[test]
+fn bookmarks_panel_fits_a_narrow_window() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::ViewportResized(400.0, 600.0));
+    app.bookmarks_visible = true;
+    let cards = ViewTree::layout(&app, iced::Size::new(400.0, 600.0))
+        .find_all(|r| (r.width - 368.0).abs() < 2.0 && r.height >= 100.0);
+    assert!(!cards.is_empty(), "夹具自证：找到了收窄后的书签卡片");
+    let card = cards[0];
+    assert!(
+        card.x >= -0.5 && card.x + card.width <= 400.5,
+        "书签面板横向越界：{card:?}"
+    );
+}

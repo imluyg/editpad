@@ -95,11 +95,18 @@ impl Editpad {
             );
         }
         // 高度按窗口钳制：小窗不溢出、大窗不占满（查找卡片同策略）。
-        // 外层容器只负责摆位，卡片本身 opaque ⇒ 卡片外的点击照旧落到正文。
+        // 宽度同样按窗口钳制：固定 560 在窄窗里会把卡片顶出两侧，标题行的
+        // 「清除全部／×」与逐条「×」都点不到。
         let h = (self.viewport_size.1 * 0.4).clamp(140.0, 360.0);
+        // 视口未知（启动首帧仍是 0）时保持原宽——不能把 0 当成"很窄的窗口"。
+        let w = if self.viewport_size.0 > 0.0 {
+            560.0_f32.min((self.viewport_size.0 - 32.0).max(280.0))
+        } else {
+            560.0
+        };
         let card = opaque(
             container(column![header, rule::horizontal(1), scrollable(rows)].spacing(0))
-                .width(560)
+                .width(w)
                 .height(h)
                 .style(popup_card_style),
         );
