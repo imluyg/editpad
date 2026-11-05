@@ -212,7 +212,11 @@ fn prune_timestamped_backups(dir: &Path, name: &str) {
             if !(stem.starts_with(&prefix) && stem.ends_with(".bak")) {
                 return None;
             }
-            let tail = &stem[prefix.len()..stem.len() - ".bak".len()];
+            // 形状对不上就把条目原样放过：目录里可能有个恰好叫
+            // `{name}.bak` 的东西（同步工具／手工拷贝），它既不是本项目的
+            // 历史档，也扛不住下标切分——起止倒置会当场 panic，而这条清扫
+            // 路径挂在**保存**的同步调用链上。
+            let tail = stem.get(prefix.len()..stem.len() - ".bak".len())?;
             Some((ArchiveKey::of(tail), file))
         })
         .collect();
@@ -583,6 +587,22 @@ mod tests {
             .collect();
         contents.sort();
         assert_eq!(contents, vec!["v1".to_owned(), "v2".to_owned()]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 目录里混进一个恰好叫 `{name}.bak` 的条目（同步工具、手工拷贝都可能）
+    /// 时，清扫不得把整个保存流程带崩：它不是本项目的形状，原样留着即可。
+    #[test]
+    fn prune_ignores_foreign_entry_that_looks_like_the_plain_backup() {
+        let dir = scratch_dir("backup-foreign-entry");
+        let bak_dir = dir.join("note.txt.bak.d");
+        fs::create_dir_all(&bak_dir).unwrap();
+        let foreign = bak_dir.join("note.txt.bak");
+        std::fs::write(&foreign, "not ours").unwrap();
+
+        prune_timestamped_backups(&bak_dir, "note.txt");
+
+        assert!(foreign.exists(), "形状对不上的条目必须原样留着");
         fs::remove_dir_all(&dir).ok();
     }
 }
