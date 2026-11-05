@@ -229,9 +229,10 @@ pub(crate) struct Editpad {
     /// 最近一次扫描里**没能完成匹配**的文件数（正则运行期错误，如回溯超限）。
     /// 与「零命中」分开记：混在一起等于替用户把坏查询报成好答案（N-15）。
     pub(crate) fif_failed: usize,
-    /// FIF 命中点击的待跳转（行 0 起, 列, 跨度）——下一次 Loaded 装载
-    /// 结算后一次性消费（select_span 选区落在命中上）
-    pub(crate) pending_fif_goto: Option<(usize, usize, usize)>,
+    /// FIF 命中点击的待跳转（目标路径, 行 0 起, 列, 跨度）——下一次
+    /// **装载同一路径**的 Loaded 结算后一次性消费（select_span 选区落在命中上）。
+    /// 带路径：确认条被另一次打开替换后，这个意图属于旧文件，不能落到新文件上。
+    pub(crate) pending_fif_goto: Option<(PathBuf, usize, usize, usize)>,
 
     // ---------- 高亮后台分批补建（P12） ----------
     /// 在途铺建任务的代次；None = 没有。同代幂等、异代重排
@@ -301,8 +302,9 @@ pub(crate) struct Editpad {
     #[allow(clippy::type_complexity)]
     pub(crate) monitor_pending: Option<(u64, bool, Option<(usize, usize, f32, f32)>)>,
     /// P133：链接点击的待跳行号（1 起）——Ctrl+点击 `file.c:42` 时暂存，
-    /// 下一次 Loaded 装载结算后一次性消费（jump_to_line）
-    pub(crate) pending_link_goto: Option<u32>,
+    /// 下一次**装载同一路径**的 Loaded 结算后一次性消费（jump_to_line）。
+    /// 带路径：确认条被另一次打开替换后，这个意图属于旧文件，不能落到新文件上。
+    pub(crate) pending_link_goto: Option<(PathBuf, u32)>,
 
     // ---------- 打开确认 ----------
     /// dirty 时暂存 (发起页 id, 待打开的路径)；Some 即打开确认条可见。

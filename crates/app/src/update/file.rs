@@ -255,14 +255,17 @@ impl Editpad {
                         }
                         // P133：链接点击的「打开后跳行」（1 起行号，越界由
                         // jump_to_line 钳制）；A8：FIF 命中的「打开后选中」——
-                        // 一律落在**接收该文件的页**上，不是「当时的活动页」
-                        if let Some(line) = link_goto {
+                        // 一律落在**接收该文件的页**上，不是「当时的活动页」。
+                        // 两条意图都自带目标路径：确认条被另一次打开替换后，
+                        // 旧文件的行号/跨度绝不能落到这次装载的新文件上。
+                        if let Some((_, line)) = link_goto.filter(|(p, _)| *p == job.path) {
                             self.tabs[target]
                                 .editor
                                 .borrow_mut()
                                 .jump_to_line(line as usize);
                         }
-                        if let Some((line, col, len)) = fif_goto {
+                        if let Some((_, line, col, len)) = fif_goto.filter(|(p, ..)| *p == job.path)
+                        {
                             self.tabs[target]
                                 .editor
                                 .borrow_mut()
@@ -362,8 +365,9 @@ impl Editpad {
                     return Task::none();
                 }
                 // 行号暂存，装载结算（Loaded）后一次性消费跳行；打开
-                // 守卫（dirty 确认/busy）与普通打开同管线
-                self.pending_link_goto = line;
+                // 守卫（dirty 确认/busy）与普通打开同管线。**带上目标路径**：
+                // 确认条被另一次打开替换后，这个行号属于旧文件，不能落到新文件上。
+                self.pending_link_goto = line.map(|l| (path.clone(), l));
                 self.request_open(path)
             }
             // ---------- 保存 ----------

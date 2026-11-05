@@ -20,8 +20,8 @@ fn esc_dismisses_every_transient_prompt() {
     app.pending_close = true;
     app.open_confirm = Some((app.tab().id, PathBuf::from("C:/w/x.txt")));
     app.pending_cli.push_back(PathBuf::from("C:/w/y.txt"));
-    app.pending_link_goto = Some(7);
-    app.pending_fif_goto = Some((0, 0, 0));
+    app.pending_link_goto = Some((PathBuf::from("C:/w/x.txt"), 7));
+    app.pending_fif_goto = Some((PathBuf::from("C:/w/x.txt"), 0, 0, 0));
     app.close_tab_confirm = Some(id0);
     app.tab_context_menu = Some(0);
     app.editor_context_menu = true;

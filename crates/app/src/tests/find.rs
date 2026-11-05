@@ -1555,7 +1555,12 @@ fn find_in_files_hotkey_f12_and_goto_open_tab() {
     }];
     dispatch(&mut app, Message::FifGoto(0, 0));
     assert!(app.active_load.is_some(), "未开页触发打开管线");
-    assert_eq!(app.pending_fif_goto, Some((2, 4, 3)));
+    assert_eq!(
+        app.pending_fif_goto
+            .as_ref()
+            .map(|(_, l, c, n)| (*l, *c, *n)),
+        Some((2, 4, 3))
+    );
     let seq = app.job_seq;
     dispatch(
         &mut app,

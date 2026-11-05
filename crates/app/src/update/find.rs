@@ -492,7 +492,7 @@ impl Editpad {
                     self.cur_handle.borrow_mut().select_span(line, col, len);
                     return Task::none();
                 }
-                self.pending_fif_goto = Some((line, col, len));
+                self.pending_fif_goto = Some((path.clone(), line, col, len));
                 self.request_open(path)
             }
             Message::ReplaceQueryChanged(query) => {

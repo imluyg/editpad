@@ -3030,7 +3030,11 @@ fn link_clicked_file_opens_then_jumps_to_line() {
             line: Some(3),
         }),
     );
-    assert_eq!(app.pending_link_goto, Some(3), "行号应暂存待装载结算");
+    assert_eq!(
+        app.pending_link_goto.as_ref().map(|(_, l)| *l),
+        Some(3),
+        "行号应暂存待装载结算"
+    );
     let seq = app.job_seq;
     dispatch(
         &mut app,
@@ -3528,7 +3532,11 @@ fn cancelled_open_voids_link_goto_and_later_loads_do_not_honor_it() {
         }),
     );
     assert!(app.open_confirm.is_some(), "用例前提：确认条已弹出");
-    assert_eq!(app.pending_link_goto, Some(5), "行号暂存等待裁决");
+    assert_eq!(
+        app.pending_link_goto.as_ref().map(|(_, l)| *l),
+        Some(5),
+        "行号暂存等待裁决"
+    );
 
     dispatch(&mut app, Message::ConfirmOpenCancel);
     assert!(
@@ -3559,6 +3567,80 @@ fn cancelled_open_voids_link_goto_and_later_loads_do_not_honor_it() {
         "无关装载不得替被取消的点击跳行"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 打开确认条被**另一次打开**替换时，上一份「打开后跳行/选中」意图属于上一个
+/// 文件——旧实现只存行号，结算时无条件兑现，于是用户选了 B，光标却按 A 的命中
+/// 坐标跳走。两条意图现在都带目标路径，结算时按路径核对。
+#[test]
+fn a_superseded_open_confirm_does_not_apply_the_old_goto_to_the_new_file() {
+    use crate::editor::LinkTarget;
+    use crate::find_scan::{FileHit, FileHits};
+    let a = PathBuf::from("C:/doc/a.txt");
+    let b = PathBuf::from("C:/doc/b.txt");
+    let b_doc = || editpad_core::Document::from_str("b1\nb2\nb3\nb4\nb5\nb6\n");
+
+    // ── 链接那条
+    let mut app = loaded_txt_app();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+    dispatch(
+        &mut app,
+        Message::LinkClicked(LinkTarget::File {
+            path: a.clone(),
+            line: Some(5),
+        }),
+    );
+    assert!(app.open_confirm.is_some(), "夹具自证：确认条已起");
+    assert_eq!(
+        app.pending_link_goto.as_ref().map(|(p, l)| (p.clone(), *l)),
+        Some((a.clone(), 5)),
+        "夹具自证：行号意图属于 A"
+    );
+    // 还没裁决就改拖入 B：确认条换成 B
+    dispatch(&mut app, Message::FileDropped(b.clone()));
+    let (_, confirmed) = app.open_confirm.clone().expect("确认条仍在");
+    assert_eq!(confirmed, b, "夹具自证：确认条已换成 B");
+
+    dispatch(&mut app, Message::ConfirmOpenDiscard);
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::Loaded(seq, Ok((b_doc(), String::new(), "UTF-8".to_owned()))),
+    );
+    let cursor = app.cur_handle.borrow().cursor;
+    assert_eq!(
+        (cursor.line, cursor.col),
+        (0, 0),
+        "B 的光标不该被 A 的第 5 行带走"
+    );
+
+    // ── FIF 那条
+    let mut fif = loaded_txt_app();
+    dispatch(&mut fif, Message::Edit(EditOp::InsertText("!".into())));
+    fif.fif_results = vec![FileHits {
+        path: a.clone(),
+        hits: vec![FileHit {
+            pos: editpad_core::MatchPos {
+                line: 3,
+                col: 2,
+                len_chars: 2,
+            },
+            excerpt: "aa".into(),
+        }],
+    }];
+    dispatch(&mut fif, Message::FifGoto(0, 0));
+    assert!(fif.open_confirm.is_some(), "夹具自证：确认条已起（FIF）");
+    dispatch(&mut fif, Message::FileDropped(b.clone()));
+    dispatch(&mut fif, Message::ConfirmOpenDiscard);
+    let seq = fif.job_seq;
+    dispatch(
+        &mut fif,
+        Message::Loaded(seq, Ok((b_doc(), String::new(), "UTF-8".to_owned()))),
+    );
+    assert!(
+        fif.cur_handle.borrow().ordered_selection().is_none(),
+        "B 里不该出现 A 命中的选区"
+    );
 }
 
 /// P215：busy 期间的 Ctrl+点击既不该静默失效，更不该把行号「存」给
