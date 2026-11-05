@@ -134,14 +134,24 @@ impl EditorCore {
         let text = self.doc.slice_text(start_off, end_off);
         let sel_len = end_off - start_off;
         let sel_start_line = self.doc.char_to_line(start_off);
+        let sel_start_col = start_off - self.doc.line_to_char(sel_start_line);
+        let sel_end_line = self.doc.char_to_line(end_off);
         self.break_typing();
         self.snapshot(); // 单快照：删除+插入两步 splice 合为一次撤销
         let insert_off = if copy {
             drop_off
         } else {
             self.doc.remove_range(start_off, end_off);
-            let removed_lines = editpad_core::line_break_units(&text);
-            self.remap_removed_rows(sel_start_line, removed_lines);
+            // 与 `delete_selection` 同一套重映射：起点列 > 0 时该行前缀幸存
+            //（书签留下），终点行并进结果行，中间整行丢弃。`remap_removed_rows`
+            // 把起点行整行当消失 ⇒ 前缀明明还在，书签却被丢掉（同一段文字
+            // 走剪切再粘会保住，走拖拽却丢——两把尺子）。
+            self.remap_replaced_span(
+                sel_start_line,
+                sel_start_col > 0,
+                sel_end_line,
+                sel_end_line - sel_start_line,
+            );
             if drop_off > end_off {
                 drop_off - sel_len
             } else {
@@ -241,6 +251,30 @@ mod tests {
                 "{want}：书签指向的必须还是 'X'"
             );
         }
+    }
+
+    /// 起点行前缀幸存时，该行书签必须留下——与剪切/删除同口径。旧实现用
+    /// `remap_removed_rows` 把起点行整行当消失：同一段文字走剪切再粘保得住
+    /// 书签，走拖拽却丢。
+    #[test]
+    fn dnd_move_keeps_a_bookmark_on_the_selection_start_line() {
+        let mut c = core_with("abcd\nefgh\nX\n");
+        c.cursor = CursorPos { line: 0, col: 0 };
+        c.toggle_bookmark();
+        assert_eq!(c.bookmarked_lines(), vec![0], "夹具前提：行 0 有书签");
+        select(&mut c, 0, 1, 1, 2); // "bcd\nef"——行 0 的 "a" 前缀幸存
+        assert!(c.finish_drop_selection(CursorPos { line: 2, col: 1 }, false));
+        assert_eq!(c.doc.to_text(), "agh\nXbcd\nef\n");
+        assert_eq!(
+            c.bookmarked_lines(),
+            vec![0],
+            "起点行前缀还在 ⇒ 书签留下（与 delete_selection 同口径）"
+        );
+        assert_eq!(
+            c.line_body_without_eol(0),
+            "agh",
+            "书签指向的仍是起点那行拼出来的内容"
+        );
     }
 
     /// 落点在书签**之上**时，主角换成「插入侧」的单元数：搬进来的那段含一个行界
