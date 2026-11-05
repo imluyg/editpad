@@ -222,6 +222,11 @@ impl Editpad {
                         if log_appended {
                             tab.dirty = true;
                         }
+                        // 文档整体换血：上一份文档的内容快照对不上这一页了。
+                        // 不清掉它，心跳会把「版本没变」读成「内容没变」而复用
+                        // 旧文件（`.LOG` 重载会追加时间戳并重新置脏、版本却不推）
+                        // ⇒ 崩后恢复拿回重载前的内容，自动保存再把它写回磁盘。
+                        tab.heartbeat_snap = None;
                         // P50：载入成功即记外部修改比对戳
                         tab.file_stamp = file_stamp(&job.path);
                         // P445：磁盘只读属性照实接进这一页的只读闸（与 Ctrl+R

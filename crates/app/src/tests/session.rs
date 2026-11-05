@@ -2400,6 +2400,54 @@ fn heartbeat_writes_changed_dirty_page_and_marks_intermediate_manifest() {
     editpad_core::snapshot::clear_session(&dir);
 }
 
+/// 重载让文档整体换血之后，上一份文档的内容快照必须作废。`.LOG` 重载会
+/// 追加时间戳并重新置脏、却不推进版本——旧实现据此认定「版本没变 ⇒ 内容没变」
+/// 而复用旧快照，崩后恢复拿回重载前的内容，自动保存再把它写回磁盘。
+#[test]
+fn reloading_a_log_page_invalidates_its_heartbeat_snapshot() {
+    let dir = scratch_dir("hb-reload-log");
+    let mut app = heartbeat_app(&dir);
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let outcome = app.run_heartbeat_cycle(&dir).expect("首轮应有提交");
+    assert!(outcome.result.is_ok(), "提交应成功：{:?}", outcome.result);
+    let first = app.tabs[0]
+        .heartbeat_snap
+        .clone()
+        .expect("夹具自证：心跳已记下内容快照");
+
+    let tid = app.tabs[0].id;
+    dispatch(&mut app, Message::ConfirmExternalReload(tid));
+    let job = app.active_load.clone().expect("夹具：应有一次在途重载");
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job.id,
+            Ok((
+                editpad_core::Document::from_str(".LOG\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert_eq!(app.tabs[0].version, first.0, "夹具自证：重载不推进版本");
+    assert!(app.tab().dirty, "夹具自证：.LOG 追加让页重新置脏");
+    assert!(
+        app.tabs[0].heartbeat_snap.is_none(),
+        "换文档必须作废旧内容快照，否则心跳会把它当成最新内容复用"
+    );
+
+    // 后果：下一拍必须重写这一页，而不是把清单指回重载前那份快照文件
+    let outcome = app.run_heartbeat_cycle(&dir).expect("置脏页应再次入选");
+    assert!(outcome.result.is_ok(), "提交应成功：{:?}", outcome.result);
+    let manifest = editpad_core::snapshot::read_manifest(&dir).unwrap();
+    assert_ne!(
+        manifest.tabs[0].file.as_deref(),
+        Some(first.1.as_str()),
+        "清单仍指向重载前的旧快照"
+    );
+    editpad_core::snapshot::clear_session(&dir);
+}
+
 #[test]
 fn heartbeat_skips_commit_entirely_when_nothing_changed() {
     let dir = scratch_dir("hb-dedupe");
