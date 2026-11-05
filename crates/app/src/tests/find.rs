@@ -2973,3 +2973,33 @@ fn opening_document_find_cancels_an_in_flight_fif_scan() {
         app.status
     );
 }
+
+/// 跳转栏与 FIF 面板同槽停靠：打开跳转栏必须一并收起 FIF 并取消其扫描。
+/// 旧实现只关查找栏，`fif_visible` 留着 ⇒ 面板不再渲染，但 `step_match`
+/// 仍按目录模式路由，扫描完成还会改写状态栏。
+#[test]
+fn opening_goto_hides_fif_mode_and_cancels_its_scan() {
+    let mut app = Editpad::default();
+    app.fif_dir = Some(PathBuf::from("C:/doc"));
+    app.find_visible = true;
+    app.fif_visible = true;
+    app.find_query = "x".to_owned();
+    let _ = app.schedule_fif_scan();
+    let seq = app.fif_scan.expect("夹具自证：目录扫描已登记");
+    app.status.clear();
+
+    dispatch(&mut app, Message::GotoToggled);
+
+    assert!(
+        app.goto_visible && !app.find_visible,
+        "夹具自证：切到跳转栏"
+    );
+    assert!(!app.fif_visible, "跳转栏与 FIF 同槽 ⇒ FIF 必须收起");
+    assert!(app.fif_scan.is_none(), "在途目录扫描一并取消");
+    dispatch(&mut app, Message::FifScanDone(seq, Vec::new(), false, 0));
+    assert!(
+        app.status.is_empty(),
+        "被取消的扫描不许再写状态栏，实际 {:?}",
+        app.status
+    );
+}

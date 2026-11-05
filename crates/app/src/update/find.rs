@@ -832,6 +832,11 @@ impl Editpad {
                 self.goto_visible = !self.goto_visible;
                 if self.goto_visible {
                     self.find_visible = false;
+                    // 与 `FindToggled` 同规：FIF 面板与跳转栏同槽停靠，收起它的
+                    // 同时取消在途目录扫描——否则 `step_match` 仍按目录模式路由，
+                    // 扫描完成还会把状态栏改写掉（面板此时已不渲染）。
+                    self.fif_visible = false;
+                    self.cancel_fif_scan();
                     // P123：查找栏被跳转栏顶掉时同步清视口高亮（命中表
                     // 保留，重新开栏即恢复）
                     self.sync_find_highlights();
