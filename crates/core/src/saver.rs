@@ -288,11 +288,21 @@ fn temp_sibling(path: &Path) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(1);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let suffix = format!(".{}.{}.editpad-tmp", std::process::id(), seq);
+    // 目标名合法不等于「目标名 + 后缀」合法：NTFS 的单个路径分量上限是
+    // 255 个 UTF-16 单元（多数 Unix 文件系统是 255 字节）。文件名贴着上限
+    // 时，派生出的临时名会以 ERROR_FILENAME_EXCED_RANGE 失败，而目标路径
+    // 本身其实可写——保存因此平白失败。放不下就换短基名：临时文件只活到
+    // rename 为止，可读性不重要，唯一性由 pid + 进程内序号保证。
+    const MAX_COMPONENT_BYTES: usize = 240;
     let mut name = path
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
-    name.push(format!(".{}.{}.editpad-tmp", std::process::id(), seq));
+    if name.len() + suffix.len() > MAX_COMPONENT_BYTES {
+        name.clear();
+    }
+    name.push(suffix);
     path.with_file_name(name)
 }
 
@@ -467,6 +477,69 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 目标文件名贴着分量上限时，派生出的临时名不能比它更长——否则
+    /// `File::create` 以「文件名过长」失败，而目标本身其实可写。
+    #[test]
+    fn temp_sibling_never_exceeds_the_component_limit() {
+        let long = PathBuf::from("C:/x").join(format!("{}.txt", "a".repeat(236)));
+        assert_eq!(
+            long.file_name().unwrap().len(),
+            240,
+            "夹具自证：目标名合法但贴着上限"
+        );
+        let tmp = temp_sibling(&long);
+        assert_eq!(tmp.parent(), long.parent(), "临时文件必须与目标同目录");
+        assert!(
+            tmp.file_name().unwrap().len() <= 240,
+            "临时名 {} 字节越过分量上限",
+            tmp.file_name().unwrap().len()
+        );
+        assert!(tmp
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".editpad-tmp"));
+        assert_ne!(tmp, temp_sibling(&long), "每个写者必须独占一个临时名");
+
+        // 普通名字照旧留着可读的基名（排查残留时认得出是谁的）
+        let short = temp_sibling(Path::new("C:/x/note.txt"));
+        assert!(
+            short
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("note.txt."),
+            "短名不该被换成匿名基名：{short:?}"
+        );
+    }
+
+    /// `\\?\` 前缀绕开 MAX_PATH，但单个分量的 255 上限照旧生效 ⇒ 这是
+    /// 「目标路径可写、旧临时名写不出」唯一能稳定复现的形状。旧实现的
+    /// 临时名长 240＋约 19 字节，`create` 当场失败。
+    #[cfg(windows)]
+    #[test]
+    fn save_succeeds_when_the_target_name_is_at_the_component_limit() {
+        let raw = scratch_dir("long-name");
+        // 逐字路径（`\\?\`）把字符串原样交给内核：正斜杠在那里非法，
+        // 必须先归一成反斜杠，否则得到的是 ERROR_INVALID_NAME（123）而不是
+        // 我们要测的分量超长。
+        let verbatim = raw.display().to_string().replace('/', "\\");
+        let dir = PathBuf::from(format!(r"\\?\{verbatim}"));
+        let target = dir.join(format!("{}.txt", "a".repeat(236)));
+        assert_eq!(target.file_name().unwrap().len(), 240);
+
+        save_atomic(&target, "长名内容").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "长名内容");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".editpad-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不得留下临时残留: {leftovers:?}");
+        fs::remove_dir_all(&raw).ok();
     }
 
     #[test]
