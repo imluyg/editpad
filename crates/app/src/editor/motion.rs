@@ -1429,7 +1429,7 @@ impl EditorCore {
                         return k;
                     }
                 }
-                return s1;
+                return Self::segment_tail_col(s1, lens);
             }
         }
         let mut acc = 0.0f32; // 绝对列累计（Tab 宽度依赖绝对列，不能段内重算）
@@ -1449,7 +1449,20 @@ impl EditorCore {
             }
             acc += w;
         }
-        s1
+        Self::segment_tail_col(s1, lens)
+    }
+
+    /// 段尾列：**非末段**停在段内最后一格，末段才允许到行尾。
+    ///
+    /// 列 `s1` 同时是「本段之后」与「下一段之前」——返回它，`segment_index`
+    /// 会把光标画到下一视觉行。点击段尾右侧的空白区时那等于光标凭空跳一行；
+    /// 与竖向移动 [`Self::vertical_target`] 的段尾钳制同一条裁决。
+    fn segment_tail_col(s1: usize, lens: usize) -> usize {
+        if s1 < lens {
+            s1.saturating_sub(1)
+        } else {
+            s1
+        }
     }
 
     /// 第 `line` 行的不含换行文本，走**纪元键控 memo**（P283）。

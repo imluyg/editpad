@@ -2274,6 +2274,29 @@ fn wrap_hit_test_resolves_visual_row_to_segment_col() {
     assert_eq!((hit.line, hit.col), (0, 50), "段尾钳制应为行末");
 }
 
+/// 非末段的段尾空白区：光标必须留在**本视觉行**。列 s1 同时是下一段的
+/// 起点，直接返回会让 `segment_index` 把光标画到下一行（视觉上凭空跳一行）；
+/// 与竖向移动的段尾钳制同一条裁决。
+#[test]
+fn wrap_hit_past_a_non_final_segment_does_not_jump_to_the_next_row() {
+    let c = wrap_core(&format!("{}\nbb\n", "a".repeat(50)));
+    let mc = c.wrap_max_cols();
+    let gutter = c.gutter_width();
+    let lh = c.line_height();
+    assert!(mc < 50, "夹具自证：这一行确实折了（mc={mc}）");
+
+    // 视觉行 0 右侧的空白：旧实现返回 mc＝段 1 起点
+    let hit = c.hit_test(gutter + 9999.0, lh * 0.5);
+    assert_eq!(
+        (hit.line, hit.col),
+        (0, mc - 1),
+        "非末段段尾应停在段内最后一格，不许等价于下一段起点"
+    );
+    // 反面对照：末段（视觉行 1）的段尾仍允许到行尾
+    let hit = c.hit_test(gutter + 9999.0, lh * 1.5);
+    assert_eq!((hit.line, hit.col), (0, 50), "末段段尾钳制应为行末");
+}
+
 #[test]
 fn wrap_scroll_clamp_and_ensure_visible_use_visual_rows() {
     // 12 行 × 各 50 字符 → 24 视觉行；视口 3 行
