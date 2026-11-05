@@ -262,10 +262,27 @@ impl EditorCore {
     fn leading_ws_samples(&self) -> impl Iterator<Item = String> + '_ {
         (0..self.doc.line_count()).map(move |i| {
             let start = self.doc.line_to_char(i);
-            self.doc
-                .chars_from(start)
-                .take_while(|c| matches!(c, ' ' | '\t'))
-                .collect()
+            let mut ws = String::new();
+            let mut has_content = false;
+            // 手写循环而不是 `take_while`：后者会把第一个不满足的字符
+            // **吃掉**，于是"空白后面是什么"就读不到了。
+            for c in self.doc.chars_from(start) {
+                if matches!(c, ' ' | '\t') {
+                    ws.push(c);
+                } else {
+                    has_content = !editpad_core::is_line_break(c);
+                    break;
+                }
+            }
+            // 空白之后是行界（或文档尾）⇒ 这是纯空白行：交回空串让
+            // `dominant_indent` 当"没有证据"。不能让纯空白行交出它那串空白——
+            // 那与一条真正缩进同样格数的行采样出来一模一样，一行残留空格
+            // 就能把整份文件的步长判成 1/2 格（回车/反缩进按那个宽度写）。
+            if has_content {
+                ws
+            } else {
+                String::new()
+            }
         })
     }
 

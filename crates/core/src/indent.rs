@@ -367,6 +367,10 @@ pub const MAX_INDENT_STEP: usize = 8;
 /// 规则：只看**纯空格起头**的行。含制表符的行首不参与统计——tab 文件的"一档"就是一个
 /// tab，本来就不需要宽度这个数；而 `  \tx` 这种混排起头说明这一行给不出"一档"的宽度。
 /// 但同文件里另一条干净的行照样算证据（见用例里那一格现量）。
+///
+/// ⚠️ 传**整行**时，纯空白行（只有空格、没有内容）不是证据；传**行首空白**
+/// （app 的采样方式）时，空串代表"没有证据"。两者形状不可区分，故调用方
+/// 不许把空白行的那串空白当样本传进来（app 的 `leading_ws_samples` 已按此过滤）。
 pub fn dominant_indent<I, S>(lines: I) -> Option<IndentUnit>
 where
     I: IntoIterator<Item = S>,

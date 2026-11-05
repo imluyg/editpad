@@ -412,6 +412,17 @@ fn enter_smart_uses_the_documents_own_step_not_a_fixed_four() {
     assert_eq!(c.cursor, CursorPos { line: 1, col: 2 });
 }
 
+/// 纯空白行不是缩进证据：4 格一档的文件里夹一行残留 2 个空格，回车不许按
+/// 2 格写（旧采样把那一行的空白原样交出去，与真正的 2 格行无法区分）。
+#[test]
+fn doc_indent_step_ignores_whitespace_only_lines() {
+    let c = core_with("def f():\n    x\n  \n    y");
+    assert_eq!(c.doc_indent_step(), Some(4), "纯空白行不许把步长拉成 2");
+    // 反面对照：带内容的 2 格行仍然是证据（取最外层那一档）
+    let d = core_with("def f():\n    x\n  y");
+    assert_eq!(d.doc_indent_step(), Some(2));
+}
+
 #[test]
 fn enter_smart_follows_the_dominant_line_ending() {
     // CRLF 文档：换行归一成 `\r\n`（两个字符），而光标列按**字符列**给——
