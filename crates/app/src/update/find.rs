@@ -258,8 +258,11 @@ impl Editpad {
                 self.find_dimmed = false;
                 if self.find_visible {
                     self.goto_visible = false;
-                    // A8：重开查找栏时不自动恢复 FIF 面板（入口显式切换）
+                    // A8：重开查找栏时不自动恢复 FIF 面板（入口显式切换），
+                    // 在途目录扫描一并取消——只藏面板不取消的话，扫描完成
+                    // 仍会把状态栏的「第 N/M 处」换成目录命中摘要。
                     self.fif_visible = false;
+                    self.cancel_fif_scan();
                     // P123：有选区则带入其文本作为查询（上限 1 万字符——
                     // 防全选大文档把查询框与扫描撑爆；正则模式下原样带入，
                     // 元字符由用户自行调整，主流「选中即查」同口径）

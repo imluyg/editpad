@@ -2941,3 +2941,35 @@ fn every_tab_removal_funnel_voids_the_hit_table() {
         "批量关页这条漏斗必须作废命中表（摘掉它那一句时，全池原本一条都不红）"
     );
 }
+
+/// 打开文档查找栏时必须取消在途目录扫描：`fif_visible = false` 只藏面板，
+/// 后台扫描完成仍会写状态栏（把「第 N/M 处」换成目录命中摘要），并留下一份
+/// 没人看的结果。关栏那条早就这么做，开栏这条漏了。
+#[test]
+fn opening_document_find_cancels_an_in_flight_fif_scan() {
+    let mut app = Editpad::default();
+    app.fif_dir = Some(PathBuf::from("C:/doc"));
+    app.fif_visible = true;
+    app.find_query = "x".to_owned();
+    let _ = app.schedule_fif_scan();
+    let seq = app.fif_scan.expect("夹具自证：目录扫描已登记");
+    app.status.clear();
+
+    dispatch(&mut app, Message::FindToggled);
+
+    assert!(
+        app.find_visible && !app.fif_visible,
+        "夹具自证：切到文档查找"
+    );
+    assert!(
+        app.fif_scan.is_none(),
+        "打开文档查找应取消在途目录扫描（关栏那条早就这么做）"
+    );
+    // 迟到的完成消息不许再写状态栏
+    dispatch(&mut app, Message::FifScanDone(seq, Vec::new(), false, 0));
+    assert!(
+        app.status.is_empty(),
+        "被取消的扫描不许再写状态栏，实际 {:?}",
+        app.status
+    );
+}
