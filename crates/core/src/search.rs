@@ -362,20 +362,22 @@ thread_local! {
     static WHOLE_WORD_LINE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// 物化第 `line` 行的「行内容字符」到 `buf`（行尾换行单元按原口径截断）。
+/// 物化第 `line` 行的「行内容字符」到 `buf`（行尾换行单元按全集截断）。
 ///
 /// 零拷贝读法：`line_to_char` + `chars_from` 走 rope 叶片迭代，
 /// `take(line_len_chars)` 把范围钉回本行——不产生整行 `String`。
-/// `take_while` 的判据与历史实现逐字相同（只截 `\n`/`\r`），故行内容为
-/// VT/FF/NEL/LS/PS 结尾时这些字符**留在** `content` 里；两者都在
-/// [`whole_word_bounds_ok`] 里得出同一结论（这些字符非词字符，
-/// 「窥到它」与「视作行尾」判定一致），口径与孪生函数无分叉。
+/// 截断用**行界全集**（R-22）：此前只截 `\n`/`\r`，VT/FF/NEL/LS/PS 会留在
+/// content 里，于是「查询以行界结尾」的跨行命中在 exotic 收尾行上
+/// `end == content.len()`，`whole_word_bounds_ok` 的跨行判定失手（把它当
+/// 行内命中，前一个字符是词字符就丢掉）；`&str` 孪生的 content 本来就不含
+/// 行界（`for_each_line` 切过），两边形不成同一结论。现在两边都不含行界，
+/// `end > content.len()` 就是唯一的跨行判据。
 fn fill_line_chars(doc: &Document, line: usize, buf: &mut Vec<char>) {
     buf.clear();
     buf.extend(
         doc.chars_from(doc.line_to_char(line))
             .take(doc.line_len_chars(line))
-            .take_while(|&c| c != '\n' && c != '\r'),
+            .take_while(|&c| !is_line_break(c)),
     );
     #[cfg(test)]
     WHOLE_WORD_LINE_BUILDS.with(|c| c.set(c.get() + 1));
@@ -3216,15 +3218,18 @@ mod tests {
         );
     }
 
-    /// **改前实现原样留档**（O-12 等价性对拍的基准）：每个命中都把整行物化
-    /// 成 `Vec<char>`，成本 O(命中数 × 行长)。语义即旧契约，一条不改。
+    /// **参考实现**（O-12 等价性对拍的基准）：每个命中都把整行物化成
+    /// `Vec<char>`，成本 O(命中数 × 行长)。语义与正式实现同规——行内容按
+    /// **行界全集**截断。⚠️ 它起初照抄的是改前实现（只截 `\n`/`\r`），而那
+    /// 一版在「查询以行界结尾 + 异体行界收尾行」上把跨行命中判成行内命中而
+    /// 丢掉；照抄它当基准会把缺陷钉成规格，故一并纠正。
     fn filter_whole_word_naive(doc: &Document, hits: Vec<MatchPos>) -> Vec<MatchPos> {
         hits.into_iter()
             .filter(|hit| {
                 let content: Vec<char> = doc
                     .line_str(hit.line)
                     .chars()
-                    .take_while(|&c| c != '\n' && c != '\r')
+                    .take_while(|&c| !is_line_break(c))
                     .collect();
                 let end = hit.col + hit.len_chars;
                 if end > content.len() {
@@ -3276,6 +3281,9 @@ mod tests {
             ("cat\ncat", "t\nc"),
             ("cat\r\ndog", "t\nd"),
             ("cat\rcat", "t\nc"),
+            // 查询以行界结尾 + 行以异体行界收尾：行内容若留着那个行界字符，
+            // end 恰等于 content.len()，跨行判定失手（两边形不成同一结论）
+            ("xa\u{000B}y", "a\n"),
             // 空行 / 空文档
             ("\n\ncat", "cat"),
             ("", "cat"),
