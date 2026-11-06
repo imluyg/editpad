@@ -384,7 +384,10 @@ impl Editpad {
         self.tabs.remove(idx);
         // 占位页也走同一收口（不变量见 Editpad::ensure_nonempty_tabs）：
         // 恢复期间删掉唯一占位页而队列尚有后续时，不能让 tabs 变空。
-        let _ = self.ensure_nonempty_tabs();
+        // 补位页同样要有「未命名N」，与 NewTab/打开占位页一致。
+        if let Some(last) = self.ensure_nonempty_tabs() {
+            self.assign_untitled_num(last);
+        }
         // 占位页被抽掉后其后的页整体左移，标签条上按裸下标找页的三份瞬态
         // 全部换锚。这条出路此前连悬停态都没清（另两条清了），所以作废
         // 同样收进漏斗本身，不由调用侧各写一份。

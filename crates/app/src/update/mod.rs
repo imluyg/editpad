@@ -252,7 +252,7 @@ impl Editpad {
     /// 快照按代次+页下标命名（snapshot::page_file_name），磁盘上不存在
     /// 「未命名N」文件，复用号码无落盘冲突。`untitled_next` 仍随快照
     /// 维护（格式兼容），赋号不再消费。
-    fn assign_untitled_num(&mut self, idx: usize) {
+    pub(crate) fn assign_untitled_num(&mut self, idx: usize) {
         let used: std::collections::HashSet<u64> =
             self.tabs.iter().filter_map(|t| t.untitled_num).collect();
         let n = (1u64..).find(|n| !used.contains(n)).unwrap_or(1);

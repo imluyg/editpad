@@ -6076,3 +6076,70 @@ fn closing_the_loading_tab_cancels_it() {
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "base");
 }
+
+/// 打开失败：本次新建的空占位页要移除，别在标签条上留垃圾页。
+#[test]
+fn failed_open_removes_created_placeholder() {
+    let mut app = loaded_txt_app();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/fail/a.txt")),
+    );
+    assert_eq!(app.tabs.len(), 2, "夹具：打开落进新页");
+    let job = app.active_load.as_ref().expect("夹具：装载在途").id;
+
+    dispatch(&mut app, Message::Loaded(job, Err("读不出来".to_owned())));
+
+    assert!(!app.busy, "失败后必须解除 busy");
+    assert_eq!(app.tabs.len(), 1, "本次新建的空占位页应被移除");
+    assert_eq!(app.active_tab, 0, "应回到原页");
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "base");
+    assert!(!app.status.is_empty(), "失败还要有状态栏说明");
+}
+
+/// 打开失败但复用的是用户的活动空白页：那一页是用户的，不许删。
+#[test]
+fn failed_open_keeps_reused_blank_tab() {
+    let mut app = Editpad::default();
+    let original_id = app.tabs[0].id;
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/fail/b.txt")),
+    );
+    assert_eq!(app.tabs.len(), 1, "夹具：空白页被复用");
+    let job = app.active_load.as_ref().expect("夹具：装载在途").id;
+
+    dispatch(&mut app, Message::Loaded(job, Err("读不出来".to_owned())));
+
+    assert!(!app.busy);
+    assert_eq!(app.tabs.len(), 1, "复用页不许被当成占位页删掉");
+    assert_eq!(
+        app.tabs[0].id, original_id,
+        "复用页被删再补一页时 id 会变——这里必须是原来那一页"
+    );
+    assert!(app.tabs[0].path.is_none());
+    assert!(app.tabs[0].editor.borrow().doc.is_empty());
+    assert!(!app.status.is_empty(), "失败还要有状态栏说明");
+}
+
+/// 打开新建的占位页在标签条上要显示「未命名N」，与 Ctrl+T 一致。
+#[test]
+fn new_placeholder_shows_untitled_number() {
+    let mut app = loaded_txt_app();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/open/c.txt")),
+    );
+    let placeholder = &app.tabs[app.active_tab];
+    assert!(
+        placeholder.untitled_num.is_some(),
+        "打开新建的占位页必须有未命名编号"
+    );
+    assert!(
+        placeholder
+            .display_name_in(editpad_core::Lang::ZhCn)
+            .contains('1'),
+        "显示名应带编号，实际 {:?}",
+        placeholder.display_name_in(editpad_core::Lang::ZhCn)
+    );
+}

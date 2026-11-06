@@ -3403,3 +3403,34 @@ fn cancelling_a_restore_step_drops_its_placeholder_and_advances_the_chain() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 恢复占位页加载失败被移除后，补位页也要有「未命名N」。
+#[test]
+fn restore_placeholder_replacement_gets_untitled_number() {
+    let dir = snapshot_scratch_dir("restore-replacement-number");
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[editpad_core::snapshot::SessionPage {
+            tab: clean_named_tab("C:/w/gone.txt"),
+            doc: editpad_core::Document::new(),
+        }],
+        0,
+        1,
+    )
+    .expect("写会话应成功");
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+    assert_eq!(app.tabs.len(), 1, "夹具：一页占位");
+    let job = app.active_load.as_ref().expect("夹具：恢复装载在途").id;
+
+    dispatch(&mut app, Message::Loaded(job, Err("文件没了".to_owned())));
+
+    assert_eq!(app.tabs.len(), 1, "失败占位页被移除后应补一页");
+    assert!(
+        app.tabs[0].untitled_num.is_some(),
+        "补位页要有未命名编号，实际 {:?}",
+        app.tabs[0].untitled_num
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

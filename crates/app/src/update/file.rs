@@ -299,6 +299,23 @@ impl Editpad {
                             self.busy = false;
                         } else {
                             self.busy = false;
+                            // 本次打开新建的空占位页：打开失败后它再也不会被填，
+                            // 留在标签条上就是一个「未命名」垃圾页。只删自己造的
+                            // 那一页；复用活动空白页时 `created_placeholder=false`，
+                            // 用户原来的页原样保留。
+                            if job.created_placeholder {
+                                if let Some(idx) = target {
+                                    let removable = {
+                                        let tab = &self.tabs[idx];
+                                        tab.path.is_none()
+                                            && !tab.dirty
+                                            && tab.editor.borrow().doc.is_empty()
+                                    };
+                                    if removable {
+                                        self.close_tab_now(idx);
+                                    }
+                                }
+                            }
                             self.set_status_error(
                                 self.t_suffix(editpad_core::Key::StOpenFailed, &error.to_string()),
                             );
@@ -1002,6 +1019,10 @@ impl Editpad {
         if created_placeholder {
             let fresh = self.fresh_tab();
             self.tabs.push(fresh);
+            let last = self.tabs.len() - 1;
+            // 占位页也要有「未命名N」：它是用户在标签条上最先看到的东西，
+            // 裸「未命名」与其它新页不一致（恢复占位页替换同样走这一条）。
+            self.assign_untitled_num(last);
         }
         // P381：这一页的正文接下来要被**磁盘上的内容**替换 ⇒ 先作废它身上还在途的
         // 自动保存。漏它的后果是数据覆写：那次写盘醒来时带的还是用户刚刚丢掉的那份
