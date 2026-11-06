@@ -267,6 +267,10 @@ pub(crate) struct Editpad {
     /// 拿到 id 就照原样重放一次，拿不到就整份作废（不许留到下一次无关回报再兑现
     /// ＝P215／P221／P371 同一条规矩）。
     pub(crate) pending_window_toggle: Option<PendingWindowToggle>,
+    /// 第二实例转来文件时，主窗口 id 还没拿到就先挂起一次「恢复并前置」。
+    /// 与 `pending_window_toggle` 分开：F11/F9 还没兑现时又双击了一个文件，
+    /// 两件事都要在 `MainWindowResolved` 里兑现。
+    pub(crate) pending_window_raise: bool,
     /// P126：全屏态（F11）。全屏期间窗口几何不记忆（尺寸是全屏值，
     /// 退出后按它恢复会错）。
     pub(crate) fullscreen: bool,
@@ -533,6 +537,7 @@ impl Default for Editpad {
             pending_close: false,
             main_window: None,
             pending_window_toggle: None,
+            pending_window_raise: false,
             fullscreen: false,
             palette_visible: false,
             palette_mode: PaletteMode::Commands,

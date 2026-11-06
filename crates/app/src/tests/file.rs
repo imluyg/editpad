@@ -6666,3 +6666,37 @@ fn reopen_while_loading_switches_without_second_job() {
     assert!(app.pending_cli.is_empty());
     assert_eq!(app.tabs.len(), 1);
 }
+
+/// 第二实例转发路径：主窗口 id 未知时挂起一次「恢复并前置」，
+/// 拿到 id 后兑现且清标记（不丢、不留残值）。
+#[test]
+fn pending_paths_request_window_raise() {
+    let mut app = Editpad::default();
+    app.busy = true; // 夹具：占住通道，避免尾部钩子把转发的文件立刻开走
+    app.main_window = None;
+
+    dispatch(
+        &mut app,
+        Message::PendingOpenPaths(vec![PathBuf::from("C:/fwd/a.txt")]),
+    );
+    assert!(app.pending_window_raise, "主窗口 id 未知时应挂起前置");
+    assert_eq!(app.pending_open_stash.len(), 1, "路径照常入暂存");
+
+    let id = iced::window::Id::unique();
+    dispatch(&mut app, Message::MainWindowResolved(Some(id)));
+
+    assert_eq!(app.main_window, Some(id));
+    assert!(
+        !app.pending_window_raise,
+        "拿到 id 后必须兑现并清掉挂起标记"
+    );
+}
+
+/// `request_user_attention(id, None)` 是撤销；前置兜底必须是 `Some(Critical)`。
+#[test]
+fn focus_attention_requests_critical() {
+    assert!(matches!(
+        crate::update::focus_attention(),
+        Some(iced::window::UserAttention::Critical)
+    ));
+}

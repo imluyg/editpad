@@ -62,6 +62,12 @@ type TickStream = std::pin::Pin<Box<dyn iced::futures::Stream<Item = Message> + 
 /// 假死。注：`iced::time::every` 在本工程 feature 组合（thread-pool，无
 /// smol/tokio）下是空实现，离线环境也无法引入 smol 依赖——故手写同语义
 /// 桥接。缓冲写满丢拍不断链；订阅撤销后 try_send 失败，桥接线程自然退出。
+/// 任务栏闪烁请求。⚠️ `request_user_attention(id, None)` 是**撤销**请求，
+/// 不是「请求注意」；必须传 `Some(Critical)` 才会闪窗口/任务栏。
+pub(crate) fn focus_attention() -> Option<iced::window::UserAttention> {
+    Some(iced::window::UserAttention::Critical)
+}
+
 pub(crate) fn tick_stream(kind: &TickKind) -> TickStream {
     let (interval, message) = match *kind {
         TickKind::Caret { interval_ms } => (
@@ -553,6 +559,29 @@ impl Editpad {
         self.cur_handle.borrow_mut().pointer_focus(true);
     }
 
+    /// 把主窗口从最小化恢复并前置。
+    ///
+    /// `Task::batch` 不保证两个窗口动作的先后，而 winit 的 `focus_window`
+    /// 在窗口最小化时**直接 no-op**（`is_minimized` 分支跳过）⇒ 先
+    /// `minimize(false)`，再用一次性 60ms 延时补 `gain_focus`。只做一次，
+    /// 不是常驻睡眠链。
+    fn raise_main_window(&self, id: window::Id) -> Task<Message> {
+        let delayed = Task::perform(
+            async {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            },
+            move |_| Message::FocusMainWindow(id),
+        );
+        Task::batch([iced::window::minimize(id, false), delayed])
+    }
+
+    fn focus_main_window(&self, id: window::Id) -> Task<Message> {
+        Task::batch([
+            iced::window::gain_focus(id),
+            iced::window::request_user_attention(id, focus_attention()),
+        ])
+    }
+
     /// 打开/新建后能不能把输入焦点还给正文。
     ///
     /// 判据是「没有任何文本框/浮层在占焦点」：八个整窗背板浮层 + 查找栏 +
@@ -770,6 +799,7 @@ impl Editpad {
             | Message::HeartbeatDone(..)
             | Message::ToggleFullscreen
             | Message::MainWindowResolved(..)
+            | Message::FocusMainWindow(..)
             | Message::ToggleAlwaysOnTop
             | Message::WindowMoved(..) => self.update_session(message),
             // ---------- P318：书签列表面板（开关／逐条跳／逐条摘） ----------
@@ -1111,18 +1141,26 @@ impl Editpad {
             // （P215／P221／P371 同一条规矩：一次性意图不能被下一次无关动作兑现）。
             Message::MainWindowResolved(id) => {
                 let pending = self.pending_window_toggle.take();
+                let raise = std::mem::take(&mut self.pending_window_raise);
                 let Some(id) = id else {
                     return Task::none();
                 };
                 self.main_window = Some(id);
-                match pending {
+                let replay = match pending {
                     Some(PendingWindowToggle::Fullscreen) => self.update(Message::ToggleFullscreen),
                     Some(PendingWindowToggle::AlwaysOnTop) => {
                         self.update(Message::ToggleAlwaysOnTop)
                     }
                     None => Task::none(),
+                };
+                if raise {
+                    // F11/F9 的挂起与「双击文件前置」可以同时存在：两件都兑现
+                    Task::batch([replay, self.raise_main_window(id)])
+                } else {
+                    replay
                 }
             }
+            Message::FocusMainWindow(id) => self.focus_main_window(id),
             // P126：置顶切换（F9）。iced 0.14：window::set_level。
             Message::ToggleAlwaysOnTop => {
                 // P386：同 F11——没有 id 就先去问，问到了再翻标志＋出声（见上面那臂）。

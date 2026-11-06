@@ -107,7 +107,16 @@ impl Editpad {
                 // 用户双击要打开的文件就此静默丢失。
                 // 也不直接进 `pending_cli`：取消分支会连带作废整条 CLI 队列（N-07 口径）。
                 self.pending_open_stash.extend(paths);
-                Task::none()
+                // 第二实例带着文件来找：把已运行窗口恢复并前置。主窗口 id
+                // 通常已经捕获过；还没有就挂起，等 `MainWindowResolved` 兑现
+                // （与 F11/F9 的挂起互不覆盖）。
+                match self.main_window {
+                    Some(id) => self.raise_main_window(id),
+                    None => {
+                        self.pending_window_raise = true;
+                        iced::window::oldest().map(Message::MainWindowResolved)
+                    }
+                }
             }
             Message::LoadProgress(job_id, bytes_read, total_bytes) => {
                 if self.active_load.as_ref().is_some_and(|j| j.id == job_id) {

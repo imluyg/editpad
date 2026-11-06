@@ -109,6 +109,10 @@ pub(crate) fn forward_pending_open(files: &[std::path::PathBuf]) -> bool {
         return false;
     };
     let batch = dir.join(format!("pending_open.{}.txt", std::process::id()));
+    // 让已运行实例有权把窗口提到前台（Windows 的前台锁）。第二实例自己
+    // 未必持前台，调用失败就忽略——已运行实例仍有任务栏闪烁兜底。
+    // ASFW_ANY = (DWORD)-1。
+    unsafe { AllowSetForegroundWindow(0xFFFF_FFFF) };
     let mut content = String::new();
     for f in files {
         content.push_str(&f.to_string_lossy());
@@ -210,4 +214,6 @@ extern "system" {
         caption: *const u16,
         utype: u32,
     ) -> i32;
+    /// 允许指定进程（`ASFW_ANY` = 0xFFFF_FFFF 表示任意进程）设置前台窗口。
+    fn AllowSetForegroundWindow(dw_process_id: u32) -> i32;
 }
