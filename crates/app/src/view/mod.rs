@@ -278,6 +278,15 @@ impl Editpad {
                 };
                 strip = strip.push(pill_area);
             }
+            // 右端常驻「+」：标签条不换行、不滚动，放在最后一个标签之后会随
+            // 页数增多被顶出可视区；`space().width(Fill)` 把按钮固定在右缘。
+            strip = strip.push(iced::widget::space().width(Fill));
+            strip = strip.push(
+                button(text("+").size(uipx).font(uifont))
+                    .padding([2, 8])
+                    .style(chrome_button_style)
+                    .on_press_maybe((!self.busy).then_some(Message::NewTab)),
+            );
             // 第 76 轮（用户点单）：标签条右侧空白区双击新建标签页——
             // 命中面就是整条标签条本身（外层 mouse_area 的 on_double_click）：
             // 标签按钮/重命名输入框会先消费左键（iced 事件委托语义，P28

@@ -802,8 +802,9 @@ fn p100_strip_blank_right_edge_double_click_reaches_outer_area() {
         ui.dump()
     );
 
-    // 命中面最右缘（空白区）连按两次左键
-    let at = iced::Point::new(strip.x + strip.width - 16.0, strip.y + strip.height * 0.5);
+    // 命中面右侧空白区连按两次左键。⚠️ 最右缘现在是常驻「+」按钮的命中区
+    // （本轮新增），空白区在按钮左侧；取距右缘 60px 处。
+    let at = iced::Point::new(strip.x + strip.width - 60.0, strip.y + strip.height * 0.5);
     let single = ui.click(at);
     assert!(!got_new_tab(&single), "单击不得触发新建");
     // 双击：同树状态内上一次点击保留，300ms/<6px 窗内成对

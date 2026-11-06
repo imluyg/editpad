@@ -6383,3 +6383,63 @@ fn file_menu_new_opens_tab() {
         "文件菜单首项应新建标签页，实际 {messages:?}"
     );
 }
+
+/// 标签条右端的「+」按钮（生产视图树真实点击）发 NewTab。
+#[test]
+fn plus_button_emits_new_tab() {
+    let app = Editpad::default();
+    let mut ui = ViewTree::layout_default(&app);
+    let at = plus_button_point(&ui);
+    let messages = click_left(&mut ui, at);
+    assert!(
+        messages.iter().any(|m| matches!(m, Message::NewTab)),
+        "+ 按钮应发 NewTab，实际 {messages:?}"
+    );
+}
+
+/// 忙时「+」置灰：点击不产生 NewTab。
+#[test]
+fn plus_button_disabled_while_busy() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/plus/busy.txt")),
+    );
+    assert!(app.busy, "夹具：装载在途");
+    let mut ui = ViewTree::layout_default(&app);
+    let at = plus_button_point(&ui);
+    let messages = click_left(&mut ui, at);
+    assert!(
+        !messages.iter().any(|m| matches!(m, Message::NewTab)),
+        "忙时 + 应禁用，实际 {messages:?}"
+    );
+}
+
+fn plus_button_point(ui: &ViewTree<'_>) -> iced::Point {
+    let r = ui
+        .find(|r| {
+            r.y > 25.0
+                && r.y < 60.0
+                && r.x > 1100.0
+                && r.width > 10.0
+                && r.width < 40.0
+                && r.height > 15.0
+        })
+        .expect("标签条右端的 + 按钮");
+    iced::Point::new(r.center_x(), r.center_y())
+}
+
+/// 左右键按下+释放各发一次：按钮在抬起时 publish。
+fn click_left(ui: &mut ViewTree<'_>, at: iced::Point) -> Vec<Message> {
+    let mut messages = ui.send(
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+        at,
+    );
+    messages.extend(ui.send(
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+            iced::mouse::Button::Left,
+        )),
+        at,
+    ));
+    messages
+}
