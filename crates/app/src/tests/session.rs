@@ -42,16 +42,11 @@ fn reopened_recent_file_restores_cursor_and_scroll() {
     }
     let doc = || editpad_core::Document::from_str(&text);
 
-    // 首开 C:/a.txt：进最近列表（尚无记忆）
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
-    let seq1 = app.job_seq;
-    dispatch(
-        &mut app,
-        Message::Loaded(seq1, Ok((doc(), String::new(), "UTF-8".to_owned()))),
-    );
+    // 打开前先种入上次退出时的位置（模拟历史记忆）。
+    // 同一路径重复拖入现在会去重成切页，不再触发装载，所以这里只开一次。
+    // `set_recent_view` 只对最近文件列表里的路径记账：先登记。
+    app.settings.push_recent(Path::new("C:/a.txt"));
     assert!(app.settings.recent_view(Path::new("C:/a.txt")).is_none());
-
-    // 种入上次退出时的位置（模拟历史记忆）
     assert!(app.settings.set_recent_view(
         Path::new("C:/a.txt"),
         editpad_core::RecentView {
@@ -61,12 +56,11 @@ fn reopened_recent_file_restores_cursor_and_scroll() {
         },
     ));
 
-    // 重开同一文件（当前页已命名非空 → 落新页并聚焦）→ 光标滚动就位
     dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/a.txt")));
-    let seq2 = app.job_seq;
+    let seq = app.job_seq;
     dispatch(
         &mut app,
-        Message::Loaded(seq2, Ok((doc(), String::new(), "UTF-8".to_owned()))),
+        Message::Loaded(seq, Ok((doc(), String::new(), "UTF-8".to_owned()))),
     );
     let ed = app.cur_handle.borrow();
     assert_eq!(

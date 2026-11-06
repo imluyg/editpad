@@ -78,6 +78,62 @@ pub fn pending_open_path() -> Option<PathBuf> {
     data_root().map(|root| root.join("pending_open.txt"))
 }
 
+/// 文档路径身份键：同一文件的不同写法归一到同一个字符串。
+///
+/// 先 `canonicalize`（解析链接、返回真实大小写）；失败（文件不存在/无权限）
+/// 回退词法归一：`/`→`\`、剥 `\\?\` 前缀、折叠 `.`/`..`、去尾分隔符与
+/// Windows 尾随空格/点、Windows 上小写。词法回退**不解析符号链接**，只是
+/// 让「打开对话框/拖拽/最近文件」的常见写法不拆成两条。
+pub fn normalized_path_key(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).ok();
+    lexical_path_key(canonical.as_deref().unwrap_or(path))
+}
+
+fn lexical_path_key(path: &Path) -> String {
+    let mut s = path.to_string_lossy().replace('/', "\\");
+    // canonicalize 在 Windows 上返回 `\\?\C:\...`（UNC 是 `\\?\UNC\...`）
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        s = format!(r"\\{rest}");
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        s = rest.to_owned();
+    }
+    let bytes = s.as_bytes();
+    let drive_abs = bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'\\';
+    let unc = s.starts_with(r"\\") && !drive_abs;
+    let prefix_len = if unc {
+        2
+    } else if drive_abs {
+        3
+    } else {
+        0
+    };
+    let prefix = &s[..prefix_len];
+    let rest = &s[prefix_len..];
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split('\\') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let mut out = String::from(prefix);
+    out.push_str(&parts.join("\\"));
+    while out.ends_with('\\') {
+        out.pop();
+    }
+    if cfg!(windows) {
+        // Windows 路径忽略尾随空格/点与大小写
+        while out.ends_with(' ') || out.ends_with('.') {
+            out.pop();
+        }
+        out = out.to_lowercase();
+    }
+    out
+}
+
 /// FNV-1a 64b：无需依赖标准库哈希的随机种子（默认 SipHash 带随机 key，
 /// 跨进程不稳定，不可用于目录名）。
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -415,5 +471,33 @@ mod tests {
         assert!(lone_to.is_file());
 
         fs::remove_dir_all(&appdata).ok();
+    }
+
+    #[test]
+    fn normalized_path_key_ignores_case_and_separators() {
+        let a = normalized_path_key(Path::new(r"C:\Foo\.\Bar\..\Baz.txt"));
+        let b = normalized_path_key(Path::new("C:/foo/baz.txt"));
+        assert_eq!(a, b, "分隔符、`.`/`..`、大小写应归一");
+        assert_ne!(
+            normalized_path_key(Path::new(r"C:\foo\a.txt")),
+            normalized_path_key(Path::new(r"C:\foo\b.txt")),
+            "不同文件不许撞键"
+        );
+    }
+
+    #[test]
+    fn normalized_path_key_falls_back_for_missing_path() {
+        let missing = std::env::temp_dir()
+            .join("editpad-missing-dir")
+            .join("x.txt");
+        let variant = PathBuf::from(missing.to_string_lossy().replace('\\', "/").to_uppercase());
+        #[cfg(windows)]
+        assert_eq!(
+            normalized_path_key(&missing),
+            normalized_path_key(&variant),
+            "文件不存在时的词法回退也要归一大小写与分隔符"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(normalized_path_key(&missing), lexical_path_key(&missing));
     }
 }

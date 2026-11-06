@@ -63,7 +63,8 @@ pub use pairing::{
     closer_for, opener_for, pair_action, pair_deletes_whole_pair, PairAction, PairProbe, AUTO_PAIRS,
 };
 pub use paths::{
-    data_root, data_root_for, data_root_for_base, instance_mutex_name, pending_open_path,
+    data_root, data_root_for, data_root_for_base, instance_mutex_name, normalized_path_key,
+    pending_open_path,
 };
 pub use saver::{
     save_atomic, save_document_atomic, save_document_encoded, EncodeNotice, SaveEncoding,

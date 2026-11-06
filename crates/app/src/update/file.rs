@@ -68,6 +68,11 @@ impl Editpad {
             // 拖拽文件进窗口 = 打开。一次拖入多个时，第一个之后的文件在忙/
             // 待决确认期间到货：进 CLI 队列排队，而不是被 busy 守卫静默丢弃。
             Message::FileDropped(path) => {
+                // 同一路径已在某页（含在途装载）时优先去重——即使忙也切过去，
+                // 不把重复文件排进队列。
+                if self.tab_already_open(&path).is_some() {
+                    return self.request_open(path);
+                }
                 if self.busy || self.open_confirm.is_some() {
                     self.pending_cli.push_back(path);
                     Task::none()
@@ -1182,7 +1187,48 @@ impl Editpad {
     /// 统一的换文档入口（打开对话框/拖拽/最近文件共用）：
     /// 当前页 dirty 时绝不静默丢弃修改（含撤销链），先弹打开确认条。
     /// P21：落点 = [`Self::target_tab_for_open`]（空净当前页就地打开，否则新页）。
+    /// 这个路径是否已在某页打开（装载中的那一页也算）。
+    ///
+    /// 用 core 的 [`editpad_core::normalized_path_key`]：大小写、分隔符、
+    /// `\\?\` 前缀、`.`/`..` 的常见变体归一到同一个键；`canonicalize`
+    /// 失败时退词法归一（不解析符号链接）。
+    pub(crate) fn tab_already_open(&self, path: &Path) -> Option<usize> {
+        let key = editpad_core::normalized_path_key(path);
+        if let Some(job) = &self.active_load {
+            if editpad_core::normalized_path_key(&job.path) == key {
+                return self.tabs.iter().position(|t| t.id == job.tab_id);
+            }
+        }
+        self.tabs.iter().position(|t| {
+            t.path
+                .as_deref()
+                .is_some_and(|p| editpad_core::normalized_path_key(p) == key)
+        })
+    }
+
     pub(super) fn request_open(&mut self, path: PathBuf) -> Task<Message> {
+        // 同一路径已在某页（含在途装载）：切过去，绝不再叠一份。
+        // 这条判断排在 busy 之前——切页不是 IO，装载中重复打开也该落到在途页。
+        if let Some(idx) = self.tab_already_open(&path) {
+            if idx != self.active_tab {
+                self.set_active_tab(idx);
+            }
+            // 干净页且磁盘已经变了：切过去并静默重载（与外部改动巡检同口径）；
+            // 脏页只切页，绝不弹「放弃并打开」——没有要被丢弃的新文档。
+            let stale = {
+                let tab = &self.tabs[idx];
+                !tab.dirty
+                    && tab
+                        .path
+                        .as_deref()
+                        .is_some_and(|p| file_changed_externally(tab.file_stamp, file_stamp(p)))
+            };
+            if stale {
+                return self.start_loading(path, idx);
+            }
+            self.set_status(self.t(editpad_core::Key::StAlreadyOpen).to_owned());
+            return Task::none();
+        }
         if self.busy {
             // 最近文件等直接走这条管线的入口：不再静默，给一句可读解释。
             // 拖拽/CLI 在调用前已自行排队，不会走到这里。

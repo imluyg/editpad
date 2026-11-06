@@ -3,32 +3,28 @@ use super::*;
 // ---------- 健壮性边界用例批 ----------
 
 #[test]
-fn duplicate_open_while_loading_is_guards_and_reload_after_done() {
-    // 加载进行中再次拖入同一文件：busy 守卫必须拒绝重入（防双任务竞态）
+fn duplicate_open_while_loading_switches_and_never_opens_twice() {
+    // 加载进行中再次拖入同一文件：切到在途页，不起第二个任务、不排队、不叠页。
     let mut app = Editpad::default();
     dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
     assert!(app.active_load.is_some(), "首次拖入应登记加载任务");
     let seq_first = app.job_seq;
 
     dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
-    assert_eq!(app.job_seq, seq_first, "加载中不得排队第二个任务");
-    assert_eq!(app.pending_cli.len(), 1, "第二次拖入应进队列");
+    assert_eq!(app.job_seq, seq_first, "装载中重复打开不许起第二个任务");
+    assert!(app.pending_cli.is_empty(), "重复打开不许进队列");
+    assert_eq!(app.tabs.len(), 1, "不许叠第二页");
 
-    // 第一次结算后队列续排：重复打开作为新任务重新加载
+    // 落定后再拖一次：仍然只切页
     let doc = editpad_core::Document::from_str("reloaded\n");
     dispatch(
         &mut app,
         Message::Loaded(seq_first, Ok((doc, String::new(), "UTF-8".to_owned()))),
     );
-    assert_eq!(
-        app.job_seq,
-        seq_first + 1,
-        "队列里的重复打开应作为新任务续排"
-    );
-    assert_eq!(
-        app.active_load.as_ref().map(|j| j.path.clone()),
-        Some(PathBuf::from("C:/dup.txt"))
-    );
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
+    assert_eq!(app.job_seq, seq_first, "已打开的文件只切页，不再起任务");
+    assert_eq!(app.tabs.len(), 1);
+    assert!(app.active_load.is_none());
 }
 
 #[test]
@@ -166,27 +162,13 @@ fn reopen_same_file_twice_lands_consistently() {
     assert_eq!(app.tabs.len(), 1);
     assert_eq!(app.tabs[0].path.as_ref(), Some(&path));
 
-    // 重复打开同一路径：当前页非空 → 新开一页承接，不覆盖、不 panic
+    // 重复打开同一路径：切回已有页，不再叠第二份
     dispatch(&mut app, Message::FileDropped(path.clone()));
-    let seq2 = app.job_seq;
-    assert_eq!(app.active_tab, 1, "重复打开落新页");
-    dispatch(
-        &mut app,
-        Message::Loaded(
-            seq2,
-            Ok((
-                editpad_core::Document::from_str("v1"),
-                String::new(),
-                "UTF-8".to_owned(),
-            )),
-        ),
-    );
-
-    assert_eq!(app.tabs.len(), 2);
-    for tab in &app.tabs {
-        assert_eq!(tab.path.as_ref(), Some(&path));
-        assert_eq!(tab.editor.borrow().doc.to_text(), "v1");
-    }
+    assert_eq!(app.job_seq, seq1, "同一路径不再起任务");
+    assert_eq!(app.active_tab, 0, "切回已有页");
+    assert_eq!(app.tabs.len(), 1, "不许叠第二页");
+    assert_eq!(app.tabs[0].path.as_ref(), Some(&path));
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "v1");
 }
 
 #[test]

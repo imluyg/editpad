@@ -2010,10 +2010,14 @@ fn recent_selected_prechecks_existence() {
         "缺失条目保留，不做静默剔除"
     );
 
-    // 存在的条目照常打开（进入加载管线）
+    // 存在的条目照常打开（进入加载管线）。用**另一份**真实文件：
+    // 当前页那份已被打开，再选它现在会被去重成切页。
+    let other = path.with_file_name("other.txt");
+    std::fs::write(&other, "x").unwrap();
+    app.settings.recent_files.push(other.display().to_string());
     dispatch(
         &mut app,
-        Message::RecentSelected(path.display().to_string()),
+        Message::RecentSelected(other.display().to_string()),
     );
     assert!(app.busy, "存在的文件应正常进入打开管线");
 }
@@ -2065,13 +2069,13 @@ fn p67_convert_eol_rewrites_document_undoably() {
 
 #[test]
 fn p67_loaded_and_save_as_reset_encoding_preference() {
-    // 重新载入同一文件：编码偏好重置为默认 UTF-8
-    // （先派发 FileDropped 建新加载任务，否则 Loaded 会被过期守卫丢弃；
-    // 当前页非空净 → 打开落在新页，断言按路径定位而非固定下标）
+    // 重新载入同一文件：编码偏好重置为默认 UTF-8。
+    // 走显式「重新加载」入口——拖入同一路径现在会去重成切页，不再触发装载。
     let (mut app, path) = loaded_real_file_app("p67-pref-reset");
     app.tabs[0].save_encoding = Some(editpad_core::SaveEncoding::Gbk);
 
-    dispatch(&mut app, Message::FileDropped(path.clone()));
+    let tab_id = app.tab().id;
+    dispatch(&mut app, Message::ConfirmExternalReload(tab_id));
     let seq = app.job_seq;
     dispatch(
         &mut app,
@@ -2084,7 +2088,6 @@ fn p67_loaded_and_save_as_reset_encoding_preference() {
             )),
         ),
     );
-    // start_loading「打开即聚焦」：活动页 = 刚重载完成的那一页
     assert_eq!(
         app.tab().path.as_deref(),
         Some(path.as_path()),
@@ -6581,4 +6584,85 @@ fn edit_during_save_as_keeps_tab_open() {
     );
     assert!(app.tabs[0].dirty);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 同一路径已打开：再打开只切页，不叠第二份。
+#[test]
+fn reopen_switches_instead_of_second_tab() {
+    let mut app = loaded_txt_app();
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/note.txt")),
+    );
+    assert_eq!(app.job_seq, seq, "已打开的文件不许再起任务");
+    assert_eq!(app.tabs.len(), 1, "不许叠第二页");
+    assert!(!app.status.is_empty(), "切页要给一句说明");
+    assert!(app.active_load.is_none());
+}
+
+/// 大小写/分隔符不同的同一路径也归一到同一页。
+#[test]
+fn reopen_same_file_other_spelling_switches() {
+    let mut app = loaded_txt_app();
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("c:/DOC/NOTE.TXT")),
+    );
+    assert_eq!(app.job_seq, seq, "不同拼写不应起新任务");
+    assert_eq!(app.tabs.len(), 1);
+}
+
+/// 已打开且置脏的页：只切页，不弹打开确认、不清脏。
+#[test]
+fn reopen_dirty_tab_switches_without_confirm() {
+    let mut app = loaded_txt_app();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+    let seq = app.job_seq;
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/note.txt")),
+    );
+    assert!(app.open_confirm.is_none(), "脏页去重不许弹确认条");
+    assert_eq!(app.job_seq, seq);
+    assert!(app.tabs[0].dirty, "去重不许碰这一页的脏账");
+}
+
+/// 已打开且干净、但磁盘已变：切过去并静默重载。
+#[test]
+fn reopen_clean_tab_reloads_when_disk_changed() {
+    let (mut app, path) = loaded_real_file_app("dedupe-changed");
+    let seq = app.job_seq;
+    std::fs::write(&path, "changed!").unwrap();
+    dispatch(&mut app, Message::FileDropped(path.clone()));
+    assert_eq!(app.job_seq, seq + 1, "磁盘变了应重新装载");
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.path.clone()),
+        Some(path),
+        "重载应落在同一路径"
+    );
+    assert_eq!(app.tabs.len(), 1, "重载落回原页");
+}
+
+/// 装载中的同一路径：切到在途页，不排队第二个任务。
+#[test]
+fn reopen_while_loading_switches_without_second_job() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/loading.txt")),
+    );
+    let job = app.active_load.as_ref().expect("夹具：装载在途").id;
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/doc/loading.txt")),
+    );
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.id),
+        Some(job),
+        "重复打开不许顶掉在途任务"
+    );
+    assert!(app.pending_cli.is_empty());
+    assert_eq!(app.tabs.len(), 1);
 }

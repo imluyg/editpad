@@ -367,6 +367,7 @@ key_table! {
     { StOpeningPrefix => "正在打开：", "Opening: " },
     { StLoadCancelled => "已取消打开", "Open canceled" },
     { StOpenBusy => "正在打开或保存，请稍候", "Opening or saving; try again shortly" },
+    { StAlreadyOpen => "已切换到该文件所在的标签页", "Switched to the tab that already has this file" },
     { RecentsEmpty => "（暂无最近文件）", "(no recent files)" },
     { RecentsClear => "清空记录", "Clear History" },
     { RecentsClearHint => "从 config.toml 移除全部路径", "Remove all paths from config.toml" },
