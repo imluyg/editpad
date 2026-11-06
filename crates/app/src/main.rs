@@ -204,6 +204,17 @@ where
     files
 }
 
+/// Windows 把**最小化**窗口的矩形报成 `(-32000, -32000)`。这个值绝不能参与
+/// 几何记忆：存进配置 ⇒ 下次启动把窗口建在屏幕外，用户从此看不见窗口（再点
+/// exe，第二实例只会把参数转给这个隐形实例）。保存侧与恢复侧共用这条判据。
+/// 合法的左侧副屏坐标通常只到 -16384 量级，故 -30000 的底线不会误杀。
+pub(crate) const WINDOW_POS_FLOOR: i32 = -30000;
+
+/// 一个窗口位置是否值得记住／可以按它建窗。
+pub(crate) fn window_pos_is_usable(x: i32, y: i32) -> bool {
+    x > WINDOW_POS_FLOOR && y > WINDOW_POS_FLOOR && x.abs() < (1 << 20) && y.abs() < (1 << 20)
+}
+
 /// P102：把配置里的窗口几何换算成 iced 建窗参数。值域钳制防坏配置
 /// （越界坐标/极端尺寸）建出用户无法操作的窗口；缺省 = 1024×768 居中。
 fn restore_window_geometry(s: &editpad_core::Settings) -> (iced::Size, window::Position) {
@@ -215,8 +226,8 @@ fn restore_window_geometry(s: &editpad_core::Settings) -> (iced::Size, window::P
         _ => iced::Size::new(1024.0, 768.0),
     };
     let position = match (s.window_x, s.window_y) {
-        // i32 全幅理论上界以内才采用（防坏值把窗口建到屏幕外十万像素）
-        (Some(x), Some(y)) if x.abs() < (1 << 20) && y.abs() < (1 << 20) => {
+        // 坏值不采用（防窗口建到屏幕外）；最小化哨兵 (-32000,-32000) 也在此列
+        (Some(x), Some(y)) if window_pos_is_usable(x, y) => {
             window::Position::Specific(Point::new(x as f32, y as f32))
         }
         _ => window::Position::Centered,

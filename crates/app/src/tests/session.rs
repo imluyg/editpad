@@ -2189,6 +2189,52 @@ fn p102_restore_window_geometry_clamps_bad_values() {
         (1024.0, 768.0),
         "非有限尺寸必须回退"
     );
+
+    // 最小化哨兵：Windows 把最小化窗口的矩形报成 (-32000,-32000)——不许按它建窗
+    s.window_x = Some(-32000);
+    s.window_y = Some(-32000);
+    s.window_width = None;
+    s.window_height = None;
+    let (_, pos) = restore_window_geometry(&s);
+    assert!(
+        matches!(pos, Position::Centered),
+        "最小化哨兵坐标必须回退居中（否则窗口建在屏幕外）"
+    );
+    // 反面对照：左侧副屏的合法负坐标仍要采用（-1920 不该被误杀）
+    s.window_x = Some(-1920);
+    s.window_y = Some(100);
+    let (_, pos) = restore_window_geometry(&s);
+    assert!(matches!(pos, Position::Specific(_)), "左副屏坐标必须保留");
+}
+
+/// 最小化的那一拍 Windows 会把窗口报成 (-32000,-32000)：保存侧不许把它写进
+/// 几何记忆（写进去 ⇒ 下次启动窗口建在屏幕外，用户从此看不见窗口）。
+#[test]
+fn window_moved_never_persists_the_minimized_sentinel() {
+    let mut app = Editpad::default();
+    app.settings_path_override = Some(scratch_dir("p102-geom-sentinel").join("config.toml"));
+    app.settings.window_x = Some(320);
+    app.settings.window_y = Some(180);
+
+    dispatch(
+        &mut app,
+        Message::WindowMoved(iced::Point::new(-32000.0, -32000.0)),
+    );
+    assert_eq!(
+        (app.settings.window_x, app.settings.window_y),
+        (Some(320), Some(180)),
+        "最小化哨兵不许覆写已记录的位置"
+    );
+
+    // 反面对照：真实移动照旧记录
+    dispatch(
+        &mut app,
+        Message::WindowMoved(iced::Point::new(400.0, 200.0)),
+    );
+    assert_eq!(
+        (app.settings.window_x, app.settings.window_y),
+        (Some(400), Some(200))
+    );
 }
 
 #[test]

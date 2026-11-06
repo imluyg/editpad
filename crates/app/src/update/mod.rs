@@ -1133,7 +1133,11 @@ impl Editpad {
             Message::WindowMoved(p) => {
                 // P102：窗口位置记忆（逻辑坐标，iced 与建窗 Specific 同空间）。
                 // 全屏那半边不记，理由同 [`Self::geometry_is_memorable`]。
-                if self.geometry_is_memorable() {
+                // 最小化时 Windows 报 (-32000, -32000)——那不是用户放的位置，
+                // 存下来会让下次启动的窗口建在屏幕外（与恢复侧共用一条判据）。
+                if self.geometry_is_memorable()
+                    && crate::window_pos_is_usable(p.x as i32, p.y as i32)
+                {
                     self.settings.window_x = Some(p.x as i32);
                     self.settings.window_y = Some(p.y as i32);
                     self.persist_geometry_if_due();
