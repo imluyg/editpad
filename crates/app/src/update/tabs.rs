@@ -128,6 +128,10 @@ impl Editpad {
         } else {
             false
         };
+        // 这一页正被〔另存为并关闭〕盯着：页没了就作废那次待关标记
+        if self.pending_close_tab_save_as == Some(self.tabs[idx].id) {
+            self.pending_close_tab_save_as = None;
+        }
         // P146：作废在途自动保存——「放弃更改并关闭」的页曾被人写盘复活
         self.tabs[idx].invalidate_autosave();
         self.tabs.remove(idx);
@@ -182,6 +186,10 @@ impl Editpad {
         let mut removed = 0usize;
         for &idx in idxs.iter().rev() {
             if idx < self.tabs.len() {
+                // 同 close_tab_now：页没了的待关标记一并作废
+                if self.pending_close_tab_save_as == Some(self.tabs[idx].id) {
+                    self.pending_close_tab_save_as = None;
+                }
                 // P146：同 close_tab_now——批量移除也作废在途自动保存
                 self.tabs[idx].invalidate_autosave();
                 self.tabs.remove(idx);
@@ -423,8 +431,12 @@ impl Editpad {
                     return Task::none();
                 }
                 if self.tabs[idx].path.is_none() {
-                    self.set_status(self.t(editpad_core::Key::StRenameUntitledFirst).to_owned());
-                    return Task::none();
+                    // 未命名页没有可写的归属路径：先走另存为对话框；选好目标后
+                    // 由 `SaveTargetChosen` 起写盘，`Saved` 成功且版本守卫通过
+                    // 时按 `pending_close_tab_save_as` 关页（见 file.rs）。
+                    let tab_id = self.tabs[idx].id;
+                    self.pending_close_tab_save_as = Some(tab_id);
+                    return self.save_as_dialog_for(tab_id);
                 }
                 self.save_page(idx, true).0
             }

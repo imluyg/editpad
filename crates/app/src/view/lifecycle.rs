@@ -125,23 +125,21 @@ impl Editpad {
         }
     }
 
-    pub(crate) fn suggested_name(&self) -> String {
-        match self.file_display_name() {
-            Some(name) => name,
+    /// 第 `idx` 页的另存为建议名。
+    ///
+    /// 从关闭确认条发起〔另存为并关闭〕时，用户可能在对话框开着期间切页，
+    /// 建议名必须跟着**发起页**走，不是回报时刻的活动页。
+    pub(crate) fn suggested_name_for(&self, idx: usize) -> String {
+        let Some(tab) = self.tabs.get(idx) else {
+            return String::new();
+        };
+        match tab.path.as_deref().and_then(Path::file_name) {
+            Some(name) => name.to_string_lossy().into_owned(),
             // P25：未命名页的另存为建议名带序号并补扩展名
-            None => match self.tab().untitled_num {
+            None => match tab.untitled_num {
                 Some(n) => format!("{}{n}.txt", editpad_core::untitled_prefix(self.lang())),
                 None => format!("{}.txt", editpad_core::untitled_prefix(self.lang())),
             },
         }
-    }
-
-    pub(super) fn file_display_name(&self) -> Option<String> {
-        self.tab()
-            .path
-            .as_deref()
-            .and_then(Path::file_name)
-            .and_then(std::ffi::OsStr::to_str)
-            .map(str::to_owned)
     }
 }

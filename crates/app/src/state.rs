@@ -74,6 +74,10 @@ pub(crate) struct Editpad {
     /// Saved/TabSaved 完成后据此关页
     pub(crate) pending_close_tab: Option<u64>,
 
+    /// 未命名页关闭确认里的〔另存为并关闭〕：从另存为对话框选定目标后，
+    /// 这次落盘要接 `TabSaved` 的逐页关闭链。存页 id 而不是下标（同 P146）。
+    pub(crate) pending_close_tab_save_as: Option<u64>,
+
     /// 「另存为」的目标：`(发起页 id, 选定的路径)`（P349）。
     ///
     /// 归属（路径／链接基准目录／未命名序号／编码偏好）**等到落盘成功那一步
@@ -555,6 +559,7 @@ impl Default for Editpad {
             viewport_size: (0.0, 0.0),
             batch_close_confirm: None,
             pending_close_tab: None,
+            pending_close_tab_save_as: None,
             pending_save_as: None,
             // 第 64 轮：会话内「上次关闭」栈，启动为空（不跨重启）
             closed_stack: Vec::new(),

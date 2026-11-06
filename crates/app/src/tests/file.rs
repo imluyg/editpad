@@ -6443,3 +6443,142 @@ fn click_left(ui: &mut ViewTree<'_>, at: iced::Point) -> Vec<Message> {
     ));
     messages
 }
+
+/// 未命名置脏页点〔保存并关闭〕：不再拒绝，改登记「另存为并关闭」并开对话框。
+#[test]
+fn untitled_close_offers_save_as_and_close() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tab_id = app.tabs[0].id;
+
+    dispatch(&mut app, Message::CloseTabSave(0));
+
+    assert_eq!(
+        app.pending_close_tab_save_as,
+        Some(tab_id),
+        "未命名页应登记另存为关页链"
+    );
+    assert!(app.busy, "另存为对话框阶段应占住通道");
+    assert!(app.tabs[0].dirty, "还没落盘，页仍置脏");
+}
+
+/// 另存为选好目标 → 落盘成功 → 按关页标记关闭。
+#[test]
+fn save_as_and_close_writes_then_closes() {
+    let dir = scratch_dir("save-as-close");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("out.txt");
+    std::fs::write(&target, "x").unwrap();
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tab_id = app.tabs[0].id;
+    let version = app.tabs[0].version;
+    dispatch(&mut app, Message::CloseTabSave(0));
+    app.busy = false; // 对话框回报前，通道由 FileChosen 放行
+    dispatch(
+        &mut app,
+        Message::SaveTargetChosen(tab_id, Some(target.clone())),
+    );
+    assert!(app.busy, "写盘阶段应重新占住通道");
+
+    dispatch(
+        &mut app,
+        Message::Saved(tab_id, version, Ok(editpad_core::EncodeNotice::default())),
+    );
+
+    assert!(!app.busy);
+    assert!(app.pending_close_tab_save_as.is_none(), "关页标记应清掉");
+    assert!(app.pending_save_as.is_none(), "另存为归属不许留残值");
+    assert!(
+        !app.tabs.iter().any(|t| t.id == tab_id),
+        "落盘成功且无新编辑后应关闭这一页"
+    );
+    assert_eq!(app.tabs.len(), 1, "关到最后一页应补一个空页");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 另存为被取消：页留着、关页标记作废。
+#[test]
+fn cancel_save_as_keeps_tab() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tab_id = app.tabs[0].id;
+    dispatch(&mut app, Message::CloseTabSave(0));
+
+    dispatch(&mut app, Message::SaveTargetChosen(tab_id, None));
+
+    assert!(!app.busy);
+    assert!(app.pending_close_tab_save_as.is_none());
+    assert!(app.tabs.iter().any(|t| t.id == tab_id), "取消不关页");
+    assert!(app.tabs[0].dirty);
+}
+
+/// 另存为写盘失败：页留着、关页标记作废、归属不落地。
+#[test]
+fn save_as_failure_keeps_tab() {
+    let dir = scratch_dir("save-as-close-fail");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("out.txt");
+    std::fs::write(&target, "x").unwrap();
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tab_id = app.tabs[0].id;
+    let version = app.tabs[0].version;
+    dispatch(&mut app, Message::CloseTabSave(0));
+    app.busy = false;
+    dispatch(&mut app, Message::SaveTargetChosen(tab_id, Some(target)));
+
+    dispatch(
+        &mut app,
+        Message::Saved(tab_id, version, Err("拒绝访问".to_owned())),
+    );
+
+    assert!(!app.busy);
+    assert!(app.pending_close_tab_save_as.is_none());
+    assert!(app.pending_save_as.is_none());
+    assert!(app.tabs.iter().any(|t| t.id == tab_id), "失败不关页");
+    assert!(app.tabs[0].dirty);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 另存为写盘期间又编辑：归新路径但页不关（与〔保存并关闭〕同口径）。
+#[test]
+fn edit_during_save_as_keeps_tab_open() {
+    let dir = scratch_dir("save-as-close-edit");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("out.txt");
+    std::fs::write(&target, "x").unwrap();
+
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let tab_id = app.tabs[0].id;
+    dispatch(&mut app, Message::CloseTabSave(0));
+    app.busy = false;
+    dispatch(
+        &mut app,
+        Message::SaveTargetChosen(tab_id, Some(target.clone())),
+    );
+    let version = app.tabs[0].version;
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("y".into())));
+
+    dispatch(
+        &mut app,
+        Message::Saved(tab_id, version, Ok(editpad_core::EncodeNotice::default())),
+    );
+
+    assert!(!app.busy);
+    assert!(app.pending_close_tab_save_as.is_none());
+    assert!(
+        app.tabs.iter().any(|t| t.id == tab_id),
+        "期间有新编辑，页不许被关"
+    );
+    assert_eq!(
+        app.tabs[0].path.as_deref(),
+        Some(target.as_path()),
+        "落盘成功仍应归新路径"
+    );
+    assert!(app.tabs[0].dirty);
+    let _ = std::fs::remove_dir_all(&dir);
+}

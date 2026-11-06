@@ -629,6 +629,14 @@ impl Editpad {
         // P21 标签页关闭确认：骨架版仅提供「放弃更改并关闭」出口，
         // 想保留改动请先 Ctrl+S（完整保存后关闭随 P21 完整版补齐）
         if let Some(idx) = self.close_confirm_idx() {
+            // 未命名页没有归属路径：按钮文案改为〔另存为并关闭〕，点击先开
+            // 另存为对话框；已命名页沿用〔保存并关闭〕。
+            let untitled = self.tabs.get(idx).is_some_and(|t| t.path.is_none());
+            let save_label = if untitled {
+                editpad_core::Key::ButtonSaveAsAndClose
+            } else {
+                editpad_core::Key::ButtonSaveAndClose
+            };
             body = body.push(rule::horizontal(1)).push(
                 row![
                     text(format!(
@@ -647,20 +655,17 @@ impl Editpad {
                     .padding([4, 12])
                     .style(chrome_button_style)
                     .on_press(Message::ConfirmCloseTabDiscard(idx)),
-                    // P21 完整版：已命名的页可直接「保存并关闭」
-                    button(
-                        text(self.t(editpad_core::Key::ButtonSaveAndClose))
-                            .size(uipx)
-                            .font(uifont)
-                    )
-                    .padding([4, 12])
-                    .style(chrome_button_style)
-                    .on_press_maybe(
-                        // S-1：idx 由页 id 现地解析（close_confirm_idx），恒在界内；
-                        // 这里的 get 只当保险，不再是防陈旧下标越界的兜底
-                        (!self.busy && self.tabs.get(idx).is_some_and(|t| t.path.is_some()))
-                            .then_some(Message::CloseTabSave(idx)),
-                    ),
+                    // P21 完整版：已命名页可直接「保存并关闭」；未命名页改走
+                    // 另存为对话框（成功后同样关闭）
+                    button(text(self.t(save_label)).size(uipx).font(uifont))
+                        .padding([4, 12])
+                        .style(chrome_button_style)
+                        .on_press_maybe(
+                            // S-1：idx 由页 id 现地解析（close_confirm_idx），恒在界内；
+                            // 这里的 get 只当保险，不再是防陈旧下标越界的兜底
+                            (!self.busy && self.tabs.get(idx).is_some())
+                                .then_some(Message::CloseTabSave(idx)),
+                        ),
                     button(
                         text(self.t(editpad_core::Key::ButtonCancel))
                             .size(uipx)

@@ -424,10 +424,13 @@ impl Editpad {
                 None => self.save_as_dialog(),
             },
             Message::SaveAsRequested => self.save_as_dialog(),
-            Message::SaveTargetChosen(_, None) => {
+            Message::SaveTargetChosen(tab_id, None) => {
                 self.busy = false;
                 // 另存为被取消：若它属于「保存并关闭」，一并放弃关闭
                 self.pending_close = false;
+                if self.pending_close_tab_save_as == Some(tab_id) {
+                    self.pending_close_tab_save_as = None;
+                }
                 Task::none()
             }
             Message::SaveTargetChosen(tab_id, Some(path)) => {
@@ -440,6 +443,9 @@ impl Editpad {
                     // 发起页已被关闭：目标文件一个字节都没写过，什么都不做
                     self.busy = false;
                     self.pending_close = false;
+                    if self.pending_close_tab_save_as == Some(tab_id) {
+                        self.pending_close_tab_save_as = None;
+                    }
                     return Task::none();
                 };
                 // P146：改路径前作废在途自动保存——曾以调度时刻的旧路径
@@ -457,6 +463,9 @@ impl Editpad {
                 if !started {
                     self.pending_close = false;
                     self.pending_save_as = None;
+                    if self.pending_close_tab_save_as == Some(tab_id) {
+                        self.pending_close_tab_save_as = None;
+                    }
                 }
                 task
             }
@@ -477,6 +486,9 @@ impl Editpad {
                     // 页已被关：落盘已发生，账目无处可记——收口即可
                     self.busy = false;
                     self.pending_close = false;
+                    if self.pending_close_tab_save_as == Some(tab_id) {
+                        self.pending_close_tab_save_as = None;
+                    }
                     return Task::none();
                 };
                 // P349（池 ⑤）：归属到这一步才落地——磁盘上确实有这个文件了。
@@ -564,6 +576,15 @@ impl Editpad {
                     }
                     self.set_status(self.t(editpad_core::Key::StSwitchCancelledClose).to_owned());
                 }
+                // 未命名页的〔另存为并关闭〕：归属已在上方提交，落盘成功且
+                // 期间没有新编辑才关页；有编辑则保留，与〔保存并关闭〕同口径。
+                if self.pending_close_tab_save_as == Some(tab_id) {
+                    self.pending_close_tab_save_as = None;
+                    if !self.tabs[idx].dirty {
+                        self.close_tab_now(idx);
+                        return Task::none();
+                    }
+                }
                 if self.tabs[idx].dirty {
                     // 保存期间的编辑保持了置脏，但自动保存不能只剩「再敲一次键」
                     // 这个触发点：用户停手后这一笔会永远停在内存里（崩溃即丢）。
@@ -572,8 +593,11 @@ impl Editpad {
                 }
                 Task::none()
             }
-            Message::Saved(_, _, Err(error)) => {
+            Message::Saved(tab_id, _, Err(error)) => {
                 self.busy = false;
+                if self.pending_close_tab_save_as == Some(tab_id) {
+                    self.pending_close_tab_save_as = None;
+                }
                 // P349（池 ⑤）：失败 ⇒ 那份待提交的另存为归属当场作废——
                 // 归属字段一个都不动（页仍叫原名／仍留着该页的编码偏好），
                 // 也不留残值给下一次落盘成功去认领。
@@ -1309,13 +1333,20 @@ impl Editpad {
     }
 
     pub(super) fn save_as_dialog(&mut self) -> Task<Message> {
+        self.save_as_dialog_for(self.tab().id)
+    }
+
+    /// 指定页的另存为对话框（关闭确认条里的〔另存为并关闭〕也走这里）。
+    /// 发起页 id 随任务带走：对话框开着期间用户完全可以切页。
+    pub(super) fn save_as_dialog_for(&mut self, tab_id: u64) -> Task<Message> {
         if self.busy {
             return Task::none();
         }
+        let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return Task::none();
+        };
         self.enter_busy();
-        let suggested = self.suggested_name();
-        // 发起页 id 随任务带走：对话框开着期间用户完全可以切页
-        let tab_id = self.tab().id;
+        let suggested = self.suggested_name_for(idx);
         Task::perform(
             async move {
                 rfd::AsyncFileDialog::new()

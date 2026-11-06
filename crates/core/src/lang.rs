@@ -397,6 +397,7 @@ key_table! {
     { GotoInvalidLine => "请输入有效行号（可选「:列」，都从 1 开始）", "Enter a valid line number (optional \":column\", both start at 1)" },
     { CloseConfirmDirty => "文档有未保存的更改，确定要关闭吗？", "This document has unsaved changes. Close it anyway?" },
     { ButtonSaveAndClose => "保存并关闭", "Save and Close" },
+    { ButtonSaveAsAndClose => "另存为并关闭", "Save As and Close" },
     { ButtonDiscardChanges => "放弃更改", "Discard Changes" },
     { ButtonCancel => "取消", "Cancel" },
     { ButtonDiscardAndClose => "放弃更改并关闭", "Discard and Close" },
