@@ -6343,3 +6343,43 @@ fn busy_open_request_reports_status() {
     dispatch(&mut app, Message::ReopenLastClosedFile);
     assert!(!app.status.is_empty(), "忙时重开也要出声");
 }
+
+/// Ctrl+N 与 Ctrl+T 是同一条新建动作。
+#[test]
+fn ctrl_n_opens_new_untitled_tab() {
+    let msg = handle_key_defaults(
+        iced::keyboard::Key::Character("n".into()),
+        iced::keyboard::Modifiers::CTRL,
+    );
+    assert!(
+        matches!(msg, Some(Message::NewTab)),
+        "Ctrl+N 应新建标签页，实际 {msg:?}"
+    );
+}
+
+/// 文件菜单首项「新建」也发同一条消息。
+#[test]
+fn file_menu_new_opens_tab() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::MenuToggled(0));
+    let mut ui = ViewTree::layout_default(&app);
+    let card = ui
+        .find(|r| r.width > 200.0 && r.width < 300.0 && r.height > 100.0 && r.y > 30.0)
+        .expect("File 菜单卡片");
+    // 按钮在抬起时 publish，`click()` 只发按下，这里补上释放。
+    let at = iced::Point::new(card.x + card.width / 2.0, card.y + 14.0);
+    let mut messages = ui.send(
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+        at,
+    );
+    messages.extend(ui.send(
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+            iced::mouse::Button::Left,
+        )),
+        at,
+    ));
+    assert!(
+        messages.iter().any(|m| matches!(m, Message::NewTab)),
+        "文件菜单首项应新建标签页，实际 {messages:?}"
+    );
+}

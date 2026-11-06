@@ -245,7 +245,9 @@ pub(crate) const HOTKEY_ACTIONS: &[HotkeyAction] = &[
     },
     HotkeyAction {
         id: "new_tab",
-        default_combos: &["Ctrl+T"],
+        // Ctrl+N 是对外最通行的「新建文件」；与 Ctrl+T 同一条动作，
+        // 不新开一个同义命令（命令面板里不该出现两条做同一件事的条目）。
+        default_combos: &["Ctrl+T", "Ctrl+N"],
         desc: HkNewTab,
     },
     HotkeyAction {

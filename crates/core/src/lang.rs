@@ -196,6 +196,7 @@ macro_rules! key_table {
 }
 key_table! {
     { MenuFile => "文件", "File" },
+    { MenuNew => "新建", "New" },
     { MenuEdit => "编辑", "Edit" },
     { MenuView => "查看", "View" },
     { MenuSettings => "设置", "Settings" },

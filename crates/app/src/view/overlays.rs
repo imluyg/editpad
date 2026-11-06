@@ -338,6 +338,10 @@ impl Editpad {
             0 => {
                 panel = panel
                     .push(item(
+                        item_label(lang, editpad_core::Key::MenuNew, false, Some("Ctrl+N")),
+                        interactive.then_some(Message::NewTab),
+                    ))
+                    .push(item(
                         item_label(lang, editpad_core::Key::MenuOpen, false, Some("Ctrl+O")),
                         interactive.then_some(Message::OpenRequested),
                     ))
