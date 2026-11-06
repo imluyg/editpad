@@ -254,6 +254,18 @@ impl Editpad {
                         self.confirm_visible = false;
                         self.pending_close = false;
                         self.status.clear();
+                        // 打开即聚焦：接收页就是活动页、且没有文本框/浮层占着
+                        // 焦点时，把焦点还给正文（中文输入法首键落在正文）。
+                        if target == self.active_tab {
+                            if self.editor_may_take_focus() {
+                                self.focus_editor();
+                            } else {
+                                // 新建的页默认 `focused=true`；有文本框/浮层正占着
+                                // 焦点时必须把它按下去，否则打开文件会把用户正在
+                                // 输入的内容踢回正文（查找栏开着时最明显）。
+                                self.cur_handle.borrow_mut().pointer_focus(false);
+                            }
+                        }
                         if self.find_visible && target == self.active_tab {
                             tasks.push(self.schedule_find_scan());
                         }

@@ -705,10 +705,8 @@ impl Backdrop {
 
     /// 本帧会不会画出整窗背板（读各浮层自己的在场标记）。
     ///
-    /// ⚠️ `#[cfg(test)]`：生产路径只需要"收"这一半（`enter_busy` 无条件 close 全部），
-    /// 读侧的唯一读者就是那条表驱动用例——留成 `pub(crate)` 会撞 `clippy -D warnings`
-    /// 的 dead-code（同 P301 那口 `#[cfg(test)]` 夹具入口）。
-    #[cfg(test)]
+    /// 生产读者是 [`Editpad::editor_may_take_focus`]：打开/新建后要判断
+    /// 有没有浮层正在占着焦点，有就不抢。写侧仍是 `enter_busy` 的无条件 close。
     pub(crate) fn is_open(self, app: &Editpad) -> bool {
         match self {
             Backdrop::TabMenu => app.tab_context_menu.is_some(),

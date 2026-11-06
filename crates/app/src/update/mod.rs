@@ -553,6 +553,19 @@ impl Editpad {
         self.cur_handle.borrow_mut().pointer_focus(true);
     }
 
+    /// 打开/新建后能不能把输入焦点还给正文。
+    ///
+    /// 判据是「没有任何文本框/浮层在占焦点」：八个整窗背板浮层 + 查找栏 +
+    /// 转跳栏 + 标签重命名 + 热键录键。任一在场就不动焦点——否则打开文件的
+    /// 同时会把用户正在输入的内容踢回正文（IME 尤其明显）。
+    pub(crate) fn editor_may_take_focus(&self) -> bool {
+        !Backdrop::ALL.iter().any(|b| b.is_open(self))
+            && !self.find_visible
+            && !self.goto_visible
+            && self.renaming_tab.is_none()
+            && self.hotkey_capture.is_none()
+    }
+
     /// 关闭列编辑器对话框的**唯一出口**：连同输入焦点一起还给正文。
     ///
     /// 为什么收成一处：本仓反复的"清除点散在各出路"那一族（P303／P336／P345／

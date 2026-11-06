@@ -6143,3 +6143,78 @@ fn new_placeholder_shows_untitled_number() {
         placeholder.display_name_in(editpad_core::Lang::ZhCn)
     );
 }
+
+/// 打开完成后焦点回到正文（用户不必先点一下才能打字/上屏中文）。
+#[test]
+fn loaded_focuses_editor_when_no_field_owns_focus() {
+    let mut app = Editpad::default();
+    app.cur_handle.borrow_mut().pointer_focus(false);
+    assert!(!app.cur_handle.borrow().focused, "夹具：焦点先交出去");
+
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/focus/a.txt")),
+    );
+    let job = app.active_load.as_ref().expect("夹具：装载在途").id;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job,
+            Ok((
+                editpad_core::Document::from_str("x"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    assert!(app.cur_handle.borrow().focused, "打开后焦点应回正文");
+}
+
+/// 查找栏正持有焦点时打开文件：不许把焦点抢回正文。
+#[test]
+fn loaded_does_not_steal_focus_from_find_bar() {
+    let mut app = Editpad::default();
+    dispatch(&mut app, Message::FindToggled);
+    assert!(!app.cur_handle.borrow().focused, "夹具：查找栏持有焦点");
+
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/focus/b.txt")),
+    );
+    let job = app.active_load.as_ref().expect("夹具：装载在途").id;
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job,
+            Ok((
+                editpad_core::Document::from_str("x"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "查找栏开着时打开文件不许抢焦点"
+    );
+}
+
+/// 命令面板正持有焦点时新建标签页：新页也不许抢焦点。
+#[test]
+fn new_tab_does_not_steal_focus_from_palette() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::PaletteToggled(crate::state::PaletteMode::Commands),
+    );
+    assert!(!app.cur_handle.borrow().focused, "夹具：命令面板持有焦点");
+
+    dispatch(&mut app, Message::NewTab);
+
+    assert!(
+        !app.cur_handle.borrow().focused,
+        "命令面板开着时新建页不许抢焦点"
+    );
+}

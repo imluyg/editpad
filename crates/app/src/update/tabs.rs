@@ -317,6 +317,11 @@ impl Editpad {
                 let last = self.tabs.len() - 1;
                 self.assign_untitled_num(last);
                 self.set_active_tab(last);
+                if self.editor_may_take_focus() {
+                    self.focus_editor();
+                } else {
+                    self.cur_handle.borrow_mut().pointer_focus(false);
+                }
                 Task::none()
             }
             // 第 76 轮：标签条空白区双击 → 新建标签页。双击判定由控件层完成
