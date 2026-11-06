@@ -220,6 +220,12 @@ impl Editpad {
                 }
                 let marker = if i == self.active_tab { "▸ " } else { "  " };
                 let pin = if tab.pinned { "📌 " } else { "" };
+                // 后台页正在装载：行不画在用户眼前，但这一页要有标记可寻
+                let loading = if self.tab_is_loading(tab.id) {
+                    "⟳ "
+                } else {
+                    ""
+                };
                 // P168：页签名走当前界面语言——此前 display_name() 硬编码
                 // 中文，英文界面下标签仍是「未命名N」（状态栏/重命名占位
                 // 已是 UntitledN，同屏混排，用户复报）。
@@ -235,7 +241,7 @@ impl Editpad {
                 // SwitchTab（含 P65 双击重命名）。
                 let closeable = !tab.pinned;
                 let mut pill = row![button(
-                    text(format!("{marker}{pin}{}", tab_label))
+                    text(format!("{marker}{pin}{loading}{}", tab_label))
                         .size(uipx)
                         .font(uifont),
                 )
@@ -415,29 +421,49 @@ impl Editpad {
             body = body.push(self.cur_handle.view(content_font));
         }
 
-        if let Some((bytes_read, total_bytes)) = self.progress {
-            body = body.push(
-                row![
-                    text(self.t(editpad_core::Key::RecentsLoading))
+        // 进度行只画在**属主页**上：恢复链与后台页装载不抢焦点，若无条件按
+        // 活动页渲染，用户会在自己正看的文档下面看到另一个文件的进度条。
+        if self.progress_belongs_to_active() {
+            if let Some((bytes_read, total_bytes)) = self.progress {
+                let name = self
+                    .active_load
+                    .as_ref()
+                    .and_then(|j| j.path.file_name())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let percent = if total_bytes == 0 {
+                    0
+                } else {
+                    // 128 位中间量：不让 "bytes×100" 在极端档回绕
+                    (bytes_read as u128 * 100 / total_bytes as u128).min(100)
+                };
+                body = body.push(
+                    row![
+                        text(format!(
+                            "{}{}",
+                            self.t(editpad_core::Key::StOpeningPrefix),
+                            name
+                        ))
                         .size(uipx)
                         .font(uifont),
-                    container(progress_bar(
-                        0.0..=total_bytes.max(1) as f32,
-                        bytes_read as f32
-                    ))
-                    .width(Fill),
-                    text(format!(
-                        "{} / {} KB",
-                        bytes_read / 1024,
-                        total_bytes.max(1) / 1024
-                    ))
-                    .size(uipx)
-                    .font(uifont),
-                ]
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .padding([6, 10]),
-            );
+                        container(progress_bar(
+                            0.0..=total_bytes.max(1) as f32,
+                            bytes_read as f32
+                        ))
+                        .width(Fill),
+                        text(format!(
+                            "{percent}%  {} / {} KB",
+                            bytes_read / 1024,
+                            total_bytes.max(1) / 1024
+                        ))
+                        .size(uipx)
+                        .font(uifont),
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .padding([6, 10]),
+                );
+            }
         }
 
         if self.recents_visible {

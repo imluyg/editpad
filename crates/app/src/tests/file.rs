@@ -5941,3 +5941,24 @@ fn markdown_url_links_keep_their_query_string() {
     assert_eq!(md_link_target("?q=1", Some(dir.as_path())), None);
     let _ = std::fs::remove_file(&file);
 }
+
+/// 进度行只画在属主页：后台恢复/后台页装载不许在用户正看的文档下面
+/// 画另一个文件的进度条；标签条用 `⟳` 标记真正在装载的那一页。
+#[test]
+fn progress_row_only_on_owner_tab() {
+    let mut app = Editpad::default();
+    // 第 0 页起一次装载，再切到第 1 页：装载目标不再是活动页
+    app.register_load_job(PathBuf::from("C:/load/A.txt"), 0);
+    dispatch(&mut app, Message::NewTab);
+    assert_eq!(app.active_tab, 1);
+    assert!(
+        !app.progress_belongs_to_active(),
+        "后台页装载时进度行不许画在活动页上"
+    );
+    assert!(app.tab_is_loading(app.tabs[0].id), "装载页应有 ⟳ 标记");
+    assert!(!app.tab_is_loading(app.tabs[1].id), "非装载页不许有标记");
+
+    // 切回装载页：进度行恢复可见
+    app.set_active_tab(0);
+    assert!(app.progress_belongs_to_active(), "切回属主页后进度行应恢复");
+}

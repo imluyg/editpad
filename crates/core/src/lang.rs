@@ -363,6 +363,7 @@ key_table! {
     { TabHeaderSuffix => "」", "”" },
     { TabUnsaved => "（未保存）", "(unsaved)" },
     { RecentsLoading => "加载中…", "Loading…" },
+    { StOpeningPrefix => "正在打开：", "Opening: " },
     { RecentsEmpty => "（暂无最近文件）", "(no recent files)" },
     { RecentsClear => "清空记录", "Clear History" },
     { RecentsClearHint => "从 config.toml 移除全部路径", "Remove all paths from config.toml" },

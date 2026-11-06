@@ -955,6 +955,25 @@ impl Editpad {
         self.busy || self.active_load.is_some()
     }
 
+    /// 在途装载落在哪一页（稳定页 id）；没有装载 = `None`。
+    pub(crate) fn load_owner_tab_id(&self) -> Option<u64> {
+        self.active_load.as_ref().map(|j| j.tab_id)
+    }
+
+    /// 进度行是否该画在活动页上。
+    ///
+    /// 恢复链与后台页装载不抢焦点（`register_load_job` 的调用方决定），
+    /// 若进度行无条件按活动页渲染，用户会在自己正看的文档下面看到另一个
+    /// 文件的进度条——那是一条假话。属主页才画行，别的页只在 pill 上标记。
+    pub(crate) fn progress_belongs_to_active(&self) -> bool {
+        self.load_owner_tab_id() == self.tabs.get(self.active_tab).map(|t| t.id)
+    }
+
+    /// 这一页是否正是当前装载目标（标签条 `⟳` 标记用）。
+    pub(crate) fn tab_is_loading(&self, tab_id: u64) -> bool {
+        self.load_owner_tab_id() == Some(tab_id)
+    }
+
     pub(crate) fn start_loading(&mut self, path: PathBuf, tab: usize) -> Task<Message> {
         if !self.load_channel_available() {
             return Task::none();
