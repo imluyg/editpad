@@ -1,11 +1,14 @@
 use super::*;
 use std::rc::Rc;
 
-/// P386：主窗口 id 未就绪时挂起的窗口切换种类（F11 全屏／F9 置顶）。
+/// P386：主窗口 id 未就绪时挂起的窗口动作（F11 全屏／F9 置顶／Esc 关窗）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PendingWindowToggle {
     Fullscreen,
     AlwaysOnTop,
+    /// 裸 Esc 关窗：主窗口 id 尚未捕获时先问运行时，问到再走关窗请求
+    /// （与点「×」同一条路径，不做任何快捷放过）。
+    Close,
 }
 
 /// B9 列编辑器对话框草稿（Phase 2）。数值字段以字符串承载——输入框
@@ -262,7 +265,7 @@ pub(crate) struct Editpad {
     pub(crate) pending_close: bool,
     /// 主窗口 id。iced 0.14 没有 Id::MAIN 之类的常量，只能从 close_requests 订阅捕获
     pub(crate) main_window: Option<window::Id>,
-    /// P386：主窗口 id 还没拿到时挂起的那次窗口切换（F11／F9）。
+    /// P386：主窗口 id 还没拿到时挂起的那次窗口动作（F11／F9／Esc 关窗）。
     /// 一次性意图 ⇒ 兑现点与作废点都在 `Message::MainWindowResolved` 那一条臂上：
     /// 拿到 id 就照原样重放一次，拿不到就整份作废（不许留到下一次无关回报再兑现
     /// ＝P215／P221／P371 同一条规矩）。

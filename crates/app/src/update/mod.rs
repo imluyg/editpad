@@ -785,7 +785,8 @@ impl Editpad {
             | Message::RecentsToggled
             | Message::RecentSelected(..)
             | Message::RecentsCleared
-            | Message::BarsDismissed => self.update_menus(message),
+            | Message::BarsDismissed
+            | Message::EscapePressed => self.update_menus(message),
             // ---------- 会话/快照/关窗/窗口 ----------
             Message::CloseRequested(..)
             | Message::ConfirmSaveAndClose
@@ -944,8 +945,26 @@ impl Editpad {
                 // 各写一行、每轮新增都要记得补（P21/P27/P28/P50/P55/P151/69 轮
                 // 各补过一次）；收口后新增浮层只有一条 checklist：
                 // 在 `dismiss_all_prompts` 加一行 + 在穷尽回归里加一条断言。
-                self.dismiss_all_prompts();
+                // 点背板不看返回值：它只在浮层在场时才存在，永远只是"收起"。
+                let _ = self.dismiss_all_prompts();
                 Task::none()
+            }
+            Message::EscapePressed => {
+                // Esc 分两段：有浮层/裁决在场＝只收起（与点背板同义）；空场
+                // 才落到关窗。关窗走与「×」完全相同的路径（`CloseRequested`
+                // → 快照直退或未保存确认条），不新增第二条退出实现。
+                if self.dismiss_all_prompts() {
+                    return Task::none();
+                }
+                match self.main_window {
+                    Some(id) => self.update(Message::CloseRequested(id)),
+                    // P386 同款：全新会话还没捕获主窗口 id，先问运行时；
+                    // 一次性意图由 `MainWindowResolved` 兑现或作废。
+                    None => {
+                        self.pending_window_toggle = Some(PendingWindowToggle::Close);
+                        iced::window::oldest().map(Message::MainWindowResolved)
+                    }
+                }
             }
             _ => Task::none(),
         }
@@ -961,43 +980,54 @@ impl Editpad {
     /// UX 裁决（`external_change` 装的是多页聚合队列，与单页/批量确认条在今天
     /// 是可以合法共存的），点单后要么把存储收进 `enum PendingPrompt`、要么
     /// 在这里加一条优先级截断。
-    pub(crate) fn dismiss_all_prompts(&mut self) {
-        self.find_visible = false;
-        self.goto_visible = false;
-        self.recents_visible = false;
+    ///
+    /// 返回值 = 这一下**真的收起了什么**（有浮层/裁决在场）。裸 Esc
+    /// （`EscapePressed`）据此分两段：收起了东西就到此为止，空场才关窗。
+    /// 新增浮层时除了"加一行收起"，还要把它的在场读进 `had`——否则那类浮层
+    /// 开着时按 Esc 会既收起它又顺手退出应用。
+    pub(crate) fn dismiss_all_prompts(&mut self) -> bool {
+        let mut had = false;
+        had |= std::mem::take(&mut self.find_visible);
+        had |= std::mem::take(&mut self.goto_visible);
+        had |= std::mem::take(&mut self.recents_visible);
         // P318：书签列表面板同样吃 Esc（穷尽回归里已加一条断言）
-        self.bookmarks_visible = false;
+        had |= std::mem::take(&mut self.bookmarks_visible);
         // P151：Esc 同时收起命令面板与重命名态（下方既有分支同款），
         // 收尾把输入焦点还给正文——否则中文输入法在正文里失效
-        self.palette_visible = false;
+        had |= std::mem::take(&mut self.palette_visible);
         self.focus_editor();
         // P27：Esc 一并关闭设置弹窗。P367：走唯一出口——弹窗关了就没人能再取消
         // 录键态，必须连带作废「等一个组合键」
+        had |= self.settings_visible || self.hotkey_capture.is_some();
         self.close_settings_dialog();
         // Esc 同时视作放弃关窗确认
-        self.confirm_visible = false;
-        self.pending_close = false;
+        had |= std::mem::take(&mut self.confirm_visible);
+        had |= std::mem::take(&mut self.pending_close);
         // P21：Esc 也取消标签页关闭确认
-        self.close_tab_confirm = None;
+        had |= self.close_tab_confirm.take().is_some();
         // P28：Esc 同时收起右键菜单与批量关闭确认
-        self.tab_context_menu = None;
+        had |= self.tab_context_menu.take().is_some();
         // P308：正文右键菜单同一条收起出口
+        had |= std::mem::take(&mut self.editor_context_menu);
         self.close_editor_context_menu();
-        self.batch_close_confirm = None;
+        had |= self.batch_close_confirm.take().is_some();
         // 第 69 轮：Esc 同时收起顶部菜单栏浮层
-        self.menu_bar_open = None;
+        had |= self.menu_bar_open.take().is_some();
         // P50：Esc 一并收起外部修改提示条
-        self.external_change = None;
+        had |= self.external_change.take().is_some();
         // P55：Esc 一并取消就地重命名（一切保持原状）
-        self.renaming_tab = None;
+        had |= self.renaming_tab.take().is_some();
         self.rename_input.clear();
         // P67：Esc 一并收起状态栏编码/行尾菜单
+        had |= std::mem::take(&mut self.encoding_menu);
         self.close_encoding_menu();
+        had |= std::mem::take(&mut self.eol_menu);
         self.close_eol_menu();
         // P10：取消在途扫描 + 清结果（含序号失效）
         self.cancel_find_scan();
         // 关栏（Esc 路径）同样清掉查找进度提示，避免左下角残留；
         // 只清自己写的那条（换过别的状态时标记已失效）
+        had |= self.find_status;
         if self.find_status {
             self.status.clear();
             self.status_is_error = false;
@@ -1007,8 +1037,8 @@ impl Editpad {
         // 自己的切换路径（Ctrl+Shift+A / F12）而 Esc 漏过——收起了查找栏却把
         // 结果面板留在屏上。FIF 关栏必须连带取消在途目录扫描（与
         // FindInFilesToggled 的关闭分支同一口径），否则后台仍在扫一块看不见的面板。
-        self.find_all_visible = false;
-        self.fif_visible = false;
+        had |= std::mem::take(&mut self.find_all_visible);
+        had |= std::mem::take(&mut self.fif_visible);
         self.cancel_fif_scan();
         // 崩溃恢复提示条：Esc 与〔丢弃〕不同义——后者调 `discard_session`（P378 起
         // 只删崩前那一份会话的页与清单，不碰整个快照目录；旧注释写的 `clear_session`
@@ -1018,14 +1048,15 @@ impl Editpad {
         // 写一份新清单覆盖它，而 `keeping` 又只从本字段取（`view/snapshots.rs:107-111`）
         // ⇒ 崩前那几页的文件在下一拍被回收／配额两把刀一起删掉（`core/src/snapshot.rs:396-411`）。
         // 要不要真「留着再问」＝机制级决定（新增待决字段＋清单如何共存），已登记等他点单。
-        self.recover_prompt = None;
+        had |= self.recover_prompt.take().is_some();
         // P364：连带收掉〔恢复〕的「已问过替换未保存改动」记号。留着它 = 一次
         // 误按 Esc 就把护栏永久武装掉，下次弹出的提示条第一下点击直接替换标签页。
         self.recover_overwrite_ok = false;
         // 列编辑器对话框**不进**本出口，是刻意的：它是模态浮层，Esc 在
         // `update/edit.rs` 的按键分支里先于本函数收自己（顶层优先，与主流编辑器
         // 一致）；并进来会让「点菜单背板」也变成关对话框。
-        self.find_drag = None;
+        had |= self.find_drag.take().is_some();
+        had
     }
 
     // ---------- domain methods (round 81 Phase 1: update() split) ----------
@@ -1140,6 +1171,7 @@ impl Editpad {
                     Some(PendingWindowToggle::AlwaysOnTop) => {
                         self.update(Message::ToggleAlwaysOnTop)
                     }
+                    Some(PendingWindowToggle::Close) => self.update(Message::CloseRequested(id)),
                     None => Task::none(),
                 };
                 if raise {

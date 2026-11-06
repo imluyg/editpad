@@ -499,6 +499,14 @@ impl Editpad {
                         _ => {}
                     }
                 }
+                // 组字（IME 预编辑）中：Esc 是"取消候选/取消组字"的系统手势。
+                // 只交给输入法（它会发 Preedit("") 收尾），不许落到下面的
+                // 浮层/关窗语义——否则打中文时按一下 Esc 就退出应用。
+                if let keyboard::Key::Named(Named::Escape) = &key {
+                    if self.cur_handle.borrow().preedit_active() {
+                        return Task::none();
+                    }
+                }
                 // B10 多光标：Esc = 折叠为单光标（设计 §3.3），先于列块
                 // Esc 清块分支消费按键
                 if let keyboard::Key::Named(Named::Escape) = &key {

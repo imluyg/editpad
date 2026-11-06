@@ -933,8 +933,9 @@ pub(crate) fn dispatch_action(id: &str, mods: keyboard::Modifiers) -> Option<Mes
 ///
 /// 顺序：① Ctrl 组合（无 Alt，P8 AltGr 保护）→ 规范组合串 → 生效动作表
 /// （用户重映射优先，其次默认）→ 分发；Ctrl+Shift+Home/End 经 shiftless
-/// 回退命中 doc_start/doc_end 并透传 Shift（选区语义）。② 其余按键
-/// （字符输入/光标移动/回车退格/Esc）走既有编辑路径。
+/// 回退命中 doc_start/doc_end 并透传 Shift（选区语义）。② 裸功能键（F2 家族）。
+/// ③ 其余按键（字符输入/光标移动/回车退格）走既有编辑路径；Esc 发
+/// `EscapePressed`——浮层在场先收浮层，空场关窗。
 pub(crate) fn handle_key(
     key: keyboard::Key,
     mods: keyboard::Modifiers,
@@ -1005,7 +1006,9 @@ pub(crate) fn handle_key(
         // P125：Insert 切换覆写/插入（固定语义不入注册表——裸命名键
         // 不参与热键系统，与 Enter/Tab 同口径）
         Key::Named(Named::Insert) => Some(Message::ToggleOverwrite),
-        Key::Named(Named::Escape) => Some(Message::BarsDismissed),
+        // Esc 是固定语义的两段式手势：先关浮层，空场再关窗（判据在
+        // `update_menus`，见 `Message::EscapePressed`）
+        Key::Named(Named::Escape) => Some(Message::EscapePressed),
 
         Key::Named(Named::ArrowLeft) => {
             // P312（路线图 C11）：Alt+← = 跳回上一个出发点（对标项目 A #1733、

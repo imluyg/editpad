@@ -107,6 +107,141 @@ fn esc_dismisses_every_transient_prompt() {
     );
 }
 
+/// 裸 Esc 的两段语义：有浮层/裁决在场＝只收起（`dismiss_all_prompts` 返回
+/// true），空场才关窗。关窗必须复用点「×」的那条 `CloseRequested` 路径——
+/// 未保存页照旧弹确认条，不另造一条"快捷退出"。
+///
+/// 夹具关掉快照总开关：`CloseRequested` 走的是真实 `%APPDATA%` 目录
+/// （注入点只覆盖心跳），测试不许碰。
+#[test]
+fn esc_closes_the_window_only_when_no_prompt_is_open() {
+    let mut app = Editpad::default();
+    app.settings.enable_snapshots = false;
+    app.main_window = Some(iced::window::Id::unique());
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(
+        app.any_dirty(),
+        "夹具自证：有未保存内容，关窗必须被确认条拦住"
+    );
+
+    // ① 浮层在场：这一下只收起浮层，不得同时触发关窗
+    dispatch(&mut app, Message::FindToggled);
+    assert!(app.find_visible, "夹具自证：查找栏在场");
+    dispatch(&mut app, Message::EscapePressed);
+    assert!(!app.find_visible, "Esc 先收浮层");
+    assert!(
+        !app.confirm_visible,
+        "收浮层的那一下不许顺手弹关窗确认条（否则一次 Esc 关两层）"
+    );
+
+    // ② 空场：同一个手势落到关窗
+    dispatch(&mut app, Message::EscapePressed);
+    assert!(
+        app.confirm_visible,
+        "空场 Esc = 关窗请求；dirty 时由未保存确认条把门"
+    );
+
+    // ③ 确认条本身也算"在场"：Esc 先取消它，不退出
+    dispatch(&mut app, Message::EscapePressed);
+    assert!(!app.confirm_visible, "Esc 取消关窗确认");
+    assert!(!app.pending_close, "也不许留下待关标记");
+}
+
+/// 真实按键通道（`handle_key` 的 Esc 臂）必须接到同一条关窗路径——
+/// 只测 `EscapePressed` 消息会漏掉"键根本没被映射过来"这一格。
+/// ⚠️ 测试的 `dispatch` 不执行 `Task`，所以 `KeyPressed` 派生出的消息
+/// 必须在这里显式接住再派发（生产由运行时投递）。
+#[test]
+fn escape_key_wires_to_the_close_path() {
+    let mut app = Editpad::default();
+    app.settings.enable_snapshots = false;
+    app.main_window = Some(iced::window::Id::unique());
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    let routed = handle_key_defaults(
+        keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::empty(),
+    )
+    .expect("裸 Esc 必须有分发（固定语义）");
+    assert!(
+        matches!(routed, Message::EscapePressed),
+        "裸 Esc 要接到 EscapePressed，实得 {routed:?}"
+    );
+    dispatch(&mut app, routed);
+    assert!(
+        app.confirm_visible,
+        "裸 Esc 经 handle_key → EscapePressed 走到关窗"
+    );
+}
+
+/// 组字（IME 预编辑）中按 Esc 是"取消候选"，绝不能被当成退出应用——
+/// 否则用中文输入法的人每次想取消候选都会关掉软件。
+#[test]
+fn esc_during_ime_composition_does_not_close_the_window() {
+    let mut app = Editpad::default();
+    app.settings.enable_snapshots = false;
+    app.main_window = Some(iced::window::Id::unique());
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    assert!(
+        app.cur_handle.borrow_mut().ime_preedit("ni".to_owned()),
+        "夹具自证：预编辑串真的进了编辑器"
+    );
+    assert!(
+        app.cur_handle.borrow().preedit_active(),
+        "夹具自证：确实在组字"
+    );
+    dispatch(
+        &mut app,
+        Message::KeyPressed(
+            keyboard::Key::Named(keyboard::key::Named::Escape),
+            keyboard::Modifiers::empty(),
+        ),
+    );
+    assert!(
+        !app.confirm_visible && !app.pending_close,
+        "组字期 Esc 只交给输入法，不许触发关窗/待关"
+    );
+}
+
+/// 全新会话还没捕获主窗口 id：Esc 关窗先挂起，问到 id 再兑现；问不到就
+/// 整份作废（P386 那次"按了没反应还谎报成功"同一条规矩）。
+#[test]
+fn esc_close_without_a_captured_window_id_is_replayed_once() {
+    let mut app = Editpad::default();
+    app.settings.enable_snapshots = false;
+    assert!(app.main_window.is_none(), "夹具自证：还没捕获主窗口 id");
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("x".into())));
+    dispatch(&mut app, Message::EscapePressed);
+    assert_eq!(
+        app.pending_window_toggle,
+        Some(PendingWindowToggle::Close),
+        "没 id ⇒ 挂起一次关窗意图"
+    );
+    assert!(!app.confirm_visible, "拿到 id 之前什么都不该发生");
+
+    let id = iced::window::Id::unique();
+    dispatch(&mut app, Message::MainWindowResolved(Some(id)));
+    assert_eq!(app.main_window, Some(id), "回报要把主窗口 id 补齐");
+    assert!(app.confirm_visible, "挂起的那次关窗在拿到 id 后兑现");
+    assert_eq!(
+        app.pending_window_toggle, None,
+        "兑现即作废，不许留到下一次无关回报"
+    );
+
+    // 问不到 id：挂起的意图整份丢弃，迟到的回报也不许偷偷兑现
+    let mut fresh = Editpad::default();
+    fresh.settings.enable_snapshots = false;
+    dispatch(&mut fresh, Message::Edit(EditOp::InsertText("x".into())));
+    dispatch(&mut fresh, Message::EscapePressed);
+    dispatch(&mut fresh, Message::MainWindowResolved(None));
+    assert_eq!(fresh.pending_window_toggle, None, "问不到就该丢掉意图");
+    assert!(!fresh.confirm_visible, "没兑现成就不许弹确认条");
+    dispatch(&mut fresh, Message::MainWindowResolved(Some(id)));
+    assert!(
+        !fresh.confirm_visible,
+        "迟到的无关回报不许把已作废的那次偷偷兑现"
+    );
+}
+
 // ---------- P153：查找框淡出（点正文后查找框转半透明） ----------
 
 /// 淡出系数是查找框内所有控件的**单一来源**：1.0 = 不淡出，
