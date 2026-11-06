@@ -622,11 +622,6 @@ enum Message {
     /// 单实例转发轮询取到的待开路径（P210：轮询在桥接线程做，**只有真取到
     /// 路径才发这一条**，不再有每 400ms 一次的空拍消息；见 `tick_stream`）
     PendingOpenPaths(Vec<PathBuf>),
-    /// 打开确认条「放弃更改并打开」：丢弃未保存修改并加载暂存路径
-    ConfirmOpenDiscard,
-    /// 打开确认条「取消」：留在当前文档
-    ConfirmOpenCancel,
-
     /// 深浅主题切换（写回设置）
     ThemeToggled,
     /// P155：下拉框选中项（`pick_list` 按选项类型发消息，故单列一档，

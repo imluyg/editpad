@@ -3324,330 +3324,35 @@ fn save_and_close_chain_voids_pending_flag_when_guard_blocks() {
     );
 }
 
-/// 多选文件转发给已运行实例 → 首个进「放弃更改并打开」确认、其余留在
-/// `pending_cli`。用户点「取消」只收走了确认条，队列悬挂 → 之后任意一次
-/// 无关的 Loaded 收尾续排会把被放弃的文件接二连三开出来。
+/// 一次性跳转/选中意图只能由**它所属的那次装载**兑现：结算时按路径核对，
+/// A 的意图不许落到后来打开的 B 上。
 #[test]
-fn p341_open_confirm_discard_clears_the_originating_page() {
-    // 缺陷形状：A 页置脏 → 一次打开弹出「放弃更改并打开」确认条（它**不占 busy**，
-    // 切页臂也不看 busy）→ 用户切到 B 页并敲了字 → 点〔放弃并打开〕 ⇒ 旧写法用
-    // `self.tab_mut()` 清脏，被标成"已保存"的是 **B**：那页的未存改动此后既不弹
-    // 关页确认、也进不了自动保存 = 静默丢失；而真正被放弃的 A 反倒还挂着脏账。
-    let mut app = app_with_tabs(2); // 页 0 脏（"d0"），页 1 是新建页
-    app.set_active_tab(0); // 确认条问的就是**活动页**的未存改动
-    let pending = PathBuf::from("C:/w/next.txt");
-    dispatch(&mut app, Message::FileDropped(pending.clone()));
-    assert_eq!(
-        app.open_confirm.as_ref().map(|(_, p)| p),
-        Some(&pending),
-        "夹具前提：确认条已弹出且带着待开路径"
-    );
-
-    app.set_active_tab(1);
-    dispatch(
-        &mut app,
-        Message::Edit(EditOp::InsertText("B 的未存改动".into())),
-    );
-    assert!(
-        app.tabs[0].dirty && app.tabs[1].dirty,
-        "夹具前提：两页都有未存改动（否则分辨不出清错了页）"
-    );
-    let (a_id, b_id) = (app.tabs[0].id, app.tabs[1].id);
-    let b_version = app.tabs[1].version;
-
-    dispatch(&mut app, Message::ConfirmOpenDiscard);
-
-    assert_eq!(app.tabs[0].id, a_id);
-    assert!(!app.tabs[0].dirty, "被放弃的应当是发起页 A 的更改");
-    assert!(app.tabs[1].dirty, "B 的未存改动不许被这次裁决清掉");
-    assert_eq!(app.tabs[1].version, b_version, "B 的账目一字不动");
-    assert_ne!(b_id, a_id);
-    // 打开本身照常起——这才是用户点〔放弃并打开〕要的结果
-    let job = app.active_load.as_ref().expect("确认之后应真的开始装载");
-    assert_eq!(job.path, pending, "开的就是那条路径");
-}
-
-#[test]
-fn p341_open_confirm_discard_after_originating_tab_closed_still_opens() {
-    // 同一条裁决的另一头：确认条挂着时发起页被关掉了（关页时它自己那笔改动已经
-    // 没了）。旧写法没有"页还在不在"这一问，会把幸存页当成发起页清脏。
-    let mut app = app_with_tabs(1); // 只有一页，且已置脏
-    let pending = PathBuf::from("C:/w/after.txt");
-    dispatch(&mut app, Message::FileDropped(pending.clone()));
-    let origin = app.open_confirm.as_ref().expect("确认条应弹出").0;
-
-    dispatch(&mut app, Message::NewTab);
-    dispatch(&mut app, Message::ConfirmCloseTabDiscard(0));
-    assert_eq!(app.tabs.len(), 1, "夹具前提：发起页已关");
-    assert_ne!(app.tabs[0].id, origin, "夹具前提：幸存页不是发起页");
-    assert!(!app.tabs[0].dirty, "夹具前提：幸存页本来就干净");
-
-    dispatch(&mut app, Message::ConfirmOpenDiscard);
-
-    assert!(
-        app.active_load.as_ref().is_some_and(|j| j.path == pending),
-        "发起页没了也要把用户要开的文件开出来"
-    );
-    assert!(!app.tabs[0].dirty, "无人认领的裁决不许改别页账目");
-}
-
-/// 通道被占时点〔放弃并打开〕＝这一整枪必须作废。兄弟臂〔重新加载〕在 P388
-/// 改的就是这个次序，而 `start_loading` 开头的早退是**静默**的：改前先
-/// `take()` 掉这份一次性裁决、先把发起页的 ● 抹掉，再去撞那道早退 ⇒
-/// 文件没开、条也没了，而那一页的未存改动此后**既不弹关页确认、也进不了
-/// 自动保存**（＝静默丢失，比"什么都没发生"更糟的一档）。
-#[test]
-fn open_confirm_discard_asks_the_channel_before_consuming_the_decision() {
-    let mut app = app_with_tabs(2); // 页 0 脏，页 1 是新建的空页
-
-    // 先占通道：切到干净的新页，起一次真实装载
-    app.set_active_tab(1);
-    let occupier = PathBuf::from("C:/w/occupier.txt");
-    dispatch(&mut app, Message::FileDropped(occupier.clone()));
-    let job_id = app
-        .active_load
-        .as_ref()
-        .expect("夹具前提：第二次打开确实起了装载")
-        .id;
-    assert!(
-        app.busy,
-        "夹具前提：通道被占（`load_channel_available` 问的就是这个）"
-    );
-    // 拖入在确认条在场时会排队，所以待决确认用状态直接立（测的是
-    // 「通道被占时点〔放弃并打开〕」这条落地判据，不是拖拽排队）
-    app.set_active_tab(0);
-    let pending = PathBuf::from("C:/w/next.txt");
-    app.open_confirm = Some((app.tabs[0].id, pending.clone()));
-
-    dispatch(&mut app, Message::ConfirmOpenDiscard);
-
-    assert!(
-        app.tabs[0].dirty,
-        "执行不了的点击不许清掉发起页的 ●：清了就是宣称已保存"
-    );
-    assert_eq!(
-        app.open_confirm.as_ref().map(|(_, p)| p),
-        Some(&pending),
-        "待决裁决必须留在场上，等通道空出来再点一次"
-    );
-    assert_eq!(
-        app.active_load.as_ref().map(|j| j.id),
-        Some(job_id),
-        "被占的这一次也不许顺手起第二次装载，实际 {:?}",
-        app.active_load.as_ref().map(|j| j.path.clone())
-    );
-
-    // 反面对照：通道空出来后同一颗按钮真的把要开的文件开出来（挡住"永远点不动"）
-    dispatch(
-        &mut app,
-        Message::Loaded(
-            job_id,
-            Ok((
-                editpad_core::Document::from_str("occ\n"),
-                String::new(),
-                "UTF-8".to_owned(),
-            )),
-        ),
-    );
-    assert!(!app.busy, "夹具自证：占通道的那次装载已结算");
-    dispatch(&mut app, Message::ConfirmOpenDiscard);
-    assert!(app.open_confirm.is_none(), "兑现之后这份一次性裁决才被消费");
-    assert!(!app.tabs[0].dirty, "兑现时才放弃发起页的改动");
-    assert!(
-        app.active_load.as_ref().is_some_and(|j| j.path == pending),
-        "此刻开的就是那条待决路径，实际 {:?}",
-        app.active_load.as_ref().map(|j| j.path.clone())
-    );
-}
-
-#[test]
-fn cancelling_open_confirm_voids_remaining_cli_queue() {
-    let mut app = Editpad::default();
-    dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
-    app.pending_cli = VecDeque::from(vec![
-        PathBuf::from("C:/cli/b.txt"),
-        PathBuf::from("C:/cli/c.txt"),
-    ]);
-    app.open_confirm = Some((app.tab().id, PathBuf::from("C:/cli/a.txt")));
-
-    dispatch(&mut app, Message::ConfirmOpenCancel);
-
-    assert!(app.open_confirm.is_none(), "确认条应收起");
-    assert!(
-        app.pending_cli.is_empty(),
-        "放弃打开 = 整批作废，不得留下悬挂队列：实际 {:?}",
-        app.pending_cli
-    );
-}
-
-#[test]
-fn esc_on_open_confirm_also_voids_cli_queue() {
-    let mut app = Editpad::default();
-    dispatch(&mut app, Message::Edit(EditOp::InsertText("local".into())));
-    app.pending_cli = VecDeque::from(vec![PathBuf::from("C:/cli/b.txt")]);
-    app.open_confirm = Some((app.tab().id, PathBuf::from("C:/cli/a.txt")));
-
-    // Esc 在 BarsDismissed 里本就等价于「放弃打开确认」
-    dispatch(&mut app, Message::BarsDismissed);
-
-    assert!(app.open_confirm.is_none());
-    assert!(!app.pending_close);
-    assert!(
-        app.pending_cli.is_empty(),
-        "Esc 既然视作取消，队列也要一并作废：实际 {:?}",
-        app.pending_cli
-    );
-}
-
-/// 一次性跳转意图只能由**它所属的那次装载**兑现。旧实现把消费写在
-/// `match (result, target)` 之外、且作用在「当时的活动页」上，于是取消一次
-/// 打开确认后意图悬挂，下一次无关装载的收尾替它跳了行。
-#[test]
-fn cancelled_open_voids_link_goto_and_later_loads_do_not_honor_it() {
-    let dir = scratch_dir("link-goto-cancel");
-    let (cur, target) = (dir.join("cur.txt"), dir.join("t.txt"));
-    std::fs::write(&cur, "c1\nc2\nc3\n").unwrap();
-    std::fs::write(&target, "a\nb\nc\nd\ne\n").unwrap();
-    let mut app = Editpad::default();
-    dispatch(&mut app, Message::FileDropped(cur.clone()));
-    let s0 = app.job_seq;
-    dispatch(
-        &mut app,
-        Message::Loaded(
-            s0,
-            Ok((
-                editpad_core::Document::from_str("c1\nc2\nc3\n"),
-                String::new(),
-                "UTF-8".to_owned(),
-            )),
-        ),
-    );
-    // 当前页置脏 → 链接打开要先过「放弃更改并打开」确认
-    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
-    dispatch(
-        &mut app,
-        Message::LinkClicked(crate::editor::LinkTarget::File {
-            path: target,
-            line: Some(5),
-        }),
-    );
-    assert!(app.open_confirm.is_some(), "用例前提：确认条已弹出");
-    assert_eq!(
-        app.pending_link_goto.as_ref().map(|(_, l)| *l),
-        Some(5),
-        "行号暂存等待裁决"
-    );
-
-    dispatch(&mut app, Message::ConfirmOpenCancel);
-    assert!(
-        app.pending_link_goto.is_none(),
-        "用户取消打开 = 该跳转意图一并作废，不得悬挂"
-    );
-
-    // 之后用户自己正常打开另一个文件并结算：被取消的那次跳行不得借这次
-    // 收尾续排复活（旧实现正是如此——当前文档光标被凭空打跑到第 5 行）
-    let later = dir.join("later.txt");
-    std::fs::write(&later, "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
-    dispatch(&mut app, Message::FileDropped(later));
-    let s1 = app.job_seq;
-    dispatch(
-        &mut app,
-        Message::Loaded(
-            s1,
-            Ok((
-                editpad_core::Document::from_str("l1\nl2\nl3\nl4\nl5\nl6\n"),
-                String::new(),
-                "UTF-8".to_owned(),
-            )),
-        ),
-    );
-    assert_eq!(
-        app.cur_handle.borrow().cursor.line,
-        0,
-        "无关装载不得替被取消的点击跳行"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 打开确认条被**另一次打开**替换时，上一份「打开后跳行/选中」意图属于上一个
-/// 文件——旧实现只存行号，结算时无条件兑现，于是用户选了 B，光标却按 A 的命中
-/// 坐标跳走。两条意图现在都带目标路径，结算时按路径核对。
-#[test]
-fn a_superseded_open_confirm_does_not_apply_the_old_goto_to_the_new_file() {
-    use crate::editor::LinkTarget;
-    use crate::find_scan::{FileHit, FileHits};
-    let dir = scratch_dir("superseded-confirm");
-    std::fs::create_dir_all(&dir).unwrap();
-    let a = PathBuf::from("C:/doc/a.txt");
-    // 拖入在确认条在场时会排队（这是本轮的新口径），会顶掉确认条的入口
-    // 只剩「最近文件」这类直接走 request_open 的；用真实文件让它可达。
-    let b = dir.join("b.txt");
-    std::fs::write(&b, "b1\nb2\nb3\nb4\nb5\nb6\n").unwrap();
-    let b_entry = b.to_string_lossy().into_owned();
-    let b_doc = || editpad_core::Document::from_str("b1\nb2\nb3\nb4\nb5\nb6\n");
-
-    // ── 链接那条
+fn stale_goto_intent_does_not_apply_to_another_file() {
     let mut app = loaded_txt_app();
-    dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
+    let other = PathBuf::from("C:/doc/other.txt");
+    app.pending_link_goto = Some((other.clone(), 5));
+    app.pending_fif_goto = Some((other, 3, 2, 2));
+
     dispatch(
         &mut app,
-        Message::LinkClicked(LinkTarget::File {
-            path: a.clone(),
-            line: Some(5),
-        }),
+        Message::FileDropped(PathBuf::from("C:/doc/b.txt")),
     );
-    assert!(app.open_confirm.is_some(), "夹具自证：确认条已起");
-    assert_eq!(
-        app.pending_link_goto.as_ref().map(|(p, l)| (p.clone(), *l)),
-        Some((a.clone(), 5)),
-        "夹具自证：行号意图属于 A"
-    );
-    // 还没裁决就从最近文件打开 B：确认条换成 B
-    dispatch(&mut app, Message::RecentSelected(b_entry.clone()));
-    let (_, confirmed) = app.open_confirm.clone().expect("确认条仍在");
-    assert_eq!(confirmed, b, "夹具自证：确认条已换成 B");
-
-    dispatch(&mut app, Message::ConfirmOpenDiscard);
     let seq = app.job_seq;
     dispatch(
         &mut app,
-        Message::Loaded(seq, Ok((b_doc(), String::new(), "UTF-8".to_owned()))),
-    );
-    let cursor = app.cur_handle.borrow().cursor;
-    assert_eq!(
-        (cursor.line, cursor.col),
-        (0, 0),
-        "B 的光标不该被 A 的第 5 行带走"
+        Message::Loaded(
+            seq,
+            Ok((
+                editpad_core::Document::from_str("b1\nb2\nb3\nb4\nb5\nb6\n"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
     );
 
-    // ── FIF 那条
-    let mut fif = loaded_txt_app();
-    dispatch(&mut fif, Message::Edit(EditOp::InsertText("!".into())));
-    fif.fif_results = vec![FileHits {
-        path: a.clone(),
-        hits: vec![FileHit {
-            pos: editpad_core::MatchPos {
-                line: 3,
-                col: 2,
-                len_chars: 2,
-            },
-            excerpt: "aa".into(),
-        }],
-    }];
-    dispatch(&mut fif, Message::FifGoto(0, 0));
-    assert!(fif.open_confirm.is_some(), "夹具自证：确认条已起（FIF）");
-    dispatch(&mut fif, Message::RecentSelected(b_entry.clone()));
-    dispatch(&mut fif, Message::ConfirmOpenDiscard);
-    let seq = fif.job_seq;
-    dispatch(
-        &mut fif,
-        Message::Loaded(seq, Ok((b_doc(), String::new(), "UTF-8".to_owned()))),
-    );
-    assert!(
-        fif.cur_handle.borrow().ordered_selection().is_none(),
-        "B 里不该出现 A 命中的选区"
-    );
-    std::fs::remove_dir_all(&dir).ok();
+    let ed = app.cur_handle.borrow();
+    assert_eq!(ed.cursor.line, 0, "A 的跳行不许落到 B 上");
+    assert!(ed.ordered_selection().is_none(), "A 的选中不许落到 B 上");
 }
 
 /// P215：busy 期间的 Ctrl+点击既不该静默失效，更不该把行号「存」给
@@ -3901,11 +3606,9 @@ fn pending_open_stream_delivers_arrived_paths() {
 }
 
 /// P210：busy 期间到货的转发路径改存暂存位，不混进 `pending_cli`。
-/// 依据是 N-07 的既有口径——`ConfirmOpenCancel` / `BarsDismissed` 会整条
-/// 清空 `pending_cli`（那批本就是用户主动取消的对象），而转发路径此刻已经
-/// 从磁盘抢走、无处重试：混进去就是「取消一次确认条，第二实例双击的文件
-/// 全丢」。旧实现靠「busy 时干脆不读盘」回避，读盘挪到桥接线程后改暂存，
-/// 下一拍（400ms）自愈合。
+/// 转发路径此刻已经从磁盘抢走、无处重试；单独暂存让它的排空点与 CLI 队列
+/// 分开，统一由 `update` 尾部那一个钩子驱动（R-19）。旧实现靠「busy 时干脆
+/// 不读盘」回避，读盘挪到桥接线程后改暂存，下一拍（400ms）自愈合。
 #[test]
 fn pending_open_paths_stash_while_busy_and_merge_in_order_when_idle() {
     let mut app = Editpad::default();
@@ -6257,77 +5960,46 @@ fn dropping_two_files_opens_both_in_order() {
     assert!(app.pending_cli.is_empty());
 }
 
-/// 打开确认条在场时，排队的下一个文件不许顶掉用户的待决裁决。
+/// 脏页（含未命名新文件）上打开已有文件：直接新开一页，原页保持未保存。
 #[test]
-fn queue_head_survives_open_confirm() {
+fn opening_from_a_dirty_page_opens_a_new_tab_and_keeps_it_dirty() {
     let mut app = Editpad::default();
-    dispatch(&mut app, Message::Edit(EditOp::InsertText("dirty".into())));
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/q/a.txt")));
-    assert!(app.open_confirm.is_some(), "夹具：脏页触发确认条");
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/q/b.txt")));
-    assert_eq!(app.pending_cli.len(), 1);
-    assert!(app.open_confirm.is_some(), "排队不许消费确认条");
-
-    dispatch(&mut app, Message::ConfirmOpenDiscard);
-    let first = app.active_load.as_ref().expect("确认后应开第一个").id;
-    assert_eq!(first, app.job_seq);
-    assert_eq!(app.pending_cli.len(), 1, "第二个仍在队列里等结算");
-
-    dispatch(
-        &mut app,
-        Message::Loaded(
-            first,
-            Ok((
-                editpad_core::Document::from_str("a"),
-                String::new(),
-                "UTF-8".to_owned(),
-            )),
-        ),
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("draft".into())));
+    let original_id = app.tabs[0].id;
+    assert!(
+        app.tabs[0].path.is_none() && app.tabs[0].dirty,
+        "夹具：未命名脏页"
     );
+
+    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/q/a.txt")));
+
+    assert_eq!(app.tabs.len(), 2, "不许覆盖未保存的新文件，直接新开一页");
+    assert_eq!(app.tabs[0].id, original_id, "原页还是那一页");
+    assert!(app.tabs[0].dirty, "原页必须保持脏（否则等于伪装成已保存）");
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "draft");
+    assert_eq!(app.active_tab, 1, "焦点落在新页");
     assert_eq!(
         app.active_load.as_ref().map(|j| j.path.clone()),
-        Some(PathBuf::from("C:/q/b.txt")),
-        "确认后队列头必须继续打开"
+        Some(PathBuf::from("C:/q/a.txt"))
     );
+    assert!(app.pending_cli.is_empty(), "不是排队，是直接打开");
 }
 
-/// 单实例转发的路径在确认条在场时只进暂存，等确认结束后才排空。
+/// 单实例转发的路径在脏页上也直接新开一页，不再有确认器阻隔。
 #[test]
-fn stashed_forward_waits_while_open_confirm_up() {
+fn forwarded_path_opens_from_a_dirty_page() {
     let mut app = Editpad::default();
-    // 直接立一个待决确认（不弄脏页面，取消后转发的路径才能直接开）
-    app.open_confirm = Some((app.tabs[0].id, PathBuf::from("C:/q/a.txt")));
-
+    dispatch(&mut app, Message::Edit(EditOp::InsertText("dirty".into())));
     dispatch(
         &mut app,
         Message::PendingOpenPaths(vec![PathBuf::from("C:/q/forwarded.txt")]),
     );
-    assert_eq!(app.pending_open_stash.len(), 1);
-    assert!(app.pending_cli.is_empty(), "确认条在场时不许排空暂存");
-
-    // 取消确认：待决裁决消失，暂存才能在尾部钩子里接上打开链
-    dispatch(&mut app, Message::ConfirmOpenCancel);
     assert_eq!(
         app.active_load.as_ref().map(|j| j.path.clone()),
-        Some(PathBuf::from("C:/q/forwarded.txt")),
-        "确认结束后转发的路径应被打开"
+        Some(PathBuf::from("C:/q/forwarded.txt"))
     );
-}
-
-/// 取消打开确认会连同这批拖入队列一起作废（既有 N-07 语义）。
-#[test]
-fn cancelling_confirm_clears_dropped_queue() {
-    let mut app = Editpad::default();
-    dispatch(&mut app, Message::Edit(EditOp::InsertText("dirty".into())));
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/q/a.txt")));
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/q/b.txt")));
-    assert_eq!(app.pending_cli.len(), 1);
-
-    dispatch(&mut app, Message::ConfirmOpenCancel);
-
-    assert!(app.open_confirm.is_none());
-    assert!(app.pending_cli.is_empty(), "取消确认应清掉这批队列");
-    assert!(app.active_load.is_none(), "取消后什么都别开");
+    assert_eq!(app.tabs.len(), 2);
+    assert!(app.tabs[0].dirty, "原页保持脏");
 }
 
 /// 忙时按 Ctrl+O / Ctrl+Shift+T 不再毫无反应。
@@ -6616,7 +6288,7 @@ fn reopen_same_file_other_spelling_switches() {
 
 /// 已打开且置脏的页：只切页，不弹打开确认、不清脏。
 #[test]
-fn reopen_dirty_tab_switches_without_confirm() {
+fn reopen_dirty_tab_switches_without_touching_dirty() {
     let mut app = loaded_txt_app();
     dispatch(&mut app, Message::Edit(EditOp::InsertText("!".into())));
     let seq = app.job_seq;
@@ -6624,7 +6296,6 @@ fn reopen_dirty_tab_switches_without_confirm() {
         &mut app,
         Message::FileDropped(PathBuf::from("C:/doc/note.txt")),
     );
-    assert!(app.open_confirm.is_none(), "脏页去重不许弹确认条");
     assert_eq!(app.job_seq, seq);
     assert!(app.tabs[0].dirty, "去重不许碰这一页的脏账");
 }

@@ -18,10 +18,6 @@ fn esc_dismisses_every_transient_prompt() {
     app.settings_visible = true;
     app.confirm_visible = true;
     app.pending_close = true;
-    app.open_confirm = Some((app.tab().id, PathBuf::from("C:/w/x.txt")));
-    app.pending_cli.push_back(PathBuf::from("C:/w/y.txt"));
-    app.pending_link_goto = Some((PathBuf::from("C:/w/x.txt"), 7));
-    app.pending_fif_goto = Some((PathBuf::from("C:/w/x.txt"), 0, 0, 0));
     app.close_tab_confirm = Some(id0);
     app.tab_context_menu = Some(0);
     app.editor_context_menu = true;
@@ -92,10 +88,6 @@ fn esc_dismisses_every_transient_prompt() {
     assert!(!app.settings_visible, "设置弹窗");
     assert!(!app.confirm_visible, "退出保存确认");
     assert!(!app.pending_close, "关窗标记");
-    assert_eq!(app.open_confirm, None, "打开确认");
-    assert!(app.pending_cli.is_empty(), "收起打开确认时命令行批次作废");
-    assert_eq!(app.pending_link_goto, None, "悬挂的跳行意图一并作废");
-    assert_eq!(app.pending_fif_goto, None, "悬挂的 FIF 跳行意图一并作废");
     assert_eq!(app.close_tab_confirm, None, "单页关闭确认");
     assert_eq!(app.tab_context_menu, None, "标签右键菜单");
     assert!(!app.editor_context_menu, "正文右键菜单（P308）");

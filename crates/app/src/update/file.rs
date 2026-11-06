@@ -18,10 +18,7 @@ impl Editpad {
     /// 不发消息），所以"等下一拍"根本等不来。
     /// 递归安全：暂存在递归之前已 `take` 清空 ⇒ 内层这道钩子必定原样返回。
     pub(crate) fn drive_stashed_pending_open(&mut self, task: Task<Message>) -> Task<Message> {
-        if self.busy
-            || self.open_confirm.is_some()
-            || (self.pending_open_stash.is_empty() && self.pending_cli.is_empty())
-        {
+        if self.busy || (self.pending_open_stash.is_empty() && self.pending_cli.is_empty()) {
             return task;
         }
         self.pending_cli
@@ -63,17 +60,15 @@ impl Editpad {
                 self.busy = false;
                 self.request_open(path)
             }
-            // 拖拽文件进窗口 = 打开；同一路径重复拖拽也允许重新加载
-            // （每次 job_seq 递增，无路径去重；dirty/busy 保护在 request_open 内）
-            // 拖拽文件进窗口 = 打开。一次拖入多个时，第一个之后的文件在忙/
-            // 待决确认期间到货：进 CLI 队列排队，而不是被 busy 守卫静默丢弃。
+            // 拖拽文件进窗口 = 打开。一次拖入多个时，第一个之后的文件在忙
+            // 到货：进 CLI 队列排队，而不是被 busy 守卫静默丢弃。
             Message::FileDropped(path) => {
                 // 同一路径已在某页（含在途装载）时优先去重——即使忙也切过去，
                 // 不把重复文件排进队列。
                 if self.tab_already_open(&path).is_some() {
                     return self.request_open(path);
                 }
-                if self.busy || self.open_confirm.is_some() {
+                if self.busy {
                     self.pending_cli.push_back(path);
                     Task::none()
                 } else {
@@ -81,13 +76,10 @@ impl Editpad {
                 }
             }
             // P103：命令行排队打开的下一个文件。boot 首发；每次 Loaded
-            // 结算（busy 归零）后续排，直到队列清空。request_open 的
-            // dirty/busy 守卫照常生效——期间用户若编辑了当前页，后续
-            // 文件改走打开确认条，与拖拽语义完全一致。
+            // 结算（busy 归零）后续排，直到队列清空。与拖拽完全同一条打开
+            // 管线（有内容就新开页，不占用户当前页）。
             Message::OpenNextCliFile => {
-                // 待决的打开确认条在场时，队列暂停：不许用下一个文件顶掉
-                // 用户还没回答的那次裁决。
-                if self.busy || self.open_confirm.is_some() {
+                if self.busy {
                     return Task::none();
                 }
                 let Some(path) = self.pending_cli.pop_front() else {
@@ -777,45 +769,6 @@ impl Editpad {
                 // 同上：批量裁决后补排一轮防抖
                 self.maybe_schedule_autosave()
             }
-            // ---------- 打开确认 ----------
-            Message::ConfirmOpenDiscard => {
-                // P473（P388 同族，兄弟臂〔重新加载〕当时改的就是这个次序）：
-                // **先问通道，再消费这份一次性裁决**。改前顺序＝先 `take()`、
-                // 先把发起页的 ● 抹掉，再去调 `start_loading`，而它开头的早退是
-                // **静默**的 ⇒ 通道被占的那一次点击：文件没开、提示条没了、一句
-                // 话不说，而那一页的未存改动此后再不置脏＝关窗不拦、自动保存不排
-                // （静默丢失，比"什么都没发生"重一档）。保持静默是 house style，
-                // 要害在于裁决与那页的脏账都得原样留在场上，等通道空出来再点一次。
-                if !self.load_channel_available() {
-                    return Task::none();
-                }
-                let Some((tab_id, path)) = self.open_confirm.take() else {
-                    return Task::none();
-                };
-                // P341：清脏落在**发起页**上（确认条不占 busy，用户可能已经切走）；
-                // 发起页已被关闭时无账可记（内容随页一起没了），照常把文件开出来。
-                if let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) {
-                    self.tabs[idx].dirty = false;
-                }
-                // 明确放弃：不再触发下一次确认；若关闭确认条还开着，其前提已消失
-                self.confirm_visible = false;
-                self.pending_close = false;
-                let tab = self.target_tab_for_open();
-                self.start_loading(path, tab)
-            }
-            Message::ConfirmOpenCancel => {
-                // 取消的正是「打开确认」时才作废命令行/转发批次：活动页仍是脏的，
-                // 续排后面的文件只会逐个再撞同一面确认墙；留着队列更糟——它会在
-                // 之后任意一次无关装载的收尾续排里，把用户已明确放弃的文件突然
-                // 开出来。无确认在飞时不动队列（不打断正常批量打开）。
-                if self.open_confirm.take().is_some() {
-                    self.pending_cli.clear();
-                    // 链接/FIF 点击的「打开后跳行」同属这次被放弃的打开，一并作废
-                    self.pending_link_goto = None;
-                    self.pending_fif_goto = None;
-                }
-                Task::none()
-            }
             // ---------- 编码与行尾（P67） ----------
             Message::ToggleEncodingMenu => {
                 if self.busy {
@@ -1244,10 +1197,9 @@ impl Editpad {
             self.set_status(self.t(editpad_core::Key::StOpenBusy).to_owned());
             return Task::none();
         }
-        if self.tab().dirty {
-            self.open_confirm = Some((self.tab().id, path));
-            return Task::none();
-        }
+        // 落点由 `target_tab_for_open` 决定：当前页是空净未命名页才就地打开，
+        // 否则一律新开一页。新页不会覆盖当前页的未保存内容，所以打开这条路
+        // 不需要任何「放弃并打开」裁决（原确认流会清掉原页的 ● 却把内容留下）。
         let tab = self.target_tab_for_open();
         self.start_loading(path, tab)
     }

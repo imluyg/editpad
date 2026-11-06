@@ -773,8 +773,6 @@ impl Editpad {
             | Message::ConfirmExternalReload(..)
             | Message::IgnoreExternalChange(..)
             | Message::IgnoreAllExternalChanges
-            | Message::ConfirmOpenDiscard
-            | Message::ConfirmOpenCancel
             | Message::ToggleEncodingMenu
             | Message::ToggleEolMenu
             | Message::SaveWithEncoding(..)
@@ -976,18 +974,9 @@ impl Editpad {
         // P27：Esc 一并关闭设置弹窗。P367：走唯一出口——弹窗关了就没人能再取消
         // 录键态，必须连带作废「等一个组合键」
         self.close_settings_dialog();
-        // Esc 同时视作放弃关闭/打开确认
+        // Esc 同时视作放弃关窗确认
         self.confirm_visible = false;
         self.pending_close = false;
-        // 收起的确实是一次「打开确认」时，命令行/转发批次一并作废
-        // （与 ConfirmOpenCancel 同一口径；无确认在飞时按 Esc 不该
-        // 打断一次正常的批量打开）
-        if self.open_confirm.take().is_some() {
-            self.pending_cli.clear();
-            // 同 ConfirmOpenCancel：这次打开携带的跳行意图一并作废
-            self.pending_link_goto = None;
-            self.pending_fif_goto = None;
-        }
         // P21：Esc 也取消标签页关闭确认
         self.close_tab_confirm = None;
         // P28：Esc 同时收起右键菜单与批量关闭确认

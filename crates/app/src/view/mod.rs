@@ -725,41 +725,6 @@ impl Editpad {
             );
         }
 
-        // 未保存时打开新文件的确认条（样式沿用关闭确认条）
-        if let Some((_, path)) = &self.open_confirm {
-            body = body.push(rule::horizontal(1)).push(
-                row![
-                    text(editpad_core::fmt_wrapped(
-                        self.lang(),
-                        editpad_core::Key::DiscardOpenPrefix,
-                        &path.display().to_string(),
-                        editpad_core::Key::DiscardOpenSuffix,
-                    ))
-                    .size(uipx)
-                    .font(uifont),
-                    button(
-                        text(self.t(editpad_core::Key::ButtonDiscardAndOpen))
-                            .size(uipx)
-                            .font(uifont)
-                    )
-                    .padding([4, 12])
-                    .style(chrome_button_style)
-                    .on_press(Message::ConfirmOpenDiscard),
-                    button(
-                        text(self.t(editpad_core::Key::ButtonCancel))
-                            .size(uipx)
-                            .font(uifont)
-                    )
-                    .padding([4, 12])
-                    .style(chrome_button_style)
-                    .on_press(Message::ConfirmOpenCancel),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .padding([6, 10]),
-            );
-        }
-
         // P50/P52 外部修改提示条：队列首页展示，聚合时带总数与「全部忽略」。
         // P220：队列里是页 id，按 id 找页——关掉任意一页只会让**下标**左移，
         // 按 id 才能继续指当初那一页；id 解析不到（页已关）才跳过。

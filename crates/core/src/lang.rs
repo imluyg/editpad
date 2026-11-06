@@ -404,9 +404,6 @@ key_table! {
     { ButtonDiscardAndClose => "放弃更改并关闭", "Discard and Close" },
     { DiscardClosePrefix => "「", "“" },
     { DiscardCloseSuffix => "」有未保存的更改，放弃并关闭？", "” has unsaved changes. Discard them and close?" },
-    { DiscardOpenPrefix => "", "" },
-    { DiscardOpenSuffix => " 有未保存的更改，放弃并打开？", " has unsaved changes. Discard them and open?" },
-    { ButtonDiscardAndOpen => "放弃更改并打开", "Discard and Open" },
     { ButtonReload => "重新加载", "Reload" },
     { ButtonIgnore => "忽略", "Ignore" },
     { ButtonIgnoreAll => "全部忽略", "Ignore All" },
@@ -1204,7 +1201,6 @@ mod tests {
     #[test]
     fn every_key_has_non_empty_text_in_every_language() {
         const EMPTY_BY_DESIGN: &[Key] = &[
-            Key::DiscardOpenPrefix,
             Key::FindAllTruncatedPrefix,
             Key::FindFileHitsPrefix,
             Key::SaveAsEncodingSuffix,
