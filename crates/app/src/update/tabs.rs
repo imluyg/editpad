@@ -114,6 +114,20 @@ impl Editpad {
         self.remember_tab_views(&[idx]);
         // 第 64 轮：命名页进「上次关闭」栈（恢复入口见 ReopenLastClosedFile）
         self.remember_closed_tab(idx);
+        // 正在装载的那一页被关掉：先止读、清账（删页由本函数继续）。
+        // 不能调 `cancel_active_load`——它会为「本次打开新建的占位页」再删一次，
+        // 与这里正在做的事递归。
+        let was_restore = if self
+            .active_load
+            .as_ref()
+            .is_some_and(|j| j.tab_id == self.tabs[idx].id)
+        {
+            self.abort_active_load(false)
+                .map(|(_, was_restore)| was_restore)
+                .unwrap_or(false)
+        } else {
+            false
+        };
         // P146：作废在途自动保存——「放弃更改并关闭」的页曾被人写盘复活
         self.tabs[idx].invalidate_autosave();
         self.tabs.remove(idx);
@@ -135,6 +149,14 @@ impl Editpad {
         // P382：同一条纪律的第二份账——恢复队列里存的是裸下标，页少了不平移就会
         // 让排队页落进别人的槽位或越界静默不开（此前只有丢占位页那条出路平移了）
         self.shift_restore_queue_after_removal(&[idx]);
+        if was_restore {
+            // 被关掉的是恢复链在途的那一页：这一页确实没恢复出内容，
+            // 计数照实，队列继续推进。
+            self.restore_failed += 1;
+            if self.settle_restore_step() || !self.restore_queue.is_empty() {
+                let _ = self.begin_restore_load();
+            }
+        }
         // P369：页集合变了 ⇒ 命中表这类**窗口级**结果必须作废。原先这句话散在
         // 五处关页出口里各抄一遍（P303 只把「切页要作废」收进了 `set_active_tab`），
         // 而恢复链丢占位页那条根本没抄 ⇒ 收进漏斗本身，调用侧不再各写一份。

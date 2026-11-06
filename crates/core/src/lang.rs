@@ -364,6 +364,7 @@ key_table! {
     { TabUnsaved => "（未保存）", "(unsaved)" },
     { RecentsLoading => "加载中…", "Loading…" },
     { StOpeningPrefix => "正在打开：", "Opening: " },
+    { StLoadCancelled => "已取消打开", "Open canceled" },
     { RecentsEmpty => "（暂无最近文件）", "(no recent files)" },
     { RecentsClear => "清空记录", "Clear History" },
     { RecentsClearHint => "从 config.toml 移除全部路径", "Remove all paths from config.toml" },
@@ -590,6 +591,7 @@ key_table! {
     { ErrRead => "无法读取文件", "Cannot read file" },
     { ErrWrite => "无法写入文件", "Cannot write file" },
     { ErrBinaryDetected => "疑似二进制文件（含 NUL 字节或替换符占比过高），已拒绝打开以保护原文件", "looks like a binary file (NUL bytes or too many replacement characters); opening was refused to protect the original" },
+    { ErrCancelled => "加载已取消", "Loading canceled" },
     { RecentReopenPrefix => "恢复上次关闭的文件（", "Reopen last closed file (" },
     { RecentReopenSuffix => "）", ")" },
     { ExternalModifiedFilesPrefix => "」已被外部修改（共 ", "” changed on disk (" },
@@ -1025,6 +1027,7 @@ pub fn fmt_core_error(lang: Lang, err: &crate::CoreError) -> String {
                 path.display()
             ),
         },
+        crate::CoreError::Cancelled => Key::ErrCancelled.text(lang).to_owned(),
     }
 }
 

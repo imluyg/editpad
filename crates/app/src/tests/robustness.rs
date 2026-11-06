@@ -250,7 +250,10 @@ fn loaded_after_closing_loading_tab_discards_result_without_panic() {
     // 加载占位页即活动页且干净：Ctrl+W 直接移除（复现真实操作序列）
     dispatch(&mut app, Message::CloseTabRequest);
     assert_eq!(app.tabs.len(), 1, "占位页被移除后由空页补位");
-    assert!(app.active_load.is_some(), "关页不清加载任务（问题前提）");
+    assert!(
+        app.active_load.is_none() && !app.busy,
+        "关掉装载页必须止住那次装载（旧口径只是让它继续跑，结果迟到被丢弃）"
+    );
 
     let doc = editpad_core::Document::from_str("late");
     dispatch(

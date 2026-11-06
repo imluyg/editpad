@@ -3359,3 +3359,47 @@ fn closing_a_page_while_restoring_shifts_the_pending_restore_queue() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 取消恢复链在途的那一步：删掉它再也不会被填的占位页，计入未恢复，
+/// 并继续排下一页——不许让整条链停在取消处。
+#[test]
+fn cancelling_a_restore_step_drops_its_placeholder_and_advances_the_chain() {
+    let dir = snapshot_scratch_dir("cancel-restore-step");
+    let manifest = editpad_core::snapshot::write_session(
+        &dir,
+        &[
+            editpad_core::snapshot::SessionPage {
+                tab: clean_named_tab("C:/w/one.txt"),
+                doc: editpad_core::Document::new(),
+            },
+            editpad_core::snapshot::SessionPage {
+                tab: clean_named_tab("C:/w/two.txt"),
+                doc: editpad_core::Document::new(),
+            },
+        ],
+        0,
+        1,
+    )
+    .expect("写会话应成功");
+
+    let mut app = Editpad::default();
+    let _ = app.restore_from_manifest(&dir, &manifest);
+    assert_eq!(app.tabs.len(), 2, "夹具：两页占位");
+    assert_eq!(app.restore_queue.len(), 1, "夹具：队首已登记在途");
+    let job = app
+        .active_load
+        .as_ref()
+        .expect("恢复链应有在途任务")
+        .clone();
+
+    dispatch(&mut app, Message::CancelLoad);
+
+    assert!(app.active_load.is_some(), "取消一步后应续排下一页");
+    assert_eq!(app.restore_failed, 1, "被取消的恢复页要计入未恢复");
+    assert_eq!(app.tabs.len(), 1, "被取消的占位页应移除");
+    assert!(
+        !app.restore_views.contains_key(&job.id),
+        "取消步的视图快照必须作废"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

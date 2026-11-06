@@ -719,6 +719,7 @@ impl Editpad {
             | Message::OpenNextCliFile
             | Message::PendingOpenPaths(..)
             | Message::LoadProgress(..)
+            | Message::CancelLoad
             | Message::Loaded(..)
             | Message::LinkClicked(..)
             | Message::SaveRequested

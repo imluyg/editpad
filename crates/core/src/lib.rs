@@ -56,8 +56,8 @@ pub use line_diff::{
     DIFF_MAX_TOTAL_BYTES,
 };
 pub use loader::{
-    decode, load_document_streaming, load_file, load_file_streaming, LoadProgress, LoadedDocument,
-    LoadedText,
+    decode, load_document_streaming, load_document_streaming_cancelable, load_file,
+    load_file_streaming, LoadProgress, LoadedDocument, LoadedText,
 };
 pub use pairing::{
     closer_for, opener_for, pair_action, pair_deletes_whole_pair, PairAction, PairProbe, AUTO_PAIRS,

@@ -1,3 +1,7 @@
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use super::*;
 
 /// 后台加载线程 → 订阅流的事件。
@@ -13,7 +17,7 @@ pub(crate) enum LoadEvent {
 /// 那是假的：队列平移作用在另一份下标（`RestoreLoad.tab`）上，这个字段从 P145 之后
 /// 就没人读过、也从没被平移过。留着＝"跨异步持裸下标"这一族的诱饵，
 /// 删掉字段才是把载体拿掉（同 S-1 把确认条改存页 id 的思路）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub(crate) struct LoadJob {
     pub(crate) id: u64,
     pub(crate) path: PathBuf,
@@ -24,11 +28,34 @@ pub(crate) struct LoadJob {
     /// 设置；跟着任务走而不是跟着订阅走——中途换语言不会撤销在途加载，
     /// 也不会让已经发起的那次失败换一种说法。
     pub(crate) lang: editpad_core::Lang,
+    /// 取消令牌：UI 置位后，core 装载在两个 64KB 读循环之间返回 `Cancelled`。
+    pub(crate) cancel: Arc<AtomicBool>,
+    /// 这次装载是否为「打开」新建的空占位页。失败/取消时只移除自己造的那一页，
+    /// 复用活动空白页（`created_placeholder=false`）原样保留。
+    pub(crate) created_placeholder: bool,
+}
+
+/// `Subscription::run_with` 用 `LoadJob` 作身份：**只认任务号**。
+/// 取消令牌是共享可变状态，不参与相等/哈希——否则置位那一刻订阅会重键，
+/// 把正在读的装载重启一遍，取消反而变成「从头再读」。
+impl PartialEq for LoadJob {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for LoadJob {}
+
+impl Hash for LoadJob {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
 }
 
 /// 把一次加载任务构造成事件流（OS 线程做阻塞 IO，std mpsc 桥接到异步端）。
 pub(crate) fn build_load_stream(job: &LoadJob) -> impl iced::futures::Stream<Item = Message> {
     let job = job.clone();
+    let cancel = job.cancel.clone();
     stream::channel(
         64,
         move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -36,7 +63,13 @@ pub(crate) fn build_load_stream(job: &LoadJob) -> impl iced::futures::Stream<Ite
                 job.id,
                 job.lang,
                 job.path,
-                |path, on_progress| editpad_core::load_document_streaming(path, on_progress),
+                move |path, on_progress| {
+                    editpad_core::load_document_streaming_cancelable(
+                        path,
+                        Some(&cancel),
+                        on_progress,
+                    )
+                },
                 &mut output,
             )
             .await;

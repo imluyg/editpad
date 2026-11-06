@@ -458,6 +458,14 @@ impl Editpad {
                         ))
                         .size(uipx)
                         .font(uifont),
+                        button(
+                            text(self.t(editpad_core::Key::ButtonCancel))
+                                .size(uipx)
+                                .font(uifont)
+                        )
+                        .padding([2, 10])
+                        .style(chrome_button_style)
+                        .on_press(Message::CancelLoad),
                     ]
                     .spacing(12)
                     .align_y(Alignment::Center)

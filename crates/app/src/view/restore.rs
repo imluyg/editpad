@@ -310,7 +310,7 @@ impl Editpad {
             self.restore_queue.insert(0, entry);
             return Task::none();
         }
-        let id = self.register_load_job(entry.path, entry.tab);
+        let id = self.register_load_job(entry.path, entry.tab, false);
         self.restore_views.insert(
             id,
             (

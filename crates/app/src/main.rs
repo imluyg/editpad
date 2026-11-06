@@ -318,6 +318,8 @@ enum Message {
     FileChosen(Option<PathBuf>),
     /// 后台加载进度：(任务 id, 已读字节, 总字节)
     LoadProgress(u64, u64, u64),
+    /// 用户取消在途装载（进度行按钮）。
+    CancelLoad,
     /// 后台加载完成：(任务 id, (rope 直入的文档, 嗅探样本, 编码标签))。
     /// P19 起携带 Document，不再有全量 String 中转；
     /// P22 起附带解码头部样本供语言嗅探

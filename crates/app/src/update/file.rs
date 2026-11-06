@@ -3,6 +3,9 @@
 //! 承载文件的打开/加载/保存/另存为/重命名、最近文件与标签视图记忆、
 //! 自动保存调度、外部修改巡检。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use super::*;
 
 impl Editpad {
@@ -92,6 +95,7 @@ impl Editpad {
                 }
                 Task::none()
             }
+            Message::CancelLoad => self.cancel_active_load(true),
             Message::Loaded(job_id, result) => {
                 // 过期任务的迟到消息直接丢弃
                 let Some(job) = self.active_load.clone() else {
@@ -994,9 +998,10 @@ impl Editpad {
             self.monitor_pending = None;
             return Task::none();
         }
-        if tab >= self.tabs.len() {
-            let tab = self.fresh_tab();
-            self.tabs.push(tab);
+        let created_placeholder = tab >= self.tabs.len();
+        if created_placeholder {
+            let fresh = self.fresh_tab();
+            self.tabs.push(fresh);
         }
         // P381：这一页的正文接下来要被**磁盘上的内容**替换 ⇒ 先作废它身上还在途的
         // 自动保存。漏它的后果是数据覆写：那次写盘醒来时带的还是用户刚刚丢掉的那份
@@ -1006,7 +1011,7 @@ impl Editpad {
         // 排在两道早退（busy／内存护栏）之后＝被拒的装载什么都不替换，也就不该取消什么。
         // 落新页时这句是无害空转：那一页的 gen Arc 刚建、没有任何在途任务引用它。
         self.tabs[tab].invalidate_autosave();
-        self.register_load_job(path, tab);
+        self.register_load_job(path, tab, created_placeholder);
         // P21：加载落在新页时直接切过去（符合「打开即聚焦」直觉）。
         // ⚠️ 必须经 set_active_tab 同步 cur_handle 长期别名——直接赋值
         // active_tab 会造成「下标指向新页、别名仍指旧页」的失步：
@@ -1020,7 +1025,12 @@ impl Editpad {
     /// 登记一个后台加载任务（任务号分配 + busy 置位 + 进度条复位）。
     /// 内存守卫、占位页创建与焦点切换由调用方决定：用户打开要切过去
     /// （[`Self::start_loading`]），恢复链绝不抢焦点（P30）。
-    pub(crate) fn register_load_job(&mut self, path: PathBuf, tab: usize) -> u64 {
+    pub(crate) fn register_load_job(
+        &mut self,
+        path: PathBuf,
+        tab: usize,
+        created_placeholder: bool,
+    ) -> u64 {
         self.job_seq += 1;
         let id = self.job_seq;
         // P145：随任务记下目标页稳定 id（0 = 页不存在，归页必走丢弃分支）
@@ -1031,10 +1041,70 @@ impl Editpad {
             tab_id,
             // P377：登记时刻的语言随任务走（后台线程拿不到设置）
             lang: self.settings.language,
+            cancel: Arc::new(AtomicBool::new(false)),
+            created_placeholder,
         });
         self.progress = Some((0, 0));
         self.enter_busy();
         id
+    }
+
+    /// 止住一次在途装载并清掉它的 UI 状态。**不删页**——删不删由调用方决定：
+    /// 取消要删自己造的空占位页，关页那条路本来就在自己删。
+    ///
+    /// 返回 `(job, was_restore)`；没有在途装载 = `None`。`was_restore` 让调用方
+    /// 决定要不要续排恢复链（`shift_restore_queue_after_removal` 只平移下标，
+    /// 不驱动队列）。
+    pub(crate) fn abort_active_load(&mut self, notice: bool) -> Option<(LoadJob, bool)> {
+        let job = self.active_load.take()?;
+        job.cancel.store(true, Ordering::Relaxed);
+        let was_restore = self.restore_views.remove(&job.id).is_some();
+        self.progress = None;
+        self.busy = false;
+        // 与本次装载绑定的三个一次性意图一并作废（P215／P221／P371 同规）：
+        // 取消之后它们不该等下一次无关装载来兑现。
+        self.pending_link_goto = None;
+        self.pending_fif_goto = None;
+        self.monitor_pending = None;
+        if notice {
+            self.set_status(self.t(editpad_core::Key::StLoadCancelled).to_owned());
+        }
+        Some((job, was_restore))
+    }
+
+    /// 用户点〔取消〕：止读、清状态、删掉本次打开新建的空占位页；恢复步则续排。
+    ///
+    /// 提前清 `active_load` 也是「迟到 `Loaded` 不得污染状态」的保证：
+    /// `Loaded` 臂第一道守卫见 `None` 即返回，第二道按任务号过滤。
+    pub(crate) fn cancel_active_load(&mut self, notice: bool) -> Task<Message> {
+        let Some((job, was_restore)) = self.abort_active_load(notice) else {
+            return Task::none();
+        };
+        if job.created_placeholder {
+            if let Some(idx) = self.tabs.iter().position(|t| t.id == job.tab_id) {
+                let removable = {
+                    let tab = &self.tabs[idx];
+                    tab.path.is_none() && !tab.dirty && tab.editor.borrow().doc.is_empty()
+                };
+                if removable {
+                    self.close_tab_now(idx);
+                }
+            }
+        } else if was_restore {
+            // 恢复占位页本来就是为了装这个文件；用户取消后它再也不会被填，
+            // 用恢复链自己的移除出口收掉（含队列平移与页集合对账）。
+            if let Some(idx) = self.tabs.iter().position(|t| t.id == job.tab_id) {
+                self.drop_restore_placeholder(idx);
+            }
+        }
+        if was_restore {
+            // 用户放弃的这一页确实没恢复出内容：汇总要如实说。
+            self.restore_failed += 1;
+            if self.settle_restore_step() || !self.restore_queue.is_empty() {
+                let _ = self.begin_restore_load();
+            }
+        }
+        Task::none()
     }
 
     /// 统一的换文档入口（打开对话框/拖拽/最近文件共用）：

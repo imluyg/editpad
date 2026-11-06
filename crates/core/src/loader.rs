@@ -7,6 +7,7 @@ use std::fs;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use std::str;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use encoding_rs::{Encoding, GBK, UTF_16BE, UTF_16LE, UTF_8};
 use ropey::RopeBuilder;
@@ -127,13 +128,30 @@ pub struct LoadedDocument {
 /// 在校验＋装载这一趟里映射到 `[0, 3/4]`，真不是 UTF-8 时回卷重读走 GBK 补满
 /// 到 `total`——两趟读法共用「单调不减、末值到 total」这条契约。
 /// 宽编码（UTF-16LE/BE）单趟直达，进度线性。
-pub fn load_document_streaming<F>(
+pub fn load_document_streaming<F>(path: &Path, on_progress: F) -> Result<LoadedDocument, CoreError>
+where
+    F: FnMut(LoadProgress),
+{
+    load_document_streaming_cancelable(path, None, on_progress)
+}
+
+/// 同 [`load_document_streaming`]，但可在两个 64KB 读循环之间取消。
+///
+/// 取消只在块边界检查（单次 `fill_chunk` 最多读一块），因此停止延迟
+/// 上界是一块——对 256 MiB 上限内的文件足够，不会让后台线程把整份读完。
+/// 取消返回 [`CoreError::Cancelled`]；UI 侧据此丢弃结果并按「用户主动取消」
+/// 处理，不把它当打开失败展示。
+pub fn load_document_streaming_cancelable<F>(
     path: &Path,
+    cancel: Option<&AtomicBool>,
     mut on_progress: F,
 ) -> Result<LoadedDocument, CoreError>
 where
     F: FnMut(LoadProgress),
 {
+    if cancel_is_set(cancel) {
+        return Err(CoreError::Cancelled);
+    }
     let file = fs::File::open(path).map_err(|source| CoreError::Read {
         path: path.to_path_buf(),
         source,
@@ -152,6 +170,9 @@ where
     // 读满第一块（read 允许少读），嗅探 BOM 决定解码策略
     let mut first_len = 0usize;
     while first_len < CHUNK_SIZE {
+        if cancel_is_set(cancel) {
+            return Err(CoreError::Cancelled);
+        }
         let n = reader.read(&mut chunk[first_len..]).map_err(io_err(path))?;
         if n == 0 {
             break;
@@ -217,6 +238,7 @@ where
                 &mut on_progress,
                 None,
                 &mut head,
+                cancel,
             )?;
             Ok(LoadedDocument {
                 doc,
@@ -243,6 +265,7 @@ where
                 total_bytes,
                 utf8_span,
                 &mut on_progress,
+                cancel,
             )?;
             match scanned {
                 Some(loaded) => Ok(loaded),
@@ -270,6 +293,7 @@ where
                         &mut on_progress,
                         Some(&mut stats),
                         &mut head,
+                        cancel,
                     )?;
                     if stats.replacements as f32 / stats.chars.max(1) as f32
                         > BINARY_REPLACEMENT_RATIO
@@ -309,6 +333,7 @@ fn scan_and_build_utf8<F>(
     total_bytes: u64,
     progress_span: u64,
     on_progress: &mut F,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Option<LoadedDocument>, CoreError>
 where
     F: FnMut(LoadProgress),
@@ -347,6 +372,9 @@ where
 
     let mut chunk = vec![0u8; CHUNK_SIZE];
     loop {
+        if cancel_is_set(cancel) {
+            return Err(CoreError::Cancelled);
+        }
         let n = fill_chunk(reader, &mut chunk).map_err(io_err(path))?;
         if n == 0 {
             break;
@@ -451,6 +479,12 @@ fn io_err(path: &Path) -> impl Fn(std::io::Error) -> CoreError + '_ {
         path: path.to_path_buf(),
         source,
     }
+}
+
+/// 取消令牌的一次读取。`Relaxed` 足够：这是单向标志，不需要与其它内存
+/// 建立 happens-before 关系。
+fn cancel_is_set(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|c| c.load(Ordering::Relaxed))
 }
 
 fn report(on_progress: &mut dyn FnMut(LoadProgress), bytes_read: u64, total_bytes: u64) {
@@ -671,6 +705,7 @@ fn build_pass(
     on_progress: &mut dyn FnMut(LoadProgress),
     mut stats: Option<&mut BuildStats>,
     head: &mut HeadSample,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Document, CoreError> {
     let mut builder = RopeBuilder::new();
     let mut eol = EolCounter::new();
@@ -696,6 +731,9 @@ fn build_pass(
 
     let mut chunk = vec![0u8; CHUNK_SIZE];
     loop {
+        if cancel_is_set(cancel) {
+            return Err(CoreError::Cancelled);
+        }
         let n = fill_chunk(reader, &mut chunk).map_err(|source| CoreError::Read {
             path: path.to_path_buf(),
             source,
@@ -1644,5 +1682,60 @@ mod tests {
             assert!(at <= span);
             last = at;
         }
+    }
+
+    /// 取消令牌在打开前就已置位：不读文件，直接返回 `Cancelled`。
+    #[test]
+    fn cancel_before_start_returns_cancelled() {
+        let dir = scratch_dir("cancel-before");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        std::fs::write(&path, "abc").unwrap();
+        let flag = AtomicBool::new(true);
+        let result = load_document_streaming_cancelable(&path, Some(&flag), |_| {});
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 第一次进度回调里置位：读循环在下一块边界停读，不再吃完整份。
+    #[test]
+    fn cancel_flag_set_midway_stops_reading() {
+        let dir = scratch_dir("cancel-midway");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.txt");
+        let content = "x".repeat(CHUNK_SIZE * 8);
+        std::fs::write(&path, &content).unwrap();
+        let flag = AtomicBool::new(false);
+        let mut callbacks = 0usize;
+        let result = load_document_streaming_cancelable(&path, Some(&flag), |_| {
+            callbacks += 1;
+            if callbacks == 1 {
+                flag.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(
+            matches!(result, Err(CoreError::Cancelled)),
+            "第一次进度后取消应返回 Cancelled"
+        );
+        assert!(
+            callbacks <= 2,
+            "应在下一块边界停读，实际回调 {callbacks} 次"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反面对照：令牌没置位时照常把整份读完（挡住「一见令牌就报取消」）。
+    #[test]
+    fn uncanceled_loader_still_loads() {
+        let dir = scratch_dir("cancel-off");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        let content = "取消令牌未置位\n".repeat(16);
+        std::fs::write(&path, &content).unwrap();
+        let flag = AtomicBool::new(false);
+        let loaded = load_document_streaming_cancelable(&path, Some(&flag), |_| {})
+            .expect("未取消时应成功装载");
+        assert_eq!(loaded.doc.to_text(), content);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

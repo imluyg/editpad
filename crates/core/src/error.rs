@@ -24,6 +24,10 @@ pub enum CoreError {
     /// 打开再保存会把原文件替换成乱码，宁可拒开也不损毁数据。
     #[error("{path} 疑似二进制文件（含 NUL 字节或替换符占比过高），已拒绝打开以保护原文件")]
     BinaryDetected { path: PathBuf },
+
+    /// 用户主动取消了一次在途装载。UI 侧按「取消」处理，不当作打开失败展示。
+    #[error("加载已取消")]
+    Cancelled,
 }
 
 impl CoreError {
@@ -45,6 +49,7 @@ impl CoreError {
                 // 两种语言的键文本都是"谓语段"，拼在路径之后都读得通
                 format!("{}: {}", path.display(), Key::ErrBinaryDetected.text(lang))
             }
+            CoreError::Cancelled => Key::ErrCancelled.text(lang).to_owned(),
         }
     }
 }

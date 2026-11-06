@@ -5948,7 +5948,7 @@ fn markdown_url_links_keep_their_query_string() {
 fn progress_row_only_on_owner_tab() {
     let mut app = Editpad::default();
     // 第 0 页起一次装载，再切到第 1 页：装载目标不再是活动页
-    app.register_load_job(PathBuf::from("C:/load/A.txt"), 0);
+    app.register_load_job(PathBuf::from("C:/load/A.txt"), 0, false);
     dispatch(&mut app, Message::NewTab);
     assert_eq!(app.active_tab, 1);
     assert!(
@@ -5961,4 +5961,118 @@ fn progress_row_only_on_owner_tab() {
     // 切回装载页：进度行恢复可见
     app.set_active_tab(0);
     assert!(app.progress_belongs_to_active(), "切回属主页后进度行应恢复");
+}
+
+/// 取消一次「打开到新页」：清在途状态、删掉本次新建的空占位页、
+/// 回到发起前那一页，原页内容逐字不动。
+#[test]
+fn cancel_load_removes_created_placeholder_and_keeps_original_page() {
+    let mut app = loaded_txt_app();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/cancel/a.txt")),
+    );
+    assert_eq!(app.tabs.len(), 2, "夹具：打开落进新页");
+    assert_eq!(app.active_tab, 1, "夹具：打开即聚焦新页");
+    assert!(app.active_load.is_some());
+
+    dispatch(&mut app, Message::CancelLoad);
+
+    assert!(app.active_load.is_none(), "取消后不许留着在途任务");
+    assert!(!app.busy, "取消后必须解除 busy");
+    assert_eq!(app.tabs.len(), 1, "本次新建的空占位页应被移除");
+    assert_eq!(app.active_tab, 0, "应回到发起前那一页");
+    assert_eq!(
+        app.tabs[0].editor.borrow().doc.to_text(),
+        "base",
+        "原页内容不许被取消动作碰到"
+    );
+}
+
+/// 复用活动空白页的打开被取消：那一页是用户的，不许删。
+#[test]
+fn cancel_load_keeps_reused_blank_tab() {
+    let mut app = Editpad::default();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/cancel/b.txt")),
+    );
+    assert_eq!(app.tabs.len(), 1, "夹具：空白页被复用");
+    let job = app.active_load.as_ref().expect("夹具：装载在途").id;
+
+    dispatch(&mut app, Message::CancelLoad);
+
+    assert!(app.active_load.is_none());
+    assert_eq!(app.tabs.len(), 1, "复用页不许被当成占位页删掉");
+    assert!(app.tabs[0].path.is_none(), "这一页仍是无名页");
+
+    // 复用页没有「删占位页」这条顺带清账的路：迟到的结果只能靠
+    // 取消时清空 active_load 来挡住，不许写进用户这一页。
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job,
+            Ok((
+                editpad_core::Document::from_str("late"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+    assert!(app.tabs[0].path.is_none(), "迟到结果不许归属这一页");
+    assert!(
+        app.tabs[0].editor.borrow().doc.is_empty(),
+        "迟到结果不许写正文"
+    );
+}
+
+/// 取消后迟到的 `Loaded` 不得再写进任何页（active_load 已空 + 任务号过滤）。
+#[test]
+fn late_loaded_after_cancel_is_ignored() {
+    let mut app = loaded_txt_app();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/cancel/c.txt")),
+    );
+    let job = app.active_load.as_ref().unwrap().id;
+
+    dispatch(&mut app, Message::CancelLoad);
+    dispatch(
+        &mut app,
+        Message::Loaded(
+            job,
+            Ok((
+                editpad_core::Document::from_str("late"),
+                String::new(),
+                "UTF-8".to_owned(),
+            )),
+        ),
+    );
+
+    assert!(app.active_load.is_none());
+    assert_eq!(app.tabs.len(), 1, "迟到的结果不许复活占位页");
+    assert_eq!(
+        app.tabs[0].path.as_deref(),
+        Some(Path::new("C:/doc/note.txt")),
+        "不许把迟到结果写进原页"
+    );
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "base");
+}
+
+/// 装载中按 Ctrl+W 关掉那一页：先止读并清账，不许留下卡死的 busy。
+#[test]
+fn closing_the_loading_tab_cancels_it() {
+    let mut app = loaded_txt_app();
+    dispatch(
+        &mut app,
+        Message::FileDropped(PathBuf::from("C:/cancel/d.txt")),
+    );
+    assert!(app.active_load.is_some());
+
+    dispatch(&mut app, Message::CloseTabRequest);
+
+    assert!(app.active_load.is_none(), "关掉装载页必须止住那次装载");
+    assert!(!app.busy, "关掉装载页后 busy 必须归零");
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.tabs[0].editor.borrow().doc.to_text(), "base");
 }
