@@ -18,7 +18,10 @@ impl Editpad {
     /// 不发消息），所以"等下一拍"根本等不来。
     /// 递归安全：暂存在递归之前已 `take` 清空 ⇒ 内层这道钩子必定原样返回。
     pub(crate) fn drive_stashed_pending_open(&mut self, task: Task<Message>) -> Task<Message> {
-        if self.busy || self.pending_open_stash.is_empty() {
+        if self.busy
+            || self.open_confirm.is_some()
+            || (self.pending_open_stash.is_empty() && self.pending_cli.is_empty())
+        {
             return task;
         }
         self.pending_cli
@@ -33,6 +36,7 @@ impl Editpad {
             // ---------- 打开 ----------
             Message::OpenRequested => {
                 if self.busy {
+                    self.set_status(self.t(editpad_core::Key::StOpenBusy).to_owned());
                     return Task::none();
                 }
                 self.enter_busy();
@@ -61,13 +65,24 @@ impl Editpad {
             }
             // 拖拽文件进窗口 = 打开；同一路径重复拖拽也允许重新加载
             // （每次 job_seq 递增，无路径去重；dirty/busy 保护在 request_open 内）
-            Message::FileDropped(path) => self.request_open(path),
+            // 拖拽文件进窗口 = 打开。一次拖入多个时，第一个之后的文件在忙/
+            // 待决确认期间到货：进 CLI 队列排队，而不是被 busy 守卫静默丢弃。
+            Message::FileDropped(path) => {
+                if self.busy || self.open_confirm.is_some() {
+                    self.pending_cli.push_back(path);
+                    Task::none()
+                } else {
+                    self.request_open(path)
+                }
+            }
             // P103：命令行排队打开的下一个文件。boot 首发；每次 Loaded
             // 结算（busy 归零）后续排，直到队列清空。request_open 的
             // dirty/busy 守卫照常生效——期间用户若编辑了当前页，后续
             // 文件改走打开确认条，与拖拽语义完全一致。
             Message::OpenNextCliFile => {
-                if self.busy {
+                // 待决的打开确认条在场时，队列暂停：不许用下一个文件顶掉
+                // 用户还没回答的那次裁决。
+                if self.busy || self.open_confirm.is_some() {
                     return Task::none();
                 }
                 let Some(path) = self.pending_cli.pop_front() else {
@@ -1145,6 +1160,9 @@ impl Editpad {
     /// P21：落点 = [`Self::target_tab_for_open`]（空净当前页就地打开，否则新页）。
     pub(super) fn request_open(&mut self, path: PathBuf) -> Task<Message> {
         if self.busy {
+            // 最近文件等直接走这条管线的入口：不再静默，给一句可读解释。
+            // 拖拽/CLI 在调用前已自行排队，不会走到这里。
+            self.set_status(self.t(editpad_core::Key::StOpenBusy).to_owned());
             return Task::none();
         }
         if self.tab().dirty {

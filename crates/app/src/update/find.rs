@@ -481,6 +481,7 @@ impl Editpad {
             // 装载结算（Loaded）后一次性消费 select_span（P133 同构）
             Message::FifGoto(file_idx, hit_idx) => {
                 if self.io_channel_busy() {
+                    self.set_status(self.t(editpad_core::Key::StOpenBusy).to_owned());
                     return Task::none();
                 }
                 let Some(fh) = self.fif_results.get(file_idx) else {

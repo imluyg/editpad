@@ -12,19 +12,22 @@ fn duplicate_open_while_loading_is_guards_and_reload_after_done() {
 
     dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
     assert_eq!(app.job_seq, seq_first, "加载中不得排队第二个任务");
+    assert_eq!(app.pending_cli.len(), 1, "第二次拖入应进队列");
 
-    // 加载完成后允许重复打开同一文件（每次新 job，无路径去重）
+    // 第一次结算后队列续排：重复打开作为新任务重新加载
     let doc = editpad_core::Document::from_str("reloaded\n");
     dispatch(
         &mut app,
         Message::Loaded(seq_first, Ok((doc, String::new(), "UTF-8".to_owned()))),
     );
-    assert!(app.active_load.is_none(), "完成后任务应解除");
-    dispatch(&mut app, Message::FileDropped(PathBuf::from("C:/dup.txt")));
     assert_eq!(
         app.job_seq,
         seq_first + 1,
-        "完成后的重复打开必须作为新任务重新加载"
+        "队列里的重复打开应作为新任务续排"
+    );
+    assert_eq!(
+        app.active_load.as_ref().map(|j| j.path.clone()),
+        Some(PathBuf::from("C:/dup.txt"))
     );
 }
 

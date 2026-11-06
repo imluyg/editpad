@@ -281,6 +281,7 @@ impl Editpad {
             Message::ReopenLastClosedFile => {
                 // busy 与打开确认流共用守卫语义；栈空静默
                 if self.busy {
+                    self.set_status(self.t(editpad_core::Key::StOpenBusy).to_owned());
                     return Task::none();
                 }
                 // 取**栈顶＝`[0]`**，与三处同源：`remember_closed_tab` 用 `insert(0, …)`
