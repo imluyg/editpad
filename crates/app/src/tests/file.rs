@@ -3795,6 +3795,43 @@ fn a_torn_batch_file_still_yields_its_intact_lines() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 转发批次里的**相对路径**必须按发送方的工作目录锚成绝对路径。
+///
+/// `editpad a.txt` 是帮助里写明的用法；可已运行实例的 CWD 是它自己启动时的
+/// 目录，与敲命令的那个终端无关。原样转发 `a.txt`，接收方会按自己的 CWD 去
+/// 取——另一个目录里正好同名就开了错的文件，没有则装载失败，两种都让用户
+/// 怀疑「我明明敲的是这个」。绝对路径（含 `\\?\`、非 Unicode 名）不再改写。
+#[test]
+fn forwarded_relative_paths_are_anchored_to_the_sender_working_directory() {
+    let dir = scratch_dir("m7-forward-relative");
+    let cwd = std::env::current_dir().expect("测试进程必须有工作目录");
+    let absolute = cwd.join("m7-abs.txt");
+    assert!(absolute.is_absolute(), "夹具自证：这一条本来就是绝对路径");
+
+    let files = vec![PathBuf::from("m7-rel.txt"), absolute.clone()];
+    assert!(
+        crate::single_instance::forward_pending_open_in(&dir, &files),
+        "批次文件应写出成功"
+    );
+
+    let batch = std::fs::read_dir(&dir)
+        .expect("批次目录可读")
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().starts_with("pending_open."))
+        .expect("应留下一个待取批次文件");
+    let content = std::fs::read_to_string(batch.path()).expect("批次是文本");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), files.len(), "一行一个路径");
+    assert_eq!(
+        PathBuf::from(lines[0]),
+        cwd.join("m7-rel.txt"),
+        "相对路径没锚到发送方 CWD——接收方会在自己的目录里找同名文件"
+    );
+    assert_eq!(PathBuf::from(lines[1]), absolute, "绝对路径必须原样转发");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// P345 夹具：走到「〔保存并关闭〕已落盘成功，但期间用户又编辑了一笔 ⇒
 /// 页没关掉、仍置脏」这一步，返回 `(app, 文件路径, 落盘时刻的版本)`。
 ///

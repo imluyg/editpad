@@ -108,17 +108,38 @@ pub(crate) fn forward_pending_open(files: &[std::path::PathBuf]) -> bool {
     let Some(dir) = base.parent() else {
         return false;
     };
-    let batch = dir.join(format!("pending_open.{}.txt", std::process::id()));
     // 让已运行实例有权把窗口提到前台（Windows 的前台锁）。第二实例自己
     // 未必持前台，调用失败就忽略——已运行实例仍有任务栏闪烁兜底。
     // ASFW_ANY = (DWORD)-1。
     unsafe { AllowSetForegroundWindow(0xFFFF_FFFF) };
+    forward_pending_open_in(dir, files)
+}
+
+/// 转发批次的内容生产端（目录参数化以便测试）。
+///
+/// ⚠️ 相对路径必须在这里按**发送方**的工作目录钉成绝对路径：`editpad a.txt`
+/// 支持相对写法，而握手文件交给已运行实例时，那个进程的 CWD 可能是另一个
+/// 目录——同一个 `a.txt` 会打开另一个同名文件（或装载失败），用户敲的是
+/// 一个路径、看到的是另一份内容。绝对路径原样转发（`\\?\` 前缀、
+/// 非 Unicode 名都不在这里改写）。`current_dir` 取不到时退回旧行为。
+pub(crate) fn forward_pending_open_in(dir: &std::path::Path, files: &[std::path::PathBuf]) -> bool {
+    let batch = dir.join(format!("pending_open.{}.txt", std::process::id()));
     let mut content = String::new();
     for f in files {
-        content.push_str(&f.to_string_lossy());
+        content.push_str(&absolutize_for_forward(f).to_string_lossy());
         content.push('\n');
     }
     std::fs::write(&batch, content.as_bytes()).is_ok()
+}
+
+/// 把待转发路径锚到当前进程的工作目录（发送方＝敲命令的那一侧）。
+fn absolutize_for_forward(path: &std::path::Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// 非 Windows 平台无单实例分支，自然也没有转发（返回值恒为"不必提示"）。
